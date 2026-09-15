@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import pandas as pd
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -192,7 +193,13 @@ def build_snapshot(ticker: str, *, client: Any = None, cache: Any = None) -> dic
 
 
 def snapshot_digest(state: dict) -> str:
-    """快照摘要（审计用）：各 DataFrame shape + 哈希，证明三变体输入一致。"""
+    """快照摘要（审计用）：各 DataFrame shape + 内容哈希，证明三变体输入一致。
+
+    DataFrame/Series 走 `pd.util.hash_pandas_object`（逐行内容哈希，混合 dtype 与
+    object 列均稳定）；`ndarray.tobytes()` 对 object 列序列化的是 PyObject 指针，
+    同内容两次构建即得不同摘要，会让驱动侧的续跑核验恒失败（G5 通路验证缺陷），
+    故只保留给其他带 shape 的非 DataFrame 对象。摘要串格式不变：`{key}:{shape}:{hash8}`。
+    """
     parts: list[str] = []
     for key in sorted(state):
         value: Any = state[key]
@@ -200,7 +207,14 @@ def snapshot_digest(state: dict) -> str:
         if shape is not None:
             values: Any = getattr(value, "values", None)
             if values is not None:
-                digest = hashlib.md5(str(values.tobytes()).encode(), usedforsecurity=False)
+                if isinstance(value, (pd.DataFrame, pd.Series)):
+                    # hash_pandas_object 的 .values 类型签名为 ndarray | ExtensionArray，
+                    # 二者皆有 tobytes（uint64 原始字节，与分配无关）
+                    row_hashes: Any = pd.util.hash_pandas_object(value, index=True).values
+                    raw = row_hashes.tobytes()
+                else:
+                    raw = str(values.tobytes()).encode()
+                digest = hashlib.md5(raw, usedforsecurity=False)
                 parts.append(f"{key}:{shape}:{digest.hexdigest()[:8]}")
         elif isinstance(value, (str, int, float, bool)) or value is None:
             parts.append(f"{key}:{value!r}")

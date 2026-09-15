@@ -631,3 +631,50 @@ class TestSnapshotDigestVerification:
             "600519": "digest-600519",
             "000001": "digest-000001",
         }
+
+    # ── G5 通路验证缺陷回归：真实 digest × 驱动（object 列帧） ──
+    # 旧实现按 ndarray.tobytes() 哈希 DataFrame → 对象列为 PyObject 指针，
+    # 同内容两次构建 digest 不同，核验在真实数据上恒失败、整条跑批被堵死。
+
+    @staticmethod
+    def _patch_real_digest_with_object_frames(env, monkeypatch, *, day: str = "20241231"):
+        import evals.ablation as real_ablation
+        import pandas as pd
+
+        def build(ticker: str) -> dict:
+            return {
+                "stock_code": ticker,
+                "balance_sheet": pd.DataFrame(
+                    {
+                        "报告日": [day, "20231231"],
+                        "资产总计": [1000.0, 900.0],
+                        "负债合计": [400.0, 360.0],
+                    }
+                ),
+            }
+
+        monkeypatch.setattr(env.ablation, "build_snapshot", build)
+        monkeypatch.setattr(env.ablation, "snapshot_digest", real_ablation.snapshot_digest)
+        return real_ablation.snapshot_digest(build("600519"))
+
+    def test_real_digest_allows_resume_across_rebuilds(self, env, monkeypatch):
+        """同内容重建（含报告日 object 列）→ 续跑核验通过，digest 落盘即重建值。"""
+        expected = self._patch_real_digest_with_object_frames(env, monkeypatch)
+        _run(env, tickers=["600519"], repeats=1)
+        calls_before = len(env.ablation.run_calls)
+        _run(env, tickers=["600519"], repeats=2)  # 重建 digest 一致 → 正常续跑
+        resume = json.loads(env.resume.read_text(encoding="utf-8"))
+        assert resume["snapshot_digests"] == {"600519": expected}
+        assert len(env.ablation.run_calls) > calls_before, "一致则须继续跑完待办 run"
+
+    def test_real_digest_detects_refreshed_data_source(self, env, monkeypatch):
+        """登记后数据源刷新（报告期变更）→ 内容哈希必须变，核验显式失败。"""
+        self._patch_real_digest_with_object_frames(env, monkeypatch)
+        _run(env, tickers=["600519"], repeats=1)
+        calls_before = len(env.ablation.run_calls)
+        self._patch_real_digest_with_object_frames(env, monkeypatch, day="20240930")
+        with pytest.raises(RuntimeError) as excinfo:
+            _run(env, tickers=["600519"], repeats=2)
+        message = str(excinfo.value)
+        assert "600519" in message and "快照 digest 与本次跑批登记值不一致" in message
+        assert len(env.ablation.run_calls) == calls_before, "失败前不得消耗 token 跑 run"

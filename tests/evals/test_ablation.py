@@ -1093,3 +1093,102 @@ class TestRunAblationScoringDelegation:
         self._patch_pipeline(ablation, monkeypatch)
         ablation.run_ablation(["600519"], repeats=1, judge_repeats=1)
         assert inline_calls == [], "库侧聚合路径不得内联判分——判分只在 score_run 一处"
+
+
+class TestSnapshotDigestContentStability:
+    """G5 通路验证缺陷回归：digest 必须内容稳定。
+
+    旧实现按 `str(values.tobytes())` 哈希 DataFrame——对象列（报告日等字符串）
+    的 ndarray 序列化的是 PyObject 指针，同一数据两次构建 digest 不同。后果是
+    驱动的「重建 digest ≠ 登记 digest → RuntimeError」（跨进程续跑防混批）在
+    真实/stub 数据上恒触发，整条消融跑批被堵死。修法：DataFrame/Series 走
+    `pd.util.hash_pandas_object`（按行内容哈希），非 DataFrame 的 shaped 对象
+    仍走旧路径。
+    """
+
+    @staticmethod
+    def _frame():
+        """带 object 列（报告日）的最小帧：旧路径下两次构建必不等。"""
+        import pandas as pd
+
+        return pd.DataFrame({"报告日": ["20241231", "20231231"], "资产总计": [1000.0, 900.0]})
+
+    def test_two_consecutive_stub_builds_hash_identically(self, monkeypatch):
+        """(a) 同标的两次构建（TESTING=1 确定性 stub）digest 必须一致。"""
+        import evals.ablation as ablation
+
+        monkeypatch.setenv("TESTING", "1")
+        first = ablation.snapshot_digest(ablation.build_snapshot("600519"))
+        second = ablation.snapshot_digest(ablation.build_snapshot("600519"))
+        assert first == second, "同内容两次构建 digest 必须一致，否则续跑核验恒失败"
+
+    def test_stub_object_column_frames_are_stable_and_included(self, monkeypatch):
+        """(c) 显式覆盖 object 列帧：报告日列参与 digest 且跨构建稳定。"""
+        import hashlib
+
+        from evals.ablation import snapshot_digest
+
+        from finance_agent.nodes.fetch import _make_stub_balance_sheet
+
+        frame_a = _make_stub_balance_sheet()
+        frame_b = _make_stub_balance_sheet()
+        assert str(frame_a["报告日"].dtype) == "object", "fixture 前提：报告日为 object 列"
+        digest_a = snapshot_digest({"balance_sheet": frame_a})
+        digest_b = snapshot_digest({"balance_sheet": frame_b})
+        assert digest_a == digest_b, "object 列帧两次构建 digest 必须一致"
+        assert digest_a.startswith(f"balance_sheet:{frame_a.shape}:")
+
+        # 旧路径（values.tobytes() = PyObject 指针）在本 fixture 上确实不稳定：
+        # 若哪天回归，本断言即为红灯信号
+        def _old_path(frame):
+            return hashlib.md5(  # noqa: S324 — 仅为复现旧实现的指针序列化
+                str(frame.values.tobytes()).encode(), usedforsecurity=False
+            ).hexdigest()[:8]
+
+        assert _old_path(frame_a) != _old_path(frame_b), "fixture 前提：旧路径在 object 列上不稳定"
+
+    def test_mutating_numeric_value_changes_digest(self):
+        """(b) 内容敏感：改数值 → digest 变。"""
+        from evals.ablation import snapshot_digest
+
+        frame = self._frame()
+        baseline = snapshot_digest({"balance_sheet": frame})
+        mutated = self._frame()
+        mutated.loc[0, "资产总计"] = 1000.5
+        assert snapshot_digest({"balance_sheet": mutated}) != baseline
+
+    def test_mutating_object_cell_changes_digest(self):
+        """(b) 内容敏感：改 object 列单元格 → digest 变（不得只哈希类型/指针）。"""
+        from evals.ablation import snapshot_digest
+
+        frame = self._frame()
+        baseline = snapshot_digest({"balance_sheet": frame})
+        mutated = self._frame()
+        mutated.loc[0, "报告日"] = "20991231"
+        assert snapshot_digest({"balance_sheet": mutated}) != baseline
+
+    def test_identical_content_different_allocations_match(self):
+        """(b) 同内容不同对象 → digest 相等（与分配无关）。"""
+        from evals.ablation import snapshot_digest
+
+        assert snapshot_digest({"balance_sheet": self._frame()}) == snapshot_digest(
+            {"balance_sheet": self._frame()}
+        )
+
+    def test_digest_string_format_unchanged(self):
+        """格式契约不变：`{key}:{shape}:{hash8}`（台账/报告既有解析依赖此形态）。"""
+        import re
+
+        from evals.ablation import snapshot_digest
+
+        digest = snapshot_digest({"balance_sheet": self._frame()})
+        assert re.fullmatch(r"balance_sheet:\(2, 2\):[0-9a-f]{8}", digest), digest
+
+    def test_scalar_and_non_frame_entries_keep_old_encoding(self):
+        """非 DataFrame 条目编码不变：标量走 repr、无 shape 对象走 type=。"""
+        from evals.ablation import snapshot_digest
+
+        digest = snapshot_digest(
+            {"stock_code": "600519", "enable_web_search": False, "d": {"a": 1}}
+        )
+        assert digest == "d:type=dict|enable_web_search:False|stock_code:'600519'"
