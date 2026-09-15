@@ -667,6 +667,7 @@ class TestRealRun:
         assert unit["variant"] == "analysts"
         assert unit["on_state"] == "caught" and unit["off_state"] == "escaped"
         assert unit["llm_calls"] == 14  # 2 态 × 7 次（按 meter 差量归属，不是估算）
+        assert unit["graph_runs"] == 2  # 机制开/关各一次图运行（预算 runs 以图运行为单位）
         assert unit["status"] == "ok"
         assert unit["on"]["citation"]["flagged"] is True
         assert unit["on"]["citation"]["scope"] == "polluted_claim"
@@ -757,6 +758,65 @@ class TestRealRun:
         assert unit["injection"]["applied"] is False
         assert "trader_plan" in unit["injection"]["applied_reason"]
         assert "注入不可施加" in unit["status_reason"]
+
+    def test_unapplicable_injection_is_prevoided_with_zero_graph_runs(self):
+        """不可施加是运行前已知事实（applied=False）→ SHALL 跳过图运行：0 次 run、0 次 LLM。
+
+        P1 真跑腿实证：illegal_price 单元缺决策 dict 时仍跑满 38 次调用，事后才判 void。
+        """
+        snapshot = _snapshot()
+        snapshot.pop("trader_plan")
+        invocations: list[str] = []
+
+        def counting_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            invocations.append(variant)
+            return {}
+
+        def boom_meter() -> int:
+            raise AssertionError("预判 void 的单元不得读 meter（未运行任何图）")
+
+        _, unit = pr.run_real_case(
+            _make_product(snapshot=snapshot),
+            _case("illegal_price"),
+            graph_runner=counting_runner,
+            llm_meter=boom_meter,
+        )
+        assert invocations == [], "注入不可施加的单元不得运行图（浪费的消耗是合规缺陷）"
+        assert unit["status"] == pr.STATUS_VOID
+        assert unit["llm_calls"] == 0
+        assert unit["graph_runs"] == 0
+        assert "预判" in unit["status_reason"]
+        assert "0 次图运行" in unit["status_reason"]
+        assert unit["on"]["ran"] is False and unit["off"]["ran"] is False
+        assert unit["on"]["graph_runs"] == 0 and unit["off"]["llm_calls"] == 0
+        assert unit["on_state"] == "" and unit["off_state"] == ""  # 未判定，不得读成 caught
+
+    def test_unchanged_snapshot_is_prevoided_with_zero_graph_runs(self):
+        """注入后快照与原件逐一相同（本产物已带该标记）→ 运行前即可判 void，零消耗。"""
+        invocations: list[str] = []
+
+        def counting_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            invocations.append(variant)
+            return {}
+
+        # 快照 macro 已含 as_of_date=2026-08-01 / freshness=fresh：注入同值 → changed 为空
+        already = {
+            "op": "macro_stale",
+            "target": "macro_indicators",
+            "as_of_date": "2026-08-01",
+            "freshness": "fresh",
+            "field": "macro_indicators.as_of_date",
+        }
+        _, unit = pr.run_real_case(
+            _make_product(),
+            _case("stale_macro", payload=already),
+            graph_runner=counting_runner,
+        )
+        assert invocations == []
+        assert unit["status"] == pr.STATUS_VOID
+        assert unit["llm_calls"] == 0 and unit["graph_runs"] == 0
+        assert "未改变快照" in unit["status_reason"]
+        assert "预判" in unit["status_reason"]
 
     def test_void_reason_names_wiring_gap_when_overlap_empty(self):
         """注入键不在消费面上时，void 原因须点名接线缺口（该分支在接线修好后仍是活路径）。"""
@@ -969,6 +1029,115 @@ class TestPilotReport:
             "stale_macro",
         }
         assert all(b["reason"] for b in report["blind_spots"])
+
+
+class TestBudgetHonesty:
+    """spec「预算分型申报」：已尝试单元（ok + void + error）的消耗 SHALL 全部入账。
+
+    P1 真跑腿实证：报告只算 ok 单元的 20 次调用，丢掉 void/error 单元的消耗（≈10× 低估）；
+    且 illegal_price 单元在「注入不可施加」已知的情况下仍跑满图（38 次/单元）。
+    """
+
+    @staticmethod
+    def _real_unit(
+        unit_id: str, *, status: str, llm_calls: int | None, graph_runs: int | None = None
+    ) -> dict:
+        unit: dict[str, object] = {
+            "unit_id": f"{unit_id}::{pr.LEG_REAL}",
+            "case_id": unit_id,
+            "ticker": "600519",
+            "leg": pr.LEG_REAL,
+            "cost_class": pr.LEG_REAL,
+            "pollution_type": "illegal_price",
+            "injection_point": "decision",
+            "mechanism_id": "A5",
+            "on_state": "caught",
+            "off_state": "escaped",
+            "status": status,
+            "status_reason": "",
+            "llm_calls": llm_calls,
+            "evidence_paths": [],
+        }
+        if graph_runs is not None:
+            unit["graph_runs"] = graph_runs
+        return unit
+
+    def _report(self, units: list[dict], tmp_path: Path, **kwargs) -> dict:
+        return pr.pilot_report(
+            units,
+            prereg_dir=_prereg_dir(tmp_path / "prereg"),
+            positive_control_units=[],
+            **kwargs,
+        )
+
+    def test_budget_sums_void_and_error_units(self, tmp_path: Path):
+        units = [
+            self._real_unit("v-ok", status="ok", llm_calls=10, graph_runs=2),
+            self._real_unit("v-void", status="void_injection", llm_calls=38, graph_runs=2),
+            self._real_unit("v-err", status="error", llm_calls=None),  # 中途失败：计量未知
+        ]
+        budget = self._report(units, tmp_path)["budget"]["real_run"]
+        assert budget["llm_calls"] == 48  # 旧实现只报 ok 单元的 10（void/error 的 38 被丢）
+        assert budget["llm_calls_unknown_units"] == 1
+        assert budget["llm_calls_by_status"] == {"ok": 10, "void_injection": 38, "error": 0}
+        assert budget["units"] == 3
+        assert budget["units_by_status"] == {"ok": 1, "void_injection": 1, "error": 1}
+        # runs = 图运行次数（每单元 2 态）；旧实现把它当单元数
+        assert budget["runs"] == 4
+        assert budget["runs_unknown_units"] == 1  # error 单元的运行数未知，显式披露
+
+    def test_budget_counts_prevoid_units_with_zero_runs(self, tmp_path: Path):
+        units = [
+            self._real_unit("v-prevoid", status="void_injection", llm_calls=0, graph_runs=0),
+        ]
+        budget = self._report(units, tmp_path)["budget"]["real_run"]
+        assert budget["units"] == 1  # 已尝试即入账（不得静默丢单元）
+        assert budget["runs"] == 0  # 但预判单元零图运行
+        assert budget["llm_calls"] == 0
+        assert budget["llm_calls_unknown_units"] == 0
+
+    def test_budget_exposes_meter_total_cross_check(self, tmp_path: Path):
+        units = [
+            self._real_unit("v-ok", status="ok", llm_calls=10, graph_runs=2),
+            self._real_unit("v-void", status="void_injection", llm_calls=38, graph_runs=2),
+        ]
+        matched = self._report(units, tmp_path, llm_meter_total=48)["budget"]["real_run"]
+        assert matched["llm_meter_total_calls"] == 48
+        assert matched["llm_meter_matches_unit_sum"] is True
+        mismatched = self._report(units, tmp_path, llm_meter_total=47)["budget"]["real_run"]
+        assert mismatched["llm_meter_matches_unit_sum"] is False
+        absent = self._report(units, tmp_path)["budget"]["real_run"]
+        assert absent["llm_meter_total_calls"] is None
+        assert absent["llm_meter_matches_unit_sum"] is None
+
+    def test_budget_keeps_split_blocks_and_offline_zero_semantics(self, tmp_path: Path):
+        offline = pr.run_offline_case(_make_product(), _case("unit_error"))[1]
+        units = [offline, self._real_unit("v-ok", status="ok", llm_calls=10, graph_runs=2)]
+        budget = self._report(units, tmp_path)["budget"]
+        assert budget["offline_replay"]["units"] == 1
+        assert budget["offline_replay"]["llm_calls"] == 0
+        assert budget["offline_replay"]["zero_llm_verified"] is True
+        assert budget["real_run"]["llm_calls"] == 10
+        assert "SHALL NOT 合并" in budget["note"]
+        assert "llm_calls_total" not in budget
+
+    def test_prevoided_real_case_flows_into_budget_with_zero_calls(self, tmp_path: Path):
+        """端到端：不可施加的注入经 run_real_case 落成 0 调用单元，报告如实计 0。"""
+        snapshot = _snapshot()
+        snapshot.pop("trader_plan")
+
+        def boom_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            raise AssertionError("预判 void 的单元不得运行图")
+
+        _, unit = pr.run_real_case(
+            _make_product(snapshot=snapshot),
+            _case("illegal_price"),
+            graph_runner=boom_runner,
+            llm_meter=lambda: 999,
+        )
+        budget = self._report([unit], tmp_path)["budget"]["real_run"]
+        assert budget["units"] == 1 and budget["units_by_status"]["void_injection"] == 1
+        assert budget["runs"] == 0 and budget["llm_calls"] == 0
 
 
 class TestPositiveControl:

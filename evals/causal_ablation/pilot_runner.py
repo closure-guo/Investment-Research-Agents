@@ -1233,6 +1233,10 @@ def run_real_case(
     单元载荷的 `injection` 记录注入效果（`applied` / `applied_reason` / `target` /
     `polluted_values` / `field_names` / `changed_keys` / `consumed_overlap`）：注入键
     未落在管线消费面上即判 void（`_real_status`），不冒充「拦下」。
+
+    **预判 void（零消耗）**：注入不可施加（`applied=False`，如缺决策 dict）或未改变快照
+    （`changed` 为空）在运行前即可确认，此时 SHALL 直接判 void 并跳过图运行——
+    P1 真跑腿实证：illegal_price 单元缺决策 dict 时仍跑满 38 次调用才事后判 void。
     """
     runner = graph_runner or default_graph_runner
     resolved_variant = variant or ("full" if case.injection_point == "decision" else "analysts")
@@ -1251,6 +1255,22 @@ def run_real_case(
         "applied_reason": effect.reason,
         "target": effect.target,
     }
+    if not effect.applied:
+        return _prevoid_real_case(
+            product,
+            case,
+            injected=injected,
+            variant=resolved_variant,
+            reason=f"注入不可施加（{injected['applied_reason']}）",
+        )
+    if not changed:
+        return _prevoid_real_case(
+            product,
+            case,
+            injected=injected,
+            variant=resolved_variant,
+            reason="注入未改变快照（该型在本产物上无污染可测，不判拦截）",
+        )
     states: dict[str, dict] = {}
     payloads: dict[str, dict] = {}
     for on in (True, False):
@@ -1268,6 +1288,8 @@ def run_real_case(
         outcome = classify_terminal(state, case, injected=injected)
         states[key] = outcome
         payloads[key] = {
+            "ran": True,
+            "graph_runs": 1,
             "polluted_present": outcome["polluted_present"],
             "flagged": outcome["flagged"],
             "citation": outcome["citation"],
@@ -1302,6 +1324,7 @@ def run_real_case(
         "status": status,
         "status_reason": reason,
         "llm_calls": None if any(c is None for c in calls) else sum(c or 0 for c in calls),
+        "graph_runs": sum(int(p.get("graph_runs") or 0) for p in payloads.values()),
         "evidence_paths": _evidence_paths(product, unit_id),
         "injection": injected,
         "on": payloads["on"],
@@ -1310,13 +1333,64 @@ def run_real_case(
     return pair, unit
 
 
+def _prevoid_real_case(
+    product: dict,
+    case: InjectionCase,
+    *,
+    injected: dict,
+    variant: str,
+    reason: str,
+) -> tuple[EscapePair, dict]:
+    """预判 void：运行前即可确认注入不含信息 → 跳过图运行（0 次 run / 0 次 LLM 调用）。
+
+    触发条件（都在 `apply_injection` 之后、任何图运行之前可知）：注入不可施加
+    （`applied=False`）或注入未改变快照（`changed` 为空）。两态载荷记 `ran=False` +
+    `mechanism=None`——未运行即无开关记录，不得伪造「开态/关态已判定」。
+    """
+    status_reason = f"void：{reason}；预判于图运行之前（0 次图运行 / 0 次 LLM），该单元不含拦截信息"
+    skipped = {
+        "ran": False,
+        "skip_reason": status_reason,
+        "polluted_present": None,  # 未观测：不得写成 False（False 是「看过，没有」）
+        "flagged": None,
+        "citation": {},
+        "decision": {},
+        "mechanism": None,
+        "graph_runs": 0,
+        "llm_calls": 0,
+    }
+    unit_id = f"{case.case_id}::{LEG_REAL}"
+    unit = {
+        "unit_id": unit_id,
+        "case_id": case.case_id,
+        "ticker": product.get("ticker"),
+        "leg": LEG_REAL,
+        "cost_class": COST_CLASS[case.pollution_type],
+        "pollution_type": case.pollution_type,
+        "injection_point": case.injection_point,
+        "mechanism_id": case.mechanism_id,
+        "variant": variant,
+        "on_state": "",  # 未判定（同 error 单元口径）：不得读成 caught
+        "off_state": "",
+        "status": STATUS_VOID,
+        "status_reason": status_reason,
+        "llm_calls": 0,
+        "graph_runs": 0,
+        "evidence_paths": _evidence_paths(product, unit_id),
+        "injection": injected,
+        "on": dict(skipped),
+        "off": dict(skipped),
+    }
+    # 配对占位：void 单元不进配对（`pilot_report` 只对 status=ok 的单元配对），此处仅为返回契约
+    return EscapePair(case.case_id, "caught", "caught"), unit
+
+
 def _real_status(injected: dict, payloads: dict[str, dict]) -> tuple[str, str]:
-    """真跑单元有效性：注入不可施加/没改变快照、或两态产物都无污染痕迹 → 不含拦截信息。"""
-    if not injected.get("applied"):
-        reason = str(injected.get("applied_reason") or "未登记的快照注入目标")
-        return STATUS_VOID, f"void：注入不可施加（{reason}）；该单元不含拦截信息"
-    if not injected["injection_effective"]:
-        return STATUS_VOID, "void：注入未改变快照（该型在本产物上无污染可测，不判拦截）"
+    """跑后单元有效性：两态产物都无污染痕迹 → 不含拦截信息（判 void）。
+
+    运行前可知的两类非适用（`applied=False` / 快照未改变）不在此处判定：
+    它们在 `run_real_case` 里已被 `_prevoid_real_case` 拦下（零图运行）。
+    """
     traced = any(p["polluted_present"] or p["flagged"] for p in payloads.values())
     if not traced:
         reason = "void：两态终态产物均无污染值且无告警（污染未到达产物，该单元不含拦截信息）"
@@ -1390,16 +1464,80 @@ def _positive_control(units: list[dict]) -> dict:
     }
 
 
+def _cost_class(unit: dict) -> str:
+    """单元的成本分型（`cost_class` 缺失时回落 `leg`：两字段取值同名，见 COST_CLASS）。"""
+    return str(unit.get("cost_class") or unit.get("leg") or "")
+
+
+def _budget_block(units: list[dict], *, llm_meter_total: int | None = None) -> dict:
+    """预算分型申报（spec「注入成本结构二分」/「预算分型申报」）：两型分列，SHALL NOT 合并。
+
+    真跑腿 SHALL 对**全部已尝试单元**（ok + void + error）计账——只算 ok 单元会把
+    void/error 的消耗静默丢掉（P1 真跑腿实证低估 ≈10×）。`llm_calls` 只对**已知计量**
+    求和，None 计量的单元单列在 `llm_calls_unknown_units`（此时 `llm_calls` 是下界）。
+    `runs` 的单位是图运行（每单元 2 态；预判 void 的单元 0 次），运行数未知的 error
+    单元单列在 `runs_unknown_units`。meter 绝对读数独立交叉核对两处数字。
+    """
+    off_units = [u for u in units if _cost_class(u) == LEG_OFFLINE]
+    real_units = [u for u in units if _cost_class(u) == LEG_REAL]
+    calls = [u.get("llm_calls") for u in real_units]
+    runs = [u.get("graph_runs") for u in real_units]
+    known_calls = sum(int(c) for c in calls if c is not None)
+    statuses = [str(u.get("status") or STATUS_ERROR) for u in real_units]
+    by_status = {s: statuses.count(s) for s in (STATUS_OK, STATUS_VOID, STATUS_ERROR)}
+    for status in sorted(set(statuses) - set(by_status)):  # 未登记状态不得静默消失
+        by_status[status] = statuses.count(status)
+    return {
+        LEG_OFFLINE: {
+            "units": len(off_units),
+            "llm_calls": sum(int(u.get("llm_calls") or 0) for u in off_units),
+            "zero_llm_verified": all(u.get("llm_calls") == 0 for u in off_units),
+        },
+        LEG_REAL: {
+            "units": len(real_units),
+            "units_by_status": by_status,
+            "runs": sum(int(r) for r in runs if r is not None),
+            "runs_unknown_units": sum(1 for r in runs if r is None),
+            "llm_calls": known_calls,
+            "llm_calls_unknown_units": sum(1 for c in calls if c is None),
+            "llm_calls_by_status": {
+                status: sum(
+                    int(raw)
+                    for unit, raw in zip(real_units, calls, strict=True)
+                    if str(unit.get("status") or STATUS_ERROR) == status and raw is not None
+                )
+                for status in by_status
+            },
+            "llm_meter_total_calls": llm_meter_total,
+            "llm_meter_matches_unit_sum": (
+                None if llm_meter_total is None else int(llm_meter_total) == known_calls
+            ),
+            "note": (
+                "计账单位 = 已尝试真跑单元（ok + void + error 全计，SHALL NOT 只算 ok）；"
+                "`runs` = 图运行次数（每单元 2 态，预判 void 的单元 0 次），"
+                "运行数未知的单元计入 `runs_unknown_units`；"
+                "`llm_calls` = 已知计量单元之和，None 计量单元单列于 `llm_calls_unknown_units`"
+                "（此时该值是下界）；`llm_meter_total_calls` 为 meter 绝对读数，仅供独立交叉核对"
+                "（续跑或同进程多批时含本进程其他消耗，不等即非异常）"
+            ),
+        },
+        "note": "两类成本量级不同，SHALL NOT 合并为单一 run 等效数（spec 注入成本结构二分）",
+    }
+
+
 def pilot_report(
     units: list[dict],
     *,
     prereg_dir: Path | None = None,
     positive_control_units: list[dict] | None = None,
+    llm_meter_total: int | None = None,
 ) -> dict:
     """P1 批报告：分型逃逸率（未终裁 rate=None）+ 校准判词 + 阳性对照 + 预算 + 终裁清单。
 
     主指标 rate 一律以 `adjudicated=set()` 结算——人工终裁前只报 pending 计数，
     「0 逃逸」与「没判定过」不得混为一谈（spec「逃逸须终裁确认」）。
+
+    `llm_meter_total` = 报告生成时的 meter 绝对读数（独立交叉核对，缺省 None = 未接线）。
     """
     prereg = assert_launch_allowed(prereg_dir)
     positive_control_units = list(positive_control_units or [])
@@ -1441,9 +1579,6 @@ def pilot_report(
         for u in ok
         if u["off_state"] == "escaped"
     ]
-    off_units = [u for u in ok if u.get("cost_class") == LEG_OFFLINE]
-    real_units = [u for u in ok if u.get("cost_class") == LEG_REAL]
-    real_calls = [u.get("llm_calls") for u in real_units]
     statuses = [str(u.get("status") or STATUS_ERROR) for u in units]
     positive_control = _positive_control(positive_control_units)
     report = {
@@ -1484,23 +1619,7 @@ def pilot_report(
         "by_type": by_type,
         "positive_control": positive_control,
         "negative_results_status": "ok" if positive_control["sensitivity_confirmed"] else "void",
-        "budget": {
-            LEG_OFFLINE: {
-                "units": len(off_units),
-                "llm_calls": sum(int(u.get("llm_calls") or 0) for u in off_units),
-                "zero_llm_verified": all(u.get("llm_calls") == 0 for u in off_units),
-            },
-            LEG_REAL: {
-                "runs": len(real_units),
-                "llm_calls": (
-                    None
-                    if any(c is None for c in real_calls)
-                    else sum(int(c or 0) for c in real_calls)
-                ),
-                "llm_calls_unknown_units": sum(1 for c in real_calls if c is None),
-            },
-            "note": "两类成本量级不同，SHALL NOT 合并为单一 run 等效数（spec 注入成本结构二分）",
-        },
+        "budget": _budget_block(units, llm_meter_total=llm_meter_total),
         "stop_rules": {
             "discordant_ratio_overall": discordant["discordant_ratio"],
             "too_easy": discordant["discordant_ratio"] < DISSONANT_MIN,
@@ -1556,7 +1675,11 @@ def to_unit_judgment(unit: dict, *, run: str | None = None) -> UnitJudgment:
 def error_unit(
     case: InjectionCase, *, ticker: str, reason: str, llm_calls: int | None = None
 ) -> dict:
-    """失败单元的显式记录（跑批不得静默丢单元：错误进报告 counts.error，不进配对）。"""
+    """失败单元的显式记录（跑批不得静默丢单元：错误进报告 counts.error，不进配对）。
+
+    `llm_calls` / `graph_runs` 缺省 None = 未知（中途失败后调用数不可归因）——预算块
+    以 `llm_calls_unknown_units` / `runs_unknown_units` 单列，不得当成 0。
+    """
     unit_id = f"{case.case_id}::{COST_CLASS[case.pollution_type]}"
     return {
         "unit_id": unit_id,
@@ -1572,6 +1695,7 @@ def error_unit(
         "status": STATUS_ERROR,
         "status_reason": reason,
         "llm_calls": llm_calls,
+        "graph_runs": None,
         "evidence_paths": [],
         "injection": {},
         "on": {},

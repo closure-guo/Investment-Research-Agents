@@ -346,7 +346,13 @@ def run_pilot(
     positive_control = [
         u for u in units if u.get("mechanism_id") == "A3" and u.get("status") == pr.STATUS_OK
     ]
-    report = pr.pilot_report(units, prereg_dir=prereg_dir, positive_control_units=positive_control)
+    report = pr.pilot_report(
+        units,
+        prereg_dir=prereg_dir,
+        positive_control_units=positive_control,
+        # meter 绝对读数：预算块的独立交叉核对（None = 未接线；不可用不得伪造成 0）
+        llm_meter_total=None if llm_meter is None else int(llm_meter()),
+    )
     report["config"] = {
         # 实际标的清单须记入产物（预登记口径是 10 标的，实际跑的可能是子集）
         "tickers": list(tickers),
