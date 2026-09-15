@@ -137,4 +137,4 @@ grep -q '"diff_mean"' evals/ablation.py && grep -q '_applicable_dims' tests/scri
 
 **未覆盖/推迟**：P1/P2 正式跑批（按预登记另行启动）；阳性对照的注入强度 pilot 真实材料跑批（同前）。
 
-**最终回归（2026-09-16，本 worktree 全量）**：`uv run pytest -q -m "not live"` → **2619 passed / 2 skipped / 12 deselected / 0 failed（9:07）**；`uv run ruff check` / `uv run mypy`（改动文件）全绿；`openspec validate revamp-ablation-v2-causal-claims --strict` 通过。
+**最终回归（2026-09-16，本 worktree 全量，含 G7 收尾修复后）**：`uv run pytest -q -m "not live"` → **2636 passed / 2 skipped / 12 deselected / 0 failed（8:33）**（G7 前基线 2619 passed）；`uv run ruff check` / `uv run mypy`（改动文件）全绿；`openspec validate revamp-ablation-v2-causal-claims --strict` 通过。
