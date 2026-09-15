@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+# 复用 citation 的私有助手（计划强制：解析/回声语义单一实现，勿在本模块复制）
 from finance_agent.citation import _norm_text, _resolve_field_ref, collect_text_sources
 from finance_agent.models import DebateArgument, DebateMessage
 
@@ -29,7 +30,11 @@ def _argument_status(arg: DebateArgument, statuses: list[str]) -> str:
 
 
 def check_argument_anchors(msg: DebateMessage, state: dict) -> list[dict]:
-    """逐论点锚点校验；返回可 JSON 序列化的检查记录列表（供 state channel 落盘）。"""
+    """逐论点锚点校验；返回可 JSON 序列化的检查记录列表（供 state channel 落盘）。
+
+    消费方按锚点状态门控时必须读 `status`：`unspecified` 条目的 `anchor_statuses`
+    虽被计算但非权威（恒为 unresolved），不代表锚点缺失或未解析。
+    """
     sources = collect_text_sources(state)
     checks: list[dict] = []
     for i, arg in enumerate(msg.key_arguments, start=1):

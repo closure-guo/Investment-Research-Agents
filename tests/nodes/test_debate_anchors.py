@@ -70,6 +70,28 @@ class TestAnchorChecks:
         )
         assert checks[0]["status"] == "unspecified"
 
+    def test_event_echo_miss_is_unresolved(self):
+        state = {"news_list": [{"title": "公司公告拟回购不超过 10 亿元"}]}
+        checks = check_argument_anchors(
+            _msg([{"text": "t", "kind": "event", "anchors": ["不存在的新闻标题"]}]), state
+        )
+        assert checks[0]["anchor_statuses"] == ["unresolved"]
+        assert checks[0]["status"] == "unresolved" and checks[0]["anchored"] is False
+
+    def test_event_zero_anchor_is_missing(self):
+        checks = check_argument_anchors(_msg([{"text": "t", "kind": "event", "anchors": []}]), {})
+        assert checks[0]["status"] == "missing" and checks[0]["anchored"] is False
+
+    def test_empty_stats_is_all_zero(self):
+        assert anchor_stats([]) == {
+            "total": 0,
+            "anchored": 0,
+            "unanchored_inference": 0,
+            "unresolved": 0,
+            "missing_required": 0,
+            "unspecified": 0,
+        }
+
     def test_stats_split(self):
         checks = [
             {"anchored": True, "status": "resolved", "kind": "data"},
@@ -86,6 +108,40 @@ class TestAnchorChecks:
             "missing_required": 1,
             "unspecified": 1,
         }
+
+
+class TestInferenceTwoStageResolution:
+    """inference 型锚点两段式解析：先 field_ref，未命中再回声回退。
+
+    两段各自锁死——重构丢掉或颠倒第二段而其余套件仍绿，必须被这两条用例捕获。
+    """
+
+    def test_inference_anchor_resolves_via_field_ref(self):
+        state = {"technical_indicators": {"MA": {"5": [1.0, 2.0]}}}
+        checks = check_argument_anchors(
+            _msg(
+                [
+                    {
+                        "text": "动能",
+                        "kind": "inference",
+                        "anchors": ["technical_indicators.MA.5.-1"],
+                    }
+                ]
+            ),
+            state,
+        )
+        assert checks[0]["anchor_statuses"] == ["resolved"]
+        assert checks[0]["status"] == "resolved" and checks[0]["anchored"] is True
+
+    def test_inference_anchor_falls_back_to_event_echo(self):
+        # 锚点不含 "."，field_ref 解析必然 None——只有回声段能把这条判为 resolved
+        state = {"news_list": [{"title": "公司公告拟回购不超过 10 亿元"}]}
+        checks = check_argument_anchors(
+            _msg([{"text": "情绪", "kind": "inference", "anchors": ["拟回购不超过 10 亿元"]}]),
+            state,
+        )
+        assert checks[0]["anchor_statuses"] == ["resolved"]
+        assert checks[0]["status"] == "resolved" and checks[0]["anchored"] is True
 
 
 class TestCheckRecordContract:
