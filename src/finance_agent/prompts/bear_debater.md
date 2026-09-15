@@ -10,10 +10,10 @@
   "round": 1,
   "content": "看空论述",
   "key_arguments": [
-    {"text": "MA5 上穿 MA20，短期动能转强", "kind": "data",
+    {"text": "MA5 下穿 MA20，短期动能转弱", "kind": "data",
      "anchors": ["technical_indicators.MA.5.-1", "technical_indicators.MA.20.-1"]},
-    {"text": "回购公告提振市场情绪", "kind": "event", "anchors": ["拟回购不超过 10 亿元"]},
-    {"text": "龙头份额集中利好，但无近期数据支撑", "kind": "inference", "anchors": []}
+    {"text": "股东减持公告压制市场情绪", "kind": "event", "anchors": ["控股股东拟减持不超过 2% 股份"]},
+    {"text": "行业竞争加剧，份额或承压，但无近期数据支撑", "kind": "inference", "anchors": []}
   ],
   "rebuttal_to": [1, 3]
 }

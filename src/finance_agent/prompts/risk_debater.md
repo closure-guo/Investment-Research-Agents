@@ -10,10 +10,10 @@
   "round": 1,
   "content": "风险分析",
   "key_arguments": [
-    {"text": "MA5 上穿 MA20，短期动能转强", "kind": "data",
-     "anchors": ["technical_indicators.MA.5.-1", "technical_indicators.MA.20.-1"]},
-    {"text": "回购公告提振市场情绪", "kind": "event", "anchors": ["拟回购不超过 10 亿元"]},
-    {"text": "龙头份额集中利好，但无近期数据支撑", "kind": "inference", "anchors": []}
+    {"text": "最大回撤扩大且波动率抬升，持仓风险暴露偏高", "kind": "data",
+     "anchors": ["risk_metrics.max_drawdown", "risk_metrics.volatility"]},
+    {"text": "股东质押公告增加尾部风险", "kind": "event", "anchors": ["控股股东质押比例升至 78%"]},
+    {"text": "极端行情下滑点放大止损成本，但无近期数据支撑", "kind": "inference", "anchors": []}
   ]
 }
 ```

@@ -18,5 +18,6 @@ def test_schema_is_structured(name):
 def test_anchor_discipline_present(name):
     text = (ROOT / name).read_text(encoding="utf-8")
     assert "data 型" in text and "field_ref" in text  # data 型必须附 field_ref
+    assert "只能引用输入数据段" in text  # data 型锚点限输入数据段内联的 state 键路径
     assert "禁止" in text and "伪造" in text  # 禁止为推断伪造锚点
     assert "inference" in text  # 拿不准标 inference

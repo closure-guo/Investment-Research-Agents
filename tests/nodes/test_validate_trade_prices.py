@@ -321,3 +321,10 @@ class TestStateChannelsDeclared:
 
         channels = set(build_5layer_graph().builder.channels)
         assert "debate_anchor_checks" in channels, "AnalysisState 缺少声明: debate_anchor_checks"
+
+    def test_graph_channels_declare_research_manager_keys(self):
+        """research_manager 解析失败降级写入 parse_degraded——未声明则被图静默丢弃。"""
+        from finance_agent.graph import build_5layer_graph
+
+        channels = set(build_5layer_graph().builder.channels)
+        assert "parse_degraded" in channels, "AnalysisState 缺少声明: parse_degraded"

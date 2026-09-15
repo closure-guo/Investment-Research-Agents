@@ -99,6 +99,9 @@ class AnalysisState(TypedDict, total=False):
     research_manager_conclusion: str  # 评级前置拼装（RM 结构化输出的人读渲染）
     research_manager_rating: str | None  # 看多/看空/中性（战绩结算与 judge 变量直取）
     research_manager_confidence: float | None
+    # RM 结构化输出解析失败降级标记（research_manager 写入；此前未声明被图合并
+    # 静默丢弃，incident 027 同族补声明）
+    parse_degraded: bool
 
     # Layer III: Trader
     trader_plan: dict  # TradeDecision 序列化
