@@ -17,11 +17,12 @@ from evals.run import (
 
 
 class TestEvaluatorAssembly:
-    def test_fifteen_evaluators(self):
+    def test_sixteen_evaluators(self):
         """4 确定性 + 4 judge + 阶段 5 拆报 6 项 + 单点修复计数 1 项
-        （blocked/真错数/归一计数/文本与未注册 UNVERIFIABLE/comparative 差值 1 项/修复回填数）。"""
+        （blocked/真错数/归一计数/文本与未注册 UNVERIFIABLE/comparative 差值 1 项/修复回填数）
+        + 论点锚点覆盖率 1 项（add-debate-argument-anchors，零 LLM）。"""
         evals = all_evaluators()
-        assert len(evals) == 15
+        assert len(evals) == 16
         names = {e.__name__ for e in evals}
         assert {
             "eval_citation_blocked",
@@ -31,6 +32,7 @@ class TestEvaluatorAssembly:
             "eval_citation_unverifiable_unregistered",
             "eval_citation_unverifiable_comparative_delta",
             "eval_citation_surgical_repaired",
+            "eval_argument_anchor_coverage",
         } <= names
 
     def test_deterministic_evaluator_shape(self):
@@ -233,6 +235,19 @@ class TestCitationMetricEvaluators:
         assert lo <= 0.875 <= hi
         assert _citation_ci([0.8, 0.9, 1.0, 0.7]) == (lo, hi)  # seed 固定可复现
         assert _citation_ci([]) == (0.0, 0.0)
+
+    def test_anchor_coverage_evaluator_reads_output(self):
+        """论点锚点覆盖率经 output 键透传为 Score；无数据（quick/旧 trace）→ None。"""
+        ev = {e.__name__: e for e in all_evaluators()}["eval_argument_anchor_coverage"]
+        result = ev(
+            input={"query": "q", "mode": "deep"},
+            output={"argument_anchor_coverage": 0.75},
+            expected_output={},
+            metadata={},
+        )
+        assert (getattr(result, "name", None) or result["name"]) == "argument_anchor_coverage"
+        assert float(getattr(result, "value", None) or result["value"]) == 0.75
+        assert ev(input={}, output={"mode": "quick"}, expected_output={}, metadata={}) is None
 
 
 class TestDebateCapEvidenceInComment:

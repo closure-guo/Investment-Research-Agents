@@ -701,3 +701,148 @@ class TestFormatClaims:
         from evals.extract import _format_claims
 
         assert _format_claims([]) == ""
+
+
+class TestAnchorMaterial:
+    """add-debate-argument-anchors Task 5：锚点覆盖率 + judge 材料骨架行/论点前缀。"""
+
+    def _checks(self) -> list[dict]:
+        return [
+            {
+                "role": "bull",
+                "round": 1,
+                "index": 1,
+                "kind": "data",
+                "anchors": ["x"],
+                "anchor_statuses": ["resolved"],
+                "status": "resolved",
+                "anchored": True,
+            },
+            {
+                "role": "bear",
+                "round": 1,
+                "index": 1,
+                "kind": "inference",
+                "anchors": [],
+                "anchor_statuses": [],
+                "status": "none",
+                "anchored": False,
+            },
+        ]
+
+    def test_coverage_and_skeleton_line(self):
+        from evals.extract import anchor_coverage, extract_judge_vars
+
+        checks = self._checks()
+        cov = anchor_coverage(checks)
+        assert cov is not None
+        assert cov["value"] == 0.5 and cov["unanchored_inference"] == 1
+
+        state = {
+            "debate_history": [
+                {
+                    "role": "bull",
+                    "round": 1,
+                    "content": "c",
+                    "key_arguments": [{"text": "MA5 上穿", "kind": "data", "anchors": ["x"]}],
+                },
+            ],
+            "debate_anchor_checks": checks[:1],
+        }
+        debate = extract_judge_vars(state, query="q")["debate_history"]
+        assert "【锚点覆盖】" in debate
+        assert "[data ✓]" in debate
+
+    def test_coverage_none_without_checks(self):
+        """无论点（含非 dict 噪声）→ None：无锚点数据的旧 trace 不得产出 0/0 假指标。"""
+        from evals.extract import anchor_coverage
+
+        assert anchor_coverage([]) is None
+        assert anchor_coverage([None, "x"]) is None
+
+    def test_mark_mapping_gates_on_status(self):
+        """标记一律取 status：unspecified 的 anchor_statuses 非权威（恒 unresolved），
+        unspecified→?、unresolved/missing→✗、none→○、resolved→✓。"""
+        from evals.extract import extract_judge_vars
+
+        def check(role, status, anchor_statuses):
+            return {
+                "role": role,
+                "round": 1,
+                "index": 1,
+                "kind": "inference",
+                "anchors": [],
+                "anchor_statuses": anchor_statuses,
+                "status": status,
+                "anchored": status == "resolved",
+            }
+
+        state = {
+            "debate_history": [
+                {
+                    "role": role,
+                    "round": 1,
+                    "content": "c",
+                    "key_arguments": [{"text": f"{role} 论点", "kind": "inference"}],
+                }
+                for role in ("bull", "bear", "aggressive", "conservative")
+            ],
+            "debate_anchor_checks": [
+                check("bull", "unspecified", ["unresolved"]),  # 非权威状态不得渲染成 ✗
+                check("bear", "unresolved", ["unresolved"]),
+                check("aggressive", "missing", []),
+                check("conservative", "none", []),
+            ],
+        }
+        out = extract_judge_vars(state, query="q")["debate_history"]
+        assert "[inference ?] bull 论点" in out
+        assert "[inference ✗] bear 论点" in out
+        assert "[inference ✗] aggressive 论点" in out
+        assert "[inference ○] conservative 论点" in out
+
+    def test_pydantic_arguments_rendered_with_mark(self):
+        """DebateArgument 实例取 text 渲染（不得 str() 成 dict-repr 噪声），
+        检查记录按 (role, round, index) 命中并拼状态标记。"""
+        from evals.extract import extract_judge_vars
+
+        from finance_agent.models import DebateArgument, DebateMessage
+
+        state = {
+            "debate_history": [
+                DebateMessage(
+                    role="bull",
+                    round=2,
+                    content="看多",
+                    key_arguments=[
+                        DebateArgument(text="ROE 32.5%", kind="data", anchors=["f.roe"])
+                    ],
+                )
+            ],
+            "debate_anchor_checks": [
+                {
+                    "role": "bull",
+                    "round": 2,
+                    "index": 1,
+                    "kind": "data",
+                    "anchors": ["f.roe"],
+                    "anchor_statuses": ["resolved"],
+                    "status": "resolved",
+                    "anchored": True,
+                }
+            ],
+        }
+        out = extract_judge_vars(state, query="q")["debate_history"]
+        assert "[data ✓] ROE 32.5%" in out
+        assert "kind=" not in out and "'kind'" not in out  # dict-repr 泄漏回归守卫
+
+    def test_risk_material_without_checks_no_skeleton_line(self):
+        """风控材料无检查记录时不得崩、不产出锚点骨架行，论点行仍渲染。"""
+        state = {
+            "risk_debate_history": [
+                {"role": "aggressive", "round": 1, "content": "加仓", "key_arguments": ["x"]}
+            ]
+        }
+        out = extract_judge_vars(state, query="q")
+        assert "【锚点覆盖】" not in out["risk_debate_history"]
+        assert "【锚点覆盖】" not in out["risk_judgment"]
+        assert "论点: x" in out["risk_debate_history"]

@@ -210,6 +210,11 @@ def all_evaluators() -> list:
             "citation_surgical_repaired",
             "单点修复成功回填数（稀疏 value_mismatch；已计入真错，单独计数观测触发/成功率）",
         ),
+        # add-debate-argument-anchors：论点锚点覆盖率（零 LLM）——工厂语义为通用
+        # output 键读取（float + comment），非 citation 专有，直接复用不另起同构工厂
+        eval_citation_counter(
+            "argument_anchor_coverage", "辩论论点锚点覆盖率（anchored/total，零 LLM）"
+        ),
     ] + [_judge_adapter(d) for d in _JUDGE_DIMS]
 
 

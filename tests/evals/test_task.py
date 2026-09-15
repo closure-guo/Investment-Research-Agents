@@ -156,3 +156,49 @@ class TestTaskCitationOutputs:
         assert out["citation_unverifiable_comparative_delta"] == 1.0
         # 单点修复计数进拆报（观测修复触发/成功率；同时仍计入 analyst_true_fail）
         assert out["citation_surgical_repaired"] == 2.0
+
+
+class TestTaskAnchorOutputs:
+    """add-debate-argument-anchors Task 5：锚点覆盖率 + 拆项进 deep 输出。"""
+
+    def _run_deep_with_state(self, monkeypatch, state: dict) -> dict:
+        import evals.task as task_mod
+
+        class _FakeGraph:
+            def invoke(self, initial_state, config=None):
+                return {**state, "final_report": state.get("final_report", "r")}
+
+        monkeypatch.setattr(task_mod, "build_5layer_graph", lambda: _FakeGraph())
+        monkeypatch.setattr(task_mod, "extract_judge_vars", lambda s, query="": {})
+        monkeypatch.setattr(task_mod, "get_callback_handler", lambda: None)
+        return task_mod._run_deep({"stock_code": "600519", "query": "q"})
+
+    def test_deep_output_includes_anchor_coverage(self, monkeypatch):
+        out = self._run_deep_with_state(
+            monkeypatch,
+            {
+                "debate_anchor_checks": [
+                    {
+                        "role": "bull",
+                        "round": 1,
+                        "index": 1,
+                        "kind": "data",
+                        "anchors": ["x"],
+                        "anchor_statuses": ["resolved"],
+                        "status": "resolved",
+                        "anchored": True,
+                    }
+                ]
+            },
+        )
+        assert out["argument_anchor_coverage"] == 1.0
+        assert out["argument_anchor_coverage_detail"]["total"] == 1
+        assert "value" not in out["argument_anchor_coverage_detail"]
+        json.dumps(out)
+
+    def test_anchor_keys_none_without_checks(self, monkeypatch):
+        """旧 trace/quick 无锚点数据 → 两键 None（不计入均值），不得 0/0 假指标。"""
+        out = self._run_deep_with_state(monkeypatch, {})
+        assert out["argument_anchor_coverage"] is None
+        assert out["argument_anchor_coverage_detail"] is None
+        json.dumps(out)
