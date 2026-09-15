@@ -81,7 +81,11 @@ class DebateMessage(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _coerce_legacy_arguments(cls, data: object) -> object:
-        """旧格式兼容：裸字符串列表 → unspecified（历史会话/夹具/TESTING stub）。"""
+        """旧格式兼容：裸字符串列表 → unspecified（历史会话/夹具/TESTING stub）。
+
+        已构造的 DebateArgument 实例原样保留（调用方直接手搓类型化论点时
+        不得被 else 分支字符串化——那会静默丢失 text/kind/anchors）。
+        """
         if not isinstance(data, dict):
             return data
         args = data.get("key_arguments")
@@ -91,6 +95,8 @@ class DebateMessage(BaseModel):
         for item in args:
             if isinstance(item, str):
                 coerced.append({"text": item, "kind": "unspecified", "anchors": []})
+            elif isinstance(item, DebateArgument):
+                coerced.append(item.model_dump())
             elif isinstance(item, dict):
                 d = dict(item)
                 if d.get("kind") not in ("data", "event", "inference", "unspecified"):
