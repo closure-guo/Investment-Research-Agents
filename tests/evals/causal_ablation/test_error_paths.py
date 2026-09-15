@@ -1,5 +1,6 @@
 """错误路径覆盖：这些分支是契约的一部分（拒绝非法输入），不是可省略的防御代码。"""
 
+import pandas as pd
 import pytest
 from evals.causal_ablation.aggregate import cluster_mean_diff_ci, effective_n
 from evals.causal_ablation.claims import (
@@ -88,31 +89,33 @@ class TestInjectionPayloads:
         cases = build_injection_cases(pollution, ticker="T", base_values=base, n=1)
         assert cases[0].payload, f"{pollution} 未构造 payload"
 
-    def test_mirror_narrative_marked_as_sequence_reversal(self):
-        base = {"close_series": [1.0, 2.0, 3.0]}
-        case = build_injection_cases("mirror_narrative", ticker="T", base_values=base, n=1)[0]
-        assert case.payload["reverse_sequence"] is True
+    def test_mirror_narrative_marked_as_kline_row_reversal(self):
+        case = build_injection_cases("mirror_narrative", ticker="T", base_values={}, n=1)[0]
+        assert case.payload["op"] == "reverse_rows"
+        assert case.payload["target"] == "kline"
 
     def test_stale_macro_sets_old_as_of(self):
-        case = build_injection_cases(
-            "stale_macro", ticker="T", base_values={"macro_as_of": "2026-09-01"}, n=1
-        )[0]
-        assert case.payload["set"]["macro_as_of"] < "2026-09-01"
+        case = build_injection_cases("stale_macro", ticker="T", base_values={}, n=1)[0]
+        assert case.payload["as_of_date"] < "2026-09-01"
+        assert case.payload["freshness"] == "stale"
 
-    def test_mirror_narrative_actually_reverses_series_on_apply(self):
+    def test_mirror_narrative_actually_reverses_kline_rows_on_apply(self):
         from evals.causal_ablation.injection import apply_injection
 
-        base = {"close_series": [1.0, 2.0, 3.0]}
-        case = build_injection_cases("mirror_narrative", ticker="T", base_values=base, n=1)[0]
-        out = apply_injection(dict(base), case)
-        assert out["close_series"] == [3.0, 2.0, 1.0]
+        base = {"kline": pd.DataFrame({"日期": ["d1", "d2", "d3"], "收盘": [1.0, 2.0, 3.0]})}
+        case = build_injection_cases("mirror_narrative", ticker="T", base_values={}, n=1)[0]
+        out, effect = apply_injection(base, case)
+        assert out["kline"]["收盘"].tolist() == [3.0, 2.0, 1.0]
+        assert effect.applied is True
 
-    def test_mirror_narrative_without_series_is_noop(self):
+    def test_mirror_narrative_without_kline_records_not_applied(self):
         from evals.causal_ablation.injection import apply_injection
 
         base = {"price": 10.0}
-        case = build_injection_cases("mirror_narrative", ticker="T", base_values=base, n=1)[0]
-        assert apply_injection(dict(base), case) == base
+        case = build_injection_cases("mirror_narrative", ticker="T", base_values={}, n=1)[0]
+        out, effect = apply_injection(dict(base), case)
+        assert out == base
+        assert effect.applied is False and "kline" in effect.reason
 
 
 class TestPreregisterLookupEdge:

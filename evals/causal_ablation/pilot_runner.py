@@ -10,6 +10,9 @@
       "snapshot_digest": "<evals.ablation.snapshot_digest>",
       "snapshot": { ... fetch_data + compute_metrics 的可重放 state 子集（含 DataFrame）,
                     另须含注入基值 revenue / price / growth / entry ... },
+                    # 真跑腿的注入目标即此快照的真实结构：value_error → income_statement、
+                    # mirror_narrative → kline、illegal_price → 决策 dict（trader_plan /
+                    # final_trade_decision）——缺结构时 apply_injection 记 applied=False，单元判 void
       "base_values": {"revenue": 1.0e9, "price": 100.0, "growth": -0.1005, "entry": 100.0},
       "analyst_reports": {agent: {"claims": [claim dict], "markdown": str}},
       "citation": { ... 原始产物的 citation 通道快照（可选，透传）... },
@@ -303,7 +306,7 @@ def inject_offline(product: dict, case: InjectionCase) -> dict:
         "mutated_flat_index": None,
         "mutated_fields": [],
         "injected_values": {},
-        "polluted_values": list((case.payload.get("set") or {}).values()),
+        "polluted_values": _offline_polluted_values(case),
         "notes": [],
     }
     handler = _OFFLINE_INJECTORS[case.pollution_type]
@@ -410,19 +413,22 @@ def _inject_fabricated_event(out: dict, case: InjectionCase, injection: dict) ->
 
 
 def _inject_stale_macro(out: dict, case: InjectionCase, injection: dict) -> None:
+    """时效污染打在真实结构上：macro_indicators 各项的 as_of_date + freshness
+    （fetch_macro_indicators 的守卫结构，见 data/akshare_client.py::_with_freshness）。"""
     snapshot = out["snapshot"]
-    stale_as_of = str((case.payload.get("set") or {}).get("macro_as_of") or "2026-05-01")
-    snapshot["macro_as_of"] = stale_as_of
-    fields = ["macro_as_of"]
+    stale_as_of = str(case.payload.get("as_of_date") or "2026-05-01")
+    freshness = str(case.payload.get("freshness") or "stale")
+    fields: list[str] = []
     macro = snapshot.get("macro_indicators") or {}
     for key, value in macro.items():
         if not isinstance(value, dict):
             continue
-        value["freshness"] = "stale"
+        value["as_of_date"] = stale_as_of
+        value["freshness"] = freshness
         fields.append(f"macro_indicators.{key}")
     injection.update(
         mutated_fields=fields,
-        injected_values={"macro_as_of": stale_as_of, "freshness": "stale"},
+        injected_values={"as_of_date": stale_as_of, "freshness": freshness},
         polluted_values=[stale_as_of],
         notes=["A7 时效标记无校验侧消费者：开关只改「喂给校验链的 state」是否带标记"],
     )
@@ -870,9 +876,7 @@ def _polluted_present_offline(polluted: dict, claims: list[dict], case: Injectio
     """污染值是否仍在送审 claim 里（修复会改写 claim → 可能已不在）。"""
     injection: dict[str, Any] = polluted["injection"]
     if case.pollution_type == "stale_macro":
-        return bool(
-            polluted["snapshot"].get("macro_as_of") == injection["injected_values"]["macro_as_of"]
-        )
+        return _macro_stale_present(polluted["snapshot"], injection["injected_values"])
     flat = injection.get("mutated_flat_index")
     if flat is None or flat >= len(claims):
         return False
@@ -890,6 +894,29 @@ def _polluted_present_offline(polluted: dict, claims: list[dict], case: Injectio
     if case.pollution_type == "fabricated_event":
         return str(injected.get("field_ref")) in str(claim.get("field_ref") or "")
     return False
+
+
+def _macro_stale_present(snapshot: dict, injected: dict) -> bool:
+    """宏观时效污染是否仍在 state：任一指标项的 as_of_date/freshness 命中注入值。"""
+    macro = snapshot.get("macro_indicators")
+    if not isinstance(macro, dict):
+        return False
+    return any(
+        isinstance(value, dict)
+        and value.get("as_of_date") == injected.get("as_of_date")
+        and value.get("freshness") == injected.get("freshness")
+        for value in macro.values()
+    )
+
+
+def _offline_polluted_values(case: InjectionCase) -> list[Any]:
+    """离线单元的污染标记：claim 侧取 payload set 值，新闻/宏观取注入的标题/日期。"""
+    payload = case.payload
+    values: list[Any] = list((payload.get("set") or {}).values())
+    values += list(payload.get("news_append") or [])
+    if payload.get("as_of_date"):
+        values.append(payload["as_of_date"])
+    return values
 
 
 def classify_offline(*, polluted_present: bool, flagged: bool) -> str:
@@ -967,36 +994,54 @@ def _surface_for_point(injection_point: str) -> str:
 # A2 的语义头在 context 构建里、A5 的 sanity 在决策层节点里。
 _REAL_RUN_SURFACES: dict[str, str] = {"A2": "context", "A3": "graph", "A5": "decision"}
 
-# 分析师 context 真正消费的 state 键（fetch/compute 产物）。真跑腿据此披露注入键是否
-# 落在「模型看得见的输入」上——`apply_injection` 写的 revenue/price/entry 等键当前
-# 不在消费面上，注入可能到不了产物（此时单元判 void，不冒充「拦下」）。
+# 管线真正消费的 state 键（分析师 context + 决策层价检的输入面）。真跑腿据此披露注入键
+# 是否落在「模型/决策层看得见的输入」上——注入键不在消费面上即注入到不了产物（此时单元
+# 判 void，不冒充「拦下」）。口径来源：`nodes/analysts.py` 各 _build_*_context 的 state 读取
+# + `nodes/validate.py` 的决策输入（trader_plan/final_trade_decision/kline/price_levels）。
 ANALYST_CONSUMED_KEYS: frozenset[str] = frozenset(
     {
+        # 行情与个股
+        "stock_code",
+        "stock_name",
+        "stock_quote",
+        "kline",
+        "benchmark_kline",
+        "price_levels",
+        # 三大报表与财务指标
         "income_statement",
         "balance_sheet",
         "cash_flow_statement",
         "financial_indicators",
-        "technical_indicators",
-        "derived_series",
-        "quarterly_trend",
         "profitability_metrics",
         "solvency_metrics",
         "efficiency_metrics",
         "cashflow_metrics",
         "growth_rates",
         "dupont_tree",
-        "kline",
-        "benchmark_kline",
+        "quarterly_trend",
+        "traffic_lights",
+        "anomalies",
+        "health_score",
+        "peer_comparison",
+        "relative_valuation",
+        "garp_result",
+        # 技术序列
+        "technical_indicators",
+        "derived_series",
+        # 宏观与行业
         "macro_indicators",
         "industry_info",
+        # 舆情与事件
         "news_list",
         "key_events",
         "announcements",
         "research_reports",
         "share_unlock",
         "block_trades",
-        "derived_metrics",
+        # 决策层（A5 价位 sanity 的输入）
         "trader_plan",
+        "final_trade_decision",
+        "derived_metrics",
     }
 )
 
@@ -1127,19 +1172,6 @@ def _numbers_in(obj: Any) -> list[float]:
     return []
 
 
-def polluted_markers(case: InjectionCase, *, original: dict, polluted: dict) -> list[Any]:
-    """污染标记（终态判定用）：payload 的 set 值 + 注入新闻标题；镜像叙事取镜像后「最新」值。"""
-    values: list[Any] = list((case.payload.get("set") or {}).values())
-    values += list(case.payload.get("news_append") or [])
-    if case.payload.get("reverse_sequence"):
-        for key in _changed_keys(original, polluted):
-            series = polluted.get(key)
-            if isinstance(series, list) and series:
-                # 序列倒序后列表末尾 = 原序列首值（LLM 若按「末尾为最新」引用即镜像叙事）
-                values.append(series[-1])
-    return values
-
-
 def _changed_keys(original: dict, polluted: dict) -> list[str]:
     changed: list[str] = []
     for key in sorted(set(original) | set(polluted)):
@@ -1197,19 +1229,27 @@ def run_real_case(
 
     `graph_runner` 可注入（测试零 LLM）；`llm_meter` 为「当前 LLM 调用计数」读取器
     （None = 未知，如实记 None 而非 0——预算不得以单一 run 等效数掩盖）。
+
+    单元载荷的 `injection` 记录注入效果（`applied` / `applied_reason` / `target` /
+    `polluted_values` / `field_names` / `changed_keys` / `consumed_overlap`）：注入键
+    未落在管线消费面上即判 void（`_real_status`），不冒充「拦下」。
     """
     runner = graph_runner or default_graph_runner
     resolved_variant = variant or ("full" if case.injection_point == "decision" else "analysts")
     surface = _real_surface(case.mechanism_id, case.injection_point)
     original = product.get("snapshot") or {}
-    polluted = apply_injection(original, case)
+    polluted, effect = apply_injection(original, case)
     changed = _changed_keys(original, polluted)
     injected = {
-        "polluted_values": polluted_markers(case, original=original, polluted=polluted),
-        "field_names": [str(case.payload["field"])] if case.payload.get("field") else [],
+        # 污染标记/命中字段一律取自注入效果记录（不再从 payload 猜：payload 只描述目标结构）
+        "polluted_values": list(effect.polluted_values),
+        "field_names": list(effect.field_names),
         "changed_keys": changed,
         "consumed_overlap": sorted(set(changed) & ANALYST_CONSUMED_KEYS),
         "injection_effective": bool(changed),
+        "applied": effect.applied,
+        "applied_reason": effect.reason,
+        "target": effect.target,
     }
     states: dict[str, dict] = {}
     payloads: dict[str, dict] = {}
@@ -1271,7 +1311,10 @@ def run_real_case(
 
 
 def _real_status(injected: dict, payloads: dict[str, dict]) -> tuple[str, str]:
-    """真跑单元有效性：注入没改变快照、或两态产物都无污染痕迹 → 该单元不含拦截信息。"""
+    """真跑单元有效性：注入不可施加/没改变快照、或两态产物都无污染痕迹 → 不含拦截信息。"""
+    if not injected.get("applied"):
+        reason = str(injected.get("applied_reason") or "未登记的快照注入目标")
+        return STATUS_VOID, f"void：注入不可施加（{reason}）；该单元不含拦截信息"
     if not injected["injection_effective"]:
         return STATUS_VOID, "void：注入未改变快照（该型在本产物上无污染可测，不判拦截）"
     traced = any(p["polluted_present"] or p["flagged"] for p in payloads.values())

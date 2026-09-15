@@ -29,7 +29,7 @@ def _analyst_reports() -> dict:
                 {
                     "claim_type": "numerical",
                     "source_type": "data",
-                    "field_ref": "revenue",
+                    "field_ref": "income_statement.20251231.营业总收入",
                     "stated_value": 1.0e9,
                     "interpretation": "营业总收入 10.00亿元",
                     "direction": "positive",
@@ -37,7 +37,7 @@ def _analyst_reports() -> dict:
                 {
                     "claim_type": "numerical",
                     "source_type": "data",
-                    "field_ref": "revenue",
+                    "field_ref": "income_statement.20251231.营业总收入",
                     "stated_value": 1.0e9,
                     "interpretation": "营业总收入 10.00亿元",
                     "direction": "positive",
@@ -71,6 +71,8 @@ def _analyst_reports() -> dict:
 
 
 def _snapshot() -> dict:
+    """可重放快照子集：键与列名同真实 fetch 输出（income_statement/kline/news_list/
+    macro_indicators + 决策 dict）；revenue/price/growth/entry 是产物自带的注入基值。"""
     return {
         "stock_code": "600519",
         "revenue": 1.0e9,
@@ -78,7 +80,9 @@ def _snapshot() -> dict:
         "price": 100.0,
         "entry": 100.0,
         "growth_rates": {"fundamental": {"revenue": -0.1005}},
-        "macro_as_of": "2026-08-01",
+        "income_statement": pd.DataFrame(
+            {"报告日": ["20251231", "20241231"], "营业总收入": [1.0e9, 9.0e8]}
+        ),
         "macro_indicators": {
             "cpi": {
                 "records": [{"月份": "2026-07", "全国-同比增长": 0.3}],
@@ -88,6 +92,13 @@ def _snapshot() -> dict:
         },
         "news_list": [{"title": "公司公告：拟回购股份", "date": "2026-08-01"}],
         "kline": pd.DataFrame({"日期": ["2026-08-01", "2026-08-04"], "收盘": [99.0, 100.0]}),
+        "trader_plan": {
+            "action": "buy",
+            "confidence": 0.6,
+            "entry_price": 100.0,
+            "stop_loss": 95.0,
+            "target_price": 115.0,
+        },
     }
 
 
@@ -114,11 +125,36 @@ def _case(pollution_type: str, *, payload: dict | None = None) -> InjectionCase:
             "set": {"period_label": "2026Q3", "period_value": 0.0},
             "field": "period_label",
         },
-        "fabricated_event": {"news_append": ["某公司宣布重大战略合作（注入）"], "field": "news"},
-        "stale_macro": {"set": {"macro_as_of": "2026-05-01"}, "field": "macro_as_of"},
-        "illegal_price": {"set": {"stop_loss": 110.0, "entry": 100.0}, "field": "stop_loss"},
-        "value_error": {"set": {"revenue": 1.13e9}, "field": "revenue"},
-        "mirror_narrative": {"reverse_sequence": True, "field": "series_direction"},
+        "fabricated_event": {
+            "op": "append_news",
+            "target": "news_list",
+            "news_append": ["某公司宣布重大战略合作（注入）"],
+            "field": "news_list",
+        },
+        "stale_macro": {
+            "op": "macro_stale",
+            "target": "macro_indicators",
+            "as_of_date": "2026-05-01",
+            "freshness": "stale",
+            "field": "macro_indicators.as_of_date",
+        },
+        "illegal_price": {
+            "op": "decision_price",
+            "targets": ["trader_plan", "final_trade_decision"],
+            "long_factor": 1.1,
+            "short_factor": 0.9,
+            "field": "trader_plan.stop_loss",
+        },
+        # factor 固定为 1.13：1.0e9 → 1.13e9（假 runner 的产物文本按 11.30亿元 断言）
+        "value_error": {
+            "op": "dataframe_cell",
+            "target": "income_statement",
+            "column": "营业总收入",
+            "row": "latest",
+            "factor": 1.13,
+            "field": "income_statement.营业总收入",
+        },
+        "mirror_narrative": {"op": "reverse_rows", "target": "kline", "field": "kline"},
     }
     return InjectionCase(
         case_id=f"600519-{pollution_type}-0",
@@ -230,12 +266,18 @@ class TestOfflineInjection:
         assert len(product["snapshot"]["news_list"]) == 1
         assert len(product["analyst_reports"]["technical"]["claims"]) == 2
 
-    def test_stale_macro_marks_state_not_claims(self):
-        polluted = pr.inject_offline(_make_product(), _case("stale_macro"))
-        assert polluted["snapshot"]["macro_as_of"] == "2026-05-01"
-        assert polluted["snapshot"]["macro_indicators"]["cpi"]["freshness"] == "stale"
+    def test_stale_macro_marks_real_freshness_structure_only(self):
+        """时效污染打在 macro_indicators 各项的 as_of_date/freshness 上（真实守卫结构）——
+        不再写管线从不消费的顶层 macro_as_of 占位键。"""
+        product = _make_product()
+        polluted = pr.inject_offline(product, _case("stale_macro"))
+        cpi = polluted["snapshot"]["macro_indicators"]["cpi"]
+        assert cpi["as_of_date"] == "2026-05-01"
+        assert cpi["freshness"] == "stale"
+        assert "macro_as_of" not in polluted["snapshot"]
+        assert product["snapshot"]["macro_indicators"]["cpi"]["as_of_date"] == "2026-08-01"
         assert polluted["injection"]["mutated_flat_index"] is None
-        assert polluted["injection"]["mutated_fields"] == ["macro_as_of", "macro_indicators.cpi"]
+        assert polluted["injection"]["mutated_fields"] == ["macro_indicators.cpi"]
 
     def test_real_run_types_are_rejected_offline(self):
         for pollution_type in ("value_error", "mirror_narrative", "illegal_price"):
@@ -373,8 +415,8 @@ class TestMechanismToggles:
         assert stripped["revenue"] == 1.0e9
         assert stripped["kline"] is state["kline"]
         # 原 state 不被修改（深拷贝）
-        assert state["macro_as_of"] == "2026-08-01"
         assert state["macro_indicators"]["cpi"]["freshness"] == "fresh"
+        assert state["macro_indicators"]["cpi"]["as_of_date"] == "2026-08-01"
 
     def test_a7_toggle_strips_marks_only_when_off(self):
         with pr.mechanism_toggle("A7", on=False) as toggle:
@@ -435,7 +477,7 @@ class TestOfflineReplay:
         on = pr.replay_offline(product, _case("unit_error"), mechanism_on=True)
         assert on["flagged"] is True
         assert on["polluted_present"] is True
-        assert [c["field_ref"] for c in on["claims"] if c["field_ref"] == "revenue"]
+        assert [c for c in on["claims"] if c["field_ref"].startswith("income_statement.")]
         assert on["fail_buckets"].get("value_mismatch") == 1
         assert on["unverifiable"] == 0
         assert on["mechanism"]["surface"] == "verification"
@@ -617,13 +659,6 @@ class TestRealRun:
 
         product = _make_product()
         case = _case("value_error")
-        case = InjectionCase(
-            case_id=case.case_id,
-            pollution_type="value_error",
-            injection_point="context",
-            mechanism_id="A3",
-            payload={"set": {"revenue": 1.13e9}, "field": "revenue"},
-        )
         pair, unit = pr.run_real_case(
             product, case, graph_runner=fake_runner, llm_meter=lambda: len(ledger)
         )
@@ -639,34 +674,59 @@ class TestRealRun:
         assert unit["off"]["citation"]["flagged"] is False
 
     def test_illegal_price_uses_price_check_channel(self):
-        state = {
-            "trader_plan": {
-                "action": "buy",
-                "entry_price": 100.0,
-                "stop_loss": 110.0,
-                "target_price": 120.0,
-            },
-            "kline": pd.DataFrame({"日期": ["2026-08-01", "2026-08-04"], "收盘": [99.0, 100.0]}),
-            "price_levels": {
-                "available": True,
-                "entry_ref": 100.0,
-                "atr": 3.0,
-                "full_band": [90.0, 130.0],
-                "stop_band_long": {"low": 95.0, "high": 98.0},
-                "target_band_long": {"low": 110.0, "high": 116.0},
-            },
-        }
+        """决策层价位污染的完整通路：快照决策 dict → 注入 → 图 → A5 价位 sanity。"""
 
         def fake_runner(*, variant: str, snapshot: dict, query: str) -> dict:
             assert variant == "full"
-            return dict(state)
+            return {
+                "trader_plan": dict(snapshot["trader_plan"]),
+                "kline": snapshot["kline"],
+                "price_levels": {
+                    "available": True,
+                    "entry_ref": 100.0,
+                    "atr": 3.0,
+                    "full_band": [90.0, 130.0],
+                    "stop_band_long": {"low": 95.0, "high": 98.0},
+                    "target_band_long": {"low": 110.0, "high": 116.0},
+                },
+            }
 
         case = _case("illegal_price")
         pair, unit = pr.run_real_case(_make_product(), case, graph_runner=fake_runner)
+        assert unit["injection"]["applied"] is True
+        assert unit["injection"]["consumed_overlap"] == ["trader_plan"]
+        assert unit["injection"]["polluted_values"] == [110.0]
         assert pair == EscapePair(case.case_id, "caught", "escaped")
         assert unit["on"]["decision"]["price_check"]["result"] == "fail"
         assert unit["off"]["decision"]["price_check"]["result"] == "pass"
         assert unit["on_state"] == "caught"
+
+    def test_value_error_overlap_hits_income_statement(self):
+        def fake_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            income = snapshot["income_statement"]
+            return {"final_report": f"营业总收入 {float(income['营业总收入'].max())} 元"}
+
+        case = _case("value_error")
+        _, unit = pr.run_real_case(_make_product(), case, graph_runner=fake_runner)
+        assert unit["injection"]["applied"] is True
+        assert unit["injection"]["changed_keys"] == ["income_statement"]
+        assert unit["injection"]["consumed_overlap"] == ["income_statement"]
+        assert unit["injection"]["polluted_values"] == [pytest.approx(1.13e9)]
+        assert unit["status"] == pr.STATUS_OK
+
+    def test_mirror_narrative_overlap_hits_kline(self):
+        def fake_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            kline = snapshot["kline"]
+            return {"final_report": f"最新交易日收盘 {float(kline['收盘'].iloc[-1])} 元"}
+
+        case = _case("mirror_narrative")
+        _, unit = pr.run_real_case(_make_product(), case, graph_runner=fake_runner)
+        assert unit["injection"]["applied"] is True
+        assert unit["injection"]["changed_keys"] == ["kline"]
+        assert unit["injection"]["consumed_overlap"] == ["kline"]
+        # 镜像后末行 = 原首行（最旧收盘）：正序读者会把 99.0 当最新
+        assert unit["injection"]["polluted_values"] == [99.0]
+        assert unit["status"] == pr.STATUS_OK
 
     def test_void_injection_is_excluded_from_pairs(self):
         def empty_runner(*, variant: str, snapshot: dict, query: str) -> dict:
@@ -676,10 +736,49 @@ class TestRealRun:
         pair, unit = pr.run_real_case(_make_product(), case, graph_runner=empty_runner)
         assert unit["status"] == "void_injection"
         assert "void" in unit["status_reason"]
-        # 注入键（revenue）不在分析师消费键上 → 原因里必须点名该接线缺口
-        assert unit["injection"]["consumed_overlap"] == []
-        assert "消费键" in unit["status_reason"]
+        # 注入本身落在消费键上（接线正确）；void 的原因是两态产物都没带污染
+        assert unit["injection"]["applied"] is True
+        assert unit["injection"]["consumed_overlap"] == ["income_statement"]
+        assert "污染未到达产物" in unit["status_reason"]
         assert pair.on_state == pair.off_state  # 配对仍是合法 EscapePair，但报告须剔除
+
+    def test_unapplicable_injection_is_void_with_reason(self):
+        """产物缺决策 dict（真实材料风险）：注入不可施加 → 单元判 void，不冒充「没逃逸」。"""
+        snapshot = _snapshot()
+        snapshot.pop("trader_plan")
+
+        def empty_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            return {}
+
+        _, unit = pr.run_real_case(
+            _make_product(snapshot=snapshot), _case("illegal_price"), graph_runner=empty_runner
+        )
+        assert unit["status"] == pr.STATUS_VOID
+        assert unit["injection"]["applied"] is False
+        assert "trader_plan" in unit["injection"]["applied_reason"]
+        assert "注入不可施加" in unit["status_reason"]
+
+    def test_void_reason_names_wiring_gap_when_overlap_empty(self):
+        """注入键不在消费面上时，void 原因须点名接线缺口（该分支在接线修好后仍是活路径）。"""
+        snapshot = {**_snapshot(), "legacy_series": pd.DataFrame({"值": [1.0, 2.0, 3.0]})}
+        case = InjectionCase(
+            case_id="600519-mirror_narrative-legacy",
+            pollution_type="mirror_narrative",
+            injection_point="context",
+            mechanism_id="A2",
+            payload={"op": "reverse_rows", "target": "legacy_series", "field": "legacy_series"},
+        )
+
+        def empty_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            return {}
+
+        _, unit = pr.run_real_case(
+            _make_product(snapshot=snapshot), case, graph_runner=empty_runner
+        )
+        assert unit["injection"]["applied"] is True
+        assert unit["injection"]["consumed_overlap"] == []
+        assert unit["status"] == pr.STATUS_VOID
+        assert "消费键" in unit["status_reason"]
 
     def test_real_run_classification_matrix_helpers(self):
         case = _case("illegal_price")
