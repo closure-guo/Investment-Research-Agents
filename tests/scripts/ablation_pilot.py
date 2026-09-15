@@ -4,14 +4,19 @@
 管线模型见 `_pin_pipeline_model`（ark-plan）。统计沿用 evals/ablation.aggregate_results
 （同标的中位 + 配对 bootstrap B=10,000，95% CI）。
 
-在设施主流程外补三件测量（不改 evals/ablation.py）：
+**薄壳**（delta revamp-ablation-v2-causal-claims G1/1.2；spec「跑批入口唯一化」）：
+judge 判分（维度适用性过滤 + K 次均值）、judge 明细塑形、judge_vars 材料落盘
+全部调用库侧 `evals.ablation.score_run`——唯一实现在库侧，本驱动只保留
+续跑/记账/coverage 三件包装，SHALL NOT 内联判分/过滤/落盘。
+
+驱动在设施主流程外补三件测量：
 1. citation_coverage：包装 verify_citations 逐次记录（设施聚合报告未含 coverage）；
-2. token 成本：包装 run_variant_once + run_judge 按 run 归属计量
-   （复用 backtest_pilot_2023 的 usage meter）；
-3. **judge 材料落盘**（delta judge-enumeration-cap-and-ablation-materials）：每次
-   run 的 judge 输入材料（judge_vars）落 `reports/ablation/judge_vars/<variant>-<ticker>-<repeat>.json`，
-   run 记录携带材料路径与 judge 明细（分数/纯定性条数/是否封顶/枚举是否缺失）——
-   rubric 变更后可**离线重判**（不重跑管线、不依赖 Langfuse 反解材料）。
+2. token 成本：包装 run_variant_once 按 run 归属计量（复用 backtest_pilot_2023 的 usage meter）；
+3. 材料落盘索引：每条 run 的 judge 输入材料（judge_vars）由库侧按
+   `(variant, ticker, repeat)` 写入 `reports/ablation/judge_vars/<variant>-<ticker>-<repeat>.json`
+   （delta judge-enumeration-cap-and-ablation-materials），run 记录携带材料路径与
+   judge 明细（分数/纯定性条数/是否封顶/枚举是否缺失）——rubric 变更后可**离线重判**
+   （不重跑管线、不依赖 Langfuse 反解材料）。
 
 **断点续跑**（2026-09-02 增加）：ark burst 限流已两次在临近结束时打崩整段试跑。
 自驱循环 + 每完成一条 run 即落盘 resume.json，重启时跳过已完成
@@ -70,21 +75,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def material_filename(variant: str, ticker: str, repeat: int) -> str:
-    """材料文件名（按 run 三元组）。"""
-    return f"{variant}-{ticker}-{repeat}.json"
-
-
-def persist_materials(
-    materials_dir: Path, variant: str, ticker: str, repeat: int, judge_vars: dict
-) -> str:
-    """落盘单条 run 的 judge 输入材料，返回相对路径（POSIX 风格，跨平台可复现）。"""
-    materials_dir.mkdir(parents=True, exist_ok=True)
-    path = materials_dir / material_filename(variant, ticker, repeat)
-    path.write_text(json.dumps(judge_vars, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path.as_posix()
-
-
 def _load_resume(path: Path) -> dict:
     if path.exists():
         try:
@@ -94,24 +84,6 @@ def _load_resume(path: Path) -> dict:
         if isinstance(loaded, dict):
             return loaded
     return {}
-
-
-def judge_detail(result: dict) -> dict:
-    """judge 结果 → run 记录用明细。
-
-    含 debate v6 封顶/枚举遥测，以及中位数协议的每次分数与极差（round11 实测
-    单次调用在 5/4 边界翻转 1/5——噪声须随 run 可见，不静默平均掉）。
-    """
-    detail: dict[str, Any] = {"score": result.get("score")}
-    if result.get("reason") is not None:
-        detail["reason"] = str(result.get("reason"))[:300]
-    for key in ("scores", "score_spread", "judge_repeats", "judge_failures"):
-        if result.get(key) is not None:
-            detail[key] = result[key]
-    for key in ("qualitative_points", "cap_applied", "enumeration_missing"):
-        if key in result:
-            detail[key] = result[key]
-    return detail
 
 
 def run_pilot(
@@ -166,24 +138,25 @@ def run_pilot(
 
     original_run_once = abl.run_variant_once
 
-    def run_one_costed(variant: str, snapshot: dict, q: str) -> tuple[dict, dict]:
-        """单次变体运行 + judge，返回 (out, cost_row)。"""
+    def run_one_costed(
+        variant: str, ticker: str, repeat: int, snapshot: dict, q: str
+    ) -> tuple[dict, dict]:
+        """单次变体运行 + 库侧判分/落盘，返回 (out, cost_row)。"""
         before_calls = len(meter._usage_ledger)
         before_cov = len(coverage_ledger)
         out: dict = original_run_once(variant, snapshot, q)
         new_entries = meter._usage_ledger[before_calls:]
         cov_entries = coverage_ledger[before_cov:]
 
-        judge_scores: dict[str, float | None] = {}
-        judge_details: dict[str, dict] = {}
-        applicable = abl._applicable_dims(variant)  # 唯一实现在库侧（#112）
-        for dim in abl.JUDGE_DIMS:
-            if dim not in applicable:
-                judge_scores[dim] = None
-                continue
-            result = abl.run_judge_mean(dim, out["judge_vars"], repeats=judge_repeats)
-            judge_scores[dim] = float(result["score"]) if result["score"] is not None else None
-            judge_details[dim] = judge_detail(result)
+        # 判分/维度过滤/明细塑形/材料落盘全部在库侧唯一实现（spec「跑批入口唯一化」）
+        score = abl.score_run(
+            variant,
+            out,
+            ticker=ticker,
+            repeat=repeat,
+            judge_repeats=judge_repeats,
+            materials_dir=materials_dir,
+        )
 
         cost_row = {
             "variant": variant,
@@ -202,19 +175,14 @@ def run_pilot(
                 else None
             ),
             "citation_pass": out.get("citation_pass"),
-            # 论点锚点覆盖率 value（delta add-debate-argument-anchors 4.4）：确定性指标，
-            # 由 run_variant_once 从 state 通道 debate_anchor_checks 提取；analysts 无辩论层
+            "materials_path": score["materials_path"],
+            "judge": score["judge"],
+            "judge_detail": score["judge_detail"],
+            # 论点锚点覆盖率 value + 拆项（delta add-debate-argument-anchors 4.4）：
+            # 由库侧从 run_variant_once 的 anchor_coverage 映射；analysts 无辩论层
             # -> None（不得伪造成 0）
-            "argument_anchor_coverage": (out["anchor_coverage"] or {}).get("value"),
-            # 拆项（去 value）同落 run 记录/resume 台账：spec「value 与拆项」，
-            # 口径与 evals/task.py 的 argument_anchor_coverage_detail 一致
-            "argument_anchor_coverage_detail": (
-                {k: v for k, v in out["anchor_coverage"].items() if k != "value"}
-                if out["anchor_coverage"]
-                else None
-            ),
-            "judge": judge_scores,
-            "judge_detail": judge_details,
+            "argument_anchor_coverage": score["argument_anchor_coverage"],
+            "argument_anchor_coverage_detail": score["argument_anchor_coverage_detail"],
         }
         return out, cost_row
 
@@ -266,10 +234,7 @@ def run_pilot(
                         f"登记 {registered} / 重建 {digest}。续跑会混入不同输入，"
                         f"层增量不可归因于编排架构。重跑请换 --resume 新文件或清空台账。"
                     )
-                out, cost_row = run_one_costed(variant, snapshot, query)
-                materials_path = persist_materials(
-                    materials_dir, variant, ticker, i, out["judge_vars"]
-                )
+                out, cost_row = run_one_costed(variant, ticker, i, snapshot, query)
                 runs.append(
                     {
                         "variant": variant,
@@ -277,7 +242,7 @@ def run_pilot(
                         "repeat": i,
                         "citation_pass": out["citation_pass"],
                         "judge": out.get("judge") or cost_row["judge"],
-                        "materials_path": materials_path,
+                        "materials_path": cost_row["materials_path"],
                         **cost_row,
                     }
                 )

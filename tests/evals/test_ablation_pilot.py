@@ -35,7 +35,12 @@ pilot = _load_module()
 
 
 class _FakeAblation:
-    """假 ablation 模块：不跑管线、不调 LLM。"""
+    """假 ablation 模块：不跑管线、不调 LLM。
+
+    判分入口 `score_run` 与库侧同契约（G1/1.2）：维度过滤/均值判分由假件替代
+    （不碰 LLM），明细塑形与材料落盘直接复用库侧纯函数（真实现）——假件不得
+    掩盖这两段库侧契约的漂移。
+    """
 
     JUDGE_DIMS = ["report_relevance", "debate_quality", "decision_grounding", "consistency"]
     _VARIANTS = ["analysts", "plus_debate", "full"]
@@ -44,6 +49,9 @@ class _FakeAblation:
         self.verify_calls = 0
         self.run_calls: list[tuple[str, str]] = []
         self.judge_calls: list[str] = []
+        self.score_calls: list[tuple] = []
+        self.direct_judge_calls = 0  # 驱动绕过库侧入口直接判分的次数（须恒 0）
+        self._scoring = False
 
     def _applicable_dims(self, variant: str) -> tuple[str, ...]:
         """与 `evals.ablation._applicable_dims` 同实现（#112 维度适用性）。"""
@@ -114,6 +122,8 @@ class _FakeAblation:
 
     def run_judge_mean(self, dimension: str, variables: dict, *, repeats: int = 3) -> dict:
         """假均值协议：debate 维度模拟 [5,4,4]（round11 实测形态）。"""
+        if not self._scoring:
+            self.direct_judge_calls += 1  # 驱动不得绕过库侧入口自行判分（G1/1.2）
         self.judge_calls.append(dimension)
         if dimension == "debate_quality":
             return {
@@ -139,6 +149,52 @@ class _FakeAblation:
             "score_spread": 0,
             "judge_repeats": repeats,
             "judge_failures": 0,
+        }
+
+    def score_run(
+        self,
+        variant: str,
+        out: dict,
+        *,
+        ticker: str,
+        repeat: int,
+        judge_repeats: int = 3,
+        materials_dir: Path | None = None,
+    ) -> dict:
+        """库侧唯一判分入口的同契约假件（G1/1.2，零 LLM）。
+
+        契约与 `evals.ablation.score_run` 一致：维度过滤 + K 次均值 + 明细塑形 +
+        材料落盘 + 锚点字段；塑形/落盘走库侧真函数，判分走假 judge。
+        """
+        from evals import ablation as _lib
+
+        self.score_calls.append((variant, ticker, repeat, judge_repeats, materials_dir))
+        judge_scores: dict[str, float | None] = {}
+        judge_details: dict[str, dict] = {}
+        self._scoring = True
+        try:
+            for dim in self.JUDGE_DIMS:
+                if dim not in self._applicable_dims(variant):
+                    judge_scores[dim] = None
+                    continue
+                result = self.run_judge_mean(dim, out["judge_vars"], repeats=judge_repeats)
+                judge_scores[dim] = float(result["score"]) if result["score"] is not None else None
+                judge_details[dim] = _lib.judge_detail(result)
+        finally:
+            self._scoring = False
+        coverage = out.get("anchor_coverage")
+        return {
+            "judge": judge_scores,
+            "judge_detail": judge_details,
+            "materials_path": (
+                _lib.persist_materials(materials_dir, variant, ticker, repeat, out["judge_vars"])
+                if materials_dir is not None
+                else None
+            ),
+            "argument_anchor_coverage": (coverage or {}).get("value"),
+            "argument_anchor_coverage_detail": (
+                {k: v for k, v in coverage.items() if k != "value"} if coverage else None
+            ),
         }
 
     def aggregate_results(self, runs: list[dict]) -> dict:
@@ -311,10 +367,13 @@ class TestApplicableDimsParity:
     """驱动不得自带变体→维度映射（#112）：唯一实现在库侧，驱动必须问库侧。"""
 
     def test_fake_matches_library_attribute_surface(self):
-        """假件照库侧实现提供 `_applicable_dims`——库侧改名/删除时本用例转红。"""
+        """假件照库侧实现提供 `_applicable_dims`/`score_run`——库侧改名/删除时本用例转红。"""
         from evals import ablation as real_ablation
 
         assert hasattr(real_ablation, "_applicable_dims"), "库侧适用性过滤的唯一实现"
+        assert callable(getattr(real_ablation, "score_run", None)), (
+            "库侧判分+落盘入口的唯一实现（G1/1.2）"
+        )
         for variant in real_ablation._VARIANTS:
             assert _FakeAblation()._applicable_dims(variant) == real_ablation._applicable_dims(
                 variant
@@ -340,17 +399,125 @@ class TestApplicableDimsParity:
         assert env.ablation.judge_calls.count("consistency") == 1, "仅 full 评该维度"
         assert len(env.ablation.judge_calls) == 7
 
-    def test_driver_fails_without_library_dims_map(self, env):
-        """库侧不暴露 `_applicable_dims` 时驱动必须炸——证明它在问库侧而非自算。"""
+    def test_driver_fails_without_library_scoring_entry(self, env):
+        """库侧不暴露 `score_run` 时驱动必须炸——证明判分只经库侧入口而非驱动自算。"""
 
-        class _FakeWithoutDimsMap(_FakeAblation):
+        class _FakeWithoutScoringEntry(_FakeAblation):
             @property
-            def _applicable_dims(self):
-                raise AttributeError("_applicable_dims")
+            def score_run(self):
+                raise AttributeError("score_run")
 
-        env.ablation = _FakeWithoutDimsMap()
+        env.ablation = _FakeWithoutScoringEntry()
         with pytest.raises(AttributeError):
             _run(env, tickers=["600519"], repeats=1)
+
+
+class TestScoringDelegation:
+    """G1（delta tasks 1.2）：判分/过滤/明细/落盘只经库侧 `score_run`，驱动不得内联。"""
+
+    def test_driver_scores_each_run_via_library_entry(self, env):
+        """每 run 恰好一次库侧判分调用，且带 run 键 / judge_repeats / 材料目录。"""
+        _run(env, tickers=["600519"], repeats=2, judge_repeats=5)
+        assert [call[:4] for call in env.ablation.score_calls] == [
+            (variant, "600519", repeat, 5)
+            for variant in ["analysts", "plus_debate", "full"]
+            for repeat in range(2)
+        ], "run 键与 judge_repeats 须经库侧入口透传"
+        assert all(call[4] == env.materials for call in env.ablation.score_calls), (
+            "材料目录须交给库侧落盘，驱动不得自行写 judge_vars"
+        )
+
+    def test_driver_does_not_run_own_judge_loop(self, env):
+        """驱动侧直接判分计数须为 0（判分只发生在 score_run 内部）。"""
+        _run(env)
+        assert env.ablation.direct_judge_calls == 0, "驱动不得绕过库侧入口调用 run_judge_mean"
+        assert len(env.ablation.judge_calls) == 7, "判分仍按适用维度发生（1 + 2 + 4）"
+
+    def test_driver_delegates_materials_and_detail_to_real_library(self, env, monkeypatch):
+        """真库侧 `score_run` 接线：材料由库侧真写盘、明细由库侧真塑形（假件不掩盖契约）。"""
+        import evals.ablation as real_ablation
+
+        monkeypatch.setattr(
+            real_ablation,
+            "verify_citations",
+            lambda state: {"citation_pass": True, "citation_coverage": 0.9},
+        )
+        monkeypatch.setattr(real_ablation, "build_snapshot", lambda ticker: {"stock_code": ticker})
+        monkeypatch.setattr(
+            real_ablation, "snapshot_digest", lambda state: f"digest-{state['stock_code']}"
+        )
+        monkeypatch.setattr(
+            real_ablation,
+            "run_variant_once",
+            lambda variant, snapshot, query: {
+                "final_report": f"report-{variant}",
+                "citation_pass": True,
+                "judge_vars": {"debate_history": f"【bull】论点: {variant}"},
+                "anchor_coverage": (
+                    None
+                    if variant == "analysts"
+                    else {
+                        "value": 0.5,
+                        "total": 2,
+                        "anchored": 1,
+                        "unanchored_inference": 1,
+                        "unresolved": 0,
+                        "missing_required": 0,
+                        "unspecified": 0,
+                    }
+                ),
+            },
+        )
+        monkeypatch.setattr(
+            real_ablation, "aggregate_results", lambda runs, **kwargs: {"n_runs": len(runs)}
+        )
+        monkeypatch.setattr(
+            real_ablation,
+            "run_judge_mean",
+            lambda dimension, variables, *, repeats=3: {
+                "score": 4.0,
+                "scores": [4] * repeats,
+                "score_spread": 0,
+                "judge_repeats": repeats,
+                "judge_failures": 0,
+            },
+        )
+        original = getattr(real_ablation, "score_run", None)
+        assert original is not None, "库侧须暴露唯一判分入口 score_run（G1/1.2）"
+        scored: list[tuple] = []
+
+        def spy(variant, out, *, ticker, repeat, judge_repeats=3, materials_dir=None):
+            scored.append((variant, ticker, repeat))
+            return original(
+                variant,
+                out,
+                ticker=ticker,
+                repeat=repeat,
+                judge_repeats=judge_repeats,
+                materials_dir=materials_dir,
+            )
+
+        monkeypatch.setattr(real_ablation, "score_run", spy)
+        env.ablation = real_ablation
+        path = _run(env, tickers=["600519"], repeats=1)
+
+        assert scored == [(variant, "600519", 0) for variant in ["analysts", "plus_debate", "full"]]
+        for variant in ["analysts", "plus_debate", "full"]:
+            material = env.materials / f"{variant}-600519-0.json"
+            assert json.loads(material.read_text(encoding="utf-8")) == {
+                "debate_history": f"【bull】论点: {variant}"
+            }, "库侧按 run 三元组落盘 judge_vars"
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        rows = {r["variant"]: r for r in artifact["run_costs"]}
+        assert rows["analysts"]["judge"]["debate_quality"] is None, "无辩论层不评该维度"
+        assert rows["plus_debate"]["judge"]["debate_quality"] == 4.0
+        assert rows["plus_debate"]["judge"]["decision_grounding"] is None
+        assert rows["full"]["judge"]["decision_grounding"] == 4.0
+        assert (
+            rows["full"]["judge_detail"]["debate_quality"]["judge_repeats"] == pilot.JUDGE_REPEATS
+        )
+        assert rows["plus_debate"]["argument_anchor_coverage"] == 0.5
+        assert rows["analysts"]["argument_anchor_coverage"] is None
 
 
 class TestSnapshotDigestVerification:

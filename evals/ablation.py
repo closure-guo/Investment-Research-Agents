@@ -226,6 +226,84 @@ def run_variant_once(variant: Variant, snapshot: dict, query: str) -> dict:
     }
 
 
+def material_filename(variant: str, ticker: str, repeat: int) -> str:
+    """judge 材料文件名（按 run 三元组）。"""
+    return f"{variant}-{ticker}-{repeat}.json"
+
+
+def persist_materials(
+    materials_dir: Path, variant: str, ticker: str, repeat: int, judge_vars: dict
+) -> str:
+    """落盘单条 run 的 judge 输入材料，返回该文件路径（POSIX 风格，跨平台可复现）。"""
+    materials_dir.mkdir(parents=True, exist_ok=True)
+    path = materials_dir / material_filename(variant, ticker, repeat)
+    path.write_text(json.dumps(judge_vars, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path.as_posix()
+
+
+def judge_detail(result: dict) -> dict:
+    """judge 结果 → run 记录用明细。
+
+    含 debate v6 封顶/枚举遥测，以及均值协议的每次分数与极差（round11 实测
+    单次调用在 5/4 边界翻转 1/5——噪声须随 run 可见，不静默平均掉）。
+    """
+    detail: dict[str, Any] = {"score": result.get("score")}
+    if result.get("reason") is not None:
+        detail["reason"] = str(result.get("reason"))[:300]
+    for key in ("scores", "score_spread", "judge_repeats", "judge_failures"):
+        if result.get(key) is not None:
+            detail[key] = result[key]
+    for key in ("qualitative_points", "cap_applied", "enumeration_missing"):
+        if key in result:
+            detail[key] = result[key]
+    return detail
+
+
+def score_run(
+    variant: Variant,
+    out: dict,
+    *,
+    ticker: str,
+    repeat: int,
+    judge_repeats: int = 3,
+    materials_dir: Path | None = None,
+) -> dict:
+    """单条 run 的判分 + judge_vars 落盘——库侧唯一实现（spec「跑批入口唯一化」）。
+
+    维度适用性过滤（#112）、K 次均值判分、judge 明细塑形、材料落盘全在此处；
+    `run_ablation` 与跑批驱动均只调用本函数，SHALL NOT 各自内联同名逻辑。
+
+    `out` 为 `run_variant_once` 的返回值；`materials_dir=None` 时不落盘
+    （`materials_path` 记 None），调用方决定材料目录。
+    """
+    judge_scores: dict[str, float | None] = {}
+    judge_details: dict[str, dict] = {}
+    applicable = _applicable_dims(variant)
+    for dim in JUDGE_DIMS:
+        if dim not in applicable:
+            judge_scores[dim] = None  # 该变体无对应层，维度不适用（#112）
+            continue
+        result = run_judge_mean(dim, out["judge_vars"], repeats=judge_repeats)
+        judge_scores[dim] = float(result["score"]) if result["score"] is not None else None
+        judge_details[dim] = judge_detail(result)
+    coverage = out.get("anchor_coverage")
+    return {
+        "judge": judge_scores,
+        "judge_detail": judge_details,
+        "materials_path": (
+            persist_materials(materials_dir, variant, ticker, repeat, out["judge_vars"])
+            if materials_dir is not None
+            else None
+        ),
+        # 论点锚点覆盖率（delta add-debate-argument-anchors 4.4）：analysts 无辩论层
+        # -> None，不得伪造 0；拆项去 value（value 已单独成键），供归因
+        "argument_anchor_coverage": (coverage or {}).get("value"),
+        "argument_anchor_coverage_detail": (
+            {k: v for k, v in coverage.items() if k != "value"} if coverage else None
+        ),
+    }
+
+
 def conclusion_for_layer(ci: tuple[float, float]) -> str:
     """层级增量结论措辞：CI 整体>0 显著改进；整体<0 显著退步；含 0 未获支持。"""
     if ci[0] > 0:
@@ -410,32 +488,18 @@ def run_ablation(
         snapshot = builder(ticker)
         snapshots[ticker] = snapshot_digest(snapshot)
         for variant in _VARIANTS:
-            for _ in range(repeats):
+            for repeat in range(repeats):
                 out = run_variant_once(variant, snapshot, query)
-                judge_scores: dict[str, float | None] = {}
-                for dim in JUDGE_DIMS:
-                    if dim not in _applicable_dims(variant):
-                        judge_scores[dim] = None  # 该变体无对应层，维度不适用（#112）
-                        continue
-                    result = run_judge_mean(dim, out["judge_vars"], repeats=judge_repeats)
-                    judge_scores[dim] = (
-                        float(result["score"]) if result["score"] is not None else None
-                    )
+                # 判分/过滤/明细塑形只经库侧唯一入口（spec「跑批入口唯一化」）；
+                # 本路径不落材料（materials_dir=None → materials_path 记 None）
                 runs.append(
                     {
                         "variant": variant,
                         "ticker": ticker,
-                        "citation_pass": out["citation_pass"],
-                        "judge": judge_scores,
-                        # 论点锚点覆盖率 value（4.4）：analysts 无辩论层 -> None，不得伪造 0
-                        "argument_anchor_coverage": (out["anchor_coverage"] or {}).get("value"),
-                        # 拆项随 run 记录落盘（spec「value 与拆项」；detail 去 value——
-                        # value 已单独成键，拆项只留分桶计数供归因，镜像 evals/task.py）
-                        "argument_anchor_coverage_detail": (
-                            {k: v for k, v in out["anchor_coverage"].items() if k != "value"}
-                            if out["anchor_coverage"]
-                            else None
+                        **score_run(
+                            variant, out, ticker=ticker, repeat=repeat, judge_repeats=judge_repeats
                         ),
+                        "citation_pass": out["citation_pass"],
                     }
                 )
     report = aggregate_results(runs)

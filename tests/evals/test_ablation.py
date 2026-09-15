@@ -1,5 +1,8 @@
 """消融编排测试：变体输入对齐（同一快照）、聚合与结论措辞。全部 mock 节点，不调 LLM。"""
 
+import json
+from pathlib import Path
+
 from evals.ablation import aggregate_results, build_variant_graph, conclusion_for_layer
 
 
@@ -520,3 +523,242 @@ class TestAblationJudgeMeanProtocol:
 class _FakeGraph:
     def invoke(self, state):
         return {}
+
+
+class TestScoreRunEntry:
+    """G1（delta tasks 1.2）：判分/维度过滤/明细塑形/材料落盘的库侧唯一入口。
+
+    驱动与 `run_ablation` 均只调用 `score_run`——本类钉住真模块上的入口行为，
+    防止「假件全绿、真模块缺实现」的 mock 缺口。
+    """
+
+    @staticmethod
+    def _out(coverage: dict | None = None, judge_vars: dict | None = None) -> dict:
+        return {
+            "citation_pass": True,
+            "judge_vars": {"debate_history": "x"} if judge_vars is None else judge_vars,
+            "anchor_coverage": coverage,
+        }
+
+    @staticmethod
+    def _anchor(value: float) -> dict:
+        return {
+            "value": value,
+            "total": 4,
+            "anchored": 2,
+            "unanchored_inference": 1,
+            "unresolved": 1,
+            "missing_required": 0,
+            "unspecified": 0,
+        }
+
+    def test_filters_inapplicable_dims(self, monkeypatch):
+        import evals.ablation as ablation
+
+        calls: list[str] = []
+
+        def fake_mean(dimension, variables, *, repeats=3):
+            calls.append(dimension)
+            return {"score": 4.0}
+
+        monkeypatch.setattr(ablation, "run_judge_mean", fake_mean, raising=False)
+        scored = ablation.score_run("plus_debate", self._out(), ticker="600519", repeat=0)
+        assert calls == ["report_relevance", "debate_quality"], "不适用维度不得发起判分（#112）"
+        assert set(scored["judge"]) == set(ablation.JUDGE_DIMS), "四维键齐全，不适用记 None"
+        assert scored["judge"]["decision_grounding"] is None
+        assert scored["judge"]["consistency"] is None
+        assert "decision_grounding" not in scored["judge_detail"], "过滤维度不得产生明细"
+
+    def test_judge_repeats_passed_to_mean_protocol(self, monkeypatch):
+        import evals.ablation as ablation
+
+        seen: list[int] = []
+
+        def fake_mean(dimension, variables, *, repeats=3):
+            seen.append(repeats)
+            return {"score": 5.0}
+
+        monkeypatch.setattr(ablation, "run_judge_mean", fake_mean, raising=False)
+        ablation.score_run("analysts", self._out(), ticker="600519", repeat=1, judge_repeats=5)
+        assert seen == [5], "K 次均值协议参数须透传"
+
+    def test_failed_judge_score_stays_none(self, monkeypatch):
+        import evals.ablation as ablation
+
+        monkeypatch.setattr(
+            ablation,
+            "run_judge_mean",
+            lambda dimension, variables, *, repeats=3: {"score": None, "judge_failures": 3},
+            raising=False,
+        )
+        scored = ablation.score_run("analysts", self._out(), ticker="600519", repeat=0)
+        assert scored["judge"]["report_relevance"] is None, "全败不得静默给分"
+        assert scored["judge_detail"]["report_relevance"]["score"] is None
+        assert scored["judge_detail"]["report_relevance"]["judge_failures"] == 3
+
+    def test_judge_detail_shapes_telemetry_and_truncates_reason(self, monkeypatch):
+        import evals.ablation as ablation
+
+        monkeypatch.setattr(
+            ablation,
+            "run_judge_mean",
+            lambda dimension, variables, *, repeats=3: {
+                "score": 4.333,
+                "reason": "长" * 400,
+                "scores": [5, 4, 4],
+                "score_spread": 1,
+                "judge_repeats": 3,
+                "judge_failures": 0,
+                "qualitative_points": 1,
+                "cap_applied": False,
+                "enumeration_missing": False,
+            },
+            raising=False,
+        )
+        detail = ablation.score_run("plus_debate", self._out(), ticker="600519", repeat=0)[
+            "judge_detail"
+        ]["debate_quality"]
+        assert detail["score"] == 4.333
+        assert detail["scores"] == [5, 4, 4], "每次分数随 run 落盘（噪声可见）"
+        assert detail["score_spread"] == 1
+        assert detail["judge_repeats"] == 3
+        assert detail["judge_failures"] == 0
+        assert detail["qualitative_points"] == 1
+        assert detail["cap_applied"] is False
+        assert detail["enumeration_missing"] is False
+        assert len(detail["reason"]) == 300, "理由截断为 300 字符（run 记录体积控制）"
+
+    def test_persists_materials_and_returns_posix_path(self, monkeypatch, tmp_path):
+        import evals.ablation as ablation
+
+        monkeypatch.setattr(
+            ablation,
+            "run_judge_mean",
+            lambda dimension, variables, *, repeats=3: {"score": 5.0},
+            raising=False,
+        )
+        judge_vars = {"debate_history": "【bull】论点: x", "trader_plan": "y"}
+        scored = ablation.score_run(
+            "full",
+            self._out(judge_vars=judge_vars),
+            ticker="600519",
+            repeat=2,
+            materials_dir=tmp_path / "judge_vars",
+        )
+        assert scored["materials_path"].endswith("full-600519-2.json"), "按 run 三元组命名"
+        assert "\\" not in scored["materials_path"], "路径 POSIX 风格（跨平台可复现）"
+        written = json.loads(Path(scored["materials_path"]).read_text(encoding="utf-8"))
+        assert written == judge_vars, "材料内容即 judge_vars（可离线重判）"
+
+    def test_materials_path_none_without_dir(self, monkeypatch):
+        import evals.ablation as ablation
+
+        monkeypatch.setattr(
+            ablation,
+            "run_judge_mean",
+            lambda dimension, variables, *, repeats=3: {"score": 5.0},
+            raising=False,
+        )
+        scored = ablation.score_run("analysts", self._out(), ticker="600519", repeat=0)
+        assert scored["materials_path"] is None, "未配置材料目录不得落盘"
+
+    def test_anchor_value_and_detail_mapping(self, monkeypatch):
+        import evals.ablation as ablation
+
+        monkeypatch.setattr(
+            ablation,
+            "run_judge_mean",
+            lambda dimension, variables, *, repeats=3: {"score": 5.0},
+            raising=False,
+        )
+        scored = ablation.score_run(
+            "plus_debate", self._out(coverage=self._anchor(0.5)), ticker="600519", repeat=0
+        )
+        assert scored["argument_anchor_coverage"] == 0.5
+        assert "value" not in scored["argument_anchor_coverage_detail"], "value 已单独成键"
+        assert scored["argument_anchor_coverage_detail"]["anchored"] == 2
+        without_arguments = ablation.score_run(
+            "analysts", self._out(coverage=None), ticker="600519", repeat=0
+        )
+        assert without_arguments["argument_anchor_coverage"] is None, "无论点不得伪造 0"
+        assert without_arguments["argument_anchor_coverage_detail"] is None
+
+
+class TestRunAblationScoringDelegation:
+    """G1：`run_ablation` 不得内联判分循环——判分只经库侧 `score_run` 一处。"""
+
+    @staticmethod
+    def _patch_pipeline(ablation, monkeypatch) -> None:
+        monkeypatch.setattr(ablation, "build_snapshot", lambda ticker: {"stock_code": ticker})
+        monkeypatch.setattr(ablation, "snapshot_digest", lambda state: "d")
+        monkeypatch.setattr(ablation, "build_variant_graph", lambda variant: _FakeGraph())
+        monkeypatch.setattr(
+            ablation,
+            "run_variant_once",
+            lambda variant, snapshot, query: {
+                "final_report": "r",
+                "citation_pass": True,
+                "judge_vars": {},
+                "anchor_coverage": None,
+            },
+        )
+
+    @staticmethod
+    def _scored_bundle(ablation) -> dict:
+        return {
+            "judge": dict.fromkeys(ablation.JUDGE_DIMS, 4.0),
+            "judge_detail": {},
+            "materials_path": None,
+            "argument_anchor_coverage": None,
+            "argument_anchor_coverage_detail": None,
+        }
+
+    def test_run_ablation_scores_via_library_entry(self, monkeypatch):
+        import evals.ablation as ablation
+
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            ablation,
+            "run_judge_mean",
+            lambda dimension, variables, *, repeats=3: {"score": 4.0},
+            raising=False,
+        )
+
+        def spy(variant, out, *, ticker, repeat, judge_repeats=3, materials_dir=None):
+            calls.append((variant, ticker, repeat, judge_repeats))
+            return self._scored_bundle(ablation)
+
+        monkeypatch.setattr(ablation, "score_run", spy, raising=False)
+        self._patch_pipeline(ablation, monkeypatch)
+        report = ablation.run_ablation(["600519"], repeats=2, judge_repeats=2)
+        assert len(calls) == 6, "1 标的 × 3 变体 × 2 重复 = 每 run 一次库侧判分入口"
+        assert all(call[3] == 2 for call in calls), "judge_repeats 须透传"
+        assert {call[:3] for call in calls} == {
+            (variant, "600519", repeat) for variant in ablation._VARIANTS for repeat in range(2)
+        }
+        assert report["variants"]["full"]["n_runs"] == 2
+
+    def test_run_ablation_does_not_inline_judge_loop(self, monkeypatch):
+        """判分只许发生在 score_run 内部：score_run 被替换后 run_judge_mean 不得被调。"""
+        import evals.ablation as ablation
+
+        inline_calls: list[str] = []
+        monkeypatch.setattr(
+            ablation,
+            "run_judge_mean",
+            lambda dimension, variables, *, repeats=3: (
+                inline_calls.append(dimension) or {"score": 4.0}
+            ),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ablation,
+            "score_run",
+            lambda variant, out, *, ticker, repeat, judge_repeats=3, materials_dir=None: (
+                self._scored_bundle(ablation)
+            ),
+            raising=False,
+        )
+        self._patch_pipeline(ablation, monkeypatch)
+        ablation.run_ablation(["600519"], repeats=1, judge_repeats=1)
+        assert inline_calls == [], "库侧聚合路径不得内联判分——判分只在 score_run 一处"
