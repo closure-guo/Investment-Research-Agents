@@ -102,6 +102,13 @@ grep -q '"diff_mean"' evals/ablation.py && grep -q '_applicable_dims' tests/scri
 
 ## 执行记录
 
-- 分支与提交：`revamp-ablation-v2-causal-claims`（rebase 于 `52b1e41`），16 个提交（Task 1–14 + 计划/文档）
-- 隔离工作区：`D:\WorkSpace\finance_analysis_agent\.worktrees\ablation-v2`（主工作区未受影响）
+- 分支与提交：`revamp-ablation-v2-causal-claims`（rebase 于 `52b1e41`），17 个提交（Task 1–14 + 计划/文档/本报告）
+- 隔离工作区：`D:\WorkSpace\finance_analysis_agent\.worktrees\ablation-v2`（主工作区未受影响；执行期间另一 agent 持续在主工作区提交，最近为 `35f760a`）
 - 未消耗 LLM token（仅 stub/离线单元测试；P1/P2 跑批按预登记另行启动）
+
+## 解阻后的后续动作（owner 或下一轮会话）
+
+1. 等 `update-ablation-driver-parity-and-report-status` 提交并 archive 后，本分支再 rebase 一次 → 执行计划 GATED 段 G1–G6；
+2. `openspec/changes/BACKLOG.md` 中「v2 消融框架（尚未立项）」条目需更新为本 delta 的 change id（该文件当前由另一 delta 持有，未在本轮改动）；
+3. 本 delta 的 `evaluation::数据对齐消融实验` MODIFIED 与 parity delta 的同名 Requirement 冲突按 project-workflow §6 处理（本 delta 为后到者）；
+4. `docs/evals/metrics.md` §1 口径变更（G4）须在 parity 落库后执行，避免与其已写入的口径切点段冲突。
