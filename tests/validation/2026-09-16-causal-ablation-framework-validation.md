@@ -92,7 +92,7 @@ grep -q '"diff_mean"' evals/ablation.py && grep -q '_applicable_dims' tests/scri
 - [ ] 因果主张登记表 A1–A7 / B1–B6 的**主张文本与效应量预期**是否认可（尤其 A5 已按 incident 027 修正为「待遥测实证」）
 - [ ] P1 预登记文档的**决策阈值与换算依据**（拦截率 <50% 判薄防线）是否可作为 P1 跑批依据
 - [ ] 逃逸率语义确认：**分母 = 已终裁单元数**，未终裁时 `rate=None`（不报 0%）——是否与产品口径一致
-- [ ] GATED 任务解阻后是否继续执行 1.2/1.3/1.4/3.3
+- [ ] 是否启动 P1/P2 正式跑批（GATED 段 1.2/1.3/1.4/3.3 已全部执行完毕；跑批按预登记另行启动，待此决策）
 - [x] ~~G3 两处解析器小瑕疵~~ **已修（G7，`96a1faf`）**：状态解析行界化（malformed `superseded-by` 现被校验拒绝）+ 徽章携真实目标；索引 README 已重渲染（逐字节核验）
 - [x] ~~G2 桶结论方向措辞~~ **已按默认处置（G7，`96a1faf`）**：四桶层条目加 `lower_is_better` 元数据（blocked/analyst_true_fail=True；telemetry 两桶=None），**措辞未动**、由消费方按元数据解读——如需方向感知措辞请 owner 另行裁决
 - [x] ~~aggregate_90 citation 层行~~ **已修（G7，`96a1faf`）**：四桶渲染 + 标量行标注「不入层增量结论」；路径/阈值/参数化未动（另属登记遗留）
@@ -101,7 +101,7 @@ grep -q '"diff_mean"' evals/ablation.py && grep -q '_applicable_dims' tests/scri
 ## 结论
 
 - [x] 框架部分（Task 1–14）实现完成，测试/lint/类型/覆盖率全绿，验证证据见上表
-- [ ] 全部通过，可 archive —— **未达成**：GATED 已解阻完成（G1–G5，见下节），但 owner 复核未完成（8 项），**本 delta 不 archive**
+- [ ] 全部通过，可 archive —— **未达成**：GATED 已解阻完成（G1–G6 + G7 收尾），技术跟进项已按默认处置；但 owner 内容决策未完成（4 项 + 是否启动跑批），**本 delta 不 archive**
 - [ ] 存在失败项，需修复后重新验证
 
 ## 执行记录
