@@ -17,6 +17,13 @@
 | add-judge-human-calibration | 标注导出 CLI + Spearman/MAE/方向一致率 + 校准触发 | 同上 |
 | enable-hosted-evaluator | 降级方案：scores 轮询 + 告警 + 口径对齐 + 模板快照 | 同上 |
 
+## 进行中（2026-09-15 立项，均已 `openspec validate --strict` 通过，待 writing-plans）
+
+| Delta | 内容 | 触发 |
+|---|---|---|
+| add-debate-argument-anchors | 辩论/风控论点 `key_arguments` 结构化锚点（kind + anchors）+ 节点侧确定性锚点校验（fail-open）+ `argument_anchor_coverage` 确定性指标进评估/judge 材料/消融 | 反幻觉盘点：定性论点无程序防线；metrics.md §3 遗留候选 (c) |
+| ground-comparative-delta-claims | 比较型差值 UNVERIFIABLE 计缺口 + 独立桶；修复 `derived_series` 通路（未声明 channel + 前缀不匹配，incident 027 同构）；均线差幅预生成 + 重算/有符号量注册 | metrics.md §3 校验器 follow-up ①；toolize 派生值在真实图从未生效 |
+
 ## 遗留待人工/待资源（2026-09-14 更新）
 
 > **2026-09-14 大扫除**：历史 sprint 的 8 个未归档 delta（settings-center/analyst-coverage/
