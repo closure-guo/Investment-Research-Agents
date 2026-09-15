@@ -752,6 +752,59 @@ class TestAnchorMaterial:
         debate = extract_judge_vars(state, query="q")["debate_history"]
         assert "【锚点覆盖】" in debate
         assert "[data ✓]" in debate
+        # 按方拆分：只有 bull 记录 → 只有 bull 方，缺席方省略（尾括号为全局拆项）
+        assert "【锚点覆盖】bull 1/1（推断无锚 0，未解析 0，data/event 无锚 0，旧格式 0）" in debate
+        assert "风控" not in debate
+
+    def test_skeleton_line_per_party_counts_and_order(self):
+        """骨架行按方拆分（bull / bear / 风控=三方聚合），全局拆项在尾括号；
+        位于收敛信号之后、原始发言之前；缺席方省略。"""
+        from evals.extract import extract_judge_vars
+
+        def check(role, index, status, anchored):
+            return {
+                "role": role,
+                "round": 1,
+                "index": index,
+                "kind": "data",
+                "anchors": ["x"],
+                "anchor_statuses": ["resolved"] if anchored else ["unresolved"],
+                "status": status,
+                "anchored": anchored,
+            }
+
+        state = {
+            "debate_history": [
+                {"role": "bull", "round": 1, "content": "多", "key_arguments": ["a", "b"]},
+                {"role": "bear", "round": 1, "content": "空", "key_arguments": ["c", "d"]},
+            ],
+            "debate_anchor_checks": [
+                check("bull", 1, "resolved", True),
+                check("bull", 2, "none", False),
+                check("bear", 1, "resolved", True),
+                check("bear", 2, "resolved", True),
+                check("aggressive", 1, "resolved", True),
+                check("conservative", 1, "none", False),
+                check("neutral", 1, "unspecified", False),
+            ],
+        }
+        out = extract_judge_vars(state, query="q")["debate_history"]
+        assert (
+            "【锚点覆盖】bull 1/2｜bear 2/2｜风控 1/3"
+            "（推断无锚 2，未解析 0，data/event 无锚 0，旧格式 1）"
+        ) in out
+        assert out.index("收敛信号") < out.index("【锚点覆盖】") < out.index("【bull】")
+
+    def test_skeleton_line_absent_without_checks(self):
+        """旧 trace（无 debate_anchor_checks 通道）→ 材料不得出现锚点骨架行。"""
+        from evals.extract import extract_judge_vars
+
+        state = {
+            "debate_history": [
+                {"role": "bull", "round": 1, "content": "多", "key_arguments": ["a"]}
+            ]
+        }
+        assert "【锚点覆盖】" not in extract_judge_vars(state, query="q")["debate_history"]
 
     def test_coverage_none_without_checks(self):
         """无论点（含非 dict 噪声）→ None：无锚点数据的旧 trace 不得产出 0/0 假指标。"""

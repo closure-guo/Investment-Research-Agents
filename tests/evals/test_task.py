@@ -187,13 +187,49 @@ class TestTaskAnchorOutputs:
                         "anchor_statuses": ["resolved"],
                         "status": "resolved",
                         "anchored": True,
-                    }
+                    },
+                    {
+                        "role": "bear",
+                        "round": 1,
+                        "index": 1,
+                        "kind": "inference",
+                        "anchors": [],
+                        "anchor_statuses": [],
+                        "status": "none",
+                        "anchored": False,
+                    },
+                    {
+                        "role": "aggressive",
+                        "round": 1,
+                        "index": 1,
+                        "kind": "data",
+                        "anchors": ["y"],
+                        "anchor_statuses": ["unresolved"],
+                        "status": "unresolved",
+                        "anchored": False,
+                    },
+                    {
+                        "role": "neutral",
+                        "round": 1,
+                        "index": 1,
+                        "kind": "unspecified",
+                        "anchors": [],
+                        "anchor_statuses": [],
+                        "status": "unspecified",
+                        "anchored": False,
+                    },
                 ]
             },
         )
-        assert out["argument_anchor_coverage"] == 1.0
-        assert out["argument_anchor_coverage_detail"]["total"] == 1
-        assert "value" not in out["argument_anchor_coverage_detail"]
+        assert out["argument_anchor_coverage"] == 0.25
+        detail = out["argument_anchor_coverage_detail"]
+        assert detail["total"] == 4 and detail["anchored"] == 1
+        # 四个拆项键全数透传（归因/comment 依赖）
+        assert detail["unanchored_inference"] == 1
+        assert detail["unresolved"] == 1
+        assert detail["missing_required"] == 0
+        assert detail["unspecified"] == 1
+        assert "value" not in detail
         json.dumps(out)
 
     def test_anchor_keys_none_without_checks(self, monkeypatch):

@@ -120,6 +120,31 @@ def eval_citation_counter(name: str, comment: str):
     return _eval
 
 
+def eval_argument_anchor_coverage(*, input, output, expected_output, metadata):
+    """论点锚点覆盖率（零 LLM，add-debate-argument-anchors）：value 透传，
+    四个拆项随 comment 落库（spec Scenario：comment 含
+    unanchored_inference=… / unresolved=… / missing_required=… / unspecified=…）。
+
+    不复用 eval_citation_counter：其 comment 为静态串，而拆项随 item 变化；
+    为避免改共享工厂（citation 家族）签名，此处独立实现同形评估器。
+    """
+    value = (output or {}).get("argument_anchor_coverage")
+    if value is None:
+        return None
+    comment = "辩论论点锚点覆盖率（anchored/total，零 LLM）"
+    detail = (output or {}).get("argument_anchor_coverage_detail") or {}
+    if detail:
+        comment += (
+            f"；unanchored_inference={detail.get('unanchored_inference', 0)}"
+            f" / unresolved={detail.get('unresolved', 0)}"
+            f" / missing_required={detail.get('missing_required', 0)}"
+            f" / unspecified={detail.get('unspecified', 0)}"
+        )
+    return make_evaluation(
+        {"name": "argument_anchor_coverage", "value": float(value), "comment": comment}
+    )
+
+
 def eval_citation_blocked(*, input, output, expected_output, metadata):
     """阻断层：归一后残余 FAIL > 0（incident 026 拆报——此前的 citation_pass 把
     校验器误报算在分析师头上）。"""
@@ -210,11 +235,9 @@ def all_evaluators() -> list:
             "citation_surgical_repaired",
             "单点修复成功回填数（稀疏 value_mismatch；已计入真错，单独计数观测触发/成功率）",
         ),
-        # add-debate-argument-anchors：论点锚点覆盖率（零 LLM）——工厂语义为通用
-        # output 键读取（float + comment），非 citation 专有，直接复用不另起同构工厂
-        eval_citation_counter(
-            "argument_anchor_coverage", "辩论论点锚点覆盖率（anchored/total，零 LLM）"
-        ),
+        # add-debate-argument-anchors：论点锚点覆盖率（零 LLM）——拆项随 comment
+        # 落库，故用同形独立评估器而非静态 comment 的 eval_citation_counter
+        eval_argument_anchor_coverage,
     ] + [_judge_adapter(d) for d in _JUDGE_DIMS]
 
 

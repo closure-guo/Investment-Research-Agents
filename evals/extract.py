@@ -262,6 +262,28 @@ _STATUS_MARK = {
     "none": "○",
     "unspecified": "?",
 }
+# 骨架行分队：Layer II 多空各自一方，Layer IV 三方风险辩论者聚合为「风控」
+# （delta spec: 「bull a/b｜bear c/d｜风控 e/f（含拆项）」）
+_PARTY_ORDER = ("bull", "bear", "风控")
+_PARTY_OF = {
+    "bull": "bull",
+    "bear": "bear",
+    "aggressive": "风控",
+    "conservative": "风控",
+    "neutral": "风控",
+}
+
+
+def _party_coverage(checks: list) -> list[tuple[str, int, int]]:
+    """各方 (party, anchored, total)；缺席方不出现，未登记角色（非辩手）忽略。"""
+    totals: dict[str, tuple[int, int]] = {}
+    for c in checks:
+        party = _PARTY_OF.get(str(c.get("role")))
+        if party is None:
+            continue
+        anchored, total = totals.get(party, (0, 0))
+        totals[party] = (anchored + (1 if c.get("anchored") else 0), total + 1)
+    return [(p, *totals[p]) for p in _PARTY_ORDER if p in totals]
 
 
 def _summarize_debate(history: list, checks: list | None = None) -> str:
@@ -283,13 +305,16 @@ def _summarize_debate(history: list, checks: list | None = None) -> str:
     if skeleton:
         parts.append(skeleton)
     # 锚点骨架行（确定性统计，数据来自 debate_anchor_checks 通道；旧 trace 无记录
-    # 则不产出）。覆盖口径是通道全量（多空 + 风控辩论），与实验指标同源。
+    # 则不产出）：各方 anchored/total（缺席方省略）+ 全局拆项
     if cov:
-        parts.append(
-            f"【锚点覆盖】anchored {cov['anchored']}/{cov['total']}"
-            f"（推断无锚 {cov['unanchored_inference']}，未解析 {cov['unresolved']}，"
-            f"data/event 无锚 {cov['missing_required']}，旧格式 {cov['unspecified']}）"
-        )
+        parties = _party_coverage(checks)
+        if parties:
+            parts.append(
+                "【锚点覆盖】"
+                + "｜".join(f"{party} {anchored}/{total}" for party, anchored, total in parties)
+                + f"（推断无锚 {cov['unanchored_inference']}，未解析 {cov['unresolved']}，"
+                f"data/event 无锚 {cov['missing_required']}，旧格式 {cov['unspecified']}）"
+            )
     occurrence: dict[str, int] = {}
     for msg in history:
         msg = _as_dict(msg)

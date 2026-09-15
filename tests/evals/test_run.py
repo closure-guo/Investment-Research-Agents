@@ -237,16 +237,32 @@ class TestCitationMetricEvaluators:
         assert _citation_ci([]) == (0.0, 0.0)
 
     def test_anchor_coverage_evaluator_reads_output(self):
-        """论点锚点覆盖率经 output 键透传为 Score；无数据（quick/旧 trace）→ None。"""
+        """论点锚点覆盖率经 output 键透传为 Score；拆项随 comment 落库
+        （spec Scenario：comment 含 unanchored_inference=2 / unresolved=1 /
+        missing_required=0 / unspecified=1）；无数据（quick/旧 trace）→ None。"""
         ev = {e.__name__: e for e in all_evaluators()}["eval_argument_anchor_coverage"]
         result = ev(
             input={"query": "q", "mode": "deep"},
-            output={"argument_anchor_coverage": 0.75},
+            output={
+                "argument_anchor_coverage": 0.6667,
+                "argument_anchor_coverage_detail": {
+                    "total": 12,
+                    "anchored": 8,
+                    "unanchored_inference": 2,
+                    "unresolved": 1,
+                    "missing_required": 0,
+                    "unspecified": 1,
+                },
+            },
             expected_output={},
             metadata={},
         )
         assert (getattr(result, "name", None) or result["name"]) == "argument_anchor_coverage"
-        assert float(getattr(result, "value", None) or result["value"]) == 0.75
+        assert float(getattr(result, "value", None) or result["value"]) == 0.6667
+        comment = getattr(result, "comment", None) or result["comment"]
+        assert (
+            "unanchored_inference=2 / unresolved=1 / missing_required=0 / unspecified=1" in comment
+        )
         assert ev(input={}, output={"mode": "quick"}, expected_output={}, metadata={}) is None
 
 
