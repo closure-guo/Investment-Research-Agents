@@ -56,11 +56,24 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 | 有效 n | = 标的数，**不是** run 数（3 标的 × 10 重复 → 有效 n=3，CI 宽度主要由该分辨率决定） |
 | 维度适用性 | 变体不存在的层不评（`_applicable_dims` 唯一实现）；被过滤维度记 `None` 且不产生 judge 调用（#112） |
 | 快照一致性 | 每条 run 的快照 digest 须与本次跑批登记值一致；不一致显式失败（不静默混批） |
-| 报告状态头 | `evals/ablation/results/*.md` 头部须带 `**status**: active` 或 `superseded-by: <路径>`，指针须可解析（`tests/evals/test_report_status.py`） |
+| 报告状态头 | `evals/ablation/results/*.md` 头部须带生命周期字段（`status`：`active` 或 `superseded-by: <路径>`，字面格式见 §1.7④），指针须可解析（`tests/evals/test_report_status.py`） |
 
 ### 1.6 报告引用纪律
 
 对外材料（README / 简历素材等）引用消融数字时须引用 `status: active` 的报告；「未获统计支持」不得转写为「据此可裁剪」（统计不支持 ≠ 无价值，裁剪需独立证据）。被推翻的报告须就地标注（原文保留 + 撤回说明 + 指向权威版本），不得只改数字。
+
+### 1.7 因果消融 v2 口径（delta `revamp-ablation-v2-causal-claims`，2026-09-16 切点，未跑批）
+
+准入判据 = **因果下游检验**：指标的失败模式须因果地依赖被消融对象，才可作层增量主指标（切题度这类通用正确性指标不依赖任何层 → 出局；v1 的 judge 四维不再作层增量裁决依据，判定本身保留为辅助观测）。
+
+| 项 | 口径 |
+|---|---|
+| ① 因果下游指标与判定方式 | 进矩阵对象须先在因果主张登记表登记（族 A 反幻觉 A1–A7 / 族 B 编排 B1–B6：因果主张 + 失败模式 + 主指标 + 判定方式 + 效应量预期；`evals/causal_ablation/claims.py`），且持有效预登记（主指标 / MDE / 阈值换算依据 / 样本量依据 / 停止规则 / rubric 版本锁定，`preregister.py`）。判定方式 `code｜nli｜judge`，逐单元落库 `unit_id/ticker/run/variant/unit_type/judgment/method/confidence`（`units.py`）。族 A 主指标=逃逸率族（A3 注入污染逃逸率为代表）+ 计算型 claim 数值错误率 / 负索引·期次错位率 / 修复前后真 FAIL 率差 / 事件型 claim 不可回声率 / stale 引用率等；族 B 主指标=B1 风险点增量率（nli）/ B2 交锋修正率（judge）/ B3 风控数字出处率（code）/ B4 sanity 打回率（code）/ B5 pairwise 盲评胜率（judge）/ B6 事后结算胜率（code，不作层间归因，`family_b.py`）。推断单元=**标的**（簇 bootstrap B=10,000 + ICC 折算有效 n 披露；`aggregate.py`） |
+| ② 校准门控 | 凡 `method ∈ {nli, judge}` 的指标（B1/B2/B5 及族 A 的 nli/judge 腿）rubric 与人工标注一致率 **≥0.80** 才允许进消融结论；每批抽 ≥20% 单元人工复核，一致率 <0.80 该批判定作废并重校准；`code` 判定不适用（`calibration_gate.py`） |
+| ③ 逃逸率 | 逃逸 = 污染值原样出现在终态产物**且未被告警**、且经人工终裁确认为真逃逸。**分母 = 已终裁单元数**；未终裁单列 `pending`（不进分子也不进分母）；无任何终裁时 `rate = None`，**不得报 0%**（「0 逃逸」≠「没判定过」）。校验器误报走四桶拆报（blocked / analyst_true_fail / surgical_repaired / verifier_normalized，桶名以 `escape.py::VERIFIER_BUCKETS` 为准；§1.3 为 citation 四桶同族拆报），**不进逃逸率分母**；四桶拆报进消融聚合，`citation_pass` 标量退出层增量比较路径（只留产出、不作层增量裁决，见 §2 切点段） |
+| ④ 结论句式与注册表 | 合法结论仅两句式：**真阴性**（CI 整体低于成本阈值 →「在本实验分辨率（MDE=X）下…建议降级/裁剪」）｜**分辨率不足**（须写出 MDE 与 CI 并给扩样方向）。**裸「未获统计支持」非法**——结论句必带 MDE（`conclusion.py`）；阳性对照测不出显著差异 → 本轮全部阴性作废（灵敏度未证实不得进注册表）。报告头部须带生命周期字段（`status`：`active` 或 `superseded-by: <路径>`，字面格式与校验见 `evals/causal_ablation/report_status.py`，取代者指针须真实存在）；索引 [`README.md`](README.md) 渲染状态与「未标注生命周期」清单，引用纪律见 §1.6 |
+
+统计口径（`diff_mean` 点估计 / 标的配对 / 维度适用性 / 快照 digest / 报告状态头契约）见 §1.5，本小节不重复；judge 材料口径切点（`debate_history` 锚点骨架行）见 §2，跨该切点的 debate_quality 不可直接比较。
 
 ---
 
@@ -82,6 +95,7 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 
 **消融口径切点（2026-09-15，delta `update-ablation-driver-parity-and-report-status`，未跑批）**：① `aggregate_results` 点估计字段 `diff_median` → `diff_mean`（口径本就为均值差，见 §1.5），历史产物 JSON 复算须按新名读；② 跑批驱动 `ablation_pilot.py` 的维度过滤改调库侧 `_applicable_dims`（此前自带硬编码分支 → plus_debate 的 grounding/consistency 照评，即 n10 批次 #112 伪影的来源），并在每条 run 前核验快照 digest；③ `evals/ablation/results/pilot.md` 标 `superseded-by` 指向 n10 报告并就地撤回简历素材段结论；④ n10 报告（09-03）补四处适用口径披露——**该批次 judge 未校准**（早于 round7 达标 10 天）、#112 伪影存活（其 full−plus_debate 的 grounding/consistency 两条 Δ 标为无效比较）、有效 n=3、citation_pass 不作层增量解读。**据此，n10 批次的可成立结论收缩为「未获统计支持」，其成本数字（辩论层 +7.9% / 决策+风控层 +30.1% / 裁到 analysts 省 28.7%）仍有效但不足以支撑裁剪决策。**
 **judge 材料口径切点（2026-09-16，delta `add-debate-argument-anchors`，未跑批）**：debate_quality 的 `debate_history` 材料在收敛骨架行后新增「【锚点覆盖】bull a/b｜bear c/d｜风控 e/f（含拆项）」骨架行，每条论点行加 `[kind 状态]` 前缀（状态取自 `debate_anchor_checks`）。**跨此切点的 debate_quality 分数不可直接比较**；rubric 版本不变（v6），`points` 契约不变。确定性指标 `argument_anchor_coverage`（§1.2）进评估器/实验报告/消融 run 记录（value + 拆项）。首轮真实链路实测（600519 ×2）：覆盖 16.3% / 22.2%，`unresolved`（申报了锚但不可解析）占 51%/44%，`unspecified` 0、`missing_required` 0–1；逐条归因为**路径格式/引导问题**（自造 `fundamental./macro./technical.` 前缀、描述混入锚点、event 整句改写），**无编造**——prompt 迭代候选已登记（见 `tests/validation/2026-09-16-add-debate-argument-anchors-validation.md`）。
+**消融 v2 口径切点（2026-09-16，delta `revamp-ablation-v2-causal-claims`，未跑批）**：① 消融聚合的 citation 腿接入四桶拆报，`citation_pass` 标量退出层增量比较路径（标量仍产出、不再进层增量裁决）；② 驱动薄壳化——`ablation_pilot.py` 的 judge 判分与 `judge_vars` 材料落盘移入库侧，驱动只留续跑/记账/coverage 包装；③ 口径先行登记（§1.7）：因果下游指标准入 + 判定方式 code｜nli｜judge、校准门控 0.80 覆盖全部 nli/judge 指标、逃逸率分母=已终裁单元（未终裁 `rate=None` 不报 0%）、结论两句式 + MDE 强制；④ 结论注册表落地——报告头部生命周期字段 + `docs/evals` 索引（[`README.md`](README.md)）渲染状态；首批注册对象：`evals/ablation/results/pilot.md` 标 `superseded-by` 指向 n10 报告、n10 报告标 `active`，其余存量文档列入索引「未标注生命周期」（未标注 ≠ 作废）。**跨此切点的消融层增量结论须按新口径读**：v1 的 judge 四维层增量与 `citation_pass` 标量读法不再作为层增量裁决依据。
 
 ---
 
