@@ -28,7 +28,7 @@
 - [x] 5.1 本机跑一次 deep（真 LLM）：✅ 2026-09-15 600519 运行成功；技术面 context 含派生值块由**真实数据通路**核验（fetch+compute+context 实测：9 字段含四差幅 -1.23/1.39/-1.82/-0.45；报告引用「MA20 较 MA60 高 1.39%」与预生成值逐字一致）；**Langfuse trace 核对因 Docker 停机拆为 5.4**
 - [x] 5.2 非枚举 comparative 差值条数已取得：**4 条**（占该 run UNVERIFIABLE 9 条中的 44%，实时落 `citation_unverifiable_comparative_delta`）；逐条组成归因待 5.4（trace 缺失）
 - [x] 5.3 报告落 `tests/validation/2026-09-15-ground-comparative-delta-claims-validation.md`（§5 全量套件结果待追加）
-- [ ] 5.4（环境推迟，归档前补）Langfuse 恢复后补 trace 核对：① 技术分析师 span 输入含派生值块；② 三类计数进 `citation_unverifiable_ratio` score metadata；③ 5.2 的 4 条差值逐条归因（可枚举组合 vs 长尾，路线 2 决策依据）
+- [x] 5.4（2026-09-16 补，Langfuse 在线）trace 核对完成：① 技术分析师 trace 输入含派生值块（18090 字符，`derived_series.` 前缀）；② `citation_unverifiable_ratio` score metadata 携三类计数 `{text:5, unregistered:0, comparative_delta:6}`；③ 逐条组成 n=6 **全为跨期水平比较、无 MA/涨跌幅类** → 路线 2 决策修正（优先申报纪律而非公式重算）——详见验证报告 §6
 
 ## 6. 收口
 

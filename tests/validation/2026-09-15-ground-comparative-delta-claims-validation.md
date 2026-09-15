@@ -51,8 +51,8 @@ citation_coverage: 0.811（< 0.90 警告线，非阻断）/ surgical_repaired: 0
 
 ## 4. 边界与遗留
 
-- **trace 级证据未取（环境）**：Docker Desktop 停机、Langfuse 不可达（`WinError 10061`）。待补两项：① 技术分析师 span 输入含派生值块；② 三类计数出现在 `citation_unverifiable_ratio` score metadata。delta tasks.md 已登记为 5.4。
-- **运行时 prompt 拉取失败回退本地**（「可能版本漂移」警告）——本 delta 无 prompt 变更，不影响结论；离线跑批前建议恢复 Langfuse。
+- **trace 级证据已补（2026-09-16，Docker/Langfuse 恢复后）**：三项全部取得，见 §6。
+- **运行时 prompt 拉取失败回退本地**（「可能版本漂移」警告）——本 delta 无 prompt 变更，不影响结论；Langfuse 已恢复，本项不再适用。
 - **全量套件本机间歇性外部 I/O 挂起**：两轮实证（本轮 55 分钟 / 13.1s CPU；T3 implementer 另一次 30 分钟无进展）。Task 2 早前完整跑通 **2366 passed / 2 skipped / 0 failed**。本轮带 `faulthandler_timeout` 重跑结果见 §5。
 - **已登记待决策**（metrics §3 同族登记）：① 方向校验扩面至 computational 路径（spec 对齐，FAIL 构成变化需按桶归因）；② recalc 返回 None 的「数据不足」子字段被判 FAIL `path_unresolvable`，建议改判 UNVERIFIABLE（另立项）。
 - 委派质量遗留（Minor，交终审裁定）：T5 计数可补 `status` 守卫与注释；T4 可补「带 metric_name/period 申报」用例把分支自源缺口钉进 CI；归档验证报告 `test_fourteen_evaluators` 引用悬空（信息性）。
@@ -69,6 +69,13 @@ LANGFUSE_PUBLIC_KEY= LANGFUSE_SECRET_KEY= LANGFUSE_HOST= LANGFUSE_BASE_URL= \
 - **两轮全量未完成的原因（挂起根因，已实证）**：`tests/evals/backtest/test_data_snapshot.py:225::test_metadata_contains_prompt_versions_and_model` → `evals/backtest/data_snapshot.build_snapshot` → `evals/run._collect_prompt_versions` → `prompts/loader._fetch_info` → Langfuse `get_prompt`（含 backoff 重试）——服务停机时连接**挂起不返回**（faulthandler 转储：`socket.create_connection` 阻塞 55+ 分钟 / CPU 仅 13s）。规避：空 Langfuse 环境变量跑（本地回退，与真实 deep 运行的降级路径同源）；带 Langfuse 的完整门禁需先恢复 Docker。
 - 时序说明：本轮在 delta `add-debate-argument-anchors` Task 1 提交前完成收集（pytest 收集期导入模块），反映的是 **delta 2 完成态**的代码。
 
+## 6. trace 级证据补录（2026-09-16，Langfuse 在线，两次 deep 600519）
+
+- **① 派生值注入**（技术分析师 trace `04f1c32dc8327dd5f0e4a5c692fcfd4f`）：输入 18090 字符，含「常用派生值（工具预生成，直接引用；field_ref 前缀 `derived_series.`）」块与四差幅真实值（-1.23 / 1.39 / -1.82 / -0.45 同前）。
+- **② 三类计数进 trace**（trace `b98eac8709caa11709a54c8f8f777b2f`）：`citation_unverifiable_ratio = 0.1549` 的 score metadata 为 `{"unverifiable_text": 5, "unverifiable_unregistered": 0, "unverifiable_comparative_delta": 6}`——**报告与 trace 同口径**。
+- **③ 非枚举差值逐条组成**（同 trace，n=6）：CPI 同比 0.8 / M2 同比 7.5 / ROE 32.53 / 利息覆盖倍数 / 经营现金流/净利润 0.75 / 销售费用率 4.30——**全部为「从 A 降至/升至 B」的跨期水平比较（双端均可从 state 推导），无一条均线/涨跌幅类**；对照另一轮（无根 span）该计数为 0，条数在轮次间波动。
+- **路线 2 决策修正（重要）**：6/6 为可枚举双端比较，缺口在**申报纪律**（LLM 把 comparative 当叙述类型、stated_value 填当期值、未申报 `stated_value_b`），而非缺公式重算机制——候选处置应优先「双端申报纪律的 prompt 强化 / 对『comparative 携数值 stated_value 且 field_ref 可解析』形态给更精确的提示性分桶」，原「formula 申报重算」（路线 2）降级为备选。该形态因本 delta 的独立桶**首次可见**，正是计数的目的。
+
 ## 结论
 
 | 验收项 | 状态 |
@@ -77,4 +84,4 @@ LANGFUSE_PUBLIC_KEY= LANGFUSE_SECRET_KEY= LANGFUSE_HOST= LANGFUSE_BASE_URL= \
 | 真实 deep 运行（新计数生效、无回归崩溃） | ✅ |
 | 真实数据通路（派生值注入 + 被引用逐字一致） | ✅ |
 | 全量套件（非 live 0 失败） | ✅ |
-| trace 级证据 | ⏸ 环境（5.4 待补） |
+| trace 级证据 | ✅（2026-09-16 补，见 §6） |

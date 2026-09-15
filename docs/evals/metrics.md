@@ -26,6 +26,7 @@
 | ticker_match | 标的解析正确性 |
 | section_coverage | 报告必备章节覆盖（must_cover；「风险提示」章口径待决策 #6） |
 | citation_coverage | 报告正文数字被 claim 认领比例（警告线 0.90） |
+| argument_anchor_coverage | 辩论论点锚点覆盖率（anchored/total；拆项 unanchored_inference/unresolved/missing_required/unspecified；无论点 None；零 LLM） |
 
 ### 1.3 citation 门禁拆报（r4 起，delta `rework-citation-gate-attribution`；定义=incident 026）
 
@@ -80,6 +81,7 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 人工校准：round5（53 行）全线未达标（整体 Spearman -0.36 / MAE 1.81 / 方向一致率 32%）→ 材料与 rubric 修复多轮 → **round7（41 对终裁后终值，r3）全维度达标：整体 MAE 0.342 / 方向一致率 97.6%，judge 自 round7 起可用**（终裁：4 行 judge 的 source 归属扣分成立改 4、1 行 judge 误判维持人工 5、1 行灰区维持 5；详见 [2026-09-13-round7-judge校准报告.md](2026-09-13-round7-judge校准报告.md)。rubric v7 四项改动已定稿待 bump：debate 5 分收紧 / source 归属三层判法 / 组合 claim 归属规则 / 解读失当强化）。
 
 **消融口径切点（2026-09-15，delta `update-ablation-driver-parity-and-report-status`，未跑批）**：① `aggregate_results` 点估计字段 `diff_median` → `diff_mean`（口径本就为均值差，见 §1.5），历史产物 JSON 复算须按新名读；② 跑批驱动 `ablation_pilot.py` 的维度过滤改调库侧 `_applicable_dims`（此前自带硬编码分支 → plus_debate 的 grounding/consistency 照评，即 n10 批次 #112 伪影的来源），并在每条 run 前核验快照 digest；③ `evals/ablation/results/pilot.md` 标 `superseded-by` 指向 n10 报告并就地撤回简历素材段结论；④ n10 报告（09-03）补四处适用口径披露——**该批次 judge 未校准**（早于 round7 达标 10 天）、#112 伪影存活（其 full−plus_debate 的 grounding/consistency 两条 Δ 标为无效比较）、有效 n=3、citation_pass 不作层增量解读。**据此，n10 批次的可成立结论收缩为「未获统计支持」，其成本数字（辩论层 +7.9% / 决策+风控层 +30.1% / 裁到 analysts 省 28.7%）仍有效但不足以支撑裁剪决策。**
+**judge 材料口径切点（2026-09-16，delta `add-debate-argument-anchors`，未跑批）**：debate_quality 的 `debate_history` 材料在收敛骨架行后新增「【锚点覆盖】bull a/b｜bear c/d｜风控 e/f（含拆项）」骨架行，每条论点行加 `[kind 状态]` 前缀（状态取自 `debate_anchor_checks`）。**跨此切点的 debate_quality 分数不可直接比较**；rubric 版本不变（v6），`points` 契约不变。确定性指标 `argument_anchor_coverage`（§1.2）进评估器/实验报告/消融 run 记录（value + 拆项）。首轮真实链路实测（600519 ×2）：覆盖 16.3% / 22.2%，`unresolved`（申报了锚但不可解析）占 51%/44%，`unspecified` 0、`missing_required` 0–1；逐条归因为**路径格式/引导问题**（自造 `fundamental./macro./technical.` 前缀、描述混入锚点、event 整句改写），**无编造**——prompt 迭代候选已登记（见 `tests/validation/2026-09-16-add-debate-argument-anchors-validation.md`）。
 
 ---
 
@@ -151,7 +153,7 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 - 覆盖率指标在「逐条回应成常态」后无区分度（r3 全 4/4、5/5），是否保留进 judge 材料
 - consistency / decision_grounding 材料缺【Trader 方案】节——Trader→Risk Judge 的转向是否静默推翻无法核对（round8 材料版本落地，本轮 round7 口径：只评 RM→RJ→FM→报告四层）
 - **v8 候选（round8 代裁发现，2026-09-13）**：① debate 5 分档执行不稳定——「个别定性论点降 4」在 4 分档执行严格，但美的/宁德两行漏判纯定性论点给 5，建议 5 分判例进 rubric few-shot；② dg 归属层对「同一评判在多来源出现」判定偏机械——claim 在 debate_bear 与 research_manager 均有原话时 judge 只认单源（比亚迪 ref7 误扣），v8 补「任一真实来源即合法」判例
-- **debate 5 分边界可靠性（round9 审计 → round10 v5 → round11 v6）**：~~待决策（v6 机制换装）~~ **已落地（2026-09-14）**：delta `judge-enumeration-cap-and-ablation-materials` —— ① judge 输出契约加 `points` 结构化枚举（data/qualitative）+ 代码按枚举封顶（不依赖 LLM 自律），枚举缺失 fail-open 但标 `enumeration_missing` 落库；② 判分协议改 **K 次均值**（`run_judge_mean`，K 经 CLI 声明），每次分数与极差随 run/重判行落盘；③ 消融材料（judge_vars）按 run 落盘 + 标的/重复次数参数化 → rubric 变更可离线重判。round11 判定达标（见 §2.5 收口结果）。**遗留（新登记）**：v6 取值域压缩到 4.0–4.333 → 该维度对消融层增量的分辨力受限；如需恢复区分度，候选=（a）把「纯定性论点条数」作为连续指标入消融（当前枚举粒度在「子句 vs 整行」间不稳，需先在 rubric 里钉死粒度），（b）改用成对比较（pairwise）替代 1-5 绝对刻度，（c）把定性/定量判定前移到辩论节点（结构化输出 key_arguments 时自带 data 锚点，确定性输入信号）——三者均需新 delta 与人工标注对照
+- **debate 5 分边界可靠性（round9 审计 → round10 v5 → round11 v6）**：~~待决策（v6 机制换装）~~ **已落地（2026-09-14）**：delta `judge-enumeration-cap-and-ablation-materials` —— ① judge 输出契约加 `points` 结构化枚举（data/qualitative）+ 代码按枚举封顶（不依赖 LLM 自律），枚举缺失 fail-open 但标 `enumeration_missing` 落库；② 判分协议改 **K 次均值**（`run_judge_mean`，K 经 CLI 声明），每次分数与极差随 run/重判行落盘；③ 消融材料（judge_vars）按 run 落盘 + 标的/重复次数参数化 → rubric 变更可离线重判。round11 判定达标（见 §2.5 收口结果）。**遗留（新登记）**：v6 取值域压缩到 4.0–4.333 → 该维度对消融层增量的分辨力受限；如需恢复区分度，候选=（a）把「纯定性论点条数」作为连续指标入消融（当前枚举粒度在「子句 vs 整行」间不稳，需先在 rubric 里钉死粒度），（b）改用成对比较（pairwise）替代 1-5 绝对刻度，（c）把定性/定量判定前移到辩论节点（结构化输出 key_arguments 时自带 data 锚点，确定性输入信号）——三者均需新 delta 与人工标注对照——**候选 (c) 已落地（2026-09-16，delta `add-debate-argument-anchors`）**：`key_arguments` 结构化（kind+anchors）+ 零 LLM 锚点存在性校验（fail-open）+ `argument_anchor_coverage` 入评估/材料/消融；把覆盖率并入 debate 判据（rubric 纳入）仍留待校准轮。
 - **消融跑批前的两处小账（2026-09-14 盘点发现）**：① `tests/scripts/ablation_aggregate_90.py` 仍指向旧工作树路径 `.worktrees/evals-boot/reports/ablation/resume.json`（新驱动默认写 `reports/ablation/resume.json`）且硬编码「< 90 条即退出」——跑新批次前需参数化（`--resume/--min-runs`）或改默认路径；② 该脚本未读新增的 `judge_detail`（scores/score_spread/qualitative_points）——90 条权威报告建议附「judge 极差与纯定性条数」分布，使 debate 维度取值域压缩的影响可见
 - **hosted 实验路径仍是单次判分**：`python -m evals.run`（`reports/evals/*.json` 与跨实验对比的数据源）的 judge 仍单次调用，带 ±1 调用级噪声（本轮只把**消融**路径改成 K 次均值）。口径一致性候选：也给该路径加 K（成本 ×K、且会改变与历史报告的绝对分可比性）——需 owner 定；在此之前跨实验比较请按「同噪声下的相对差异」解读
 - mypy 全仓 75 个既有错误（本次触碰文件为 0），是否立清理任务
