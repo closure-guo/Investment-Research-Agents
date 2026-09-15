@@ -76,6 +76,35 @@ class TestCalcDerivedSeries:
         assert d["chg_60d"] is None
         assert d["chg_5d"] is not None
 
+    def test_ma_spread_fields(self):
+        # trend=1.0：收盘 100→179；MA5 末值=177.0，MA20=169.5，MA60=149.5
+        d = calc_derived_series(_kline(80, base=100.0, trend=1.0))
+        assert d["ma_spread_5_20_pct"] == pytest.approx(4.42, abs=0.01)
+        assert d["ma_spread_20_60_pct"] == pytest.approx(13.38, abs=0.01)
+        assert d["close_vs_ma20_pct"] == pytest.approx(5.60, abs=0.01)
+        assert d["close_vs_ma60_pct"] == pytest.approx(19.73, abs=0.01)
+
+    def test_ma_spreads_match_technical_ma(self):
+        # 与 calc_technical 的均线口径必须同源（同一份 _calc_ma）
+        from finance_agent.metrics.technical import calc_technical
+
+        k = _kline(80, base=100.0, trend=1.0)
+        d = calc_derived_series(k)
+        ma = calc_technical(k)["MA"]
+        ma5, ma20 = ma["5"][-1], ma["20"][-1]
+        assert d["ma_spread_5_20_pct"] == pytest.approx((ma5 - ma20) / ma20 * 100, abs=0.01)
+
+    def test_ma60_spreads_none_when_short(self):
+        d = calc_derived_series(_kline(30))
+        assert d["ma_spread_20_60_pct"] is None
+        assert d["close_vs_ma60_pct"] is None
+        assert d["ma_spread_5_20_pct"] is not None
+
+    def test_ma_spreads_none_kline(self):
+        d = calc_derived_series(None)
+        assert d["ma_spread_5_20_pct"] is None
+        assert d["close_vs_ma60_pct"] is None
+
 
 class TestSearchStockSnapshotContract:
     """quick search_stock 结果快照契约由 agent_factory 测试覆盖（test_toolize_quick.py），
