@@ -6,18 +6,11 @@
 
 ## 1. P0 工程收口（零 LLM 成本）
 
-- [ ] 1.1 确认 `update-ablation-driver-parity-and-report-status` 已收口合并，本 delta rebase 到其合并结果（project-workflow §6 同 Requirement 冲突处理）
-      **阻塞**：该 delta 的改动（`diff_mean` 重命名 / 驱动接回 `_applicable_dims` / 驱动侧 digest 核验）在 2026-09-16 夜晚仍为未提交状态，无法 rebase。
-- [ ] 1.2 F0 后半：`tests/scripts/ablation_pilot.py` 的 judge 判分与 `judge_vars` 落盘逻辑移入库侧 `evals/ablation.py`，驱动只保留续跑/记账/coverage 包装；驱动侧不再存在判分/过滤/落盘重复实现（先写失败测试：驱动薄壳化后现有跑批行为不变）
-      **阻塞**：同 1.1（编辑该文件会覆盖未提交改动）。
-- [ ] 1.3 F3：消融聚合的 citation 腿接入四桶拆报口径（blocked / analyst_true_fail / surgical_repaired / verifier_normalized），`citation_pass` 标量退出层增量比较路径（带回归测试：旧标量字段仍产出但不进层增量结论）
-      **阻塞**：同 1.1（`evals/ablation.py` 聚合路径 + `evals/run.py` 拆报输出均被他方持有）。
-      **部分前置已就绪**：四桶常量与拆报聚合已在 `evals/causal_ablation/escape.py::split_verifier_buckets` 落地（Task 6）。
-- [ ] 1.4 F8：结论注册表——evals 报告头部 `status: active | superseded-by` 字段约定 + docs/evals 索引状态渲染；存量报告（pilot.md / n10 报告）作为首批注册对象核对一遍
-      **代码部分已完成**：`report_status.py`（解析/校验/徽章）+ `status_index.py`（索引渲染）已落地并测试（Task 9 / Task 13）。
-      **文档部分阻塞**：`docs/evals/` 索引与存量报告核对须在 parity 落库后执行（该目录正被改动）。
-- [ ] 1.5 薄壳化后 3 标的通路验证（复用 resume.json 断点续跑设施，TESTING=1 stub 模式跑通全链路，digest 核验生效）
-      **阻塞**：依赖 1.2。
+- [x] 1.1（2026-09-16 解阻）parity delta 已提交（`b24341c`）并归档；本 delta rebase 至其合并结果（21 提交零冲突），因果套件自检 147 passed；同名 Requirement 按「保留双方实质」并入 parity 三段 + 两条 scenario（`881a1ea`）
+- [x] 1.2（G1，`94ee58e`）judge 判分/维度过滤/材料落盘移入库侧 `score_run`；驱动仅续跑/记账/coverage；红 14 → 绿 56 passed；审查 Spec ✅/Approved
+- [x] 1.3（G2，`83f161e`）四桶层增量条目（配对口径同 judge 维度）+ `citation_pass` 退出层增量结论（`not_for_conclusions`，变体级仍产出）；红 22 → 绿 70 passed；审查 Spec ✅/Approved
+- [x] 1.4（G3，`a869996`）索引落 `docs/evals/README.md`（与 render 逐字节一致）；pilot/n10 核对通过；未标注 12 份如实列出（未伪填）；两处解析器小瑕疵待 owner 决策
+- [x] 1.5（G5，2026-09-16）`TESTING=1` stub（judge 进程内确定性注入）3 标的 × 3 变体 = 9 runs 跑通；续跑零新增；篡改 digest → RuntimeError；脚本入 `tests/scripts/ablation_pathway_verify.py`。**副产**：发现并修复 parity digest 核验高危缺陷（`1c33a53`，对象列 tobytes 为指针致核验恒失败）
 
 ## 2. 因果主张登记与指标管线（框架代码）
 
@@ -37,8 +30,6 @@
 - [x] 3.1 阳性对照验证：已知劣化变体（关 verify_citations）的差异可被逃逸率管线检出（不一致对子比例 ≥50%）——`tests/evals/causal_ablation/test_positive_control.py`
 - [x] 3.2 注入强度 pilot 校准判据：不一致对子比例 <10% → too_easy、>90% → too_hard、否则可扩批（`pilot_calibration.py`，含停止规则建议文案）
       （真实材料上的 pilot 数据跑批待 P1 启动后执行）
-- [ ] 3.3 `docs/evals/metrics.md` §1 口径先行变更：登记因果下游指标口径、逃逸率口径、结论两句式、结论注册表；时间线加一行
-      **阻塞**：该文件正被 parity delta 改动。
+- [x] 3.3（G4，`a869996`）metrics §1.7 四类口径 + 「消融 v2 口径切点」时间线段；§1.5/§1.6 与 adba 段落保留
 - [x] 3.4 P1 预登记文档起草（10 标的 pilot）：主指标 / MDE / 分型预算 / 终裁成本上限 / 停止规则 / rubric 版本锁定——`evals/ablation/preregister/2026-09-16-p1-injection-pilot.md`
-- [ ] 3.5 人工验证报告落 `tests/validation/`：薄壳化通路验证 + 注入确定性复现抽查 + 阳性对照结果
-      **部分完成**：框架部分验证报告已落 `tests/validation/2026-09-16-causal-ablation-framework-validation.md`；薄壳化通路验证（依赖 1.2）待解阻后补。
+- [x] 3.5（G6，`881a1ea`）报告补录：GATED 执行记录（G1–G5 + 高危 digest 缺陷 + spec 合并）+ 待 owner 复核项更新（4+4 项）；阳性对照/注入确定性由 Task 11/12 既有用例覆盖
