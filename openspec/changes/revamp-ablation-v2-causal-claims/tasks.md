@@ -33,3 +33,12 @@
 - [x] 3.3（G4，`a869996`）metrics §1.7 四类口径 + 「消融 v2 口径切点」时间线段；§1.5/§1.6 与 adba 段落保留
 - [x] 3.4 P1 预登记文档起草（10 标的 pilot）：主指标 / MDE / 分型预算 / 终裁成本上限 / 停止规则 / rubric 版本锁定——`evals/ablation/preregister/2026-09-16-p1-injection-pilot.md`
 - [x] 3.5（G6，`881a1ea`）报告补录：GATED 执行记录（G1–G5 + 高危 digest 缺陷 + spec 合并）+ 待 owner 复核项更新（4+4 项）；阳性对照/注入确定性由 Task 11/12 既有用例覆盖
+
+## 4. G7 收尾修复（2026-09-16，审查跟进项，非 owner 决策项）
+
+- [x] 4.1 ⑤a `report_status.py` 状态解析行界——跨行捕获曾致 malformed `superseded-by` 通过校验（红→绿，malformed 现抛错）
+- [x] 4.2 ⑤b `status_index.py` 徽章携真实目标 + 索引 README 重渲染（marker 区与现场重跑逐字节一致）
+- [x] 4.3 ⑥ 四桶层条目 `lower_is_better` 元数据（`blocked`/`analyst_true_fail`=True；`surgical_repaired`/`verifier_normalized`=None）——结论措辞未动
+- [x] 4.4 ⑦ `ablation_aggregate_90.py` 四桶渲染 + 标量行标注「不入层增量结论」（路径/阈值/参数化未动，另属登记遗留）
+- [x] 4.5 ⑧ 驱动 `main()` 透传 `--judge-repeats`（CLI 契约修复；端到端断言 kwargs + 产物 config + 库侧判分 K）
+- 提交 `96a1faf`（11 文件）；scoped 113 passed + `tests/evals -m "not live"` 696 passed；审查 Spec ✅ / Approved

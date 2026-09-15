@@ -93,10 +93,10 @@ grep -q '"diff_mean"' evals/ablation.py && grep -q '_applicable_dims' tests/scri
 - [ ] P1 预登记文档的**决策阈值与换算依据**（拦截率 <50% 判薄防线）是否可作为 P1 跑批依据
 - [ ] 逃逸率语义确认：**分母 = 已终裁单元数**，未终裁时 `rate=None`（不报 0%）——是否与产品口径一致
 - [ ] GATED 任务解阻后是否继续执行 1.2/1.3/1.4/3.3
-- [ ] G3 两处解析器小瑕疵是否修：`parse_status` 把状态值后首个 token 当 target（n10 取代者列显示 `**日期**:`）、`status_badge` 未传目标致 superseded 徽章恒显 `<缺目标>`（真实指针列正确）——各一行修复
-- [ ] G2 桶结论方向措辞：`conclusion_for_layer` 共用致 `blocked` 下降被写成「显著退步」（计数正确、方向语义相反）——需方向感知措辞或 `lower_is_better` 元数据
-- [ ] `tests/scripts/ablation_aggregate_90.py` 不再渲染 citation 层行（`if "ci" in cpr` 静默跳过，无崩溃）——待补四桶渲染
-- [ ] 驱动 `main()` 未透传 `--judge-repeats`（既有缺陷，G1 审查确认非回归）——G5 通路验证未裁决，待定
+- [x] ~~G3 两处解析器小瑕疵~~ **已修（G7，`96a1faf`）**：状态解析行界化（malformed `superseded-by` 现被校验拒绝）+ 徽章携真实目标；索引 README 已重渲染（逐字节核验）
+- [x] ~~G2 桶结论方向措辞~~ **已按默认处置（G7，`96a1faf`）**：四桶层条目加 `lower_is_better` 元数据（blocked/analyst_true_fail=True；telemetry 两桶=None），**措辞未动**、由消费方按元数据解读——如需方向感知措辞请 owner 另行裁决
+- [x] ~~aggregate_90 citation 层行~~ **已修（G7，`96a1faf`）**：四桶渲染 + 标量行标注「不入层增量结论」；路径/阈值/参数化未动（另属登记遗留）
+- [x] ~~`--judge-repeats` 未透传~~ **已修（G7，`96a1faf`）**：CLI 契约修复，端到端断言（kwargs + 产物 config + 库侧判分 K=5）
 
 ## 结论
 
