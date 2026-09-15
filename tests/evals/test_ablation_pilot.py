@@ -60,10 +60,27 @@ class _FakeAblation:
 
     def run_variant_once(self, variant: str, snapshot: dict, query: str) -> dict:
         self.run_calls.append((variant, query))
-        # 锚点覆盖率（delta add-debate-argument-anchors 4.4）：analysts 无辩论层 → None
+        # 锚点覆盖率（delta add-debate-argument-anchors 4.4）：analysts 无辩论层 → None；
+        # 真实协议为 value + 拆项（与 evals/task.py 的 detail 同口径）
         coverage = {
-            "plus_debate": {"value": 0.5, "total": 4, "anchored": 2},
-            "full": {"value": 0.75, "total": 4, "anchored": 3},
+            "plus_debate": {
+                "value": 0.5,
+                "total": 4,
+                "anchored": 2,
+                "unanchored_inference": 1,
+                "unresolved": 1,
+                "missing_required": 0,
+                "unspecified": 0,
+            },
+            "full": {
+                "value": 0.75,
+                "total": 4,
+                "anchored": 3,
+                "unanchored_inference": 0,
+                "unresolved": 1,
+                "missing_required": 0,
+                "unspecified": 0,
+            },
         }.get(variant)
         return {
             "final_report": f"report-{variant}",
@@ -202,21 +219,41 @@ class TestMaterialPersistence:
 class TestAnchorCoverageRecord:
     """delta add-debate-argument-anchors 4.4：驱动 run 记录携带 argument_anchor_coverage。"""
 
-    def test_run_record_carries_anchor_coverage_value(self, env):
+    def test_run_record_carries_anchor_coverage_value_and_detail(self, env):
         path = _run(env, tickers=["600519"], repeats=1)
         artifact = json.loads(path.read_text(encoding="utf-8"))
         by_variant = {r["variant"]: r for r in artifact["run_costs"]}
         assert by_variant["analysts"]["argument_anchor_coverage"] is None, "无辩论层不得伪造 0"
+        assert by_variant["analysts"]["argument_anchor_coverage_detail"] is None
         assert by_variant["plus_debate"]["argument_anchor_coverage"] == 0.5
         assert by_variant["full"]["argument_anchor_coverage"] == 0.75
+        assert by_variant["plus_debate"]["argument_anchor_coverage_detail"] == {
+            "total": 4,
+            "anchored": 2,
+            "unanchored_inference": 1,
+            "unresolved": 1,
+            "missing_required": 0,
+            "unspecified": 0,
+        }, "拆项（去 value）随 run 记录落盘，供归因"
+        assert by_variant["full"]["argument_anchor_coverage_detail"] == {
+            "total": 4,
+            "anchored": 3,
+            "unanchored_inference": 0,
+            "unresolved": 1,
+            "missing_required": 0,
+            "unspecified": 0,
+        }
 
-    def test_resume_record_carries_anchor_coverage_value(self, env):
-        """断点续跑台账与产物同批落盘 → resume 记录同样携带该值。"""
+    def test_resume_record_carries_anchor_coverage_value_and_detail(self, env):
+        """断点续跑台账与产物同批落盘 → resume 记录同样携带 value 与拆项。"""
         _run(env, tickers=["600519"], repeats=1)
         resume = json.loads(env.resume.read_text(encoding="utf-8"))
         by_variant = {r["variant"]: r for r in resume["runs"]}
         assert by_variant["analysts"]["argument_anchor_coverage"] is None
+        assert by_variant["analysts"]["argument_anchor_coverage_detail"] is None
         assert by_variant["full"]["argument_anchor_coverage"] == 0.75
+        assert by_variant["full"]["argument_anchor_coverage_detail"]["anchored"] == 3
+        assert by_variant["full"]["argument_anchor_coverage_detail"]["unanchored_inference"] == 0
 
 
 class TestParameterization:

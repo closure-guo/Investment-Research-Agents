@@ -429,6 +429,13 @@ def run_ablation(
                         "judge": judge_scores,
                         # 论点锚点覆盖率 value（4.4）：analysts 无辩论层 -> None，不得伪造 0
                         "argument_anchor_coverage": (out["anchor_coverage"] or {}).get("value"),
+                        # 拆项随 run 记录落盘（spec「value 与拆项」；detail 去 value——
+                        # value 已单独成键，拆项只留分桶计数供归因，镜像 evals/task.py）
+                        "argument_anchor_coverage_detail": (
+                            {k: v for k, v in out["anchor_coverage"].items() if k != "value"}
+                            if out["anchor_coverage"]
+                            else None
+                        ),
                     }
                 )
     report = aggregate_results(runs)

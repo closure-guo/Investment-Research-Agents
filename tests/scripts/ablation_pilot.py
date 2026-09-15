@@ -206,6 +206,13 @@ def run_pilot(
             # 由 run_variant_once 从 state 通道 debate_anchor_checks 提取；analysts 无辩论层
             # -> None（不得伪造成 0）
             "argument_anchor_coverage": (out["anchor_coverage"] or {}).get("value"),
+            # 拆项（去 value）同落 run 记录/resume 台账：spec「value 与拆项」，
+            # 口径与 evals/task.py 的 argument_anchor_coverage_detail 一致
+            "argument_anchor_coverage_detail": (
+                {k: v for k, v in out["anchor_coverage"].items() if k != "value"}
+                if out["anchor_coverage"]
+                else None
+            ),
             "judge": judge_scores,
             "judge_detail": judge_details,
         }

@@ -141,8 +141,20 @@ class TestAnchorCoverageWiring:
         )
         out = ablation.run_variant_once("plus_debate", {"stock_code": "600519"}, "综合评估投资价值")
         assert out["anchor_coverage"] is not None, "有论点就必须携带锚点覆盖率"
+        assert set(out["anchor_coverage"]) == {
+            "value",
+            "total",
+            "anchored",
+            "unanchored_inference",
+            "unresolved",
+            "missing_required",
+            "unspecified",
+        }, "value + 拆项桶名须与锚点统计（anchor_stats / task.py detail）同口径"
         assert out["anchor_coverage"]["value"] == 0.5
         assert out["anchor_coverage"]["unanchored_inference"] == 1
+        assert out["anchor_coverage"]["unresolved"] == 0
+        assert out["anchor_coverage"]["missing_required"] == 0
+        assert out["anchor_coverage"]["unspecified"] == 0
         assert out["anchor_coverage"]["total"] == 2
 
     def test_run_variant_once_anchor_none_without_arguments(self, monkeypatch):
@@ -157,8 +169,8 @@ class TestAnchorCoverageWiring:
         out = ablation.run_variant_once("analysts", {"stock_code": "600519"}, "综合评估投资价值")
         assert out["anchor_coverage"] is None
 
-    def test_run_ablation_run_records_carry_anchor_value(self, monkeypatch):
-        """run 记录携带 argument_anchor_coverage = 指标 value（analysts → None）。"""
+    def test_run_ablation_run_records_carry_anchor_value_and_detail(self, monkeypatch):
+        """run 记录携带 value + 拆项（spec「value 与拆项」；analysts → 双 None）。"""
         import evals.ablation as ablation
 
         captured: dict[str, list[dict]] = {}
@@ -168,7 +180,19 @@ class TestAnchorCoverageWiring:
             return {}
 
         def fake_run_once(variant, snapshot, query):
-            coverage = None if variant == "analysts" else {"value": 0.25, "total": 4, "anchored": 1}
+            coverage = (
+                None
+                if variant == "analysts"
+                else {
+                    "value": 0.25,
+                    "total": 8,
+                    "anchored": 2,
+                    "unanchored_inference": 3,
+                    "unresolved": 1,
+                    "missing_required": 1,
+                    "unspecified": 1,
+                }
+            )
             return {
                 "final_report": "r",
                 "citation_pass": True,
@@ -186,8 +210,20 @@ class TestAnchorCoverageWiring:
         records = {r["variant"]: r for r in captured["runs"] if r["ticker"] == "600519"}
         assert len(captured["runs"]) == 6
         assert records["analysts"]["argument_anchor_coverage"] is None, "无论点不得伪造 0"
+        assert records["analysts"]["argument_anchor_coverage_detail"] is None
         assert records["plus_debate"]["argument_anchor_coverage"] == 0.25
         assert records["full"]["argument_anchor_coverage"] == 0.25
+        # 拆项（去 value——value 已单独成键），镜像 evals/task.py 的同名字段
+        expected_detail = {
+            "total": 8,
+            "anchored": 2,
+            "unanchored_inference": 3,
+            "unresolved": 1,
+            "missing_required": 1,
+            "unspecified": 1,
+        }
+        assert records["plus_debate"]["argument_anchor_coverage_detail"] == expected_detail
+        assert records["full"]["argument_anchor_coverage_detail"] == expected_detail
 
 
 class TestAnchorCoverageAggregation:
@@ -248,6 +284,26 @@ class TestAnchorCoverageAggregation:
         )
         report = aggregate_results(runs)
         assert "argument_anchor_coverage" not in report["layers"]["full"]
+
+    def test_detail_key_does_not_affect_aggregation(self):
+        """拆项键只随 run 记录落盘，聚合不读取：带不带它报告逐字段相同。"""
+        runs = (
+            self._anchor_runs("analysts", {"t0": [None], "t1": [None]})
+            + self._anchor_runs("plus_debate", {"t0": [0.5], "t1": [0.6]})
+            + self._anchor_runs("full", {"t0": [0.8], "t1": [0.9]})
+        )
+        with_detail = [
+            {
+                **r,
+                "argument_anchor_coverage_detail": (
+                    {"total": 4, "anchored": 2}
+                    if r["argument_anchor_coverage"] is not None
+                    else None
+                ),
+            }
+            for r in runs
+        ]
+        assert aggregate_results(with_detail) == aggregate_results(runs)
 
     def test_old_records_without_key_skipped_gracefully(self):
         """旧 run 记录（无该键）不得炸聚合：跳过该指标，变体中位数记 None。"""
