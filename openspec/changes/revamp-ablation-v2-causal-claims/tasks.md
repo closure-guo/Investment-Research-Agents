@@ -42,3 +42,12 @@
 - [x] 4.4 ⑦ `ablation_aggregate_90.py` 四桶渲染 + 标量行标注「不入层增量结论」（路径/阈值/参数化未动，另属登记遗留）
 - [x] 4.5 ⑧ 驱动 `main()` 透传 `--judge-repeats`（CLI 契约修复；端到端断言 kwargs + 产物 config + 库侧判分 K）
 - 提交 `96a1faf`（11 文件）；scoped 113 passed + `tests/evals -m "not live"` 696 passed；审查 Spec ✅ / Approved
+
+## 5. P1 启动（2026-09-16，owner 指令"启动P1"）
+
+- [x] 5.1 P1 runner 建成（`5f1e4f2`，含盲区/接线缺口披露）+ 注入载荷接线到真实 state 结构（`21b2700`）；两提交审查 Spec ✅/Approved
+- [x] 5.2 基准材料生成：10 标的 × analysts 变体真跑 → `reports/ablation/p1/materials/`（002304 遇数据源降级走回退）
+- [x] 5.3 跑批执行：离线腿 200 单元（**0 LLM 已核验**）+ 限量真跑腿 13 单元（204 调用）；阳性对照显著（p=4.09e-16）；总体不一致比 0.485 落健康区间
+- [x] 5.4 校准报告 + 终裁清单：`tests/validation/2026-09-16-p1-injection-pilot-validation.md` + `2026-09-16-p1-adjudication-worklist.csv`（201 条待 owner 终裁）
+- [x] 5.5 P1 命中缺陷修复：anchors 形态崩溃（`09a5029`）+ 预算漏计/void 先跑后废（`fdfeb9f`）
+- [ ] 5.6（待 owner）终裁 201 条 → 回填 escape_rate；随后按校准结论重校注入强度（period_shift 降强度；context 级真跑强化靶点）
