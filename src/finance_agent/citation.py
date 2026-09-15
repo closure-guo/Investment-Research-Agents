@@ -692,12 +692,9 @@ def _verify_comparative(claim: Claim, state: dict) -> CitationResult:
     )
 
 
-def _verify_textual(claim: Claim, state: dict) -> CitationResult:
-    """文本 claim 回声匹配：归一后子串命中 news_list / key_events / field_ref 解析文本。
-
-    未命中判 UNVERIFIABLE(text)——文本 claim 的语义忠实性由 decision_grounding
-    judge（rubric v6 逐条核对 claim 与 source）与人工盲标承担，确定性门禁不越权。
-    """
+def collect_text_sources(state: dict) -> list[str]:
+    """回声源集合（归一前原文）：news/key_events/公告/研报/解禁/大宗——文本 claim 与
+    辩论 event 锚点共用同一集合（单一实现，勿复制）。"""
     sources: list[str] = []
     news = state.get("news_list") or []
     if isinstance(news, list):
@@ -722,6 +719,16 @@ def _verify_textual(claim: Claim, state: dict) -> CitationResult:
                 for f in fields
                 if i.get(f)
             ]
+    return sources
+
+
+def _verify_textual(claim: Claim, state: dict) -> CitationResult:
+    """文本 claim 回声匹配：归一后子串命中 news_list / key_events / field_ref 解析文本。
+
+    未命中判 UNVERIFIABLE(text)——文本 claim 的语义忠实性由 decision_grounding
+    judge（rubric v6 逐条核对 claim 与 source）与人工盲标承担，确定性门禁不越权。
+    """
+    sources = collect_text_sources(state)
     resolved = _resolve_field_ref(claim.field_ref, state)
     if isinstance(resolved, str):
         sources.append(resolved)

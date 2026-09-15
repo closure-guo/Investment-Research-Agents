@@ -315,3 +315,9 @@ class TestStateChannelsDeclared:
         channels = set(build_5layer_graph().builder.channels)
         for key in ("citation_coverage_gap", "value_mismatch_repaired"):
             assert key in channels, f"AnalysisState 缺少声明: {key}"
+
+    def test_graph_channels_declare_debate_anchor_keys(self):
+        from finance_agent.graph import build_5layer_graph
+
+        channels = set(build_5layer_graph().builder.channels)
+        assert "debate_anchor_checks" in channels, "AnalysisState 缺少声明: debate_anchor_checks"

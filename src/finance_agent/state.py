@@ -92,6 +92,9 @@ class AnalysisState(TypedDict, total=False):
 
     # Layer II: Researcher Team（Bull/Bear 辩论）
     debate_history: Annotated[list[dict], add]
+    # 论点锚点校验记录（add-debate-argument-anchors）：辩手/风控两层辩论按论点追加，
+    # 由 debate_anchors.check_argument_anchors 产出（fail-open，不参与路由）
+    debate_anchor_checks: Annotated[list[dict], add]
     focus_summary: str  # 研究聚焦摘要（report 节点无条件生成，judge report_conclusion 直取源）
     research_manager_conclusion: str  # 评级前置拼装（RM 结构化输出的人读渲染）
     research_manager_rating: str | None  # 看多/看空/中性（战绩结算与 judge 变量直取）
