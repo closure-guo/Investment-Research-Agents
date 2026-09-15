@@ -104,10 +104,14 @@ def calc_technical(kline: pd.DataFrame) -> dict[str, dict[str, list[float | None
 
 
 def _pct_spread(a: float | None, b: float | None) -> float | None:
-    """(a − b) / b × 100（%）；任一缺失或 b 为 0 → None。"""
+    """(a − b) / b × 100（%）；任一缺失或 b 为 0 → None。
+
+    round 后归零的极小负值归一为 +0.0，避免 context JSON 渲染成 "-0.0"。
+    """
     if a is None or b is None or b == 0:
         return None
-    return round((a - b) / b * 100, 2)
+    spread = round((a - b) / b * 100, 2)
+    return 0.0 if spread == 0 else spread
 
 
 def calc_derived_series(
@@ -117,6 +121,9 @@ def calc_derived_series(
 ) -> dict:
     """常用派生值预生成（toolize-price-levels）：区间涨跌幅 + 距高低点回撤/反弹 + 均线差幅。
 
+    单位约定（有意混用，spec 规定）：chg_*d / drawdown_from_high_250d /
+    rebound_from_low_250d 为小数比率（round 4 位）；ma_spread_*_pct /
+    close_vs_ma*_pct 为百分比（round 2 位）。
     工具算好供 LLM 直接引用（field_ref: derived_series.*），避免 LLM 对序列心算。
     数据不足的派生项值为 None（如实标注缺失，不伪造）。kline 缺失时全 None。
     """
