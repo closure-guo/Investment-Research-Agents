@@ -77,6 +77,9 @@ class AnalysisState(TypedDict, total=False):
     technical_indicators: dict  # calc_technical() 输出
     risk_metrics: dict  # calc_risk() 输出
     derived_series: dict  # calc_derived_series() 输出（toolize-price-levels；此前未声明被图丢弃）
+    # price_levels 同族同病：compute 写入但从未声明 → 图合并静默丢弃，validate 恒走
+    # 「price_levels 不可用，跳过校验」分支（参考带 band 校验与二次失败修正从未生效）
+    price_levels: dict  # calc_price_levels() 输出
     macro_indicators: dict  # CPI/PMI/M2/LPR
     news_list: list[dict]  # 新闻列表
     announcements: list[dict]  # 公司公告列表（add-analyst-data-coverage）

@@ -20,6 +20,10 @@ def _kline(n=80, base=100.0, trend=1.0):
     （派生值块与指标块同段渲染，指标空则该段整体跳过）。初始 state 注入
     kline 后，编译图真实走 calc_technical/calc_derived_series 产出派生值，
     本文件才真正验到「派生值经图合并存活并进入 context」。
+
+    trend=1.0 相对 test_levels.py 的默认 0.0 是**故意**的：收盘逐日递增使
+    涨跌幅/回撤/反弹全为非零真实值，断言才能钉住「真算出来的数」而非
+    全 None / 全 0 的退化形态。
     """
     rows = []
     for i in range(n):
@@ -44,9 +48,12 @@ class TestDerivedSeriesChannel:
         channels = set(build_5layer_graph().builder.channels)
         assert "derived_series" in channels, "AnalysisState 缺少声明: derived_series"
 
-    def test_derived_series_reaches_technical_context_in_real_graph(self, monkeypatch):
+    def test_derived_series_reaches_technical_context_in_real_graph(self, monkeypatch, tmp_path):
         """TESTING=1 确定性 stub 下跑通编译图：派生值存活且进入技术面 context。"""
         monkeypatch.setenv("TESTING", "1")
+        # 非 live 测试不得写默认 reports/：全图跑到终止节点 generate_file 会落盘
+        # ~760KB × 3 格式（docx/pptx/md）。同 test_export_api.py 隔离手法。
+        monkeypatch.setenv("REPORTS_DIR", str(tmp_path))
         import finance_agent.nodes.analysts as analysts_mod
 
         captured: dict = {}
@@ -71,6 +78,9 @@ class TestDerivedSeriesChannel:
         assert state_has_derived is True
         assert "常用派生值" in ctx
         assert "derived_series." in ctx
+        # 注入的 80 期 K 线使 5/20/60 日窗口全部可算：不得出现「数据不足」，
+        # 否则本用例在全 None 派生值下也会通过（退化为只验键在不在）。
+        assert "数据不足" not in ctx
 
     def test_derived_claim_resolves_and_passes(self):
         """以 derived_series.<字段> 为 field_ref 的数值 claim 可解析并通过校验。"""

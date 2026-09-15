@@ -305,6 +305,7 @@ class TestStateChannelsDeclared:
             "price_level_correction_reason",
             "derived_metrics",
             "derived_series",  # ground-comparative-delta-claims：compute 写入但从未声明
+            "price_levels",  # 同族：compute 写入但从未声明（band 校验/参考带修正恒不可达）
         ):
             assert key in channels, f"AnalysisState 缺少声明: {key}"
 
