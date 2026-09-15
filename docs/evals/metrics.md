@@ -36,6 +36,7 @@
 | citation_verifier_normalized | 跟踪 | 归一后由 FAIL 转 PASS 的计数（unit/percent/echo）＝校验器此前解析债的量化 |
 | citation_unverifiable_text | 跟踪 | 文本 claim（entity/regulatory/event）分型排除，不计阻断分母 |
 | citation_unverifiable_unregistered | 跟踪 | 未注册/空值 UNVERIFIABLE（目标：注册后趋零） |
+| citation_unverifiable_comparative_delta | 跟踪 | 比较型差值申报（comparative 的 stated_value 非三枚举，如「MA5 较 MA20 低约 2.3%」的 2.3）；不计阻断分母，与 unregistered 互斥不重复计数 |
 | citation_surgical_repaired | 跟踪 | 单点修复成功回填条数（稀疏 value_mismatch，同一分析师同轮 <3 处触发）；已计入 `analyst_true_fail`，单独计数用于观测修复触发/成功率——修复失败时无重试回退（自动重试已关），失败即标记阻断 |
 | citation_coverage_warn | 警告 | coverage < 0.90 报警不阻断 |
 | auto_claims | 跟踪 | 正文数字唯一匹配 state 条目自动合成的 claim 数 |
@@ -120,7 +121,9 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 
 **待 owner 终裁（round7 校准，2026-09-13）**：~~已完成~~——4 行 judge source 归属扣分成立（人工改 4）、1 行 judge 误判（维持人工 5）、1 行灰区（维持 5）、1caf1f7b 单向解读成立（维持 3）、7e6bc8bc 改 4、5f41a49a 补填 5。终值：整体 MAE 0.342 / 方向一致率 97.6%。rubric v7 四项改动清单已定稿（见校准报告）。
 
-**校验器 follow-up（2026-09-13，22 条终裁副产品）**：① 比较型 claim（「MA5 较 MA20 低约 X」）重算注册——**仍开放**：`_verify_comparative` 对数值差值申报（非 greater/less/equal 枚举）返回 UNVERIFIABLE、不计缺口，组件数字可从 state 推导，尚未注册重算；② quarterly_trend 期段定位补全（quarterly_trend.yoy/qoq 单季路径 path_unresolvable）——**已落地**（ff26b71：路径止于序列名时按 claim.period 季度标签补位置段）。
+**校验器 follow-up（2026-09-13，22 条终裁副产品）**：① 比较型 claim（「MA5 较 MA20 低约 X」）重算注册——**计数已落地（2026-09-15，delta `ground-comparative-delta-claims`）**：非枚举差值判 UNVERIFIABLE + 独立桶 `comparative_delta_unregistered` + 覆盖缺口（拆报第三类 `citation_unverifiable_comparative_delta`，见 §1.3）；**差值重算（路线 2）未实现**，触发条件=首轮实验统计该计数占 UNVERIFIABLE 比例并逐条归因（均线/涨跌幅类可枚举组合 vs 长尾），比例可观且长尾占多才立项 formula 申报重算；② quarterly_trend 期段定位补全（quarterly_trend.yoy/qoq 单季路径 path_unresolvable）——**已落地**（ff26b71：路径止于序列名时按 claim.period 季度标签补位置段）。
+
+**同族登记（2026-09-15，delta `ground-comparative-delta-claims` 收口）**：② `derived_series` 通路修复——此前未声明 channel（图合并丢弃）+ context 前缀 `derived.` 与真实键不一致 → 技术面派生值在生产从未注入且不可引用；已修复（含同族 `price_levels` 补声明）并补编译图端到端测试；均线差幅四字段（`ma_spread_5_20_pct` / `ma_spread_20_60_pct` / `close_vs_ma20_pct` / `close_vs_ma60_pct`）随本次扩展并注册重算根键与有符号量。③ 方向校验覆盖 computational 路径——`direction_mismatch` 现可作用于「已注册根 + 有符号 metric_name」的 computational claim（主规范「数值型（numerical/computational）」本就要求）；FAIL 构成与桶归属变化，实验收口时须按桶归因、不得直接进处置。④「数据不足」子字段被记 FAIL——recalc 返回 None（40 根 K 线下 `chg_60d`、`technical_indicators.MA.60`）判 `path_unresolvable`，与「数据不足如实标缺」的设计意图冲突；待决策改判 UNVERIFIABLE（触门禁构成，另立项）。
 
 **待决策**：
 - ~~#2 surgical 单点修复（<3 处失败真值回填）与重试准入的关系~~ **已落地（2026-09-14）**：真错口径含修复回填（`citation_analyst_true_fail = 残余 FAIL + value_mismatch_repaired`，`citation_node.py:411`）；修复数单独入拆报 `citation_surgical_repaired`；授权与三条护栏固化进规范（`citation-verification`「单点修复的自动处置授权与边界」，delta `2026-09-14-document-surgical-repair-policy`）
