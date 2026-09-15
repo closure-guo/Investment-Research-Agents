@@ -141,6 +141,7 @@ class AnalysisState(TypedDict, total=False):
     citation_coverage_warn: bool  # 警告线：coverage < 0.90
     citation_unverifiable_text: int  # 跟踪：文本 claim UNVERIFIABLE（分型排除，不进阻断分母）
     citation_unverifiable_unregistered: int  # 跟踪：未注册/空值 UNVERIFIABLE
+    citation_unverifiable_comparative_delta: int  # 跟踪：比较型差值申报（非三枚举 stated_value）
     citation_verifier_normalized: int  # 归一后由 FAIL 转 PASS 的计数（unit/percent/echo）
     auto_claims: int  # 阶段 4 自动合成 claim 数
     citation_retry_feedback: dict[str, list[dict]]  # 每分析师失败明细（重试上下文注入）

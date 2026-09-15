@@ -1224,6 +1224,27 @@ class TestGateLayers:
         assert out["citation_unverifiable_unregistered"] == 0
         assert out["citation_verifier_normalized"] == 0
 
+    def test_comparative_delta_counted_and_split_from_unregistered(self):
+        """非枚举差值：独立计数，且不再计入 unregistered（拆报三类不重叠）。"""
+        claim = Claim(
+            claim_type="comparative",
+            source_type="data",
+            field_ref="profitability_metrics.ROE.2024",
+            stated_value=2.3,
+            interpretation="2024 年 ROE 较 2023 年低约 2.3",
+            field_ref_b="profitability_metrics.ROE.2023",
+            stated_value_b=25.0,
+        )
+        report = _report("fundamental", [claim], "ROE 较上年下滑 2.3")
+        state = {
+            "analyst_reports": {"fundamental": report},
+            "profitability_metrics": {"ROE": {"2024": 28.0, "2023": 25.0}},
+        }
+        out = verify_citations(state)
+        assert out["citation_unverifiable_comparative_delta"] == 1
+        assert out["citation_unverifiable_unregistered"] == 0
+        assert out["citation_blocked"] is False
+
     def test_normalized_count_counts_unit_fix(self):
         from finance_agent.citation import Claim as NumericClaim
 

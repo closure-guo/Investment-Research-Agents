@@ -111,6 +111,11 @@ def _run_deep(inp: dict) -> dict:
             if state.get("citation_unverifiable_unregistered") is not None
             else None
         ),
+        "citation_unverifiable_comparative_delta": (
+            float(state["citation_unverifiable_comparative_delta"])
+            if state.get("citation_unverifiable_comparative_delta") is not None
+            else None
+        ),
         # surgical-citation-repair：单点修复成功回填数（观测修复触发/成功率）。
         # 注意与 analyst_true_fail 的关系——修复数已计入真错口径，此处单独计数
         # 只为让「修复有没有在干活」可观测，两者不可互相替代。

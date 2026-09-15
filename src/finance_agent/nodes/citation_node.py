@@ -422,6 +422,10 @@ def verify_citations(state: dict) -> dict:
             if r.status == "UNVERIFIABLE"
             and r.claim.claim_type not in ("entity", "regulatory")
             and r.claim.source_type != "event"
+            and r.bucket != "comparative_delta_unregistered"  # 单独计，避免重复计数
+        ),
+        "citation_unverifiable_comparative_delta": sum(
+            1 for r in results if r.bucket == "comparative_delta_unregistered"
         ),
         "citation_verifier_normalized": sum(
             1 for r in results if r.status == "PASS" and r.unit_normalized is not None

@@ -144,6 +144,7 @@ class TestTaskCitationOutputs:
                     "citation_pass": True,
                     "citation_coverage": 0.92,
                     "value_mismatch_repaired": 2,
+                    "citation_unverifiable_comparative_delta": 1,
                 }
 
         monkeypatch.setattr(task_mod, "build_5layer_graph", lambda: _FakeGraph())
@@ -152,5 +153,6 @@ class TestTaskCitationOutputs:
         out = task_mod._run_deep({"stock_code": "600519", "query": "q"})
         assert out["citation_pass"] == 1.0
         assert out["citation_coverage"] == 0.92
+        assert out["citation_unverifiable_comparative_delta"] == 1.0
         # 单点修复计数进拆报（观测修复触发/成功率；同时仍计入 analyst_true_fail）
         assert out["citation_surgical_repaired"] == 2.0
