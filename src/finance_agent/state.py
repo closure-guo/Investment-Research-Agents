@@ -76,6 +76,7 @@ class AnalysisState(TypedDict, total=False):
     benchmark_kline: pd.DataFrame  # 沪深 300 K 线
     technical_indicators: dict  # calc_technical() 输出
     risk_metrics: dict  # calc_risk() 输出
+    derived_series: dict  # calc_derived_series() 输出（toolize-price-levels；此前未声明被图丢弃）
     macro_indicators: dict  # CPI/PMI/M2/LPR
     news_list: list[dict]  # 新闻列表
     announcements: list[dict]  # 公司公告列表（add-analyst-data-coverage）
