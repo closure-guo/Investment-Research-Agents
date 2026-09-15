@@ -126,7 +126,9 @@ def _payload(
     if pollution_type == "illegal_price":
         entry = float(base_values["entry"])
         return {"set": {"stop_loss": round(entry * 1.1, 4), "entry": entry}, "field": "stop_loss"}
-    raise ValueError(f"未实现污染类型: {pollution_type}")
+    # 不可达：build_injection_cases 已在入口校验 pollution_type ∈ POLLUTION_TYPES，
+    # 本分支只作为「新增污染类型忘了实现 _payload」的显式断路器保留
+    raise ValueError(f"未实现污染类型: {pollution_type}")  # pragma: no cover
 
 
 def apply_injection(snapshot: dict[str, Any], case: InjectionCase) -> dict[str, Any]:
