@@ -86,6 +86,8 @@ class CitationResult(BaseModel):
     # 超容差，定向重试）；path_unresolvable=路径/事件不可解析；semantic_*=术语/期次
     # 张冠李戴；internal_inconsistency=stated 与 interpretation 两张皮/方向矛盾；
     # direction_mismatch=已申报方向与真值符号冲突（ehr-style-claim-direction）。
+    # comparative_delta_unregistered=比较型非三枚举差值申报的 UNVERIFIABLE 显式降级
+    # （ground-comparative-delta-claims，非 FAIL 桶，独立计覆盖缺口）。
     bucket: (
         Literal[
             "value_mismatch",
@@ -94,6 +96,8 @@ class CitationResult(BaseModel):
             "semantic_period_mismatch",
             "internal_inconsistency",
             "direction_mismatch",
+            # 比较型差值申报（非三枚举 stated_value）：显式降级，独立桶计缺口
+            "comparative_delta_unregistered",
         ]
         | None
     ) = None
@@ -637,7 +641,15 @@ def _verify_comparative(claim: Claim, state: dict) -> CitationResult:
     elif direction == "equal_to":
         passed = delta < 0.01
     else:
-        return CitationResult(status="UNVERIFIABLE", claim=claim)
+        # 差值数字填入 stated_value（「MA5 较 MA20 低约 2.3%」的 2.3）：非三枚举
+        # → 显式降级。不重算差值、不判 PASS/FAIL（ground-comparative-delta-claims
+        # 明确推迟的「路线 2」）；独立桶 + 覆盖缺口使问题规模可见。
+        return CitationResult(
+            status="UNVERIFIABLE",
+            claim=claim,
+            bucket="comparative_delta_unregistered",
+            coverage_gap=True,
+        )
 
     # D3：基期值申报与校验（comparative 双端建档）。基期真值 b 取自 field_ref_b；
     # stated_value_b 缺失（裸奔）或与真值超容差 → FAIL。
