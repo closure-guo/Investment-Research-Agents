@@ -92,7 +92,8 @@ def _build_debate_context(state: dict) -> str:
             arg_line = ""
             if args:
                 numbered = " ".join(
-                    f"{'①②③④⑤⑥⑦⑧⑨⑩'[i] if i < 10 else i + 1}.{a}" for i, a in enumerate(args)
+                    f"{'①②③④⑤⑥⑦⑧⑨⑩'[i] if i < 10 else i + 1}.{a.text if hasattr(a, 'text') else a}"
+                    for i, a in enumerate(args)
                 )
                 arg_line = f"R{rnd} 论点: {numbered}\n"
             history_lines.append(f"{arg_line}{role}(R{rnd}): {content}")

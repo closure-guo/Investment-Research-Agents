@@ -40,6 +40,20 @@ class AnalystReport(BaseModel):
         return v
 
 
+class DebateArgument(BaseModel):
+    """辩论论点（add-debate-argument-anchors）。
+
+    kind 对 LLM 只暴露 data/event/inference；unspecified 是旧格式或非法值的
+    显式降级（不猜 kind，与 direction=None 计覆盖缺口的先例一致）。
+    anchors：data 型为 state 英文键路径（与分析师 claim 同一词表）；event 型为
+    来源事件标题要点；inference 型可为空。
+    """
+
+    text: str = Field(min_length=1)
+    kind: Literal["data", "event", "inference", "unspecified"] = "unspecified"
+    anchors: list[str] = Field(default_factory=list)
+
+
 class DebateMessage(BaseModel):
     """Layer II/IV 辩论消息。
 
@@ -58,11 +72,33 @@ class DebateMessage(BaseModel):
     ]
     round: int = Field(ge=1)
     content: str
-    key_arguments: list[str]
+    key_arguments: list[DebateArgument]
     # 交锋结构化引用（harden-decision-report-semantics 1.11）：本轮回应的对方
     # 上一轮论点编号（1-based，对应对方 key_arguments 序号）。首轮开场为空。
     # 使「对方论点被回应的比例」可由代码直接计算（零 token 确定性指标）。
     rebuttal_to: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_arguments(cls, data: object) -> object:
+        """旧格式兼容：裸字符串列表 → unspecified（历史会话/夹具/TESTING stub）。"""
+        if not isinstance(data, dict):
+            return data
+        args = data.get("key_arguments")
+        if not isinstance(args, list):
+            return data
+        coerced: list[dict] = []
+        for item in args:
+            if isinstance(item, str):
+                coerced.append({"text": item, "kind": "unspecified", "anchors": []})
+            elif isinstance(item, dict):
+                d = dict(item)
+                if d.get("kind") not in ("data", "event", "inference", "unspecified"):
+                    d["kind"] = "unspecified"
+                coerced.append(d)
+            else:
+                coerced.append({"text": str(item), "kind": "unspecified", "anchors": []})
+        return {**data, "key_arguments": coerced}
 
 
 # TradeDecision.evidence_refs 的 source 规范枚举（improve-decision-grounding）
