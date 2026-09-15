@@ -4,7 +4,7 @@
 
 `DebateMessage.key_arguments` SHALL 为结构化论点列表，每项 `DebateArgument` 含 `text`（论点标头原文，非空）、`kind ∈ {data, event, inference, unspecified}` 与 `anchors: list[str]`。`kind` 对 LLM 只暴露 `data` / `event` / `inference` 三值：`data` 型的 `anchors` SHALL 为 state 英文键路径（field_ref，与分析师 claim 同一词表）；`event` 型的 `anchors` SHALL 为来源事件标题要点；`inference` 型 `anchors` 可为空。旧格式裸字符串或 `kind` 缺失/非法的论点 SHALL 解析为 `kind="unspecified"`（显式降级，SHALL NOT 推断 kind、SHALL NOT 视为解析失败）。
 
-辩论与风控辩论节点 SHALL 在解析出 `DebateMessage` 后执行**确定性锚点校验**（零 LLM 调用）：`data` 型锚点复用引用校验器的 field_ref 解析器，解析得到非 None 值判 `resolved`，否则 `unresolved`；`event` 型锚点按既有回声源集合（`news_list` / `key_events` / `announcements` / `research_reports`）归一子串匹配，命中判 `resolved`；`inference` 型锚点先按 field_ref 解析、失败再按回声匹配；`data` / `event` 型零锚点判 `missing`；`inference` 型零锚点判 `none`（合法，计数）。校验结果 SHALL 写入 `AnalysisState` 中**已声明**的 channel `debate_anchor_checks`（append reducer）并落当前 span metadata。校验 SHALL fail-open：SHALL NOT 改变路由、SHALL NOT 阻断、SHALL NOT 触发重跑。
+辩论与风控辩论节点 SHALL 在解析出 `DebateMessage` 后执行**确定性锚点校验**（零 LLM 调用）：`data` 型锚点复用引用校验器的 field_ref 解析器，解析得到非 None 值判 `resolved`，否则 `unresolved`；`event` 型锚点按既有回声源集合（`collect_text_sources`：`news_list` / `key_events` / `announcements` / `research_reports` / `share_unlock` / `block_trades`——与文本 claim 回声匹配同一实现）归一子串匹配，命中判 `resolved`；`inference` 型锚点先按 field_ref 解析、失败再按回声匹配；`data` / `event` 型零锚点判 `missing`；`inference` 型零锚点判 `none`（合法，计数）。校验结果 SHALL 写入 `AnalysisState` 中**已声明**的 channel `debate_anchor_checks`（append reducer）并落当前 span metadata。校验 SHALL fail-open：SHALL NOT 改变路由、SHALL NOT 阻断、SHALL NOT 触发重跑。
 
 `rebuttal_to` 的 1-based 编号 SHALL 继续指向对方 `key_arguments` 的位置；对手可见的辩论历史编号行（「R{n} 论点: ①…」）SHALL 只渲染 `text`，SHALL NOT 在本变更中向对手暴露锚点。
 
