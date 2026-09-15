@@ -395,7 +395,7 @@ def _verify_computational(claim: Claim, state: dict) -> CitationResult:
     # ehr-style-claim-direction：有符号量根键（derived_series）的 direction 申报
     # 与真值符号对齐后比对，符号冲突 FAIL + direction_mismatch——与数值型共用
     # _align_signed_effective 单一实现（恒正水平量上的申报仍按字面误读降级）。
-    eff, direction_fail, _ = _align_signed_effective(claim, stated, ground_truth)
+    eff, direction_fail, direction_misapplied = _align_signed_effective(claim, stated, ground_truth)
     if direction_fail is not None:
         return direction_fail
     delta = abs(ground_truth - eff)
@@ -421,6 +421,9 @@ def _verify_computational(claim: Claim, state: dict) -> CitationResult:
         ground_truth=ground_truth,
         delta=delta,
         bucket=None if passed else "value_mismatch",
+        # 与数值路径（_verify_numerical）同口径：非 signed 根键上的
+        # negative/positive 申报记覆盖缺口（spec「符号校验限定有符号量」）
+        coverage_gap=claim.direction is None or direction_misapplied,
     )
 
 

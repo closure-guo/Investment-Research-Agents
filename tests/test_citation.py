@@ -619,6 +619,75 @@ class TestComputationalRegistryCoverage:
         assert ok.ground_truth == spread
 
 
+class TestComputationalDirectionCoverageGap:
+    """computational 方向误申报的覆盖缺口（与数值路径 `:607` 对齐）。
+
+    修复前 `_verify_computational` 丢弃 `_align_signed_effective` 返回的
+    direction_misapplied——非 signed 根键上的 negative/positive 申报不记缺口，
+    而数值路径记 `coverage_gap=claim.direction is None or direction_misapplied`
+    （spec「符号校验限定有符号量」：非 signed 申报 SHALL 记覆盖缺口）。
+    """
+
+    @staticmethod
+    def _kline() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=80).strftime("%Y-%m-%d"),
+                "开盘": [10.0] * 80,
+                "收盘": [10.0 + i * 0.1 for i in range(80)],
+                "最高": [10.5 + i * 0.1 for i in range(80)],
+                "最低": [9.5 + i * 0.1 for i in range(80)],
+                "成交量": [1000.0] * 80,
+            }
+        )
+
+    def test_misapplied_direction_on_non_signed_root_counts_gap(self):
+        # 恒正水平量（MA5）上的 direction="negative" 是「低于阈值」的字面误读：
+        # 值级照常 PASS，但必须与数值路径一致记覆盖缺口（不判 direction_mismatch）。
+        from finance_agent.metrics.technical import calc_technical
+
+        kline = self._kline()
+        state = {"kline": kline}
+        ma5 = calc_technical(kline)["MA"]["5"][-1]
+        assert ma5 is not None and ma5 > 0
+        claim = Claim(
+            claim_type="computational",
+            source_type="data",
+            field_ref="technical_indicators.MA.5.-1",
+            stated_value=float(ma5),
+            interpretation="",
+            metric_name="MA",
+            period=str(kline["日期"].iloc[-1]),
+            direction="negative",
+        )
+        (r,) = verify_claims([claim], state)
+        assert r.status == "PASS"
+        assert r.coverage_gap is True
+
+    def test_correct_direction_on_signed_root_keeps_no_gap(self):
+        # 有符号量（derived_series）申报方向且符号一致 → 不计缺口。
+        # 直调 _verify_computational：术语/期次缺口由外层 _verify_data_claim 承担，
+        # 本用例只钉方向申报本身不产生缺口。
+        from finance_agent.citation import _verify_computational
+        from finance_agent.metrics.technical import calc_derived_series
+
+        kline = self._kline()
+        state = {"kline": kline}
+        spread = float(calc_derived_series(kline)["ma_spread_5_20_pct"])
+        assert spread > 0
+        claim = Claim(
+            claim_type="computational",
+            source_type="data",
+            field_ref="derived_series.ma_spread_5_20_pct",
+            stated_value=spread,
+            interpretation="",
+            direction="positive",
+        )
+        r = _verify_computational(claim, state)
+        assert r.status == "PASS"
+        assert r.coverage_gap is False
+
+
 class TestComparativeBaseDeclaration:
     """refine-citation-coverage-v3 D3：comparative 基期值双端申报与校验。"""
 
