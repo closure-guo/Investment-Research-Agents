@@ -53,8 +53,13 @@ class TestAggregate:
             == "该层价值未获统计支持"
         )
 
-    def test_citation_pass_rate_increment_with_ci(self):
-        """citation_pass 率层增量须带配对 bootstrap CI（spec：消融以带 CI 的 pass 率衡量）。"""
+    def test_citation_pass_rate_exits_conclusion_path(self):
+        """G2/F3 回归：citation_pass 标量不得再作层增量比较（spec evaluation「citation 腿拆报呈现」）。
+
+        历史形态：本用例改前断言 `rate["ci"][0] > 0` 与 `conclusion == "显著改进"`
+        （最大可能的层增量形态 0% → 100%）；现在此块 SHALL NOT 带 CI / 结论，只留
+        点估计供向后兼容，并显式标记 not_for_conclusions。
+        """
         runs = (
             self._runs("analysts", [False] * 6, [2.0] * 6)
             + self._runs("plus_debate", [True] * 6, [4.0] * 6)
@@ -62,20 +67,22 @@ class TestAggregate:
         )
         report = aggregate_results(runs)
         rate = report["layers"]["debate"]["citation_pass_rate"]
-        assert rate["prev"] == 0.0
-        assert rate["current"] == 1.0
-        assert rate["ci"][0] > 0
-        assert rate["conclusion"] == "显著改进"
+        assert "ci" not in rate, "标量不得带层增量 CI"
+        assert "conclusion" not in rate, "标量不得带层增量结论（层增量只认四桶）"
+        assert rate["not_for_conclusions"] is True, "须显式标记退出结论路径"
+        assert rate["prev"] == 0.0 and rate["current"] == 1.0, "点估计仍披露（向后兼容）"
+        assert report["variants"]["analysts"]["citation_pass_rate"] == 0.0, "变体级 pass 率保留"
+        assert report["variants"]["full"]["citation_pass_rate"] == 1.0
 
-    def test_citation_pass_rate_without_support(self):
-        """逐 ticker pass 率交错（t0 降、t1 升）→ CI 含 0 → 未获统计支持。"""
+    def test_citation_pass_rate_point_estimates_survive_without_conclusion(self):
+        """逐 ticker 交错（t0 降、t1 升）：无论差值形态，层块只留点估计、不出结论。"""
         runs = self._runs("analysts", [True, False], [3.0, 3.0]) + self._runs(
             "plus_debate", [False, True], [3.0, 3.0]
         )
         report = aggregate_results(runs)
         rate = report["layers"]["debate"]["citation_pass_rate"]
-        assert rate["ci"][0] <= 0 <= rate["ci"][1]
-        assert rate["conclusion"] == "该层价值未获统计支持"
+        assert rate["prev"] == 0.5 and rate["current"] == 0.5
+        assert "ci" not in rate and "conclusion" not in rate
 
 
 class TestLayerIncrementFieldName:
@@ -201,6 +208,8 @@ class TestAnchorCoverageWiring:
                 "citation_pass": True,
                 "judge_vars": {},
                 "anchor_coverage": coverage,
+                # 假件须对齐 run_variant_once 真实返回协议（G2/F3 四桶拆报）
+                "citation_buckets": ablation.split_verifier_buckets({"blocked": 0}),
             }
 
         monkeypatch.setattr(ablation, "aggregate_results", fake_aggregate)
@@ -227,6 +236,129 @@ class TestAnchorCoverageWiring:
         }
         assert records["plus_debate"]["argument_anchor_coverage_detail"] == expected_detail
         assert records["full"]["argument_anchor_coverage_detail"] == expected_detail
+
+
+class TestCitationBucketWiring:
+    """G2（delta tasks 1.3/F3）：citation 腿四桶拆报进 run_variant_once 与 run 记录。
+
+    桶名与校验的唯一来源是 `evals.causal_ablation.escape`（VERIFIER_BUCKETS /
+    split_verifier_buckets），本层不得另建映射副本。
+    """
+
+    @staticmethod
+    def _patch_state(ablation, monkeypatch, state: dict) -> None:
+        monkeypatch.setattr(
+            ablation, "build_variant_graph", lambda variant: _FakeGraphWithState(state)
+        )
+
+    def test_run_variant_once_maps_state_keys_to_four_buckets(self, monkeypatch):
+        """state 键 → 桶名：citation_blocked(bool) / citation_analyst_true_fail /
+        value_mismatch_repaired→surgical_repaired / citation_verifier_normalized。"""
+        import evals.ablation as ablation
+        from evals.causal_ablation.escape import VERIFIER_BUCKETS
+
+        self._patch_state(
+            ablation,
+            monkeypatch,
+            {
+                "final_report": "r",
+                "citation_pass": False,
+                "citation_blocked": True,
+                "citation_analyst_true_fail": 2,
+                "value_mismatch_repaired": 1,
+                "citation_verifier_normalized": 3,
+            },
+        )
+        out = ablation.run_variant_once("full", {"stock_code": "600519"}, "综合评估投资价值")
+        assert out["citation_buckets"] == {
+            "blocked": 1,
+            "analyst_true_fail": 2,
+            "surgical_repaired": 1,
+            "verifier_normalized": 3,
+            "total": 7,
+        }
+        assert set(out["citation_buckets"]) == set(VERIFIER_BUCKETS) | {"total"}, (
+            "桶名须与共享常量 VERIFIER_BUCKETS 一致"
+        )
+
+    def test_missing_state_keys_default_to_zero(self, monkeypatch):
+        """旧图 / stub 不产四桶状态键 → 记 0（不得 KeyError，也不得伪造成有逃逸）。"""
+        import evals.ablation as ablation
+
+        self._patch_state(ablation, monkeypatch, {"final_report": "r", "citation_pass": True})
+        out = ablation.run_variant_once("analysts", {"stock_code": "600519"}, "综合评估投资价值")
+        assert out["citation_buckets"] == {
+            "blocked": 0,
+            "analyst_true_fail": 0,
+            "surgical_repaired": 0,
+            "verifier_normalized": 0,
+            "total": 0,
+        }
+
+    def test_none_state_values_default_to_zero(self, monkeypatch):
+        """状态键存在但为 None → 同样记 0（None 不是计数）。"""
+        import evals.ablation as ablation
+
+        self._patch_state(
+            ablation,
+            monkeypatch,
+            {
+                "final_report": "r",
+                "citation_pass": True,
+                "citation_blocked": None,
+                "citation_analyst_true_fail": None,
+                "value_mismatch_repaired": None,
+                "citation_verifier_normalized": None,
+            },
+        )
+        out = ablation.run_variant_once("analysts", {"stock_code": "600519"}, "综合评估投资价值")
+        assert out["citation_buckets"] == {
+            "blocked": 0,
+            "analyst_true_fail": 0,
+            "surgical_repaired": 0,
+            "verifier_normalized": 0,
+            "total": 0,
+        }
+
+    def test_run_ablation_run_records_carry_citation_buckets(self, monkeypatch):
+        """run 记录携带 citation_buckets（additive：锚点/judge/citation_pass 字段不动）。"""
+        import evals.ablation as ablation
+
+        captured: dict[str, list[dict]] = {}
+
+        def fake_aggregate(runs, **kwargs):
+            captured["runs"] = runs
+            return {}
+
+        def fake_run_once(variant, snapshot, query):
+            return {
+                "final_report": "r",
+                "citation_pass": True,
+                "judge_vars": {},
+                "anchor_coverage": None,
+                "citation_buckets": ablation.split_verifier_buckets(
+                    {"blocked": 0, "analyst_true_fail": 1, "verifier_normalized": 2}
+                ),
+            }
+
+        monkeypatch.setattr(ablation, "aggregate_results", fake_aggregate)
+        monkeypatch.setattr(ablation, "run_judge_mean", lambda dim, v, *, repeats=3: {"score": 4.0})
+        monkeypatch.setattr(ablation, "build_snapshot", lambda ticker: {"stock_code": ticker})
+        monkeypatch.setattr(ablation, "snapshot_digest", lambda state: "d")
+        monkeypatch.setattr(ablation, "build_variant_graph", lambda variant: _FakeGraph())
+        monkeypatch.setattr(ablation, "run_variant_once", fake_run_once)
+        ablation.run_ablation(["600519"], repeats=2, judge_repeats=1)
+        records = {r["variant"]: r for r in captured["runs"] if r["ticker"] == "600519"}
+        assert len(captured["runs"]) == 6
+        for variant in ("analysts", "plus_debate", "full"):
+            assert records[variant]["citation_buckets"] == {
+                "blocked": 0,
+                "analyst_true_fail": 1,
+                "surgical_repaired": 0,
+                "verifier_normalized": 2,
+                "total": 3,
+            }
+            assert records[variant]["citation_pass"] is True, "标量字段保持产出（向后兼容）"
 
 
 class TestAnchorCoverageAggregation:
@@ -326,10 +458,194 @@ class TestAnchorCoverageAggregation:
         assert report["variants"]["full"]["anchor_coverage_median"] is None
 
 
+class TestCitationBucketAggregation:
+    """G2（F3）：四桶层增量与 judge 维度同口径（逐标的中位 + 配对 bootstrap）。
+
+    结论措辞由 `conclusion_for_layer` 按**计数增减方向**生成（与 judge 维度同一函数）：
+    计数下降 → 字面「显著退步」= 该桶计数显著下降；质量解读随桶语义（blocked /
+    analyst_true_fail 下降即改善，surgical_repaired / verifier_normalized 为校验器
+    工作量遥测）。措辞方向化不在 F3 范围内。
+    """
+
+    _BASE = {"blocked": 1, "analyst_true_fail": 2, "surgical_repaired": 0, "verifier_normalized": 3}
+    _DEBATE = {
+        "blocked": 0,
+        "analyst_true_fail": 1,
+        "surgical_repaired": 1,
+        "verifier_normalized": 2,
+    }
+    _FULL = {"blocked": 0, "analyst_true_fail": 0, "surgical_repaired": 2, "verifier_normalized": 1}
+
+    @staticmethod
+    def _runs(variant: str, by_ticker: dict[str, dict[str, int]]) -> list[dict]:
+        """{ticker: counts} → 每标的两次重复（中位数 = 该计数）；桶映射走库侧真函数。"""
+        from evals.causal_ablation.escape import split_verifier_buckets
+
+        return [
+            {
+                "variant": variant,
+                "ticker": ticker,
+                "citation_pass": True,
+                "judge": {"report_relevance": 4.0},
+                "citation_buckets": split_verifier_buckets(counts),
+            }
+            for ticker, counts in by_ticker.items()
+            for _ in range(2)
+        ]
+
+    def _report(self) -> dict:
+        tickers = ("t0", "t1", "t2")
+        runs = (
+            self._runs("analysts", dict.fromkeys(tickers, self._BASE))
+            + self._runs("plus_debate", dict.fromkeys(tickers, self._DEBATE))
+            + self._runs("full", dict.fromkeys(tickers, self._FULL))
+        )
+        return aggregate_results(runs)
+
+    def test_four_bucket_layer_entries_with_expected_values(self):
+        """四桶各有层条目，口径同 judge 维度：逐标的中位差 + 配对 bootstrap CI。"""
+        layer = self._report()["layers"]["debate"]
+        assert layer["citation_blocked"] == {
+            "diff_mean": -1.0,
+            "ci": (-1.0, -1.0),
+            "conclusion": "显著退步",
+        }
+        assert layer["citation_analyst_true_fail"] == {
+            "diff_mean": -1.0,
+            "ci": (-1.0, -1.0),
+            "conclusion": "显著退步",
+        }
+        assert layer["citation_surgical_repaired"] == {
+            "diff_mean": 1.0,
+            "ci": (1.0, 1.0),
+            "conclusion": "显著改进",
+        }
+        assert layer["citation_verifier_normalized"] == {
+            "diff_mean": -1.0,
+            "ci": (-1.0, -1.0),
+            "conclusion": "显著退步",
+        }
+        assert layer["pairing_unit"] == "ticker"
+        assert layer["pairing_units"] == 3, "配对单元为标的（与 judge 块同一披露）"
+
+    def test_full_layer_buckets_paired_against_plus_debate(self):
+        layer = self._report()["layers"]["full"]
+        assert layer["citation_blocked"] == {
+            "diff_mean": 0.0,
+            "ci": (0.0, 0.0),
+            "conclusion": "该层价值未获统计支持",
+        }
+        assert layer["citation_analyst_true_fail"]["diff_mean"] == -1.0
+        assert layer["citation_surgical_repaired"]["diff_mean"] == 1.0
+        assert layer["citation_verifier_normalized"]["ci"] == (-1.0, -1.0)
+
+    def test_variant_bucket_medians_recorded(self):
+        """变体级逐桶中位数（排除 None；全无该键 → None，不伪造 0）。"""
+        report = self._report()
+        assert report["variants"]["analysts"]["citation_buckets_median"] == {
+            "blocked": 1.0,
+            "analyst_true_fail": 2.0,
+            "surgical_repaired": 0.0,
+            "verifier_normalized": 3.0,
+        }
+        assert (
+            report["variants"]["plus_debate"]["citation_buckets_median"]["surgical_repaired"] == 1.0
+        )
+        assert report["variants"]["full"]["citation_buckets_median"]["verifier_normalized"] == 1.0
+
+    def test_zero_counts_are_real_values_not_missing(self):
+        """两侧计数恒 0 也是有效观测：条目须在（diff 0），不得当作缺值跳过。"""
+        zeros = {
+            "blocked": 0,
+            "analyst_true_fail": 0,
+            "surgical_repaired": 0,
+            "verifier_normalized": 0,
+        }
+        runs = self._runs("plus_debate", {"t0": zeros, "t1": zeros}) + self._runs(
+            "full", {"t0": zeros, "t1": zeros}
+        )
+        report = aggregate_results(runs)
+        layer = report["layers"]["full"]
+        assert layer["citation_blocked"] == {
+            "diff_mean": 0.0,
+            "ci": (0.0, 0.0),
+            "conclusion": "该层价值未获统计支持",
+        }
+        assert report["variants"]["full"]["citation_buckets_median"]["blocked"] == 0.0
+
+    def test_old_records_without_key_skipped_gracefully(self):
+        """旧 run 记录（无 citation_buckets）不得炸聚合：整腿跳过，中位数记 None。"""
+        runs = [
+            {
+                "variant": variant,
+                "ticker": t,
+                "citation_pass": True,
+                "judge": {"report_relevance": 3.0},
+            }
+            for variant in ("analysts", "plus_debate", "full")
+            for t in ("t0", "t1")
+        ]
+        report = aggregate_results(runs)
+        for bucket in ("blocked", "analyst_true_fail", "surgical_repaired", "verifier_normalized"):
+            assert f"citation_{bucket}" not in report["layers"]["debate"]
+            assert f"citation_{bucket}" not in report["layers"]["full"]
+        assert report["variants"]["analysts"]["citation_buckets_median"] is None
+        assert report["variants"]["full"]["citation_buckets_median"] is None
+
+    def test_mixed_records_pair_only_complete_side(self):
+        """一侧为旧记录 → 该侧无值 → 该层整腿跳过；另一层两段齐备则照常出条目。"""
+        runs = (
+            [
+                {
+                    "variant": "analysts",
+                    "ticker": t,
+                    "citation_pass": True,
+                    "judge": {"report_relevance": 3.0},
+                }
+                for t in ("t0", "t1")
+            ]
+            + self._runs("plus_debate", {"t0": self._DEBATE, "t1": self._DEBATE})
+            + self._runs("full", {"t0": self._FULL, "t1": self._FULL})
+        )
+        report = aggregate_results(runs)
+        assert "citation_surgical_repaired" not in report["layers"]["debate"], (
+            "配对侧缺值不得伪造成 0 产伪层结论"
+        )
+        assert report["layers"]["full"]["citation_surgical_repaired"]["diff_mean"] == 1.0
+        assert report["variants"]["analysts"]["citation_buckets_median"] is None
+
+    def test_partial_bucket_dict_does_not_fabricate_zero(self):
+        """残缺记录（只有部分桶键）只贡献已有桶；缺失桶按无值跳过，不补 0。"""
+        runs = [
+            {
+                "variant": variant,
+                "ticker": t,
+                "citation_pass": True,
+                "judge": {"report_relevance": 4.0},
+                "citation_buckets": {"blocked": value},
+            }
+            for variant, value in (("plus_debate", 1), ("full", 0))
+            for t in ("t0", "t1")
+        ]
+        report = aggregate_results(runs)
+        layer = report["layers"]["full"]
+        assert layer["citation_blocked"]["diff_mean"] == -1.0
+        assert "citation_analyst_true_fail" not in layer
+        assert report["variants"]["full"]["citation_buckets_median"] == {
+            "blocked": 0.0,
+            "analyst_true_fail": None,
+            "surgical_repaired": None,
+            "verifier_normalized": None,
+        }
+
+
 class TestJudgeOutputsUnchangedGuard:
-    """4.4 纯增量回归网：固定输入下 judge / citation 各切片逐字段不变（锚点键除外）。
+    """纯增量回归网：固定输入下 judge / 锚点切片逐字段不变（锚点键除外）。
 
     golden 为改动前基线（未变更代码时逐字捕获）；任何 judge 口径改动都会在此转红。
+    citation_pass_rate 层块是 F3 的**有意变更**（去 CI/结论 + not_for_conclusions
+    标记，见 `test_citation_pass_rate_exits_conclusion_path`），其 golden 已同步；
+    judge 维度与锚点块的 golden 值保持基线逐字不变。
     """
 
     @staticmethod
@@ -373,11 +689,11 @@ class TestJudgeOutputsUnchangedGuard:
                 "ci": (0.0, 9.0),
                 "conclusion": "该层价值未获统计支持",
             },
+            # F3：标量退出层增量结论路径（不再出 ci/conclusion），点估计保留
             "citation_pass_rate": {
                 "prev": 1.0,
                 "current": 1.0,
-                "ci": (0.0, 0.0),
-                "conclusion": "该层价值未获统计支持",
+                "not_for_conclusions": True,
             },
         },
         "full": {
@@ -388,11 +704,11 @@ class TestJudgeOutputsUnchangedGuard:
                 "ci": (-5.0, 3.0),
                 "conclusion": "该层价值未获统计支持",
             },
+            # F3：同上——层增量只认四桶，标量块不再出 ci/conclusion
             "citation_pass_rate": {
                 "prev": 1.0,
                 "current": 0.5,
-                "ci": (-0.5, -0.5),
-                "conclusion": "显著退步",
+                "not_for_conclusions": True,
             },
         },
     }
@@ -436,14 +752,27 @@ class TestJudgeOutputsUnchangedGuard:
             actual = {
                 k: v for k, v in report["layers"][name].items() if k != "argument_anchor_coverage"
             }
-            assert actual == golden, f"{name} 层 judge/citation 切片必须逐字段不变（纯增量）"
+            assert actual == golden, (
+                f"{name} 层 judge/citation 切片必须逐字段不变（F3 有意变更除外）"
+            )
         for variant, golden in self._GOLDEN_VARIANTS.items():
             actual = {
                 k: v
                 for k, v in report["variants"][variant].items()
-                if k != "anchor_coverage_median"
+                if k not in ("anchor_coverage_median", "citation_buckets_median")
             }
             assert actual == golden, f"{variant} 变体切片必须逐字段不变（纯增量）"
+
+    def test_golden_records_without_buckets_add_no_citation_bucket_entries(self):
+        """golden 输入为旧口径记录（无 citation_buckets）→ 不得凭空产四桶层条目。"""
+        report = aggregate_results(self._fixed_runs())
+        for name in ("debate", "full"):
+            extra = [
+                k
+                for k in report["layers"][name]
+                if k.startswith("citation_") and k != "citation_pass_rate"
+            ]
+            assert extra == [], f"{name} 层不得凭空产四桶条目：{extra}"
 
 
 class TestConclusionWording:
@@ -512,6 +841,7 @@ class TestAblationJudgeMeanProtocol:
                 "citation_pass": True,
                 "judge_vars": {"debate_history": "x"},
                 "anchor_coverage": None,  # 假件须对齐 run_variant_once 真实返回协议（4.4）
+                "citation_buckets": ablation.split_verifier_buckets({"blocked": 0}),  # G2/F3
             },
         )
         report = ablation.run_ablation(["600519"], repeats=1, judge_repeats=2)
@@ -700,6 +1030,7 @@ class TestRunAblationScoringDelegation:
                 "citation_pass": True,
                 "judge_vars": {},
                 "anchor_coverage": None,
+                "citation_buckets": ablation.split_verifier_buckets({"blocked": 0}),  # G2/F3
             },
         )
 

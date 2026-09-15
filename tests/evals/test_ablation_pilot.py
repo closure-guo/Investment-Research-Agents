@@ -66,7 +66,21 @@ class _FakeAblation:
         self.verify_calls += 1
         return {"citation_pass": True, "citation_coverage": 0.95}
 
+    # citation 腿四桶拆报（G2/1.3）：假件按库侧真协议返回（桶名/校验走共享常量）
+    _BUCKET_COUNTS = {
+        "analysts": {"blocked": 1, "analyst_true_fail": 2, "verifier_normalized": 3},
+        "plus_debate": {
+            "blocked": 0,
+            "analyst_true_fail": 1,
+            "surgical_repaired": 1,
+            "verifier_normalized": 2,
+        },
+        "full": {"analyst_true_fail": 0, "surgical_repaired": 2, "verifier_normalized": 1},
+    }
+
     def run_variant_once(self, variant: str, snapshot: dict, query: str) -> dict:
+        from evals.causal_ablation.escape import split_verifier_buckets
+
         self.run_calls.append((variant, query))
         # 锚点覆盖率（delta add-debate-argument-anchors 4.4）：analysts 无辩论层 → None；
         # 真实协议为 value + 拆项（与 evals/task.py 的 detail 同口径）
@@ -96,6 +110,7 @@ class _FakeAblation:
             "judge_vars": {"debate_history": f"【bull】论点: {variant}"},
             "decision": None,
             "anchor_coverage": coverage,
+            "citation_buckets": split_verifier_buckets(self._BUCKET_COUNTS[variant]),
         }
 
     def build_snapshot(self, ticker: str) -> dict:
@@ -312,6 +327,49 @@ class TestAnchorCoverageRecord:
         assert by_variant["full"]["argument_anchor_coverage_detail"]["unanchored_inference"] == 0
 
 
+class TestCitationBucketsRecord:
+    """G2（delta tasks 1.3/F3）：驱动 run 记录携带 citation 四桶拆报（additive）。
+
+    标量 `citation_pass` 仍产出（向后兼容），但不进层增量结论——层增量由四桶承担。
+    """
+
+    _ANALYSTS = {
+        "blocked": 1,
+        "analyst_true_fail": 2,
+        "surgical_repaired": 0,
+        "verifier_normalized": 3,
+        "total": 6,
+    }
+    _FULL = {
+        "blocked": 0,
+        "analyst_true_fail": 0,
+        "surgical_repaired": 2,
+        "verifier_normalized": 1,
+        "total": 3,
+    }
+
+    def test_run_record_carries_citation_buckets(self, env):
+        path = _run(env, tickers=["600519"], repeats=1)
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        by_variant = {r["variant"]: r for r in artifact["run_costs"]}
+        assert by_variant["analysts"]["citation_buckets"] == self._ANALYSTS
+        assert by_variant["full"]["citation_buckets"] == self._FULL
+        # additive：既有字段原样保留（标量 / 锚点 / judge）
+        assert by_variant["full"]["citation_pass"] is True
+        assert by_variant["full"]["argument_anchor_coverage"] == 0.75
+        assert by_variant["full"]["judge"]["report_relevance"] == 5
+        assert by_variant["full"]["judge_detail"]["debate_quality"]["score"] == 4.333
+
+    def test_resume_record_carries_citation_buckets(self, env):
+        """断点续跑台账与产物同批落盘 → resume 记录同样携带四桶。"""
+        _run(env, tickers=["600519"], repeats=1)
+        resume = json.loads(env.resume.read_text(encoding="utf-8"))
+        by_variant = {r["variant"]: r for r in resume["runs"]}
+        assert by_variant["analysts"]["citation_buckets"] == self._ANALYSTS
+        assert by_variant["plus_debate"]["citation_buckets"]["surgical_repaired"] == 1
+        assert by_variant["full"]["citation_buckets"] == self._FULL
+
+
 class TestParameterization:
     def test_config_records_actual_tickers_and_repeats(self, env):
         path = _run(env, tickers=["600519", "300308"], repeats=2)
@@ -373,6 +431,9 @@ class TestApplicableDimsParity:
         assert hasattr(real_ablation, "_applicable_dims"), "库侧适用性过滤的唯一实现"
         assert callable(getattr(real_ablation, "score_run", None)), (
             "库侧判分+落盘入口的唯一实现（G1/1.2）"
+        )
+        assert callable(getattr(real_ablation, "split_verifier_buckets", None)), (
+            "库侧须透出四桶拆报入口（G2/1.3）——假件按该入口构造 run 记录"
         )
         for variant in real_ablation._VARIANTS:
             assert _FakeAblation()._applicable_dims(variant) == real_ablation._applicable_dims(
@@ -466,6 +527,14 @@ class TestScoringDelegation:
                         "unspecified": 0,
                     }
                 ),
+                # 真库协议含四桶（G2/F3）：假件缺该键即属协议漂移
+                "citation_buckets": {
+                    "blocked": 0,
+                    "analyst_true_fail": 1,
+                    "surgical_repaired": 0,
+                    "verifier_normalized": 2,
+                    "total": 3,
+                },
             },
         )
         monkeypatch.setattr(
@@ -518,6 +587,13 @@ class TestScoringDelegation:
         )
         assert rows["plus_debate"]["argument_anchor_coverage"] == 0.5
         assert rows["analysts"]["argument_anchor_coverage"] is None
+        assert rows["full"]["citation_buckets"] == {
+            "blocked": 0,
+            "analyst_true_fail": 1,
+            "surgical_repaired": 0,
+            "verifier_normalized": 2,
+            "total": 3,
+        }, "真库协议产出四桶 → 驱动 run 记录须携带（G2/F3）"
 
 
 class TestSnapshotDigestVerification:

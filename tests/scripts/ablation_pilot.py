@@ -18,6 +18,11 @@ judge 判分（维度适用性过滤 + K 次均值）、judge 明细塑形、jud
    judge 明细（分数/纯定性条数/是否封顶/枚举是否缺失）——rubric 变更后可**离线重判**
    （不重跑管线、不依赖 Langfuse 反解材料）。
 
+**citation 腿口径**（G2/1.3）：run 记录携带四桶拆报 `citation_buckets`
+（blocked / analyst_true_fail / surgical_repaired / verifier_normalized，来自库侧
+`run_variant_once`；聚合层增量只认这四桶）；标量 `citation_pass` 仍产出但仅作向后
+兼容，不进层增量结论（spec evaluation「citation 腿拆报呈现」）。
+
 **断点续跑**（2026-09-02 增加）：ark burst 限流已两次在临近结束时打崩整段试跑。
 自驱循环 + 每完成一条 run 即落盘 resume.json，重启时跳过已完成
 (variant, ticker, repeat)，不重烧 token；材料落盘与 resume 落盘同批完成。
@@ -175,6 +180,9 @@ def run_pilot(
                 else None
             ),
             "citation_pass": out.get("citation_pass"),
+            # citation 腿四桶拆报（G2/1.3）：计数来自库侧 run_variant_once，
+            # 标量 citation_pass 仅留向后兼容（不进层增量结论）
+            "citation_buckets": out["citation_buckets"],
             "materials_path": score["materials_path"],
             "judge": score["judge"],
             "judge_detail": score["judge_detail"],
