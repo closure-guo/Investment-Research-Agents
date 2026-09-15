@@ -26,7 +26,7 @@ from finance_agent.metrics.efficiency import calc_efficiency
 from finance_agent.metrics.profitability import calc_profitability
 from finance_agent.metrics.risk import calc_risk
 from finance_agent.metrics.solvency import calc_solvency
-from finance_agent.metrics.technical import calc_technical
+from finance_agent.metrics.technical import calc_derived_series, calc_technical
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -294,6 +294,8 @@ _COMPUTATIONAL_RECALC: dict[str, Callable[[dict], object]] = {
     # 阶段 2（incident 026）：快照派生字段用同一份 compute 代码重算（r2 约 23 条恒 UNVERIFIABLE）
     "garp_result": lambda s: _recompute_snapshot(s, "garp_result"),
     "anomalies": lambda s: _recompute_snapshot(s, "anomalies"),
+    # ground-comparative-delta-claims：派生值以同一份 calc_derived_series 重算
+    "derived_series": lambda s: calc_derived_series(s["kline"]),
 }
 
 
@@ -386,16 +388,22 @@ def _verify_computational(claim: Claim, state: dict) -> CitationResult:
             delta=None,
             bucket="path_unresolvable",
         )
-    delta = abs(ground_truth - stated)
+    # ehr-style-claim-direction：有符号量根键（derived_series）的 direction 申报
+    # 与真值符号对齐后比对，符号冲突 FAIL + direction_mismatch——与数值型共用
+    # _align_signed_effective 单一实现（恒正水平量上的申报仍按字面误读降级）。
+    eff, direction_fail, _ = _align_signed_effective(claim, stated, ground_truth)
+    if direction_fail is not None:
+        return direction_fail
+    delta = abs(ground_truth - eff)
 
     # fix(percent-unit)：同 _verify_numerical——重算指标多为小数比率
     # （dupont 费率 0.118 = 11.8%），LLM 以百分比申报，归一 100 倍口径
     # 更贴近时采用（2026-09-08 trace 04b872ae 实测误报）。
     OTHER_SCALE = 100.0
-    if ground_truth != 0 and stated != 0:
+    if ground_truth != 0 and eff != 0:
         normalized = min(
-            abs(ground_truth - stated / OTHER_SCALE),
-            abs(ground_truth / OTHER_SCALE - stated),
+            abs(ground_truth - eff / OTHER_SCALE),
+            abs(ground_truth / OTHER_SCALE - eff),
         )
         if normalized < delta:
             delta = normalized
@@ -431,7 +439,7 @@ def _looks_numeric(text: str) -> bool:
         return False
 
 
-_SIGNED_ROOTS = frozenset({"growth_rates", "quarterly_trend"})
+_SIGNED_ROOTS = frozenset({"growth_rates", "quarterly_trend", "derived_series"})
 _SIGNED_NAME_KEYWORDS = ("同比", "环比", "增速", "变动", "变化", "涨跌", "差额")
 
 
@@ -445,6 +453,64 @@ def _is_signed_claim(claim: Claim) -> bool:
         return True
     name = claim.metric_name or ""
     return any(k in name for k in _SIGNED_NAME_KEYWORDS)
+
+
+def _align_signed_effective(
+    claim: Claim, stated: float, ground_truth: float
+) -> tuple[float, CitationResult | None, bool]:
+    """direction 申报与真值符号的对齐（ehr-style-claim-direction 单一实现）。
+
+    返回 (eff, direction_fail, direction_misapplied)：
+    - eff：sign(stated)×direction 对齐后的有效值（未申报/flat/非有符号量 → 原值）
+    - direction_fail：有符号量上符号冲突（eff 非零且与真值异号）→ 预构造
+      direction_mismatch FAIL，调用方直接返回
+    - direction_misapplied：非有符号量上申报 positive/negative 的字面误读 →
+      覆盖缺口标记（调用方决定是否计入）
+
+    数值/计算型两条校验路径共用，避免同一语义两份实现。
+    """
+    declared_sign: int | None = None
+    if claim.direction == "negative":
+        declared_sign = -1
+    elif claim.direction == "positive":
+        declared_sign = 1
+    # 阶段 1：非有符号量上的 negative/positive 申报是「低于/高于阈值」的字面误读
+    # ——不比符号，记覆盖缺口提示（歧义降级而非 FAIL）
+    signed = _is_signed_claim(claim)
+    direction_misapplied = declared_sign is not None and declared_sign != 0 and not signed
+    # 阶段 1 r4 残余：stated 已带符号且与 direction 同向（-10.40 + negative）——
+    # 数值本身即事实，不翻号（否则双重否定判 direction_mismatch 误报）
+    double_signed = (
+        declared_sign is not None
+        and signed
+        and ((declared_sign == -1 and stated < 0) or (declared_sign == 1 and stated > 0))
+    )
+    eff = (
+        stated * declared_sign
+        if (declared_sign is not None and signed and not double_signed)
+        else stated
+    )
+    eff_sign = 1 if eff > 0 else (-1 if eff < 0 else 0)
+    gt_sign = 1 if ground_truth > 0 else (-1 if ground_truth < 0 else 0)
+    if (
+        signed
+        and declared_sign is not None
+        and eff_sign != 0
+        and gt_sign != 0
+        and eff_sign != gt_sign
+    ):
+        return (
+            eff,
+            CitationResult(
+                status="FAIL",
+                claim=claim,
+                ground_truth=ground_truth,
+                delta=abs(ground_truth - eff),
+                bucket="direction_mismatch",
+            ),
+            direction_misapplied,
+        )
+    return eff, None, direction_misapplied
 
 
 _MAG_SCALES: tuple[tuple[str, float], ...] = (("万", 1e4), ("亿", 1e8))
@@ -490,49 +556,13 @@ def _verify_numerical(claim: Claim, state: dict) -> CitationResult:
             delta=None,
             bucket="path_unresolvable",
         )
-    delta = abs(gt_float - sv_float)  # raw 候选；容差在尾部按各候选参照系判定
-
     # ehr-style-claim-direction：已申报方向 → 先按 sign(stated)×direction 与
     # 真值符号对齐（「下滑 10.05%」↔ gt=-10.05 用 eff=-10.05 比对），符号冲突
     # 直接 FAIL + direction_mismatch 桶；符号一致后走既有容差（值级偏差仍归
     # value_mismatch）。flat/None 无数值方向语义 → 原值比对。
-    declared_sign: int | None = None
-    if claim.direction == "negative":
-        declared_sign = -1
-    elif claim.direction == "positive":
-        declared_sign = 1
-    # 阶段 1：非有符号量上的 negative/positive 申报是「低于/高于阈值」的字面误读
-    # ——不比符号，记覆盖缺口提示（歧义降级而非 FAIL）
-    signed = _is_signed_claim(claim)
-    direction_misapplied = declared_sign is not None and declared_sign != 0 and not signed
-    # 阶段 1 r4 残余：stated 已带符号且与 direction 同向（-10.40 + negative）——
-    # 数值本身即事实，不翻号（否则双重否定判 direction_mismatch 误报）
-    double_signed = (
-        declared_sign is not None
-        and signed
-        and ((declared_sign == -1 and sv_float < 0) or (declared_sign == 1 and sv_float > 0))
-    )
-    eff = (
-        sv_float * declared_sign
-        if (declared_sign is not None and signed and not double_signed)
-        else sv_float
-    )
-    eff_sign = 1 if eff > 0 else (-1 if eff < 0 else 0)
-    gt_sign = 1 if gt_float > 0 else (-1 if gt_float < 0 else 0)
-    if (
-        signed
-        and declared_sign is not None
-        and eff_sign != 0
-        and gt_sign != 0
-        and eff_sign != gt_sign
-    ):
-        return CitationResult(
-            status="FAIL",
-            claim=claim,
-            ground_truth=gt_float,
-            delta=abs(gt_float - eff),
-            bucket="direction_mismatch",
-        )
+    eff, direction_fail, direction_misapplied = _align_signed_effective(claim, sv_float, gt_float)
+    if direction_fail is not None:
+        return direction_fail
     # 候选统一按「各自参照系」判相对容差（阶段 1，incident 026）：
     #   raw      → 参照 gt
     #   percent  → 参照 gt 或 gt/100（各算各的；修注入演练暴露的缺陷——超大真值的

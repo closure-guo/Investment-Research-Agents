@@ -522,6 +522,102 @@ class TestComputationalRegistryCoverage:
         assert results[0].status == "PASS"
         assert report.coverage_gaps == 0
 
+    def test_registry_includes_derived_series(self):
+        from finance_agent.citation import _COMPUTATIONAL_RECALC
+
+        assert "derived_series" in _COMPUTATIONAL_RECALC
+
+    def test_derived_series_recalc_and_claim(self):
+        from finance_agent.citation import _COMPUTATIONAL_RECALC
+
+        kline = pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=80).strftime("%Y-%m-%d"),
+                "开盘": [10.0] * 80,
+                "收盘": [10.0 + i * 0.1 for i in range(80)],
+                "最高": [10.5 + i * 0.1 for i in range(80)],
+                "最低": [9.5 + i * 0.1 for i in range(80)],
+                "成交量": [1000.0] * 80,
+            }
+        )
+        state = {"kline": kline}
+        truth = _COMPUTATIONAL_RECALC["derived_series"](state)
+        spread = float(truth["ma_spread_5_20_pct"])
+        assert spread == pytest.approx(4.42, abs=0.01)
+
+        ok = Claim(
+            claim_type="computational",
+            source_type="data",
+            field_ref="derived_series.ma_spread_5_20_pct",
+            stated_value=spread,
+            interpretation="",
+        )
+        assert verify_claims([ok], state)[0].status == "PASS"
+
+        bad = Claim(
+            claim_type="computational",
+            source_type="data",
+            field_ref="derived_series.ma_spread_5_20_pct",
+            stated_value=spread * 1.1,
+            interpretation="",
+        )
+        (r,) = verify_claims([bad], state)
+        assert r.status == "FAIL"
+        assert r.bucket == "value_mismatch"
+
+    def test_derived_series_direction_check(self):
+        kline = pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=80).strftime("%Y-%m-%d"),
+                "开盘": [10.0] * 80,
+                "收盘": [10.0 + i * 0.1 for i in range(80)],
+                "最高": [10.5 + i * 0.1 for i in range(80)],
+                "最低": [9.5 + i * 0.1 for i in range(80)],
+                "成交量": [1000.0] * 80,
+            }
+        )
+        state = {"kline": kline}
+        base = {
+            "claim_type": "computational",
+            "source_type": "data",
+            "field_ref": "derived_series.ma_spread_5_20_pct",
+            "stated_value": 4.42,
+            "interpretation": "",
+        }
+        (ok,) = verify_claims([Claim(**base, direction="positive")], state)
+        assert ok.status == "PASS"
+        (bad,) = verify_claims([Claim(**base, direction="negative")], state)
+        assert bad.status == "FAIL"
+        assert bad.bucket == "direction_mismatch"
+
+    def test_derived_series_direction_alignment_pass(self):
+        """spec「派生值方向申报参与符号比对」：真值为负、direction 修饰后同号 → PASS。"""
+        from finance_agent.citation import _COMPUTATIONAL_RECALC
+
+        kline = pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=80).strftime("%Y-%m-%d"),
+                "开盘": [10.0] * 80,
+                "收盘": [10.0 - i * 0.1 for i in range(80)],
+                "最高": [10.5 - i * 0.1 for i in range(80)],
+                "最低": [9.5 - i * 0.1 for i in range(80)],
+                "成交量": [1000.0] * 80,
+            }
+        )
+        state = {"kline": kline}
+        spread = float(_COMPUTATIONAL_RECALC["derived_series"](state)["ma_spread_5_20_pct"])
+        assert spread < 0
+        base = {
+            "claim_type": "computational",
+            "source_type": "data",
+            "field_ref": "derived_series.ma_spread_5_20_pct",
+            "stated_value": abs(spread),
+            "interpretation": "",
+        }
+        (ok,) = verify_claims([Claim(**base, direction="negative")], state)
+        assert ok.status == "PASS"
+        assert ok.ground_truth == spread
+
 
 class TestComparativeBaseDeclaration:
     """refine-citation-coverage-v3 D3：comparative 基期值双端申报与校验。"""
