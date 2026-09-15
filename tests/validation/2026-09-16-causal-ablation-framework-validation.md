@@ -37,7 +37,7 @@
 | 类型（新代码） | `uv run mypy evals/causal_ablation` | 0 | Success: no issues in 13 files | ✅ |
 | 类型（src，CI 口径） | `uv run mypy src/`（CI 为 `\|\| true`） | 与基线一致 | 75 errors / 18 files——**全部为存量**（api.py 等），非本轮引入 | ✅（基线一致） |
 | 全量回归（pre-rebase 基点） | `uv run pytest -q -m "not live"` | 0 fail | 1 failed / 2515 passed——唯一失败为他方未同步的测试期望，见异常 1 | ⚠️ 已定位 |
-| 全量回归（rebase `52b1e41` 后） | 同上 | 0 fail | 见下方「最终回归」 | 待填 |
+| 全量回归（rebase `52b1e41` 后） | 同上 | 0 fail | **2533 passed / 2 skipped / 12 deselected / 0 failed**（570.60s） | ✅ |
 | 阳性对照灵敏度 | `test_positive_control.py` | 已知劣化可检出 | 不一致对子比例 ≥50%，管线灵敏度证实 | ✅ |
 | 注入确定性复现 | `test_injection.py::TestDeterminism` | 同 seed 同 payload | 成立（`test_same_seed_same_payload`） | ✅ |
 | TDD 纪律 | 先红后绿 | 提交前测试先失败 | `tests/evals/causal_ablation` 首次收集 13 errors（模块未创建），实现后 147 passed | ✅ |
@@ -45,8 +45,10 @@
 ### 最终回归
 
 ```
-（rebase 后全量输出待填——见本文件末尾「执行记录」）
+2533 passed, 2 skipped, 12 deselected, 62 warnings in 570.60s (0:09:30)
 ```
+
+（命令：`uv run pytest -q -m "not live"`；rebase 到 `52b1e41` 后执行，0 失败。2 skipped / 12 deselected 为非 live 层的既有排除项。）
 
 ## GATED 任务状态（依赖 `update-ablation-driver-parity-and-report-status`）
 
