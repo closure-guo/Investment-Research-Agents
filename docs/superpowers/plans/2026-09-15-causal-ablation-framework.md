@@ -2093,8 +2093,18 @@ Expected: 0 failures（与基线一致）
 **前置检查（每个 GATED 任务开工前必须先跑）**
 
 ```bash
-git -C /d/WorkSpace/finance_analysis_agent log --oneline -1 -- evals/ablation.py | grep -q "diff_mean\|parity\|消融测量收口" && echo UNLOCKED || echo BLOCKED
+cd /d/WorkSpace/finance_analysis_agent
+OK=1
+grep -q '"diff_mean"' evals/ablation.py || OK=0
+grep -q '_applicable_dims' tests/scripts/ablation_pilot.py || OK=0
+grep -q 'snapshot_digest' tests/scripts/ablation_pilot.py || OK=0
+git diff --quiet -- evals/ablation.py tests/scripts/ablation_pilot.py || OK=0
+[ "$OK" = 1 ] && echo UNLOCKED || echo BLOCKED
 ```
+
+判据含义：三个标记（`diff_mean` 重命名、驱动接回库侧 `_applicable_dims`、驱动侧 digest 核验）都已在**已提交**的 `evals/ablation.py` / `tests/scripts/ablation_pilot.py` 中，且这两个文件**无未提交改动**。
+
+> 不要用 `git log --oneline -1 -- evals/ablation.py | grep 消融测量收口` 之类只看提交信息的判据——a86986a 的提交信息含「消融测量收口」但**不含** diff_mean 重命名，会造成假 UNLOCKED（2026-09-16 夜晚实测踩过）。
 
 `BLOCKED` 时：跳过全部 GATED 任务，在 C3 报告中标注「等待 parity delta 合并」，不要在主工作区动手。
 
