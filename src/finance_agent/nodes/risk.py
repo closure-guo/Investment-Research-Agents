@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 
+from finance_agent.debate_anchors import anchor_stats, check_argument_anchors
+from finance_agent.langfuse_tracing import update_current_span
 from finance_agent.models import DebateMessage, TradeDecision
 from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint
 from finance_agent.prompts.loader import load_prompt_with_meta
@@ -38,7 +40,12 @@ def _risk_debater(state: dict, role: str, prompt_name: str, node_name: str = "")
     )
     msg = DebateMessage.model_validate(data)
 
-    return {"risk_debate_history": [msg]}
+    # 论点锚点校验（add-debate-argument-anchors）：只落通道与 span stats，
+    # fail-open 不改路由；resolved 仅表示锚存在，不代表锚支持论点
+    checks = check_argument_anchors(msg, state)
+    update_current_span(metadata={"anchor_stats": anchor_stats(checks)})
+
+    return {"risk_debate_history": [msg], "debate_anchor_checks": checks}
 
 
 def aggressive_debater(state: dict) -> dict:
