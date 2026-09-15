@@ -136,3 +136,5 @@ grep -q '"diff_mean"' evals/ablation.py && grep -q '_applicable_dims' tests/scri
 **spec 合并（project-workflow §6 后到者义务）**：本 delta 的 `evaluation::数据对齐消融实验` MODIFIED 已按「保留双方实质」并入 parity 的三段（维度适用性唯一实现 / 快照一致性核验 / 字段名与配对单元）+ 两条 scenario，并补 digest 内容稳定性条款（`1c33a53` 的实现口径）；`openspec validate --strict` 通过。
 
 **未覆盖/推迟**：P1/P2 正式跑批（按预登记另行启动）；阳性对照的注入强度 pilot 真实材料跑批（同前）。
+
+**最终回归（2026-09-16，本 worktree 全量）**：`uv run pytest -q -m "not live"` → **2619 passed / 2 skipped / 12 deselected / 0 failed（9:07）**；`uv run ruff check` / `uv run mypy`（改动文件）全绿；`openspec validate revamp-ablation-v2-causal-claims --strict` 通过。
