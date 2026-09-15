@@ -33,4 +33,4 @@
 ## 6. 收口
 
 - [x] 6.1 `openspec validate ground-comparative-delta-claims --strict` ✅；全量 `uv run pytest`：**2388 passed / 2 skipped / 3 failed（3 个全为 `pytest.mark.live` nightly 层，失败系清空 `LANGFUSE_HOST` 以规避 Langfuse 停机挂起所致，非 live 层 0 失败）**；ruff/mypy 各任务全绿——详见验证报告 §5（含挂起根因：data_snapshot 测试经 `_collect_prompt_versions` 拉 Langfuse prompt 挂起）
-- [ ] 6.2 归档前置：本文件全勾 + 5.3 验证报告落盘 + spec sync；将本 delta 的 derived 断点作为「代码写了 ≠ 机制在跑」第三例追记到 incident 027 的关联段（不新建 incident——同根因）——**incident 追记已完成（commit 6d593fe）；5.4 trace 核对未完成，归档前置未满足**
+- [x] 6.2 归档前置（2026-09-16 全部满足）：本文件全勾（5.4 trace 已补）；验证报告落盘（含 §6 trace 补录）；spec sync 完成（citation-verification +1 需求 / price-level-tooling 1 需求 MODIFIED，validate 56/56）；incident 027 追记已完成（6d593fe）
