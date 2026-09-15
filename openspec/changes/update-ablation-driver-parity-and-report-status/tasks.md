@@ -41,4 +41,4 @@
 - [x] 6.1 `uv run pytest tests/evals/` 全绿（新增用例转绿；live 用例的 3 项失败为干净工作区既有状态，需真实 API key，不进 PR 门禁）
 - [x] 6.2 全量 `uv run pytest -m "not live"` 绿 + `uv run ruff check` / `ruff format --check` 通过 + `uv run mypy`（改动文件：驱动 15 → 0，`evals/ablation.py` 0；`tests/evals/test_ablation.py:16` 为既有的故意负例）
 - [x] 6.3 `openspec validate update-ablation-driver-parity-and-report-status --strict` 通过
-- [ ] 6.4 归档前置：本文件全勾 + spec sync（evaluation 主规范 1 条 MODIFIED + 1 条 ADDED）+ `openspec validate --strict` 通过
+- [x] 6.4 归档前置：本文件全勾 + spec sync（evaluation 主规范 1 条 MODIFIED + 1 条 ADDED，`openspec/specs/evaluation/spec.md` +58 行）+ `openspec validate --all --strict` 通过（57/57）
