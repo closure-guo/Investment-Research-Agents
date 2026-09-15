@@ -60,11 +60,17 @@ class _FakeAblation:
 
     def run_variant_once(self, variant: str, snapshot: dict, query: str) -> dict:
         self.run_calls.append((variant, query))
+        # 锚点覆盖率（delta add-debate-argument-anchors 4.4）：analysts 无辩论层 → None
+        coverage = {
+            "plus_debate": {"value": 0.5, "total": 4, "anchored": 2},
+            "full": {"value": 0.75, "total": 4, "anchored": 3},
+        }.get(variant)
         return {
             "final_report": f"report-{variant}",
             "citation_pass": True,
             "judge_vars": {"debate_history": f"【bull】论点: {variant}"},
             "decision": None,
+            "anchor_coverage": coverage,
         }
 
     def build_snapshot(self, ticker: str) -> dict:
@@ -191,6 +197,26 @@ class TestMaterialPersistence:
         assert detail["scores"] == [5, 4, 4], "每次分数随 run 落盘（噪声可见）"
         assert detail["score_spread"] == 1
         assert detail["judge_repeats"] == pilot.JUDGE_REPEATS
+
+
+class TestAnchorCoverageRecord:
+    """delta add-debate-argument-anchors 4.4：驱动 run 记录携带 argument_anchor_coverage。"""
+
+    def test_run_record_carries_anchor_coverage_value(self, env):
+        path = _run(env, tickers=["600519"], repeats=1)
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        by_variant = {r["variant"]: r for r in artifact["run_costs"]}
+        assert by_variant["analysts"]["argument_anchor_coverage"] is None, "无辩论层不得伪造 0"
+        assert by_variant["plus_debate"]["argument_anchor_coverage"] == 0.5
+        assert by_variant["full"]["argument_anchor_coverage"] == 0.75
+
+    def test_resume_record_carries_anchor_coverage_value(self, env):
+        """断点续跑台账与产物同批落盘 → resume 记录同样携带该值。"""
+        _run(env, tickers=["600519"], repeats=1)
+        resume = json.loads(env.resume.read_text(encoding="utf-8"))
+        by_variant = {r["variant"]: r for r in resume["runs"]}
+        assert by_variant["analysts"]["argument_anchor_coverage"] is None
+        assert by_variant["full"]["argument_anchor_coverage"] == 0.75
 
 
 class TestParameterization:

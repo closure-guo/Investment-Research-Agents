@@ -202,6 +202,10 @@ def run_pilot(
                 else None
             ),
             "citation_pass": out.get("citation_pass"),
+            # 论点锚点覆盖率 value（delta add-debate-argument-anchors 4.4）：确定性指标，
+            # 由 run_variant_once 从 state 通道 debate_anchor_checks 提取；analysts 无辩论层
+            # -> None（不得伪造成 0）
+            "argument_anchor_coverage": (out["anchor_coverage"] or {}).get("value"),
             "judge": judge_scores,
             "judge_detail": judge_details,
         }

@@ -33,7 +33,7 @@ from typing import Any, Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from evals.extract import extract_judge_vars
+from evals.extract import anchor_coverage, extract_judge_vars
 from evals.judges import run_judge_mean
 from evals.stats import paired_bootstrap_ci
 from finance_agent.nodes.analysts import (
@@ -209,7 +209,10 @@ def snapshot_digest(state: dict) -> str:
 
 
 def run_variant_once(variant: Variant, snapshot: dict, query: str) -> dict:
-    """单次变体运行：快照重放 + citation_pass + judge 变量提取。"""
+    """单次变体运行：快照重放 + citation_pass + judge 变量提取 + 锚点覆盖率。
+
+    锚点覆盖率为确定性指标（零 LLM）：无辩论层（analysts）或旧格式 → None。
+    """
     graph = build_variant_graph(variant)
     state: dict = graph.invoke({**snapshot, "focus": query})
     judge_vars = extract_judge_vars(state, query=query)
@@ -218,6 +221,8 @@ def run_variant_once(variant: Variant, snapshot: dict, query: str) -> dict:
         "citation_pass": bool(state.get("citation_pass")),
         "judge_vars": judge_vars,
         "decision": state.get("final_trade_decision"),
+        # 论点锚点覆盖率（delta add-debate-argument-anchors 4.4；口径见 evals/extract）
+        "anchor_coverage": anchor_coverage(state.get("debate_anchor_checks") or []),
     }
 
 
@@ -231,9 +236,10 @@ def conclusion_for_layer(ci: tuple[float, float]) -> str:
 
 
 def aggregate_results(runs: list[dict], *, B: int = 10_000, seed: int = 42) -> dict:  # noqa: N803
-    """runs: [{variant, ticker, citation_pass, judge: {dim: score}}]。
+    """runs: [{variant, ticker, citation_pass, judge: {dim: score}, argument_anchor_coverage}]。
 
-    层级增量 = 上一变体 → 本变体的配对 bootstrap CI（按 ticker 中位数配对）。
+    层级增量 = 上一变体 → 本变体的配对 bootstrap CI（按 ticker 中位数配对），
+    覆盖 judge 维度、citation_pass 率与论点锚点覆盖率三类指标。
     """
     report: dict[str, Any] = {"variants": {}, "layers": {}}
     for variant in _VARIANTS:
@@ -247,6 +253,14 @@ def aggregate_results(runs: list[dict], *, B: int = 10_000, seed: int = 42) -> d
                 dim: _median([r["judge"][dim] for r in v_runs if r["judge"].get(dim) is not None])
                 for dim in JUDGE_DIMS
             },
+            # 论点锚点覆盖率（4.4）：变体内中位数（跳过 None；全无可比值 → None）
+            "anchor_coverage_median": _median(
+                [
+                    r["argument_anchor_coverage"]
+                    for r in v_runs
+                    if r.get("argument_anchor_coverage") is not None
+                ]
+            ),
         }
     layer_names = {"plus_debate": "debate", "full": "full"}
     for variant in ("plus_debate", "full"):
@@ -296,6 +310,28 @@ def aggregate_results(runs: list[dict], *, B: int = 10_000, seed: int = 42) -> d
             citation_rate["ci"] = (round(lo, 4), round(hi, 4))
             citation_rate["conclusion"] = conclusion_for_layer((lo, hi))
         layer["citation_pass_rate"] = citation_rate
+        # 论点锚点覆盖率层增量（4.4）：与 judge 维度同口径——逐标的中位数（跳过 None）
+        # 配对 + mean-diff 配对 bootstrap CI。任一侧无可配对的标的（如 prev=analysts
+        # 无辩论层、旧 run 记录缺该键）则整条跳过，不产伪层结论、不伪造 0。
+        prev_anchor = _by_ticker_anchor_median(runs, prev)
+        cur_anchor = _by_ticker_anchor_median(runs, variant)
+        anchor_prev: list[float] = []
+        anchor_cur: list[float] = []
+        for t in sorted(set(prev_anchor) & set(cur_anchor)):
+            p = prev_anchor[t]
+            c = cur_anchor[t]
+            if p is not None and c is not None:
+                anchor_prev.append(p)
+                anchor_cur.append(c)
+        if anchor_prev:
+            lo, hi = paired_bootstrap_ci(anchor_cur, anchor_prev, B=B, seed=seed)
+            layer["argument_anchor_coverage"] = {
+                "diff_mean": round(
+                    sum(anchor_cur) / len(anchor_cur) - sum(anchor_prev) / len(anchor_prev), 4
+                ),
+                "ci": (round(lo, 4), round(hi, 4)),
+                "conclusion": conclusion_for_layer((lo, hi)),
+            }
         report["layers"][layer_names[variant]] = layer
     return report
 
@@ -319,6 +355,26 @@ def _by_ticker_median(runs: list[dict], variant: str) -> dict[str, dict[str, flo
             dim: _median([r["judge"][dim] for r in t_runs if r["judge"].get(dim) is not None])
             for dim in JUDGE_DIMS
         }
+    return out
+
+
+def _by_ticker_anchor_median(runs: list[dict], variant: str) -> dict[str, float | None]:
+    """按 ticker 聚合 argument_anchor_coverage 中位数（跳过 None）；口径同 judge 维度。
+
+    旧 run 记录（本 delta 之前）无该键：按「无值」跳过，不得 KeyError 或伪造成 0；
+    标的全为 None（如 analysts 无辩论层）-> 中位数 None，整层配对随之跳过。
+    """
+    out: dict[str, float | None] = {}
+    tickers = {r["ticker"] for r in runs if r["variant"] == variant}
+    for t in tickers:
+        t_runs = [r for r in runs if r["variant"] == variant and r["ticker"] == t]
+        out[t] = _median(
+            [
+                r["argument_anchor_coverage"]
+                for r in t_runs
+                if r.get("argument_anchor_coverage") is not None
+            ]
+        )
     return out
 
 
@@ -371,6 +427,8 @@ def run_ablation(
                         "ticker": ticker,
                         "citation_pass": out["citation_pass"],
                         "judge": judge_scores,
+                        # 论点锚点覆盖率 value（4.4）：analysts 无辩论层 -> None，不得伪造 0
+                        "argument_anchor_coverage": (out["anchor_coverage"] or {}).get("value"),
                     }
                 )
     report = aggregate_results(runs)
