@@ -40,6 +40,22 @@ class AnalystReport(BaseModel):
         return v
 
 
+def _normalize_anchors(value: object) -> list[str]:
+    """LLM 形态噪声归一，不抛解析异常（显式降级口径）。
+
+    - `str` → 单元素列表（P1 pilot 真跑：LLM 把 anchors 返回为字符串，
+      旧实现直接抛 ValidationError 致整个 full-graph 运行失败）
+    - `list` / `tuple` → 保留 str 条目、丢弃其余（不字符串化 dict/int/None，
+      以维持 `list[str]` 契约；丢弃即「该项未申报」，比伪造锚点更诚实）
+    - 其余（`None` / dict / int…）→ `[]`：无法解释为锚点列表即视为未申报
+    """
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
 class DebateArgument(BaseModel):
     """辩论论点（add-debate-argument-anchors）。
 
@@ -85,6 +101,9 @@ class DebateMessage(BaseModel):
 
         已构造的 DebateArgument 实例原样保留（调用方直接手搓类型化论点时
         不得被 else 分支字符串化——那会静默丢失 text/kind/anchors）。
+        anchors 形态噪声（字符串/None/dict/混合类型项）一并归一，见
+        `_normalize_anchors`——SHALL NOT 因形态差异抛解析异常使整图失败；
+        text 缺失/为空仍照常抛验证异常（形态噪声 ≠ 内容缺失）。
         """
         if not isinstance(data, dict):
             return data
@@ -101,6 +120,7 @@ class DebateMessage(BaseModel):
                 d = dict(item)
                 if d.get("kind") not in ("data", "event", "inference", "unspecified"):
                     d["kind"] = "unspecified"
+                d["anchors"] = _normalize_anchors(d.get("anchors"))
                 coerced.append(d)
             else:
                 coerced.append({"text": str(item), "kind": "unspecified", "anchors": []})

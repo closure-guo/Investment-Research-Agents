@@ -100,6 +100,81 @@ class TestDebateArgumentModel:
                 }
             )
 
+    def test_string_anchors_normalized_to_single_item_list(self):
+        """P1 真跑回归：LLM 把 anchors 返回为字符串致 DebateMessage 校验崩溃；按显式降级口径归一为单元素列表。"""
+        msg = DebateMessage.model_validate(
+            {
+                "role": "bear",
+                "round": 1,
+                "content": "x",
+                "key_arguments": [
+                    {
+                        "text": "MA5 上穿 MA20",
+                        "kind": "data",
+                        "anchors": "technical_indicators.MA.5.-1",
+                    }
+                ],
+            }
+        )
+        assert msg.key_arguments[0].anchors == ["technical_indicators.MA.5.-1"]
+        # 形态修复只动 anchors，不得顺带动摇 kind（归一 ≠ 语义降级）
+        assert msg.key_arguments[0].kind == "data"
+
+    @pytest.mark.parametrize("bad_anchors", [None, {"k": "v"}, 3])
+    def test_unusable_anchors_shapes_degrade_to_empty_list(self, bad_anchors):
+        """无法解释为锚点列表的形态（None/dict/int）→ []：不猜内容，也不抛异常。"""
+        msg = DebateMessage.model_validate(
+            {
+                "role": "bear",
+                "round": 1,
+                "content": "x",
+                "key_arguments": [{"text": "t", "kind": "event", "anchors": bad_anchors}],
+            }
+        )
+        assert msg.key_arguments[0].anchors == []
+
+    def test_non_string_anchor_entries_dropped(self):
+        """混合类型条目：保留 str，丢弃其余（维持 list[str] 契约，不字符串化杂类值）。"""
+        msg = DebateMessage.model_validate(
+            {
+                "role": "bull",
+                "round": 1,
+                "content": "x",
+                "key_arguments": [
+                    {
+                        "text": "t",
+                        "kind": "data",
+                        "anchors": ["technical_indicators.MA.5.-1", 3, None, {"k": "v"}, "a.b"],
+                    }
+                ],
+            }
+        )
+        assert msg.key_arguments[0].anchors == ["technical_indicators.MA.5.-1", "a.b"]
+
+    def test_tuple_anchors_normalized_to_list(self):
+        msg = DebateMessage.model_validate(
+            {
+                "role": "bull",
+                "round": 1,
+                "content": "x",
+                "key_arguments": [{"text": "t", "kind": "data", "anchors": ("a.b", 7, "c.d")}],
+            }
+        )
+        assert msg.key_arguments[0].anchors == ["a.b", "c.d"]
+        assert isinstance(msg.key_arguments[0].anchors, list)
+
+    def test_anchors_shape_repair_does_not_mask_empty_text(self):
+        """形态归一 SHALL NOT 吞掉真错误：text 缺失/为空仍抛（形态噪声 ≠ 内容缺失）。"""
+        with pytest.raises(ValidationError):
+            DebateMessage.model_validate(
+                {
+                    "role": "bull",
+                    "round": 1,
+                    "content": "x",
+                    "key_arguments": [{"text": "", "kind": "data", "anchors": "a.b"}],
+                }
+            )
+
     def test_rebuttal_to_position_semantics_unchanged(self):
         msg = DebateMessage.model_validate(
             {
