@@ -30,3 +30,15 @@ round7 校准后的 delta 端到端验证（`tests/scripts/verify_deltas_e2e.py`
 ## 预防
 
 - 图通道契约测试已固化；后续新增 state 键的 delta，tasks 中 MUST 包含「AnalysisState 声明 + 通道契约测试」步骤。
+
+## 关联复发（2026-09-15，delta `ground-comparative-delta-claims`）
+
+同根因第三、四例，由该 delta 的编译图端到端测试与代码质量审查发现：
+
+1. **`derived_series`**（`compute.py:61` 写入，toolize-price-levels 家族）：未声明被图合并丢弃 → 技术面 context 的「常用派生值」块在生产从未注入（`analysts.py` 读取恒 None），且 context 文案教 LLM 用前缀 `derived.` 与真实键不一致——即使注入，任何 `derived.*` claim 也必判 `path_unresolvable`。toolize 验证报告只在节点函数层以 dict state 测「注入」，未走编译图（与本文第 3 条同一模式）。
+2. **`price_levels`**（`compute.py:60` 写入，同一 toolize delta）：未声明被丢弃 → `trader.py:64-71` 价位参考带上下文从未渲染；`validate.py:113-124` 恒走「price_levels 不可用，跳过校验」分支，价位带校验与参考带修正为死代码。
+
+修复（2026-09-15）：两键补声明 + 进 `TestStateChannelsDeclared` + 新增编译图端到端用例（断言派生值真实到达技术面 context 且 `derived_series.<字段>` claim 可引用 PASS）；`price_levels` 带校验可达性由既有节点级用例 + 编译图证据共同锁定。
+
+**审计教训补录**：027 当次的 AST 审计只覆盖「节点返回字典的顶层键」，`compute` 写入的 `price_levels` / `derived_series` 逃过了审计。通道契约测试的断言集合必须对齐**数据生产者全集**（compute / validate / citation 各家族逐键核对），而不是只对齐已发现的问题家族——本次两例都是「同一次审计的漏网」。
+
