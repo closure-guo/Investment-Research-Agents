@@ -251,10 +251,12 @@ def aggregate_results(runs: list[dict], *, B: int = 10_000, seed: int = 42) -> d
     layer_names = {"plus_debate": "debate", "full": "full"}
     for variant in ("plus_debate", "full"):
         prev = "analysts" if variant == "plus_debate" else "plus_debate"
-        layer: dict[str, Any] = {}
         prev_by_ticker = _by_ticker_median(runs, prev)
         cur_by_ticker = _by_ticker_median(runs, variant)
         common = sorted(set(prev_by_ticker) & set(cur_by_ticker))
+        # 配对单元披露：bootstrap 的重采样单位是标的（不是 run）——「3 标的 × 10 重复」
+        # 的有效 n 是 3，读报告的人须能直接看见，否则会把 CI 宽度读成效应波动
+        layer: dict[str, Any] = {"pairing_unit": "ticker", "pairing_units": len(common)}
         for dim in JUDGE_DIMS:
             # 按 ticker 配对：两侧都有该维度分数才进入序列（保证等长配对）
             seq_prev: list[float] = []
@@ -269,9 +271,9 @@ def aggregate_results(runs: list[dict], *, B: int = 10_000, seed: int = 42) -> d
                 continue
             lo, hi = paired_bootstrap_ci(seq_cur, seq_prev, B=B, seed=seed)
             layer[f"judge_{dim}"] = {
-                "diff_median": round(
-                    sum(seq_cur) / len(seq_cur) - sum(seq_prev) / len(seq_prev), 4
-                ),
+                # 点估计为均值差（与 paired_bootstrap_ci 的 mean-diff 口径一致）；
+                # 配对单元本身是逐标的中位数，但聚合统计量不是中位数——勿读作 median
+                "diff_mean": round(sum(seq_cur) / len(seq_cur) - sum(seq_prev) / len(seq_prev), 4),
                 "ci": (round(lo, 4), round(hi, 4)),
                 "conclusion": conclusion_for_layer((lo, hi)),
             }

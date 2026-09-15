@@ -23,6 +23,16 @@
 |---|---|---|
 | add-debate-argument-anchors | 辩论/风控论点 `key_arguments` 结构化锚点（kind + anchors）+ 节点侧确定性锚点校验（fail-open）+ `argument_anchor_coverage` 确定性指标进评估/judge 材料/消融 | 反幻觉盘点：定性论点无程序防线；metrics.md §3 遗留候选 (c) |
 | ground-comparative-delta-claims | 比较型差值 UNVERIFIABLE 计缺口 + 独立桶；修复 `derived_series` 通路（未声明 channel + 前缀不匹配，incident 027 同构）；均线差幅预生成 + 重算/有符号量注册 | metrics.md §3 校验器 follow-up ①；toolize 派生值在真实图从未生效 |
+| update-ablation-driver-parity-and-report-status | 消融结论生命周期管理：驱动接回库侧 `_applicable_dims`（#112 不再复现）+ 每 run 快照 digest 核验；`diff_median` → `diff_mean` + 配对单元披露；报告 `status` 头部契约 + 权威报告适用口径披露 + pilot/n10/README 就地修正。**已实施完毕（2026-09-15，待 6.4 archive）** | 2026-09-15 消融结论链取证：pilot 被推翻结论原文在线、n10 自称「修复后」实带 #112 伪影 + 未校准 judge、驱动侧判分口径与库侧分叉（#112 会原样复现） |
+
+## 评估补强（后续批次，2026-09-15 登记，尚未立项）
+
+> 与 `update-ablation-driver-parity-and-report-status` 互补：该 delta 修「已有结论的可信度管理」，本批修「新结论的产出机制」。
+
+1. **结论注册表 + superseded 状态机**：把报告 `status` 契约（本 delta 已立）扩到 `docs/evals/` 全库（9 份日期报告 + 台账 + 模板），索引页渲染状态徽章 + 状态迁移校验。需先盘清全库每份报告的真实状态。
+2. **跑批入口唯一化**：`ablation_pilot.py` 改薄壳——只做续跑/记账，判分与过滤全调库侧。本 delta 只把维度过滤拉回库侧；整体瘦身牵动计量、材料落盘、断点续跑三块。
+3. **阳性对照进消融跑批**：每轮消融带一个已知劣化变体（关 `verify_citations`），测不出差异则本轮阴性结果作废——防「评估系统失灵导致的假阴性」被当成架构结论。
+4. **v2 消融框架**：因果主张登记 + 注入法 + 单元级判定。与幻觉率度量 v1（`evals/hallucination/`，目前只覆盖数值型 claim）互补——注入法能覆盖文本/事件型这一最薄防线。
 
 ## 遗留待人工/待资源（2026-09-14 更新）
 

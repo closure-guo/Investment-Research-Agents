@@ -45,6 +45,22 @@
 
 Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥0.5、MAE≤1.0、方向一致率≥0.7。judge 分零方差的维度 Spearman 不可计算，以 MAE/方向一致率为主。
 
+### 1.5 消融层增量（`evals/ablation.py::aggregate_results`）
+
+| 项 | 口径 |
+|---|---|
+| 点估计字段 | `judge_<dim>.diff_mean`——**均值差** `mean(cur) − mean(prev)`（2026-09-15 前名为 `diff_median`，与实际统计量不符，已改名；旧名前产出的产物 JSON 复算需按新名读） |
+| 置信区间 | `paired_bootstrap_ci`，B=10,000，同为 mean-diff 口径 |
+| 配对单元 | **标的**（`pairing_unit: "ticker"`）：同标的同变体重复先取中位数，再以标的为配对点重采样；报告携 `pairing_units` |
+| 有效 n | = 标的数，**不是** run 数（3 标的 × 10 重复 → 有效 n=3，CI 宽度主要由该分辨率决定） |
+| 维度适用性 | 变体不存在的层不评（`_applicable_dims` 唯一实现）；被过滤维度记 `None` 且不产生 judge 调用（#112） |
+| 快照一致性 | 每条 run 的快照 digest 须与本次跑批登记值一致；不一致显式失败（不静默混批） |
+| 报告状态头 | `evals/ablation/results/*.md` 头部须带 `**status**: active` 或 `superseded-by: <路径>`，指针须可解析（`tests/evals/test_report_status.py`） |
+
+### 1.6 报告引用纪律
+
+对外材料（README / 简历素材等）引用消融数字时须引用 `status: active` 的报告；「未获统计支持」不得转写为「据此可裁剪」（统计不支持 ≠ 无价值，裁剪需独立证据）。被推翻的报告须就地标注（原文保留 + 撤回说明 + 指向权威版本），不得只改数字。
+
 ---
 
 ## 2. 时间线（每轮一行，收口时追加）
@@ -62,6 +78,8 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 ¹ r4 coverage 0.837 为重试停用后的真实首轮值（r2/r3 的 0.92 含 2–3 轮补 claim 重跑），不可直接对比。
 
 人工校准：round5（53 行）全线未达标（整体 Spearman -0.36 / MAE 1.81 / 方向一致率 32%）→ 材料与 rubric 修复多轮 → **round7（41 对终裁后终值，r3）全维度达标：整体 MAE 0.342 / 方向一致率 97.6%，judge 自 round7 起可用**（终裁：4 行 judge 的 source 归属扣分成立改 4、1 行 judge 误判维持人工 5、1 行灰区维持 5；详见 [2026-09-13-round7-judge校准报告.md](2026-09-13-round7-judge校准报告.md)。rubric v7 四项改动已定稿待 bump：debate 5 分收紧 / source 归属三层判法 / 组合 claim 归属规则 / 解读失当强化）。
+
+**消融口径切点（2026-09-15，delta `update-ablation-driver-parity-and-report-status`，未跑批）**：① `aggregate_results` 点估计字段 `diff_median` → `diff_mean`（口径本就为均值差，见 §1.5），历史产物 JSON 复算须按新名读；② 跑批驱动 `ablation_pilot.py` 的维度过滤改调库侧 `_applicable_dims`（此前自带硬编码分支 → plus_debate 的 grounding/consistency 照评，即 n10 批次 #112 伪影的来源），并在每条 run 前核验快照 digest；③ `evals/ablation/results/pilot.md` 标 `superseded-by` 指向 n10 报告并就地撤回简历素材段结论；④ n10 报告（09-03）补四处适用口径披露——**该批次 judge 未校准**（早于 round7 达标 10 天）、#112 伪影存活（其 full−plus_debate 的 grounding/consistency 两条 Δ 标为无效比较）、有效 n=3、citation_pass 不作层增量解读。**据此，n10 批次的可成立结论收缩为「未获统计支持」，其成本数字（辩论层 +7.9% / 决策+风控层 +30.1% / 裁到 analysts 省 28.7%）仍有效但不足以支撑裁剪决策。**
 
 ---
 

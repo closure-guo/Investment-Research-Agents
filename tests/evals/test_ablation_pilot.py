@@ -43,6 +43,15 @@ class _FakeAblation:
     def __init__(self):
         self.verify_calls = 0
         self.run_calls: list[tuple[str, str]] = []
+        self.judge_calls: list[str] = []
+
+    def _applicable_dims(self, variant: str) -> tuple[str, ...]:
+        """与 `evals.ablation._applicable_dims` 同实现（#112 维度适用性）。"""
+        if variant == "analysts":
+            return ("report_relevance",)
+        if variant == "plus_debate":
+            return ("report_relevance", "debate_quality")
+        return tuple(self.JUDGE_DIMS)
 
     # 被驱动 monkeypatch 的入口
     def verify_citations(self, state: dict) -> dict:
@@ -66,6 +75,7 @@ class _FakeAblation:
 
     def run_judge(self, dimension: str, variables: dict) -> dict:
         # debate 维度返回带遥测的结果（模拟 v6 封顶）
+        self.judge_calls.append(dimension)
         if dimension == "debate_quality":
             return {
                 "name": dimension,
@@ -81,6 +91,7 @@ class _FakeAblation:
 
     def run_judge_mean(self, dimension: str, variables: dict, *, repeats: int = 3) -> dict:
         """假均值协议：debate 维度模拟 [5,4,4]（round11 实测形态）。"""
+        self.judge_calls.append(dimension)
         if dimension == "debate_quality":
             return {
                 "name": dimension,
@@ -231,3 +242,86 @@ class TestCli:
 
     def test_judge_repeats_default_is_mean_protocol(self):
         assert pilot.JUDGE_REPEATS >= 3, "默认须为多次均值（单次调用 5/4 边界有 ±1 噪声）"
+
+
+class TestApplicableDimsParity:
+    """驱动不得自带变体→维度映射（#112）：唯一实现在库侧，驱动必须问库侧。"""
+
+    def test_fake_matches_library_attribute_surface(self):
+        """假件照库侧实现提供 `_applicable_dims`——库侧改名/删除时本用例转红。"""
+        from evals import ablation as real_ablation
+
+        assert hasattr(real_ablation, "_applicable_dims"), "库侧适用性过滤的唯一实现"
+        for variant in real_ablation._VARIANTS:
+            assert _FakeAblation()._applicable_dims(variant) == real_ablation._applicable_dims(
+                variant
+            ), f"假件与库侧的 {variant} 维度集合必须一致"
+
+    def test_nonexistent_layers_not_judged(self, env):
+        """plus_debate 无 Trader/风控/FM 层 → grounding/consistency 记 None 且不判分。"""
+        path = _run(env, tickers=["600519"], repeats=1)
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        row = next(r for r in artifact["run_costs"] if r["variant"] == "plus_debate")
+        assert row["judge"]["decision_grounding"] is None
+        assert row["judge"]["consistency"] is None
+        assert "decision_grounding" not in row["judge_detail"], "过滤维度不得产生 judge 调用"
+        assert "consistency" not in row["judge_detail"]
+
+    def test_filtered_dims_produce_no_judge_calls(self, env):
+        """1 标的 × 1 重复的判分次数：analysts 1 + plus_debate 2 + full 4 = 7。
+
+        硬编码 analysts 分支（bug 形态）会判 1 + 4 + 4 = 9——次数差异即 #112 的复现点。
+        """
+        _run(env, tickers=["600519"], repeats=1)
+        assert env.ablation.judge_calls.count("decision_grounding") == 1, "仅 full 评该维度"
+        assert env.ablation.judge_calls.count("consistency") == 1, "仅 full 评该维度"
+        assert len(env.ablation.judge_calls) == 7
+
+    def test_driver_fails_without_library_dims_map(self, env):
+        """库侧不暴露 `_applicable_dims` 时驱动必须炸——证明它在问库侧而非自算。"""
+
+        class _FakeWithoutDimsMap(_FakeAblation):
+            @property
+            def _applicable_dims(self):
+                raise AttributeError("_applicable_dims")
+
+        env.ablation = _FakeWithoutDimsMap()
+        with pytest.raises(AttributeError):
+            _run(env, tickers=["600519"], repeats=1)
+
+
+class TestSnapshotDigestVerification:
+    """跨进程续跑的快照一致性：digest 不一致必须显式失败，不得静默混批。"""
+
+    def test_mismatched_digest_fails_loudly(self, env):
+        env.resume.parent.mkdir(parents=True, exist_ok=True)
+        env.resume.write_text(
+            json.dumps(
+                {
+                    "done_keys": [["full", "600519", 0]],
+                    "runs": [],
+                    "snapshot_digests": {"600519": "digest-STALE"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        calls_before = len(env.ablation.run_calls)
+        with pytest.raises(RuntimeError) as excinfo:
+            _run(env, tickers=["600519"], repeats=1)
+        message = str(excinfo.value)
+        assert "600519" in message and "digest-STALE" in message and "digest-600519" in message
+        assert len(env.ablation.run_calls) == calls_before, "失败前不得消耗 token 跑 run"
+
+    def test_consistent_digest_allows_resume(self, env):
+        _run(env, tickers=["600519"], repeats=1)
+        _run(env, tickers=["600519"], repeats=2)  # 重建 digest 一致 → 正常续跑
+        resume = json.loads(env.resume.read_text(encoding="utf-8"))
+        assert resume["snapshot_digests"] == {"600519": "digest-600519"}
+
+    def test_digest_registered_per_ticker_on_first_run(self, env):
+        _run(env, tickers=["600519", "000001"], repeats=1)
+        resume = json.loads(env.resume.read_text(encoding="utf-8"))
+        assert resume["snapshot_digests"] == {
+            "600519": "digest-600519",
+            "000001": "digest-000001",
+        }

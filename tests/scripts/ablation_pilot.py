@@ -88,9 +88,11 @@ def persist_materials(
 def _load_resume(path: Path) -> dict:
     if path.exists():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            loaded = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return {}
+        if isinstance(loaded, dict):
+            return loaded
     return {}
 
 
@@ -131,13 +133,19 @@ def run_pilot(
     本函数不做静默降级。
     """
     if ablation_mod is None:
-        import evals.ablation as ablation_mod  # type: ignore[no-redef]
+        import evals.ablation as _ablation
+
+        ablation_mod = _ablation
     if meter is None:
         meter = pilot_util
     if prompt_versions_fn is None:
-        from evals.run import (
-            _collect_prompt_versions as prompt_versions_fn,  # type: ignore[no-redef]
-        )
+        from evals.run import _collect_prompt_versions
+
+        prompt_versions_fn = _collect_prompt_versions
+    # mypy 对「Optional 参数 + 函数内重绑定」不做收窄（重绑定后窄化失效）：
+    # 显式取 Any 别名，换取本文件类型检查全绿；运行语义不变
+    abl: Any = ablation_mod
+    versions_fn: Any = prompt_versions_fn
 
     coverage_ledger: list[dict[str, Any]] = []
     run_costs: list[dict[str, Any]] = []
@@ -145,7 +153,7 @@ def run_pilot(
     original_verify = ablation_mod.verify_citations
 
     def metered_verify(state: dict) -> dict:
-        out = original_verify(state)
+        out: dict = original_verify(state)
         coverage_ledger.append(
             {
                 "citation_pass": out.get("citation_pass"),
@@ -154,25 +162,26 @@ def run_pilot(
         )
         return out
 
-    ablation_mod.verify_citations = metered_verify
+    abl.verify_citations = metered_verify
 
-    original_run_once = ablation_mod.run_variant_once
+    original_run_once = abl.run_variant_once
 
     def run_one_costed(variant: str, snapshot: dict, q: str) -> tuple[dict, dict]:
         """单次变体运行 + judge，返回 (out, cost_row)。"""
         before_calls = len(meter._usage_ledger)
         before_cov = len(coverage_ledger)
-        out = original_run_once(variant, snapshot, q)
+        out: dict = original_run_once(variant, snapshot, q)
         new_entries = meter._usage_ledger[before_calls:]
         cov_entries = coverage_ledger[before_cov:]
 
         judge_scores: dict[str, float | None] = {}
         judge_details: dict[str, dict] = {}
-        for dim in ablation_mod.JUDGE_DIMS:
-            if variant == "analysts" and dim != "report_relevance":
+        applicable = abl._applicable_dims(variant)  # 唯一实现在库侧（#112）
+        for dim in abl.JUDGE_DIMS:
+            if dim not in applicable:
                 judge_scores[dim] = None
                 continue
-            result = ablation_mod.run_judge_mean(dim, out["judge_vars"], repeats=judge_repeats)
+            result = abl.run_judge_mean(dim, out["judge_vars"], repeats=judge_repeats)
             judge_scores[dim] = float(result["score"]) if result["score"] is not None else None
             judge_details[dim] = judge_detail(result)
 
@@ -225,18 +234,27 @@ def run_pilot(
         )
 
     for ticker in tickers:
-        if ticker not in snap_digests:
-            snapshot = ablation_mod.build_snapshot(ticker)
-            snap_digests[ticker] = ablation_mod.snapshot_digest(snapshot)
-        for variant in ablation_mod._VARIANTS:
+        for variant in abl._VARIANTS:
             for i in range(repeats):
                 key = (variant, ticker, i)
                 if key in done_keys:
                     print(f"跳过已完成: {key}", flush=True)
                     continue
                 print(f"[{datetime.now():%H:%M:%S}] 运行 {key}", flush=True)
-                # 每轮重建快照（进程内重放共享同 digest；跨进程重启重取一次数据）
-                snapshot = ablation_mod.build_snapshot(ticker)
+                # 每轮重建快照，并逐次核验 digest 与本次跑批登记值一致——跨交易日续跑
+                # 若数据源已刷新（行情/新闻按日变），新旧 run 输入不同，层增量即不可归因
+                # 于编排架构。不一致时显式失败，不静默混批（不自动重建、不自动冻结）。
+                snapshot = abl.build_snapshot(ticker)
+                digest = abl.snapshot_digest(snapshot)
+                registered = snap_digests.get(ticker)
+                if registered is None:
+                    snap_digests[ticker] = digest
+                elif registered != digest:
+                    raise RuntimeError(
+                        f"快照 digest 与本次跑批登记值不一致（{ticker}）："
+                        f"登记 {registered} / 重建 {digest}。续跑会混入不同输入，"
+                        f"层增量不可归因于编排架构。重跑请换 --resume 新文件或清空台账。"
+                    )
                 out, cost_row = run_one_costed(variant, snapshot, query)
                 materials_path = persist_materials(
                     materials_dir, variant, ticker, i, out["judge_vars"]
@@ -255,8 +273,8 @@ def run_pilot(
                 done_keys.add(key)
                 _persist()
 
-    report = ablation_mod.aggregate_results(runs)
-    report["prompt_versions"] = prompt_versions_fn()
+    report = abl.aggregate_results(runs)
+    report["prompt_versions"] = versions_fn()
     report["snapshot_digests"] = snap_digests
     report["generated_at"] = datetime.now().isoformat(timespec="seconds")
 

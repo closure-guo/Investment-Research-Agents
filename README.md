@@ -78,9 +78,12 @@
 
 ### 4. 架构归因层（数据对齐消融）
 
-- `evals/ablation.py`：三变体（analysts / +辩论 / 完整五层）× 同 state 快照 × 配对 bootstrap；n=10 权威版 90 run（1,788 次调用 / 1,260 万 token）——辩论层与完整层增量 95% CI 全含 0（未获统计支持），据此裁剪管线省 ≈29% token（见 [消融 n10 权威结果](docs/evals/2026-09-03-消融n10权威结果.md)）；judge 维度按变体适用性过滤（避免评「不存在的层」）
+- `evals/ablation.py`：三变体（analysts / +辩论 / 完整五层）× 同 state 快照 × 配对 bootstrap；n=10 权威版 90 run（1,788 次调用 / 1,260 万 token）——辩论层与完整层的 judge 维度增量 95% CI 全含 0，即**在 3 标的、有效 n=3、judge 未校准的条件下未获统计支持**（见 [消融 n10 权威结果](docs/evals/2026-09-03-消融n10权威结果.md)；该报告的有效 n 与适用口径以其「适用口径披露」为准）
+- **成本梯度（n10 实测，相对上一层）**：辩论层 +7.9%、决策+风控层 +30.1%；相对 analysts 整体 +40.3%（裁到 analysts 省 28.7%）
+- **是否裁剪管线：未决**。「增量价值未获统计支持」与「无价值」是两个命题——有效 n=3 的分辨率不足以支持裁剪决策，需等 v2 消融（因果主张登记 + 注入法 + 单元级判定）裁决
+- judge 维度按变体适用性过滤（避免评「不存在的层」）由 `_applicable_dims` 承担，**库侧已生效**；n10 批次（2026-09-03）跑在其落地之前，故该批次的 plus_debate 行含 grounding/consistency 伪影分（报告已标注，勿引用）
 
-> **诚实边界**：消融/回测为通路验证级初步证据（3 标的 × 10 重复）；pilot 的「完整层 decision_grounding 显著退步」在修复评估缺陷（#111/#112）后证实为评估伪影；确定性指标（citation_pass/coverage/门禁）全程可信。基线说明见 [docs/evals/](docs/evals/)。
+> **诚实边界**：消融/回测为通路验证级初步证据（3 标的 × 10 重复；层增量的配对单元是标的，有效 n=3）；pilot 的「完整层 decision_grounding 显著退步」在修复评估缺陷（#111/#112）后证实为评估伪影，其报告已标 `superseded`；n10 权威批次自身仍带两处未披露过的缺陷——#112 伪影存活（plus_debate 的 grounding/consistency）与 judge 未校准（跑批早于 round7 达标 10 天）——已在其报告中补披露；确定性指标（citation_pass/coverage/门禁）全程可信。基线说明见 [docs/evals/](docs/evals/)。
 
 ## 快速开始
 

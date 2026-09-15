@@ -103,9 +103,7 @@ def main() -> None:
                 key = f"judge_{d}"
                 if key in layer:
                     ci = layer[key]["ci"]
-                    parts.append(
-                        f"{JUDGE_LABEL[d]} Δ{layer[key]['diff_median']} CI[{ci[0]},{ci[1]}]"
-                    )
+                    parts.append(f"{JUDGE_LABEL[d]} Δ{layer[key]['diff_mean']} CI[{ci[0]},{ci[1]}]")
             cpr = layer.get("citation_pass_rate", {})
             if "ci" in cpr:
                 parts.append(f"citation_pass ΔCI[{cpr['ci'][0]},{cpr['ci'][1]}]")
@@ -124,7 +122,7 @@ def main() -> None:
             if key in layer:
                 it = layer[key]
                 lines.append(
-                    f"- {d}: 点估计 Δ{it['diff_median']}, 95% CI [{it['ci'][0]}, {it['ci'][1]}] → {it['conclusion']}"
+                    f"- {d}: 点估计 Δ{it['diff_mean']}, 95% CI [{it['ci'][0]}, {it['ci'][1]}] → {it['conclusion']}"
                 )
         cpr = layer.get("citation_pass_rate", {})
         if "ci" in cpr:
