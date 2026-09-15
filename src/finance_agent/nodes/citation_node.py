@@ -120,6 +120,29 @@ def supplement_anomaly_claims(
     return out
 
 
+def _unverifiable_class_counts(results: list[CitationResult]) -> dict[str, int]:
+    """UNVERIFIABLE 三类拆报计数（文本 / 未注册 / 比较型差值）——报告与 trace 共用同一口径。"""
+    return {
+        "text": sum(
+            1
+            for r in results
+            if r.status == "UNVERIFIABLE"
+            and (r.claim.claim_type in ("entity", "regulatory") or r.claim.source_type == "event")
+        ),
+        "unregistered": sum(
+            1
+            for r in results
+            if r.status == "UNVERIFIABLE"
+            and r.claim.claim_type not in ("entity", "regulatory")
+            and r.claim.source_type != "event"
+            and r.bucket != "comparative_delta_unregistered"
+        ),
+        "comparative_delta": sum(
+            1 for r in results if r.bucket == "comparative_delta_unregistered"
+        ),
+    }
+
+
 def verify_citations(state: dict) -> dict:
     """从 analyst_reports 提取所有 Claim，批量校验（按分析师归属聚合）。
 
@@ -392,6 +415,8 @@ def verify_citations(state: dict) -> dict:
             level="WARNING",
         )
 
+    counts = _unverifiable_class_counts(results)
+
     return {
         "citation_report": report.model_dump(),
         "citation_pass": report.all_passed,
@@ -410,23 +435,9 @@ def verify_citations(state: dict) -> dict:
         # 分析师真错数 = 残余 FAIL + 单点修复已用真值回填的数（修复会把真错藏进 PASS）
         "citation_analyst_true_fail": report.failed + int(value_mismatch_repaired or 0),
         "citation_coverage_warn": coverage.coverage < 0.90,
-        "citation_unverifiable_text": sum(
-            1
-            for r in results
-            if r.status == "UNVERIFIABLE"
-            and (r.claim.claim_type in ("entity", "regulatory") or r.claim.source_type == "event")
-        ),
-        "citation_unverifiable_unregistered": sum(
-            1
-            for r in results
-            if r.status == "UNVERIFIABLE"
-            and r.claim.claim_type not in ("entity", "regulatory")
-            and r.claim.source_type != "event"
-            and r.bucket != "comparative_delta_unregistered"  # 单独计，避免重复计数
-        ),
-        "citation_unverifiable_comparative_delta": sum(
-            1 for r in results if r.bucket == "comparative_delta_unregistered"
-        ),
+        "citation_unverifiable_text": counts["text"],
+        "citation_unverifiable_unregistered": counts["unregistered"],
+        "citation_unverifiable_comparative_delta": counts["comparative_delta"],
         "citation_verifier_normalized": sum(
             1 for r in results if r.status == "PASS" and r.unit_normalized is not None
         ),
@@ -494,11 +505,17 @@ def _report_to_langfuse(
             metadata={"all_passed": report.all_passed, "fail_count": fail_count, "total": total},
         )
         ratio = (report.unverifiable / total) if total else 0.0
+        counts = _unverifiable_class_counts(report.results)
         client.score_current_trace(
             name="citation_unverifiable_ratio",
             value=round(ratio, 4),
             data_type="NUMERIC",
             comment=f"UNVERIFIABLE {report.unverifiable}/{total}; coverage_gaps={report.coverage_gaps}",
+            metadata={
+                "unverifiable_text": counts["text"],
+                "unverifiable_unregistered": counts["unregistered"],
+                "unverifiable_comparative_delta": counts["comparative_delta"],
+            },
         )
         # citation_coverage（harden-citation-semantic-coverage）：NUMERIC 0-1，
         # 只监控不进路由；< 0.8 告警（span WARNING + 日志）

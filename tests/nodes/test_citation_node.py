@@ -239,6 +239,57 @@ class TestUnverifiableRatioScore:
         assert captured["citation_unverifiable_ratio"]["value"] == 0.5
         assert captured["citation_pass"]["value"] == 1.0
 
+    def test_ratio_metadata_carries_three_class_counts(self, monkeypatch):
+        """spec「UNVERIFIABLE 占比监控」：三类拆报计数随 trace 元数据上报，
+        与报告 state 同口径（同一 helper）。"""
+        from finance_agent.nodes import citation_node
+
+        captured = {}
+
+        class _Client:
+            def score_current_trace(self, **kwargs):
+                captured[kwargs["name"]] = kwargs
+
+            def update_current_span(self, **kwargs):
+                pass
+
+        monkeypatch.setattr(citation_node, "get_langfuse", lambda: _Client())
+        claims = [
+            {  # 文本类：entity 不注册
+                "claim_type": "entity",
+                "source_type": "data",
+                "field_ref": "news_list.9.title",
+                "stated_value": "不存在的新闻",
+                "interpretation": "x",
+            },
+            {  # 比较型差值：非三枚举 stated_value
+                "claim_type": "comparative",
+                "source_type": "data",
+                "field_ref": "profitability_metrics.ROE.2024",
+                "stated_value": 2.3,
+                "interpretation": "2024 年 ROE 较 2023 年低约 2.3",
+                "field_ref_b": "profitability_metrics.ROE.2023",
+                "stated_value_b": 25.0,
+            },
+            {  # 未注册：非文本非差值
+                "claim_type": "numerical",
+                "source_type": "llm_inference",
+                "field_ref": "x",
+                "stated_value": 1.0,
+                "interpretation": "",
+            },
+        ]
+        state = {"profitability_metrics": {"ROE": {"2024": 28.0, "2023": 25.0}}}
+        out = self._run_node(claims, state)
+        meta = captured["citation_unverifiable_ratio"]["metadata"]
+        assert meta["unverifiable_text"] == 1
+        assert meta["unverifiable_unregistered"] == 1
+        assert meta["unverifiable_comparative_delta"] == 1
+        # 报告 state 键与 trace 元数据同口径（同一 helper 产出）
+        assert out["citation_unverifiable_text"] == 1
+        assert out["citation_unverifiable_unregistered"] == 1
+        assert out["citation_unverifiable_comparative_delta"] == 1
+
     def test_zero_claims_ratio_is_zero(self, monkeypatch):
         from finance_agent.nodes import citation_node
 
