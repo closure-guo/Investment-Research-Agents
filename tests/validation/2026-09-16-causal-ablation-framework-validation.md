@@ -93,11 +93,15 @@ grep -q '"diff_mean"' evals/ablation.py && grep -q '_applicable_dims' tests/scri
 - [ ] P1 预登记文档的**决策阈值与换算依据**（拦截率 <50% 判薄防线）是否可作为 P1 跑批依据
 - [ ] 逃逸率语义确认：**分母 = 已终裁单元数**，未终裁时 `rate=None`（不报 0%）——是否与产品口径一致
 - [ ] GATED 任务解阻后是否继续执行 1.2/1.3/1.4/3.3
+- [ ] G3 两处解析器小瑕疵是否修：`parse_status` 把状态值后首个 token 当 target（n10 取代者列显示 `**日期**:`）、`status_badge` 未传目标致 superseded 徽章恒显 `<缺目标>`（真实指针列正确）——各一行修复
+- [ ] G2 桶结论方向措辞：`conclusion_for_layer` 共用致 `blocked` 下降被写成「显著退步」（计数正确、方向语义相反）——需方向感知措辞或 `lower_is_better` 元数据
+- [ ] `tests/scripts/ablation_aggregate_90.py` 不再渲染 citation 层行（`if "ci" in cpr` 静默跳过，无崩溃）——待补四桶渲染
+- [ ] 驱动 `main()` 未透传 `--judge-repeats`（既有缺陷，G1 审查确认非回归）——G5 通路验证未裁决，待定
 
 ## 结论
 
 - [x] 框架部分（Task 1–14）实现完成，测试/lint/类型/覆盖率全绿，验证证据见上表
-- [ ] 全部通过，可 archive —— **未达成**：GATED 任务阻塞 + owner 复核未完成，**本 delta 不 archive**
+- [ ] 全部通过，可 archive —— **未达成**：GATED 已解阻完成（G1–G5，见下节），但 owner 复核未完成（8 项），**本 delta 不 archive**
 - [ ] 存在失败项，需修复后重新验证
 
 ## 执行记录
@@ -112,3 +116,23 @@ grep -q '"diff_mean"' evals/ablation.py && grep -q '_applicable_dims' tests/scri
 2. `openspec/changes/BACKLOG.md` 中「v2 消融框架（尚未立项）」条目需更新为本 delta 的 change id（该文件当前由另一 delta 持有，未在本轮改动）；
 3. 本 delta 的 `evaluation::数据对齐消融实验` MODIFIED 与 parity delta 的同名 Requirement 冲突按 project-workflow §6 处理（本 delta 为后到者）；
 4. `docs/evals/metrics.md` §1 口径变更（G4）须在 parity 落库后执行，避免与其已写入的口径切点段冲突。
+
+## GATED 段执行记录（2026-09-16 解阻后，G1–G5 + G6）
+
+前置：B0 UNLOCKED 判据全过（parity 已提交 `b24341c` 并归档）；rebase 21 提交零冲突（基点 `52b1e41` → 现含 gcc/adba/parity 全部落库内容），因果套件自检 147 passed。
+
+| 任务 | commit | 结果 |
+|---|---|---|
+| G1 驱动薄壳化（1.2） | `94ee58e` | 判分/维度过滤/材料落盘移入库侧 `score_run`；驱动仅续跑/记账/coverage；红 14 → 绿 56 passed；审查 Spec ✅ / Approved |
+| G2 citation 四桶拆报（1.3） | `83f161e` | `layer["citation_<bucket>"]`×4（配对口径同 judge 维度）+ `citation_pass` 退出层增量结论（`not_for_conclusions`）；红 22 → 绿 70 passed；审查 Spec ✅ / Approved |
+| G3 结论注册表（1.4） | `a869996` | `docs/evals/README.md` 索引（与 `render_status_index` 现场重跑逐字节一致）；pilot.md `superseded-by` / n10 `active` 核对通过；**未标注 12 份如实列出（未伪填）** |
+| G4 metrics §1.7 + 时间线（3.3） | `a869996` | 四类口径先行登记（因果下游指标/逃逸率分母/两句式+MDE/注册表）+「消融 v2 口径切点」段 |
+| G5 通路验证（1.5） | （脚本入 `tests/scripts/`） | `TESTING=1` stub（judge 进程内确定性注入，零 token）3 标的 × 3 变体 = **9 runs** 跑通；同参数续跑**零新增**；篡改登记 digest → **RuntimeError**（含标的与两侧 digest） |
+| G5 缺陷修复 | `1c33a53` | 见下「高危缺陷」；红 5 → 绿 79 passed；跨进程（`PYTHONHASHSEED` 0/1/12345）同 digest |
+| 审查 | — | 两 commit 均 Spec ✅ / Approved（含红态独立复现） |
+
+**G5 发现的高危缺陷（如实记录）**：parity delta 新引入的 digest 核验实现为 `values.tobytes()`——对象列（含字符串列的真实/桩数据）序列化的是**内存指针**，同一数据两次构建 digest 必不同（实测 `4ebad2a5` vs `ccd02072`）。后果：**核验在真实批次必然误报 `RuntimeError`，会阻塞全部消融跑批**。修复：`pd.util.hash_pandas_object` 内容稳定哈希 + 两向测试（同内容放行 / 篡改失败）。**该缺陷在 parity delta 归档时未被发现**（其测试用假 digest、未跑真实批次）——登记为 parity delta 的追认缺陷，修复落在本 delta（`1c33a53`）。
+
+**spec 合并（project-workflow §6 后到者义务）**：本 delta 的 `evaluation::数据对齐消融实验` MODIFIED 已按「保留双方实质」并入 parity 的三段（维度适用性唯一实现 / 快照一致性核验 / 字段名与配对单元）+ 两条 scenario，并补 digest 内容稳定性条款（`1c33a53` 的实现口径）；`openspec validate --strict` 通过。
+
+**未覆盖/推迟**：P1/P2 正式跑批（按预登记另行启动）；阳性对照的注入强度 pilot 真实材料跑批（同前）。

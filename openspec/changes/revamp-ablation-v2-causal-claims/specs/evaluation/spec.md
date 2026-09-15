@@ -4,11 +4,15 @@
 
 ### Requirement: 数据对齐消融实验
 
-系统 SHALL 支持数据对齐消融：构造三个架构变体——(a) 单分析师直出、(b) 分析师 + Bull/Bear 辩论、(c) 完整 5 层——所有变体接收**完全相同**的 state 快照（fetch_data / compute_metrics 输出重放），仅 Agent 编排不同。快照对齐 SHALL 由代码保证：每条 run 前重算快照 digest 并与本次跑批登记值比对，不一致时该 run SHALL 作废并告警，SHALL NOT 静默继续（跨交易日续跑不得混入不同输入）。
+系统 SHALL 支持数据对齐消融：构造三个架构变体——(a) 单分析师直出、(b) 分析师 + Bull/Bear 辩论、(c) 完整 5 层——所有变体接收**完全相同**的 state 快照（fetch_data / compute_metrics 输出重放），仅 Agent 编排不同。每变体 × 每标的 SHALL 重复运行 3 次取中位数。快照对齐 SHALL 由代码保证：每条 run 前重算快照 digest 并与本次跑批登记值比对，不一致时跑批 SHALL 显式失败并报告标的与两侧 digest，SHALL NOT 静默继续（跨交易日续跑不得混入不同输入）。digest SHALL 为**内容稳定**哈希——同一数据在任意进程、任意次构建得到相同值，SHALL NOT 依赖内存布局（对象列 `ndarray.tobytes()` 序列化的是指针，该形态会致核验恒失败——G5 通路验证实测）。
 
 **指标层（v2 置换）**：层增量推断 SHALL 以因果主张登记表（`causal-ablation` 能力）对应的因果下游指标为主指标。原 judge 四维的安置：report_relevance / consistency SHALL 降级为 CI 回归健康监控（门禁族），SHALL NOT 参与层增量推断；debate_quality SHALL 从消融退役（由风险点增量率、交锋修正率与 pairwise 盲评替代）；decision_grounding 的 judge 版 SHALL 降级为抽查校准用，其 dg 检查（执行参数出处）SHALL 以代码化口径为主。citation 腿 SHALL 以四桶拆报口径（blocked / analyst_true_fail / surgical_repaired / verifier_normalized）呈现，SHALL NOT 以旧 `citation_pass` 标量作层增量解读。
 
 **跑批入口唯一化**：跑批驱动 SHALL 为薄壳——判分、维度适用性过滤、judge_vars 落盘 SHALL 全部调用库侧（`evals/ablation.py`）函数，驱动侧 SHALL NOT 存在判分/过滤/落盘的重复实现；判分口径变更 SHALL 只改库侧一处。
+
+**维度适用性过滤的唯一实现**：某变体不存在的层 SHALL NOT 被 judge 评分——评「不存在的层」只会产伪影（宽容评虚层 vs 挑剔评真层的不对称，incident #112）。变体→适用维度的映射 SHALL 只有一处实现（`evals.ablation._applicable_dims`），跑批驱动 SHALL 复用该实现，SHALL NOT 在驱动侧另行硬编码变体分支。适用性过滤 SHALL 在**判分调用前**生效：被过滤维度 SHALL 记 `None` 且 SHALL NOT 产生任何 judge 调用。
+
+**层增量点估计的字段名与配对单元**：层增量的点估计字段 SHALL 命名为 `diff_mean`（值为均值差，与 `paired_bootstrap_ci` 的 mean-diff 口径一致），SHALL NOT 沿用 `diff_median` 之类与实际统计量不符的名称。聚合报告 SHALL 披露配对单元为**标的**而非 run（同标的同变体重复先取中位数，再以标的为配对单元），并给出配对单元数——使「3 标的 × 10 重复」不等于「有效 n=30」这一点对读报告的人可见。
 
 **结论句式纪律**：消融结论 SHALL 只有两种合法形态——① CI 整体低于决策阈值时为真阴性结论（「在本实验分辨率（MDE=X）下，该对象增量低于其成本对应阈值，建议降级/裁剪」）；② CI 同时跨 0 与阈值时为诚实悬置（「分辨率不足，需扩至 N 只标的」）。裸「未获统计支持」SHALL NOT 作为合格结论，必须附 MDE；决策阈值 SHALL 附成本换算依据。
 
@@ -51,12 +55,26 @@
 #### Scenario: 材料落盘不改变聚合口径
 
 - **WHEN** 落盘材料后运行聚合
-- **THEN** `aggregate_results` 的输入 runs 形状 SHALL 与落盘前一致（新增字段为附加信息），既有聚合 CI 口径 SHALL NOT 变化
+- **THEN** `aggregate_results` 的输入 runs 形状 SHALL 与落盘前一致（新增字段为附加信息），既有聚合 CI 口径 SHALL NOT 因落盘而变化
 
 #### Scenario: 跑批入口唯一化
 
 - **WHEN** 消融驱动执行判分、维度适用性过滤或 judge_vars 落盘
 - **THEN** 这些逻辑 SHALL 经由库侧函数完成；驱动侧 SHALL NOT 内联判分/过滤/落盘实现
+- **AND** 被过滤维度 SHALL 记 `None` 且 SHALL NOT 发起 judge 调用
+
+#### Scenario: 跨进程续跑的快照 digest 核验
+
+- **GIVEN** 断点续跑台账已登记某标的的快照 digest
+- **WHEN** 重启后续跑重建该标的快照
+- **THEN** digest 与登记值不一致时跑批 SHALL 显式失败并输出标的与两侧 digest，SHALL NOT 继续消耗 token、SHALL NOT 将新旧 run 混入同一批次比较
+- **AND** digest SHALL 内容稳定：同一数据在任意进程、任意次构建得到相同值（对象列不得以指针序列化参与哈希）
+
+#### Scenario: 层增量点估计字段与配对单元
+
+- **WHEN** 读取聚合报告的层增量条目
+- **THEN** 点估计 SHALL 位于 `diff_mean` 字段，`diff_median` SHALL NOT 出现
+- **AND** 报告 SHALL 携带配对单元数与「配对单元=标的」的披露
 
 #### Scenario: citation 腿拆报呈现
 
