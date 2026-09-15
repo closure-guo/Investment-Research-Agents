@@ -65,3 +65,25 @@ class TestRender:
             [ReportEntry("b.md", "active", None), ReportEntry("a.md", "active", None)], []
         )
         assert out.index("a.md") < out.index("b.md")
+
+
+class TestBadgeCarriesTarget:
+    """G7/⑤b 回归：徽章必须拿到目标路径（历史形态：`status_badge(e.status)` 未传 target
+    → superseded 行恒显 `<缺目标>`，真实取代者只存在于同行的「取代者」列）。"""
+
+    _TARGET = "docs/evals/2026-09-03-消融n10权威结果.md"
+
+    def test_superseded_row_badge_points_at_real_target(self):
+        out = render_status_index(
+            [ReportEntry("evals/ablation/results/pilot.md", "superseded-by", self._TARGET)], []
+        )
+        line = next(line for line in out.splitlines() if "pilot.md" in line)
+        status_cell = line.split("|")[2].strip()
+        assert status_cell == f"![superseded](badge:superseded) → {self._TARGET}", (
+            "徽章后须跟随真实取代者路径，而非占位文案"
+        )
+        assert "<缺目标>" not in out
+
+    def test_active_row_has_no_missing_target_placeholder(self):
+        out = render_status_index([ReportEntry("docs/evals/a.md", "active", None)], [])
+        assert "<缺目标>" not in out, "active 行不得出现缺目标占位"

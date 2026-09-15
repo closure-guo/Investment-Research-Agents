@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 
 STATUSES: tuple[str, ...] = ("active", "superseded-by")
-_STATUS_RE = re.compile(r"\*\*status\*\*:\s*(?P<status>[A-Za-z-]+)\s*:?\s*(?P<target>\S*)")
+# 行内间隙一律用 [ \t]（不得用 \s）——`\s` 会跨行，使本行无路径的
+# `**status**: superseded-by` 把下一行首个 token（如 `**日期**:`）当 target，
+# 从而绕过「superseded-by 必须带目标路径」校验（G7/⑤a 修复）。
+_STATUS_RE = re.compile(r"\*\*status\*\*:[ \t]*(?P<status>[A-Za-z-]+)[ \t]*:?[ \t]*(?P<target>\S*)")
 
 
 def parse_status(text: str) -> tuple[str, str | None]:

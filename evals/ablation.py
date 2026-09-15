@@ -341,6 +341,22 @@ def score_run(
     }
 
 
+# citation 四桶的方向元数据（G7/⑥），键域 = `escape.VERIFIER_BUCKETS`。
+#
+# `conclusion_for_layer` 的措辞按**计数增减方向**生成（count-direction 通用，与桶语义
+# 无关：计数下降恒写「显著退步」）；因此质量解读**不**在措辞里，消费者读
+# `layer["citation_<bucket>"]` 时必须结合本字段：True → 计数下降即改善；None → 遥测，
+# 无方向。故意不改 `conclusion_for_layer` 措辞（不引入第二套措辞口径）。
+_CITATION_BUCKET_LOWER_IS_BETTER: dict[str, bool | None] = {
+    # 质量计数：下降（diff < 0）即改善
+    "blocked": True,  # 归一后残余 FAIL > 0 的阻断
+    "analyst_true_fail": True,  # 残余 FAIL + 单点修复回填（真错，须计入）
+    # 工作量遥测：无好坏方向（校验器/修复的触发量与解析债）
+    "surgical_repaired": None,  # 单点修复成功回填条数
+    "verifier_normalized": None,  # 归一后由 FAIL 转 PASS 的计数
+}
+
+
 def conclusion_for_layer(ci: tuple[float, float]) -> str:
     """层级增量结论措辞：CI 整体>0 显著改进；整体<0 显著退步；含 0 未获支持。"""
     if ci[0] > 0:
@@ -425,7 +441,8 @@ def aggregate_results(runs: list[dict], *, B: int = 10_000, seed: int = 42) -> d
         # citation 腿四桶拆报（F3）：口径同 judge 维度——逐标的中位 + 配对 bootstrap
         # mean-diff CI。旧 run 记录无 citation_buckets 或任一侧无可配对标的 → 整桶跳过，
         # 不产伪层结论、不伪造 0。结论措辞按计数增减方向生成（conclusion_for_layer 同
-        # 口径）；质量解读随桶语义（blocked / analyst_true_fail 下降即改善）。
+        # 口径，count-direction 通用）；质量解读随桶语义（blocked / analyst_true_fail
+        # 下降即改善）——以 `lower_is_better` 元数据随条目落盘，消费者须据此读（G7/⑥）。
         prev_bucket_by_ticker = _by_ticker_bucket_median(runs, prev)
         cur_bucket_by_ticker = _by_ticker_bucket_median(runs, variant)
         common_bucket_tickers = sorted(set(prev_bucket_by_ticker) & set(cur_bucket_by_ticker))
@@ -449,6 +466,8 @@ def aggregate_results(runs: list[dict], *, B: int = 10_000, seed: int = 42) -> d
                 ),
                 "ci": (round(lo, 4), round(hi, 4)),
                 "conclusion": conclusion_for_layer((lo, hi)),
+                # 方向元数据（G7/⑥）：措辞是计数口径，质量解读须按本字段施加
+                "lower_is_better": _CITATION_BUCKET_LOWER_IS_BETTER[bucket],
             }
         # 论点锚点覆盖率层增量（4.4）：与 judge 维度同口径——逐标的中位数（跳过 None）
         # 配对 + mean-diff 配对 bootstrap CI。任一侧无可配对的标的（如 prev=analysts

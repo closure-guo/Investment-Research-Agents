@@ -340,6 +340,7 @@ def main() -> None:
     run_pilot(
         tickers=args.tickers,
         repeats=args.repeats,
+        judge_repeats=args.judge_repeats,  # G7/⑧：CLI 旗标须透传（此前漏传致静默失效）
         query=args.query,
         resume_path=args.resume,
         materials_dir=args.materials_dir,

@@ -51,7 +51,8 @@ def render_status_index(entries: list[ReportEntry], unstamped: list[str]) -> str
         lines.append("| 报告 | 状态 | 取代者 |")
         lines.append("|---|---|---|")
         for e in sorted(entries, key=lambda x: x.path):
-            lines.append(f"| {e.path} | {status_badge(e.status)} | {e.target or '—'} |")
+            # 徽章带上目标（G7/⑤b）：否则 superseded 行恒显 `<缺目标>`，取代者只藏于末列
+            lines.append(f"| {e.path} | {status_badge(e.status, e.target)} | {e.target or '—'} |")
     else:
         lines.append("（暂无带 status 头的报告）")
     if unstamped:

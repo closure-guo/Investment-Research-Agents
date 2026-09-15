@@ -420,6 +420,59 @@ class TestCli:
     def test_judge_repeats_default_is_mean_protocol(self):
         assert pilot.JUDGE_REPEATS >= 3, "默认须为多次均值（单次调用 5/4 边界有 ±1 噪声）"
 
+    def test_main_forwards_judge_repeats_end_to_end(self, env, monkeypatch):
+        """G7/⑧ 回归：CLI `--judge-repeats` 须经 `main()` 透传到判分与产物。
+
+        历史形态：`main()` 调 `run_pilot(...)` 时漏传 `judge_repeats`，旗标静默失效
+        （产出的 `config["judge_repeats"]` 恒为默认值，判分也按默认 K 次跑）。
+        """
+        captured: dict = {}
+        produced: dict = {}
+        real_run_pilot = pilot.run_pilot
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            # 只注入假件；路径类参数由 CLI 传入 tmp_path（不碰仓库内 reports/）
+            produced["path"] = real_run_pilot(
+                **kwargs,
+                ablation_mod=env.ablation,
+                meter=env.meter,
+                prompt_versions_fn=lambda: {"debate_quality": "v6"},
+            )
+            return produced["path"]
+
+        monkeypatch.setattr(pilot, "run_pilot", spy)
+        monkeypatch.setattr(pilot.pilot_util, "_pin_pipeline_model", lambda: None)
+        monkeypatch.setattr(pilot.pilot_util, "install_usage_meter", lambda: None)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "ablation_pilot.py",
+                "--tickers",
+                "600519",
+                "--repeats",
+                "1",
+                "--judge-repeats",
+                "5",
+                "--resume",
+                str(env.resume),
+                "--materials-dir",
+                str(env.materials),
+                "--out-dir",
+                str(env.out),
+            ],
+        )
+        pilot.main()
+
+        assert captured["judge_repeats"] == 5, "CLI 旗标不得静默失效"
+        assert captured["tickers"] == ["600519"] and captured["repeats"] == 1
+        artifact = json.loads(produced["path"].read_text(encoding="utf-8"))
+        assert artifact["config"]["judge_repeats"] == 5, "CLI → 产物 config"
+        assert [call[3] for call in env.ablation.score_calls] == [5] * 3, (
+            "CLI → 库侧判分入口的 K 次均值参数"
+        )
+
 
 class TestApplicableDimsParity:
     """驱动不得自带变体→维度映射（#112）：唯一实现在库侧，驱动必须问库侧。"""

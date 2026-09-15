@@ -464,7 +464,8 @@ class TestCitationBucketAggregation:
     结论措辞由 `conclusion_for_layer` 按**计数增减方向**生成（与 judge 维度同一函数）：
     计数下降 → 字面「显著退步」= 该桶计数显著下降；质量解读随桶语义（blocked /
     analyst_true_fail 下降即改善，surgical_repaired / verifier_normalized 为校验器
-    工作量遥测）。措辞方向化不在 F3 范围内。
+    工作量遥测）。措辞方向化不在 F3 范围内；G7/⑥ 以 `lower_is_better` 元数据把方向
+    交给消费者（见 TestCitationBucketDirectionMetadata）。
     """
 
     _BASE = {"blocked": 1, "analyst_true_fail": 2, "surgical_repaired": 0, "verifier_normalized": 3}
@@ -509,21 +510,25 @@ class TestCitationBucketAggregation:
             "diff_mean": -1.0,
             "ci": (-1.0, -1.0),
             "conclusion": "显著退步",
+            "lower_is_better": True,
         }
         assert layer["citation_analyst_true_fail"] == {
             "diff_mean": -1.0,
             "ci": (-1.0, -1.0),
             "conclusion": "显著退步",
+            "lower_is_better": True,
         }
         assert layer["citation_surgical_repaired"] == {
             "diff_mean": 1.0,
             "ci": (1.0, 1.0),
             "conclusion": "显著改进",
+            "lower_is_better": None,
         }
         assert layer["citation_verifier_normalized"] == {
             "diff_mean": -1.0,
             "ci": (-1.0, -1.0),
             "conclusion": "显著退步",
+            "lower_is_better": None,
         }
         assert layer["pairing_unit"] == "ticker"
         assert layer["pairing_units"] == 3, "配对单元为标的（与 judge 块同一披露）"
@@ -534,6 +539,7 @@ class TestCitationBucketAggregation:
             "diff_mean": 0.0,
             "ci": (0.0, 0.0),
             "conclusion": "该层价值未获统计支持",
+            "lower_is_better": True,
         }
         assert layer["citation_analyst_true_fail"]["diff_mean"] == -1.0
         assert layer["citation_surgical_repaired"]["diff_mean"] == 1.0
@@ -570,6 +576,7 @@ class TestCitationBucketAggregation:
             "diff_mean": 0.0,
             "ci": (0.0, 0.0),
             "conclusion": "该层价值未获统计支持",
+            "lower_is_better": True,
         }
         assert report["variants"]["full"]["citation_buckets_median"]["blocked"] == 0.0
 
@@ -637,6 +644,54 @@ class TestCitationBucketAggregation:
             "surgical_repaired": None,
             "verifier_normalized": None,
         }
+
+
+class TestCitationBucketDirectionMetadata:
+    """G7/⑥：四桶层条目带 `lower_is_better` 方向元数据（纯增量，措辞不动）。
+
+    `conclusion_for_layer` 的措辞是**计数方向通用**的（下降恒写作「显著退步」），
+    与桶语义无关；质量解读必须由消费者按 `lower_is_better` 施加。judge / 锚点块
+    的 golden（`TestJudgeOutputsUnchangedGuard`）不涉及四桶，保持逐字不变。
+    """
+
+    def _layer(self) -> dict:
+        return TestCitationBucketAggregation()._report()["layers"]["debate"]
+
+    def test_quality_counters_marked_lower_is_better(self):
+        layer = self._layer()
+        assert layer["citation_blocked"]["lower_is_better"] is True, "阻断计数下降即改善"
+        assert layer["citation_analyst_true_fail"]["lower_is_better"] is True, (
+            "分析师真错计数下降即改善"
+        )
+
+    def test_workload_telemetry_has_no_direction(self):
+        layer = self._layer()
+        assert layer["citation_surgical_repaired"]["lower_is_better"] is None, (
+            "单点修复为工作量遥测，无好坏方向"
+        )
+        assert layer["citation_verifier_normalized"]["lower_is_better"] is None, (
+            "校验器归一为工作量遥测，无好坏方向"
+        )
+
+    def test_all_four_bucket_entries_carry_the_flag(self):
+        """四个桶条目**均**带该键（缺席会让消费者把遥测桶误读成质量桶）。"""
+        layer = self._layer()
+        for bucket in ("blocked", "analyst_true_fail", "surgical_repaired", "verifier_normalized"):
+            assert f"citation_{bucket}" in layer
+            assert "lower_is_better" in layer[f"citation_{bucket}"]
+
+    def test_direction_mapping_covers_shared_bucket_constant(self):
+        """方向映射与共享桶常量同域（缺键 → 建层即 KeyError，不静默给 None）。"""
+        from evals.ablation import _CITATION_BUCKET_LOWER_IS_BETTER
+        from evals.causal_ablation.escape import VERIFIER_BUCKETS
+
+        assert set(_CITATION_BUCKET_LOWER_IS_BETTER) == set(VERIFIER_BUCKETS)
+
+    def test_conclusion_wording_stays_count_directional(self):
+        """⑥ 只加元数据、不改措辞：blocked 下降仍逐字写作「显著退步」（计数口径）。"""
+        entry = self._layer()["citation_blocked"]
+        assert entry["diff_mean"] == -1.0
+        assert entry["conclusion"] == "显著退步"
 
 
 class TestJudgeOutputsUnchangedGuard:

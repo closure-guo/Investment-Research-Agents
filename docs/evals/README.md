@@ -3,8 +3,8 @@
 
 | 报告 | 状态 | 取代者 |
 |---|---|---|
-| docs/evals/2026-09-03-消融n10权威结果.md | ![active](badge:active) | **日期**: |
-| evals/ablation/results/pilot.md | ![superseded](badge:superseded) → <缺目标> | docs/evals/2026-09-03-消融n10权威结果.md |
+| docs/evals/2026-09-03-消融n10权威结果.md | ![active](badge:active) | — |
+| evals/ablation/results/pilot.md | ![superseded](badge:superseded) → docs/evals/2026-09-03-消融n10权威结果.md | docs/evals/2026-09-03-消融n10权威结果.md |
 
 ## 未标注生命周期（12 份）
 
@@ -46,5 +46,5 @@ PY
 ```
 
 - **登记方式**：报告头部加生命周期字段（`status`：`active`；结论被推翻时改 `superseded-by: <取代者路径>` + 就地撤回说明，指向路径须真实存在）——字面格式与校验以 `evals/causal_ablation/report_status.py`、`tests/evals/causal_ablation/test_report_status.py` 为准。
-- **渲染器已知形态（冻结代码，本索引如实渲染、未手工改写）**：① `active` 行的「取代者」列会被 `parse_status` 捕到 status 值之后的首个非空白 token（n10 行显示 `**日期**:`）——`active` 行该列应读作「无」；② `superseded` 行的状态徽章恒带 `<缺目标>`（`render_status_index` 调 `status_badge` 时未传目标），真实取代者见同行「取代者」列；③ 徽章 `badge:` 为占位图片地址，渲染时按 alt 文本读即可。
+- **渲染器已知形态（冻结代码，本索引如实渲染、未手工改写）**：① 「取代者」列只在 status 头**同一行**捕到路径时才有值，`active` 行读作 `—`（G7/⑤a 修复了此前跨行捕获、把下一行首个 token 当 target 的缺陷）；② `superseded` 行的状态徽章带真实取代者路径（`status_badge(status, target)`，与同行「取代者」列一致；G7/⑤b 修复了此前恒显 `<缺目标>` 的缺陷）；③ 徽章 `badge:` 为占位图片地址，渲染时按 alt 文本读即可。
 - **注意（扫描器判据是字面标记）**：`docs/evals/` 下的非报告文档（含本文件、`metrics.md`、模板）不得复现报告头的字面标记，否则会被误当作报告——取值合法会被显示为 `active`，取值非法会让收集器直接抛错。本文件与 `metrics.md` 因该原因以不带粗体星号的写法描述字段名。
