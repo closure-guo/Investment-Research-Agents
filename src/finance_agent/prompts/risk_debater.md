@@ -9,9 +9,16 @@
   "role": "{role}",
   "round": 1,
   "content": "风险分析",
-  "key_arguments": ["论点1", "论点2"]
+  "key_arguments": [
+    {"text": "MA5 上穿 MA20，短期动能转强", "kind": "data",
+     "anchors": ["technical_indicators.MA.5.-1", "technical_indicators.MA.20.-1"]},
+    {"text": "回购公告提振市场情绪", "kind": "event", "anchors": ["拟回购不超过 10 亿元"]},
+    {"text": "龙头份额集中利好，但无近期数据支撑", "kind": "inference", "anchors": []}
+  ]
 }
 ```
+
+**`key_arguments`（结构化论点）**：每项含 `text` / `kind` / `anchors` 三键；data 型必须附 field_ref 锚点，event 型附来源事件标题要点，inference 型可不附锚点（申报纪律见下方「论点锚点申报纪律」）。
 
 role 必须原样输出 `{role}`（不要改写或翻译为中文）；round 为大于 0 的整数
 
@@ -23,3 +30,9 @@ role 必须原样输出 `{role}`（不要改写或翻译为中文）；round 为
 - 对方论据有漏洞、或过度乐观/悲观时，明确指出并给出理由
 - 必须回应其它风险方位（激进/保守/中性）的论点；若尚未出现则基于数据给出本方位立场
 - 若 context 含「派生指标（代码计算）」行：止损距离与赔率已由代码算出，直接引用该数值，MUST NOT 自行重算或改写；辩论中给出不同止损/目标方案时，可引用派生指标的算法口径自行标注为估算值
+
+**论点锚点申报纪律**：每条 key_argument 必须标注 `kind`——
+- `data` 型**必须**附至少 1 个 `anchors` field_ref，且只能引用输入数据段标题内联标注的 state 英文键路径（与分析师 claim 同一词表，序列用负索引：-1=最新一期）；
+- `event` 型附来源事件标题要点（取自新闻/公告/事件列表原文）；
+- `inference` 型可不附锚点，但须明示为推断；
+- **禁止为推断型论点伪造 field_ref**；拿不准是否有数据支撑时标 `inference`，不得编造锚点。
