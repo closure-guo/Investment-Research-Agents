@@ -51,7 +51,9 @@ class TestSemanticTermCheck:
         )
         (r,) = verify_claims([claim], _state())
         assert r.status == "PASS"
-        assert r.coverage_gap is False
+        # harden-recompute-routing：注册表根的 claim 一律尝试重算；本 fixture 的 state 无
+        # 原始报表 → 显式降级回直读并保留覆盖缺口标记（「重算不可得」也是覆盖缺口的一种）
+        assert r.coverage_gap is True
 
     def test_term_alias_match_passes(self):
         """metric_name 用英文别名，canonical 化后与中文指标段一致 → 过。"""
