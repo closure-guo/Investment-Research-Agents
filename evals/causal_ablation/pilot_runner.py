@@ -2092,16 +2092,19 @@ def pilot_report(
     prereg_dir: Path | None = None,
     positive_control_units: list[dict] | None = None,
     llm_meter_total: int | None = None,
+    adjudicated: set[str] | None = None,
 ) -> dict:
     """P1 批报告：分型逃逸率（未终裁 rate=None）+ 校准判词 + 阳性对照 + 预算 + 终裁清单。
 
-    主指标 rate 一律以 `adjudicated=set()` 结算——人工终裁前只报 pending 计数，
-    「0 逃逸」与「没判定过」不得混为一谈（spec「逃逸须终裁确认」）。
+    主指标 rate 以 `adjudicated` 结算：缺省空集（人工终裁前只报 pending 计数，
+    「0 逃逸」与「没判定过」不得混为一谈，spec「逃逸须终裁确认」）；回填终裁清单后
+    传入 `adjudication.adjudicated_case_ids(...)` 的集合即可出数。
 
     `llm_meter_total` = 报告生成时的 meter 绝对读数（独立交叉核对，缺省 None = 未接线）。
     """
     prereg = assert_launch_allowed(prereg_dir)
     positive_control_units = list(positive_control_units or [])
+    adjudicated = set(adjudicated or set())
     ok = [u for u in units if u.get("status") == STATUS_OK]
     pairs = [_pair_of(u) for u in ok]
     by_type: dict[str, dict] = {}
@@ -2119,12 +2122,12 @@ def pilot_report(
             "n_pairs": len(type_pairs),
             "mcnemar": mcnemar_table(type_pairs),
             "calibration": _calibration(type_pairs),
-            "escape_rate": escape_rate(type_pairs, adjudicated=set()),
+            "escape_rate": escape_rate(type_pairs, adjudicated=adjudicated),
             "verification_surface": VERIFICATION_FLAG_SURFACE.get(pollution_type, False),
             # 可测面分型（fail / traceability / input_side / none）——读分型判词前先读它
             "flag_surface": FLAG_SURFACE_KIND.get(pollution_type, "none"),
         }
-    overall_rate = escape_rate(pairs, adjudicated=set())
+    overall_rate = escape_rate(pairs, adjudicated=adjudicated)
     discordant = mcnemar_table(pairs) if pairs else {"b": 0.0, "c": 0.0, "discordant_ratio": 0.0}
     worklist = [
         {
@@ -2176,7 +2179,7 @@ def pilot_report(
         "escape_rate": {
             "overall": overall_rate,
             "by_type": {t: v["escape_rate"] for t, v in by_type.items()},
-            "adjudicated": 0,
+            "adjudicated": len(adjudicated),
             "note": "未终裁单元不入分子分母：rate=None 表示尚无终裁（spec「逃逸须终裁确认」）",
         },
         "by_type": by_type,

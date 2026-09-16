@@ -1462,6 +1462,22 @@ class TestPilotReport:
         assert report["blind_spots"] == []  # direction_error 有校验侧拦截面
         assert report["stop_rules"]["too_easy"] is False
 
+    def test_adjudicated_escapes_enter_escape_rate(self, tmp_path: Path):
+        """终裁回填 → rate 出数（未回填一律 None）；未终裁的仍计 pending。"""
+        units = self._units()
+        report = pr.pilot_report(
+            units,
+            prereg_dir=_prereg_dir(tmp_path / "prereg"),
+            positive_control_units=[],
+            adjudicated={"600519-direction_error-0", "600519-unit_error-1"},
+        )
+        overall = report["escape_rate"]["overall"]
+        assert overall["denominator"] == 2
+        assert overall["escapes"] == 2
+        assert overall["rate"] == 1.0
+        assert overall["pending"] == 1
+        assert report["escape_rate"]["adjudicated"] == 2
+
     def test_stop_rule_too_easy_flagged(self, tmp_path: Path):
         units = [
             {

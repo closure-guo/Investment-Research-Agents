@@ -20,6 +20,7 @@ from evals.causal_ablation.adjudication import (
     READING_SELF_CERTIFIED,
     READING_SPURIOUS,
     adjudicable_units,
+    adjudicated_case_ids,
     case_groups,
     machine_reading,
     worklist_rows,
@@ -201,6 +202,34 @@ class TestCaseGroups:
         units = [_unit("a::offline_replay", pollution_type="stale_macro", mechanism_id="A7")]
         assert adjudicable_units(units) == []
         assert worklist_rows(units) == []
+
+
+class TestAdjudicatedCaseIds:
+    """终裁回填 → escape_rate 的入参：只认**确认真逃逸**的行（其余为 pending）。"""
+
+    def test_expands_case_level_unit_ids(self, tmp_path):
+        path = tmp_path / "cases.csv"
+        path.write_text(
+            "case_key,unit_ids,human_verdict(真逃逸?/误报?/待查)\n"
+            '"a-0","[""a-0::offline_replay"", ""a-1::offline_replay""]",真逃逸\n'
+            '"b-0","[""b-0::offline_replay""]",误报\n'
+            '"c-0","[""c-0::offline_replay""]",\n',
+            encoding="utf-8-sig",
+        )
+        assert adjudicated_case_ids(path) == {"a-0", "a-1"}
+
+    def test_reads_unit_level_rows(self, tmp_path):
+        path = tmp_path / "units.csv"
+        path.write_text(
+            "unit_id,human_verdict(真逃逸?/误报?/待查)\n"
+            "u-0::offline_replay,真逃逸\n"
+            "u-1::offline_replay,误报\n",
+            encoding="utf-8-sig",
+        )
+        assert adjudicated_case_ids(path) == {"u-0"}
+
+    def test_missing_file_yields_empty_set(self, tmp_path):
+        assert adjudicated_case_ids(tmp_path / "nope.csv") == set()
 
 
 class TestMachineReading:

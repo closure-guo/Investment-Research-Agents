@@ -37,6 +37,7 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from evals.causal_ablation.adjudication import adjudicated_case_ids  # noqa: E402
 from evals.causal_ablation.injection import COST_CLASS, POLLUTION_TYPES  # noqa: E402
 from evals.causal_ablation.preregister import MissingPreregistrationError  # noqa: E402
 from evals.causal_ablation.units import write_units  # noqa: E402
@@ -60,6 +61,8 @@ INSTANCES = 4
 LEGS = "both"
 REAL_RUN_LIMIT = 12  # 真跑型单元上限（每单元 = 2 次图运行：机制开/关同一污染输入）
 MATERIALS_DIR = Path("reports/ablation/p1/materials")
+# 终裁清单（回填「真逃逸」后 rate 出数；文件不存在或未回填 → rate 保持 None）
+ADJUDICATION_CSV = Path("tests/validation/2026-09-16-p1-adjudication-cases.csv")
 OUT_DIR = Path("reports/ablation/p1")
 PREREG_DIR = Path("evals/ablation/preregister")
 
@@ -86,6 +89,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prereg-dir", type=Path, default=PREREG_DIR, help="预登记目录（门禁）")
     parser.add_argument(
         "--resume", type=Path, default=None, help="续跑台账路径（默认 out-dir/resume.json）"
+    )
+    parser.add_argument(
+        "--adjudication-csv",
+        type=Path,
+        default=ADJUDICATION_CSV,
+        help="人工终裁清单（读回「真逃逸」的 case_id → escape_rate 出数；缺省按固定路径）",
     )
     parser.add_argument(
         "--materials-only",
@@ -271,6 +280,7 @@ def run_pilot(
     resume_path: Path | None = None,
     graph_runner: Callable[..., dict] | None = None,
     llm_meter: Callable[[], int] | None = None,
+    adjudication_csv: Path | None = None,
 ) -> Path:
     """P1 跑批主流程：门禁 → 读产物 → 构用例 → 跑腿 → 落单元/报告。"""
     # 1) 预登记门禁：缺预登记拒绝启动（spec「缺预登记拒绝跑批」）
@@ -346,10 +356,12 @@ def run_pilot(
     positive_control = [
         u for u in units if u.get("mechanism_id") == "A3" and u.get("status") == pr.STATUS_OK
     ]
+    adjudicated = adjudicated_case_ids(Path(adjudication_csv)) if adjudication_csv else set()
     report = pr.pilot_report(
         units,
         prereg_dir=prereg_dir,
         positive_control_units=positive_control,
+        adjudicated=adjudicated,
         # meter 绝对读数：预算块的独立交叉核对（None = 未接线；不可用不得伪造成 0）
         llm_meter_total=None if llm_meter is None else int(llm_meter()),
     )
@@ -361,6 +373,7 @@ def run_pilot(
         "real_run_limit": real_run_limit,
         "real_run_cases": real_cases,
         "materials_dir": Path(materials_dir).as_posix(),
+        "adjudication_csv": (Path(adjudication_csv).as_posix() if adjudication_csv else None),
         "out_dir": Path(out_dir).as_posix(),
         "prereg_dir": Path(prereg_dir).as_posix(),
         "planned_units": planned,
@@ -487,6 +500,7 @@ def main() -> None:
             out_dir=args.out_dir,
             prereg_dir=args.prereg_dir,
             resume_path=args.resume,
+            adjudication_csv=args.adjudication_csv,
             llm_meter=_install_cost_meter() if args.legs != "offline" else None,
         )
     except (MissingPreregistrationError, pr.MissingProductError, pr.InjectionError) as exc:

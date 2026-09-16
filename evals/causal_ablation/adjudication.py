@@ -188,6 +188,44 @@ def _worklist_row(unit: dict) -> dict:
     }
 
 
+VERDICT_COLUMN = "human_verdict(真逃逸?/误报?/待查)"
+VERDICT_CONFIRMED = "真逃逸"
+
+
+def adjudicated_case_ids(path: Path, *, confirmed: str = VERDICT_CONFIRMED) -> set[str]:
+    """从终裁清单读回**已确认**的 case_id 集合（`escape_rate` 的 `adjudicated` 入参）。
+
+    - 案例级行（有 `unit_ids`）：展开组内全部实例的 case_id（判一次、组内套用）；
+    - 单元级行：直接取 `unit_id` 的 case_id 段；
+    - 只有填了「真逃逸」（或缺省前缀对应的判词）的行才算已终裁——误报/待查/留空都不进
+      （「0 逃逸」与「没判定过」不得混为一谈，spec「逃逸须终裁确认」）。
+    """
+    path = Path(path)
+    if not path.exists():
+        return set()
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return set()
+    out: set[str] = set()
+    for row in csv.DictReader(text.splitlines()):
+        verdict = str(row.get(VERDICT_COLUMN) or "").strip()
+        if not verdict.startswith(confirmed):
+            continue
+        raw = row.get("unit_ids")
+        if raw:
+            try:
+                units = json.loads(raw)
+            except json.JSONDecodeError:
+                units = []
+            out.update(str(u).split("::")[0] for u in units if str(u))
+            continue
+        unit_id = str(row.get("unit_id") or row.get("case_id") or "")
+        if unit_id:
+            out.add(unit_id.split("::")[0])
+    return out
+
+
 def adjudicable_units(units: Sequence[dict]) -> list[dict]:
     """终裁口径的单元全集（与 `pilot_report` 一致：`status=ok`、关态逃逸、非输入侧面）。
 
