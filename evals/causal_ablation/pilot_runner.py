@@ -1290,8 +1290,11 @@ def freeze_analyst_output(
         "frozen_from": case.case_id,
     }
     if frozen_dir is not None:
+        # 显式 .json 后缀：save_product 用 with_suffix(".pkl") 派生侧车，而
+        # `ticker.case_id` 形态（如 600519.600519-value_error-0）的最后一段被当成后缀
+        # → 同标的全部单元会写进同一个 .pkl 互相覆盖（冻结批实测踩到）
         frozen["paths"] = save_product(
-            Path(frozen_dir) / f"{product.get('ticker')}.{case.case_id}", frozen
+            Path(frozen_dir) / f"{product.get('ticker')}.{case.case_id}.json", frozen
         )
     return frozen | {"injection_effect": effect.as_dict()}
 
