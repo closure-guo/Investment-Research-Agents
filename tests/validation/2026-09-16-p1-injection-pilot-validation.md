@@ -170,6 +170,7 @@ claim 本就解析不出，与污染无关）；③ 关态真逃逸吗。三条�
 | `period_shift` / `002415-unit_error` 的 `ground_truth`/`delta` 为空 | **语义类检查**（A2 期次检查「申报期次在数据里存在吗」、内部回声检查「值与 claim 正文自相矛盾吗」）只报「不匹配」，不做数值比对 → 无真值/差值可报；拦截证据看桶名（`semantic_period_mismatch` / `internal_inconsistency`） |
 | `fabricated_event` 的 `on_verdict=UNVERIFIABLE/-` | A6 可追溯性面：该机制没有判 FAIL 的能力，"无出处的 claim 不静默放行"即算拦下（见 §10 可测面分型） |
 | `direction_error` 的 `delta` ≈ 2×`ground_truth` | 污染是方向标签翻面，有效值变号 → 原始差 = 2 倍真值（正常算术，非异常） |
+| `002415-direction_error` 的 `delta=18.71` 与 `ground_truth=0.1852` 不同单位 | claim 面值是**百分数**（18.52）而真值是**小数**（0.1852）——方向冲突分支在校验器里**先于单位/百分比归一**返回原始差（`abs(gt - eff)`），故该 delta 只能读作「方向冲突成立」，**不能读作偏差幅度**（按同一单位算应为 0.37）。判词不受影响（桶 `direction_mismatch` 正确）；此为校验器侧观测量缺陷，已登记待处置 |
 | `unit_error` 中 `002415` 的桶是 `internal_inconsistency` | 值被放大到与 claim 正文自相矛盾，先被内部一致性抓到（同属 A3 校验链，仍算真拦） |
 | `polluted_values` 曾是方向型的申报对照值 | round-3 实测缺陷（commit `875b6c5`）：方向型漏写真实标记 → 已修为翻转后的方向词，并加 `polluted_field` 列 |
 
