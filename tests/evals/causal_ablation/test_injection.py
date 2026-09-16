@@ -180,13 +180,27 @@ class TestDeterminism:
 
 
 class TestPayloadTargets:
-    def test_value_error_targets_income_statement_cell(self):
-        case = _case("value_error")
+    def test_value_error_even_instances_target_citeable_derived_series(self):
+        """P1 重校：偶数实例打 derived_series（分析师被提示直接引用的派生值表，
+        且在重算注册表里）——旧靶点（利润表格单元格）analyst 从不逐字引用，真跑 7/8 void。"""
+        case = _case("value_error", idx=0)
+        assert case.payload["op"] == "derived_series_value"
+        assert case.payload["target"] == "derived_series"
+        assert case.payload["key"] == "chg_5d"
+        assert case.payload["field"] == "derived_series.chg_5d"
+        # 旧单元格形态保留为回落（derived_series 缺失时）
+        assert case.payload["fallback"]["op"] == "dataframe_cell"
+        assert case.payload["fallback"]["target"] == "income_statement"
+        # 旧口径（写通用 revenue 键）不得回归
+        assert "set" not in case.payload
+
+    @pytest.mark.parametrize("idx", [1, 3])
+    def test_value_error_odd_instances_keep_cell_form(self, idx):
+        case = _case("value_error", idx=idx)
         assert case.payload["op"] == "dataframe_cell"
         assert case.payload["target"] == "income_statement"
         assert case.payload["column"] == "营业总收入"
         assert case.payload["field"].startswith("income_statement")
-        # 旧口径（写通用 revenue 键）不得回归
         assert "set" not in case.payload
 
     def test_value_error_factor_is_5_to_50_pct(self):
@@ -194,10 +208,17 @@ class TestPayloadTargets:
             factor = float(_case("value_error", idx=idx).payload["factor"])
             assert 0.05 <= abs(factor - 1.0) <= 0.50
 
-    def test_mirror_narrative_targets_kline_rows(self):
+    def test_mirror_narrative_targets_indicator_series_with_kline_fallback(self):
+        """P1 重校：打技术指标序列（分析师直读），kline 行序保留为回落。"""
         case = _case("mirror_narrative")
-        assert case.payload["op"] == "reverse_rows"
-        assert case.payload["target"] == "kline"
+        assert case.payload["op"] == "reverse_series"
+        assert case.payload["target"] == "technical_indicators"
+        assert case.payload["path"] == ["MA", "5"]
+        assert case.payload["fallback"] == {
+            "op": "reverse_rows",
+            "target": "kline",
+            "field": "kline",
+        }
         assert "close_series" not in case.payload
 
     def test_fabricated_event_targets_news_list(self):
@@ -230,13 +251,13 @@ class TestPayloadTargets:
         assert case.payload["set"]
 
 
-# ── apply_injection：value_error（利润表单元格）──
+# ── apply_injection：value_error（利润表单元格 = 奇数实例 / 回落形态）──
 
 
 class TestApplyValueError:
     def test_applies_to_latest_revenue_cell(self):
         snapshot = _snapshot()
-        out, effect = apply_injection(snapshot, _case("value_error"))
+        out, effect = apply_injection(snapshot, _case("value_error", idx=1))
         assert effect.applied is True
         assert effect.reason == ""
         assert effect.target == "income_statement"
@@ -257,7 +278,7 @@ class TestApplyValueError:
                 "营业总收入": [9.0e8, 1.0e9],
             }
         )
-        out, effect = apply_injection(snapshot, _case("value_error"))
+        out, effect = apply_injection(snapshot, _case("value_error", idx=1))
         assert effect.applied is True
         assert out["income_statement"]["营业总收入"].tolist()[0] == pytest.approx(9.0e8)
         assert out["income_statement"]["营业总收入"].tolist()[1] == effect.polluted_values[0]
@@ -267,7 +288,7 @@ class TestApplyValueError:
         snapshot["income_statement"] = pd.DataFrame(
             {"报告日": ["20251231", "20241231"], "营业收入": [1.0e9, 9.0e8]}
         )
-        out, effect = apply_injection(snapshot, _case("value_error"))
+        out, effect = apply_injection(snapshot, _case("value_error", idx=1))
         assert effect.applied is True
         assert float(out["income_statement"]["营业收入"].iloc[0]) == effect.polluted_values[0]
 
@@ -276,7 +297,7 @@ class TestApplyValueError:
         snapshot["income_statement"] = pd.DataFrame(
             {"报告日": ["20251231", "20241231"], "营业总收入": [1_000_000_000, 900_000_000]}
         )
-        out, effect = apply_injection(snapshot, _case("value_error"))
+        out, effect = apply_injection(snapshot, _case("value_error", idx=1))
         assert effect.applied is True
         assert float(out["income_statement"]["营业总收入"].iloc[0]) == effect.polluted_values[0]
 
@@ -306,7 +327,7 @@ class TestApplyValueError:
     def test_missing_structure_records_applied_false(self, mutate, expected_words):
         snapshot = _snapshot()
         mutate(snapshot)
-        out, effect = apply_injection(snapshot, _case("value_error"))
+        out, effect = apply_injection(snapshot, _case("value_error", idx=1))
         assert effect.applied is False
         assert any(word in effect.reason for word in expected_words), effect.reason
         assert "income_statement" in effect.target or effect.target == ""
@@ -322,26 +343,96 @@ class TestApplyValueError:
         assert _identical(out, snapshot)
 
 
-# ── apply_injection：mirror_narrative（kline 行序）──
+# ── apply_injection：value_error 真靶点（derived_series，偶数实例）──
+
+
+class TestApplyDerivedSeriesValue:
+    """derived_series 是分析师被提示直接引用的字段，且在 citation._COMPUTATIONAL_RECALC
+    重算注册表里（A3 重算可抓）；缺该结构时回落利润表格旧形态。"""
+
+    def test_mutates_named_derived_value_only(self):
+        snapshot = _snapshot()
+        snapshot["derived_series"] = {"chg_5d": 0.02, "chg_20d": 0.05}
+        case = _case("value_error", idx=0)
+        out, effect = apply_injection(snapshot, case)
+        assert effect.applied is True
+        assert effect.target == "derived_series.chg_5d"
+        assert out["derived_series"]["chg_5d"] == pytest.approx(
+            0.02 * float(case.payload["factor"])
+        )
+        assert out["derived_series"]["chg_20d"] == 0.05  # 其他派生项原样
+        assert effect.polluted_values == (pytest.approx(out["derived_series"]["chg_5d"]),)
+        assert effect.field_names == ("derived_series.chg_5d", "derived_series")
+        assert snapshot["derived_series"]["chg_5d"] == 0.02  # 入参不被修改
+
+    def test_falls_back_to_income_statement_cell_when_absent(self):
+        snapshot = _snapshot()  # 无 derived_series（真实产物缺该键的形态）
+        case = _case("value_error", idx=0)
+        out, effect = apply_injection(snapshot, case)
+        assert effect.applied is True
+        assert effect.target == "income_statement"
+        assert float(out["income_statement"]["营业总收入"].iloc[0]) == effect.polluted_values[0]
+        assert "回落" in effect.reason
+
+    def test_falls_back_when_named_derived_value_is_not_numeric(self):
+        snapshot = _snapshot()
+        snapshot["derived_series"] = {"chg_5d": None}  # 数据不足的真实形态
+        out, effect = apply_injection(snapshot, _case("value_error", idx=0))
+        assert effect.applied is True
+        assert effect.target == "income_statement"
+        assert "回落" in effect.reason
+
+    def test_both_targets_absent_records_applied_false(self):
+        snapshot = _snapshot()
+        snapshot.pop("income_statement")
+        out, effect = apply_injection(snapshot, _case("value_error", idx=0))
+        assert effect.applied is False
+        assert "derived_series" in effect.reason and "income_statement" in effect.reason
+        assert _identical(out, snapshot)
+
+
+# ── apply_injection：mirror_narrative（技术指标序列倒序；kline 回落）──
 
 
 class TestApplyMirrorNarrative:
-    def test_reverses_kline_rows(self):
+    def test_reverses_technical_ma_series_when_present(self):
+        """真靶点：分析师直读 technical_indicators（技术面 context 的唯一序列来源）。"""
         snapshot = _snapshot()
+        snapshot["technical_indicators"] = {
+            "MA": {"5": [None, None, 10.0, 11.0, 12.0], "10": [1.0, 2.0]},
+            "RSI": {"14": [30.0, 40.0]},
+        }
         out, effect = apply_injection(snapshot, _case("mirror_narrative"))
         assert effect.applied is True
+        assert effect.target == "technical_indicators.MA.5"
+        assert out["technical_indicators"]["MA"]["5"] == [12.0, 11.0, 10.0, None, None]
+        # 倒序后末位 = 原首值；均线窗口前导 None 跳过 → 正序读者会把最旧的可用均线当最新
+        assert effect.polluted_values == (10.0,)
+        assert effect.field_names == ("technical_indicators.MA.5", "technical_indicators")
+        # 其他序列与 kline 原样（注入只打一个序列）
+        assert out["technical_indicators"]["MA"]["10"] == [1.0, 2.0]
+        assert out["technical_indicators"]["RSI"]["14"] == [30.0, 40.0]
+        assert out["kline"]["收盘"].tolist() == [99.0, 100.0, 101.0]
+        assert snapshot["technical_indicators"]["MA"]["5"] == [None, None, 10.0, 11.0, 12.0]
+
+    def test_falls_back_to_kline_rows_when_indicators_absent(self):
+        snapshot = _snapshot()  # 无 technical_indicators：回落旧靶点
+        out, effect = apply_injection(snapshot, _case("mirror_narrative"))
+        assert effect.applied is True
+        assert effect.target == "kline"
         assert out["kline"]["收盘"].tolist() == [101.0, 100.0, 99.0]
         assert out["kline"]["日期"].tolist() == ["2026-08-05", "2026-08-04", "2026-08-01"]
         # 镜像后「末行 = 原首行」：LLM 按正序读会把最旧收盘当最新
         assert effect.polluted_values == (99.0,)
         assert effect.field_names == ("kline",)
+        assert "回落" in effect.reason
 
-    def test_missing_kline_records_applied_false(self):
+    def test_missing_both_targets_records_applied_false(self):
         snapshot = _snapshot()
         snapshot.pop("kline")
         out, effect = apply_injection(snapshot, _case("mirror_narrative"))
         assert effect.applied is False
-        assert "kline" in effect.reason
+        assert "technical_indicators" in effect.reason and "kline" in effect.reason
         assert set(out) == set(snapshot)
 
 

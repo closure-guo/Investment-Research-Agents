@@ -102,6 +102,28 @@ def _snapshot() -> dict:
     }
 
 
+def _period_reports(
+    *, field_ref: str = "income_statement.20251231.营业总收入", stated: float = 1.0e9
+):
+    """期次可解析的 claim 产物（period_shift 双形态：field_ref 期次段 20251231）。"""
+    return {
+        "fundamental": {
+            "claims": [
+                {
+                    "claim_type": "numerical",
+                    "source_type": "data",
+                    "field_ref": field_ref,
+                    "stated_value": stated,
+                    "interpretation": "营业总收入 10.00亿元",
+                    "period": "20251231",
+                    "direction": "flat",
+                }
+            ],
+            "markdown": "# 基本面\n营业总收入 10.00亿元。",
+        }
+    }
+
+
 def _make_product(*, reports: dict | None = None, snapshot: dict | None = None) -> dict:
     snap = snapshot if snapshot is not None else _snapshot()
     return {
@@ -292,6 +314,86 @@ class TestOfflineInjection:
         with pytest.raises(pr.InjectionError) as err:
             pr.inject_offline(_make_product(reports=reports), _case("direction_error"))
         assert "direction_error" in str(err.value)
+
+
+# ── period_shift 双形态（P1 重校轮）──
+
+
+class TestPeriodShiftDualForm:
+    """round-1：period_shift 只改 period 标签 → 仅 A2 期次检查能拦，不一致比 1.000（too_hard）。
+
+    重校：按实例序号交替两种形态——form A 只改标签（现状）；form B 同时把 field_ref 期次段
+    改到「真值不同的相邻真实期次」→ A2 关态下值级校验也能拦（两态都 caught）。
+    确定性按实例序号（无 RNG）：偶数 → label_only，奇数 → label_and_ref。
+    """
+
+    def test_forms_alternate_by_instance_index(self):
+        product = _make_product(reports=_period_reports())
+        cases = pr.build_pilot_cases(product, instances=4, pollution_types=["period_shift"])
+        forms = [pr.inject_offline(product, c)["injection"]["shift_form"] for c in cases]
+        assert forms == ["label_only", "label_and_ref", "label_only", "label_and_ref"]
+
+    def test_form_b_shifts_ref_to_adjacent_period_with_different_truth(self):
+        product = _make_product(reports=_period_reports())
+        cases = pr.build_pilot_cases(product, instances=2, pollution_types=["period_shift"])
+        polluted = pr.inject_offline(product, cases[1])
+        claim = polluted["analyst_reports"]["fundamental"]["claims"][0]
+        assert claim["period"] == "2026Q3"
+        assert claim["field_ref"] == "income_statement.20241231.营业总收入"
+        assert claim["stated_value"] == 1.0e9  # 申报值不动：真值已换期（9.0e8）
+        injected = polluted["injection"]["injected_values"]
+        assert injected["period_segment"] == {"from": "20251231", "to": "20241231"}
+        assert "field_ref" in polluted["injection"]["mutated_fields"][1]
+
+    def test_form_a_rewrites_label_only(self):
+        product = _make_product(reports=_period_reports())
+        polluted = pr.inject_offline(
+            product, pr.build_pilot_cases(product, instances=1, pollution_types=["period_shift"])[0]
+        )
+        claim = polluted["analyst_reports"]["fundamental"]["claims"][0]
+        assert claim["period"] == "2026Q3"
+        assert claim["field_ref"] == "income_statement.20251231.营业总收入"
+        assert "field_ref" not in polluted["injection"]["injected_values"]
+
+    def test_form_b_falls_back_when_adjacent_period_unresolvable(self):
+        reports = _period_reports(field_ref="income_statement.20201231.营业总收入")
+        product = _make_product(reports=reports)
+        cases = pr.build_pilot_cases(product, instances=2, pollution_types=["period_shift"])
+        polluted = pr.inject_offline(product, cases[1])
+        claim = polluted["analyst_reports"]["fundamental"]["claims"][0]
+        assert polluted["injection"]["shift_form"] == "label_only_fallback"
+        assert claim["period"] == "2026Q3"
+        assert claim["field_ref"] == "income_statement.20201231.营业总收入"
+
+    def test_form_b_falls_back_when_adjacent_value_matches_stated(self):
+        # 申报值 = 相邻期次真值（9.0e8）→ 换期后值级校验抓不到 → 如实回落，不假造 form B
+        reports = _period_reports(stated=9.0e8)
+        product = _make_product(reports=reports)
+        cases = pr.build_pilot_cases(product, instances=2, pollution_types=["period_shift"])
+        polluted = pr.inject_offline(product, cases[1])
+        assert polluted["injection"]["shift_form"] == "label_only_fallback"
+        assert (
+            polluted["analyst_reports"]["fundamental"]["claims"][0]["field_ref"]
+            == "income_statement.20251231.营业总收入"
+        )
+
+    def test_dual_form_moves_discordance_to_half(self):
+        """合成配对集：4 实例（2×form A + 2×form B）→ 不一致比 0.5（旧全 label-only = 1.000）。"""
+        product = _make_product(reports=_period_reports())
+        cases = pr.build_pilot_cases(product, instances=4, pollution_types=["period_shift"])
+        pairs = []
+        for case in cases:
+            pair, unit = pr.run_offline_case(product, case)
+            assert unit["status"] == "ok"
+            pairs.append(pair)
+        table = pr.mcnemar_table(pairs)
+        assert table["b"] == 2.0 and table["c"] == 0.0
+        assert table["discordant_ratio"] == 0.5
+        states = {p.case_id: (p.on_state, p.off_state) for p in pairs}
+        # form A：只有 A2 能拦；form B：A2 关态下值级校验也拦（两态一致 → 不携带 A2 信息）
+        assert states["600519-period_shift-0"] == ("caught", "escaped")
+        assert states["600519-period_shift-1"] == ("caught", "caught")
+        assert states["600519-period_shift-3"] == ("caught", "caught")
 
 
 # ── 机制开关 ──
@@ -729,6 +831,274 @@ class TestRealRun:
         assert unit["injection"]["polluted_values"] == [99.0]
         assert unit["status"] == pr.STATUS_OK
 
+    def test_value_error_default_instance_targets_citeable_derived_series(self):
+        """重校靶点：派生值表是分析师被提示直接引用的字段（round-1 打利润表格 → 7/8 void）。"""
+
+        def fake_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            polluted = float(snapshot["derived_series"]["chg_5d"])
+            claim = {
+                "claim_type": "numerical",
+                "source_type": "data",
+                "field_ref": "derived_series.chg_5d",
+                "stated_value": polluted,
+                "interpretation": f"5 日涨跌幅 {polluted * 100:.2f}%",
+                "period": "2026-09-15",
+                "direction": "flat",
+            }
+            state = {
+                "analyst_reports": {"technical": {"claims": [claim], "markdown": "5 日涨跌幅"}},
+                "iteration_count": 0,
+            }
+            return state
+
+        snapshot = _snapshot()
+        snapshot["derived_series"] = {"chg_5d": 0.02, "chg_20d": 0.05}
+        product = _make_product(snapshot=snapshot)
+        case = pr.build_pilot_cases(product, instances=1, pollution_types=["value_error"])[0]
+        _, unit = pr.run_real_case(product, case, graph_runner=fake_runner)
+        assert unit["injection"]["applied"] is True
+        assert unit["injection"]["target"] == "derived_series.chg_5d"
+        assert unit["injection"]["changed_keys"] == ["derived_series"]
+        assert unit["injection"]["consumed_overlap"] == ["derived_series"]
+        assert unit["injection"]["polluted_values"] == [
+            pytest.approx(0.02 * case.payload["factor"])
+        ]
+        # 污染到达终态产物：round-1 该型判 void 的正是这一环
+        assert unit["status"] == pr.STATUS_OK
+        assert unit["on"]["polluted_present"] is True
+        assert unit["off"]["polluted_present"] is True
+
+    def test_derived_series_recompute_claim_is_caught_through_a3(self, monkeypatch):
+        """derived_series 在重算注册表里：computational claim 走 A3 重算 → 两态差可测。"""
+        import evals.ablation as ablation
+
+        import finance_agent.nodes.citation_node as citation_node
+
+        monkeypatch.setattr(
+            citation_node,
+            "repair_claims",
+            lambda markdown, failures, llm_config=None: (markdown, []),
+        )
+        kline = pd.DataFrame(
+            {
+                "日期": [f"2026-09-{i:02d}" for i in range(1, 8)],
+                "收盘": [100.0 + i for i in range(7)],
+            }
+        )
+
+        def fake_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            polluted = float(snapshot["derived_series"]["chg_5d"])
+            claim = {
+                "claim_type": "computational",
+                "source_type": "data",
+                "field_ref": "derived_series.chg_5d",
+                "stated_value": polluted,
+                "interpretation": f"5 日涨跌幅 {polluted * 100:.2f}%",
+                "period": "2026-09-07",
+                "direction": "flat",
+            }
+            state = {
+                "analyst_reports": {"technical": {"claims": [claim], "markdown": "5 日涨跌幅"}},
+                "iteration_count": 0,
+            }
+            return {**state, **ablation.verify_citations({**state, **snapshot})}
+
+        snapshot = _snapshot()
+        snapshot["kline"] = kline
+        snapshot["derived_series"] = {"chg_5d": 0.02}
+        snapshot["technical_indicators"] = {}
+        product = _make_product(snapshot=snapshot)
+        case = pr.build_pilot_cases(product, instances=1, pollution_types=["value_error"])[0]
+        _, unit = pr.run_real_case(product, case, graph_runner=fake_runner)
+        assert unit["status"] == pr.STATUS_OK
+        assert unit["on_state"] == "caught" and unit["off_state"] == "escaped"
+        assert unit["on"]["citation"]["flagged"] is True
+        assert unit["off"]["citation"]["flagged"] is False
+
+    def test_value_error_falls_back_to_income_statement_when_no_derived_series(self):
+        def fake_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            income = snapshot["income_statement"]
+            return {"final_report": f"营业总收入 {float(income['营业总收入'].max())} 元"}
+
+        product = _make_product()
+        case = pr.build_pilot_cases(product, instances=1, pollution_types=["value_error"])[0]
+        _, unit = pr.run_real_case(product, case, graph_runner=fake_runner)
+        assert unit["injection"]["applied"] is True
+        assert unit["injection"]["target"] == "income_statement"
+        assert unit["injection"]["changed_keys"] == ["income_statement"]
+        assert unit["injection"]["consumed_overlap"] == ["income_statement"]
+        assert unit["status"] == pr.STATUS_OK
+
+    def test_mirror_narrative_reaches_artifact_through_technical_indicators(self):
+        """重校靶点：分析师直读 technical_indicators 序列（round-1 打 kline → 全 void）。"""
+
+        def fake_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            ma5 = list(snapshot["technical_indicators"]["MA"]["5"])
+            quoted = next(v for v in reversed(ma5) if v is not None)
+            claim = {
+                "claim_type": "numerical",
+                "source_type": "data",
+                "field_ref": "technical_indicators.MA.5.-1",
+                "stated_value": quoted,
+                "interpretation": f"MA5 最新为 {quoted}",
+                "period": "2026-09-15",
+                "direction": "flat",
+            }
+            return {
+                "analyst_reports": {
+                    "technical": {"claims": [claim], "markdown": f"MA5 最新为 {quoted}"}
+                },
+                "final_report": f"# 技术面\nMA5 最新为 {quoted}",
+            }
+
+        snapshot = _snapshot()
+        snapshot["technical_indicators"] = {"MA": {"5": [None, None, 1.0, 2.0, 3.0]}}
+        product = _make_product(snapshot=snapshot)
+        case = pr.build_pilot_cases(product, instances=1, pollution_types=["mirror_narrative"])[0]
+        _, unit = pr.run_real_case(product, case, graph_runner=fake_runner)
+        assert unit["injection"]["applied"] is True
+        assert unit["injection"]["target"] == "technical_indicators.MA.5"
+        assert unit["injection"]["changed_keys"] == ["technical_indicators"]
+        assert unit["injection"]["consumed_overlap"] == ["technical_indicators"]
+        assert unit["injection"]["polluted_values"] == [1.0]
+        assert unit["status"] == pr.STATUS_OK
+        assert unit["on"]["polluted_present"] is True
+
+    def test_illegal_price_post_graph_flow_runs_once_and_validates_both_states(self):
+        """产物无决策 dict（round-1 的 4/4 void 场景）：跑图产出决策 → 注入 → A5 两态校验。
+
+        选「1 次图运行 + 2 次校验」：配对要求两态喂同一污染决策；每态各跑一次图只会得到
+        两个不同的 LLM 决策（非确定性）且成本翻倍。sanity 是纯规则函数（无 LLM）。
+        """
+        snapshot = _snapshot()
+        snapshot.pop("trader_plan")
+        runs: list[str] = []
+        ledger: list[int] = []
+
+        def fake_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            runs.append(variant)
+            ledger.extend(range(11))  # 模拟本趟图的 11 次 LLM 调用
+            plan = {
+                "action": "buy",
+                "entry_price": 100.0,
+                "stop_loss": 95.0,
+                "target_price": 115.0,
+            }
+            return {
+                "trader_plan": dict(plan),
+                "final_trade_decision": dict(plan),
+                "kline": snapshot["kline"],
+                "price_levels": {
+                    "available": True,
+                    "entry_ref": 100.0,
+                    "atr": 3.0,
+                    "full_band": [90.0, 130.0],
+                    "stop_band_long": {"low": 95.0, "high": 98.0},
+                    "target_band_long": {"low": 110.0, "high": 116.0},
+                },
+                "final_report": "# 报告",
+            }
+
+        product = _make_product(snapshot=snapshot)
+        case = pr.build_pilot_cases(product, instances=1, pollution_types=["illegal_price"])[0]
+        pair, unit = pr.run_real_case(
+            product, case, graph_runner=fake_runner, llm_meter=lambda: len(ledger)
+        )
+        assert runs == ["full"]  # 只跑一趟图（两态共用同一污染决策输入）
+        assert unit["status"] == pr.STATUS_OK
+        assert unit["graph_runs"] == 1
+        assert unit["llm_calls"] == 11
+        assert unit["post_graph"]["decision_key"] == "trader_plan"
+        assert unit["post_graph"]["shared_graph_runs"] == 1
+        assert unit["injection"]["applied"] is True
+        assert unit["injection"]["polluted_values"] == [pytest.approx(110.0)]
+        # sanity 看到的是注入后的决策（reason 点名被破的价位关系）
+        assert unit["on"]["decision"]["price_check"]["result"] == "fail"
+        assert "110" in unit["on"]["decision"]["price_check"]["reason"]
+        assert unit["on"]["polluted_present"] is True
+        assert unit["off"]["decision"]["price_check"]["result"] == "pass"
+        assert unit["off"]["polluted_present"] is True
+        assert pair == EscapePair(case.case_id, "caught", "escaped")
+        # 关态的补丁确实落在 A5 的校验面上（两态差异来自机制开关，不是输入）
+        assert unit["on"]["mechanism"]["patched"] == []
+        assert (
+            "finance_agent.nodes.validate.validate_trade_prices"
+            in unit["off"]["mechanism"]["patched"]
+        )
+
+    def test_illegal_price_post_graph_injects_into_final_decision_when_no_trader_plan(self):
+        """终态只有风控裁决（final_trade_decision）时也按同一决策对象喂 sanity（读 trader_plan）。"""
+
+        def fake_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            return {
+                "final_trade_decision": {
+                    "action": "buy",
+                    "entry_price": 100.0,
+                    "stop_loss": 95.0,
+                    "target_price": 115.0,
+                },
+                "kline": snapshot["kline"],
+                "price_levels": {
+                    "available": True,
+                    "entry_ref": 100.0,
+                    "atr": 3.0,
+                    "full_band": [90.0, 130.0],
+                    "stop_band_long": {"low": 95.0, "high": 98.0},
+                    "target_band_long": {"low": 110.0, "high": 116.0},
+                },
+            }
+
+        snapshot = _snapshot()
+        snapshot.pop("trader_plan")
+        product = _make_product(snapshot=snapshot)
+        case = pr.build_pilot_cases(product, instances=1, pollution_types=["illegal_price"])[0]
+        _, unit = pr.run_real_case(product, case, graph_runner=fake_runner)
+        assert unit["post_graph"]["decision_key"] == "final_trade_decision"
+        assert unit["status"] == pr.STATUS_OK
+        assert unit["on_state"] == "caught" and unit["off_state"] == "escaped"
+        assert "110" in unit["on"]["decision"]["price_check"]["reason"]
+
+    def test_illegal_price_post_graph_uninjectable_decision_is_void_with_honest_cost(self):
+        """跑图后仍不可施加（hold 无价位要求）→ 判 void，但图已跑：成本如实入账（不写 0）。"""
+        ledger: list[int] = []
+
+        def fake_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            ledger.extend(range(5))
+            return {"trader_plan": {"action": "hold", "entry_price": 100.0}}
+
+        snapshot = _snapshot()
+        snapshot.pop("trader_plan")
+        product = _make_product(snapshot=snapshot)
+        case = pr.build_pilot_cases(product, instances=1, pollution_types=["illegal_price"])[0]
+        _, unit = pr.run_real_case(
+            product, case, graph_runner=fake_runner, llm_meter=lambda: len(ledger)
+        )
+        assert unit["status"] == pr.STATUS_VOID
+        assert unit["graph_runs"] == 1  # 图已跑：不得记 0（诚实计账）
+        assert unit["llm_calls"] == 5
+        assert "hold" in unit["status_reason"]
+        assert unit["on_state"] == "" and unit["off_state"] == ""  # 未判定，不得读成 caught
+
+    def test_illegal_price_post_graph_without_decision_is_void_with_honest_cost(self):
+        ledger: list[int] = []
+
+        def fake_runner(*, variant: str, snapshot: dict, query: str) -> dict:
+            ledger.extend(range(3))  # 图跑了（有成本），但没产出决策
+            return {"final_report": "# 报告（无决策）"}
+
+        snapshot = _snapshot()
+        snapshot.pop("trader_plan")
+        product = _make_product(snapshot=snapshot)
+        case = pr.build_pilot_cases(product, instances=1, pollution_types=["illegal_price"])[0]
+        _, unit = pr.run_real_case(
+            product, case, graph_runner=fake_runner, llm_meter=lambda: len(ledger)
+        )
+        assert unit["status"] == pr.STATUS_VOID
+        assert unit["graph_runs"] == 1
+        assert unit["llm_calls"] == 3
+        assert "决策 dict" in unit["status_reason"]
+        assert unit["on"]["ran"] is True and unit["on"]["polluted_present"] is None
+
     def test_void_injection_is_excluded_from_pairs(self):
         def empty_runner(*, variant: str, snapshot: dict, query: str) -> dict:
             return {}
@@ -744,28 +1114,33 @@ class TestRealRun:
         assert pair.on_state == pair.off_state  # 配对仍是合法 EscapePair，但报告须剔除
 
     def test_unapplicable_injection_is_void_with_reason(self):
-        """产物缺决策 dict（真实材料风险）：注入不可施加 → 单元判 void，不冒充「没逃逸」。"""
+        """注入目标结构缺失（真实材料风险）：预判 void，不冒充「没逃逸」。
+
+        决策层（illegal_price）不再走此路：产物缺决策时改为「跑图产出决策 → 注入」
+        （见 post_graph 用例）；本用例覆盖非决策点（mirror_narrative）的预判 void。
+        """
         snapshot = _snapshot()
-        snapshot.pop("trader_plan")
+        snapshot.pop("kline")
 
         def empty_runner(*, variant: str, snapshot: dict, query: str) -> dict:
             return {}
 
         _, unit = pr.run_real_case(
-            _make_product(snapshot=snapshot), _case("illegal_price"), graph_runner=empty_runner
+            _make_product(snapshot=snapshot), _case("mirror_narrative"), graph_runner=empty_runner
         )
         assert unit["status"] == pr.STATUS_VOID
         assert unit["injection"]["applied"] is False
-        assert "trader_plan" in unit["injection"]["applied_reason"]
+        assert "kline" in unit["injection"]["applied_reason"]
         assert "注入不可施加" in unit["status_reason"]
 
     def test_unapplicable_injection_is_prevoided_with_zero_graph_runs(self):
         """不可施加是运行前已知事实（applied=False）→ SHALL 跳过图运行：0 次 run、0 次 LLM。
 
         P1 真跑腿实证：illegal_price 单元缺决策 dict 时仍跑满 38 次调用，事后才判 void。
+        非决策点仍按此预判；决策点改为后置流程（图必须先跑出决策才谈得上注入）。
         """
         snapshot = _snapshot()
-        snapshot.pop("trader_plan")
+        snapshot.pop("kline")
         invocations: list[str] = []
 
         def counting_runner(*, variant: str, snapshot: dict, query: str) -> dict:
@@ -777,7 +1152,7 @@ class TestRealRun:
 
         _, unit = pr.run_real_case(
             _make_product(snapshot=snapshot),
-            _case("illegal_price"),
+            _case("mirror_narrative"),
             graph_runner=counting_runner,
             llm_meter=boom_meter,
         )
@@ -1122,16 +1497,16 @@ class TestBudgetHonesty:
         assert "llm_calls_total" not in budget
 
     def test_prevoided_real_case_flows_into_budget_with_zero_calls(self, tmp_path: Path):
-        """端到端：不可施加的注入经 run_real_case 落成 0 调用单元，报告如实计 0。"""
+        """端到端：不可施加的注入（非决策点）经 run_real_case 落成 0 调用单元，报告如实计 0。"""
         snapshot = _snapshot()
-        snapshot.pop("trader_plan")
+        snapshot.pop("kline")
 
         def boom_runner(*, variant: str, snapshot: dict, query: str) -> dict:
             raise AssertionError("预判 void 的单元不得运行图")
 
         _, unit = pr.run_real_case(
             _make_product(snapshot=snapshot),
-            _case("illegal_price"),
+            _case("mirror_narrative"),
             graph_runner=boom_runner,
             llm_meter=lambda: 999,
         )

@@ -10,9 +10,12 @@
       "snapshot_digest": "<evals.ablation.snapshot_digest>",
       "snapshot": { ... fetch_data + compute_metrics 的可重放 state 子集（含 DataFrame）,
                     另须含注入基值 revenue / price / growth / entry ... },
-                    # 真跑腿的注入目标即此快照的真实结构：value_error → income_statement、
-                    # mirror_narrative → kline、illegal_price → 决策 dict（trader_plan /
-                    # final_trade_decision）——缺结构时 apply_injection 记 applied=False，单元判 void
+                    # 真跑腿的注入目标即此快照的真实结构（P1 重校轮换靶点，见 injection 模块
+                    # docstring）：value_error → derived_series（缺则回落 income_statement）、
+                    # mirror_narrative → technical_indicators.MA.5（缺则回落 kline）、
+                    # illegal_price → 决策 dict（trader_plan / final_trade_decision）——
+                    # 前两者缺结构时 apply_injection 记 applied=False，单元判 void（预判，零消耗）；
+                    # 决策 dict 缺失时走**后置流程**（跑图产出决策 → 内存注入），不预判 void
       "base_values": {"revenue": 1.0e9, "price": 100.0, "growth": -0.1005, "entry": 100.0},
       "analyst_reports": {agent: {"claims": [claim dict], "markdown": str}},
       "citation": { ... 原始产物的 citation 通道快照（可选，透传）... },
@@ -28,7 +31,8 @@
   重放引用校验链，**零 LLM**（`run_citation_chain` 的修复步骤默认不参与：`repair_fn=None`
   → 不调用 LLM；显式传 `repair_fn` 才引入，且须计入预算）。
 - 真跑型（`"real_run"`，A1/A5 输入侧联动与决策层）：`apply_injection` 污染快照 → 跑变体图
-  （`value_error` / `mirror_narrative` → analysts 变体；`illegal_price` → full 变体 + 价位 sanity 步），
+  （`value_error` / `mirror_narrative` → analysts 变体；`illegal_price` → full 变体 + 价位 sanity 步；
+  产物快照无决策 dict 时 → `_run_post_graph_decision_case`：跑图产出决策 → 内存注入 → A5 两态校验），
   `graph_runner` 可注入（测试用 fake，零 LLM）。
 
 **机制开关**：`mechanism_toggle(mechanism_id, on=..., surface=...)` 是显式补丁上下文管理器——
@@ -43,12 +47,13 @@ import importlib
 import json
 import math
 import pickle
+import re
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from evals.causal_ablation.escape import (
     EscapePair,
@@ -58,6 +63,7 @@ from evals.causal_ablation.escape import (
 )
 from evals.causal_ablation.injection import (
     COST_CLASS,
+    DECISION_KEYS,
     POLLUTION_TYPES,
     InjectionCase,
     apply_injection,
@@ -359,6 +365,18 @@ def _inject_unit_error(out: dict, case: InjectionCase, injection: dict) -> None:
 
 
 def _inject_period_shift(out: dict, case: InjectionCase, injection: dict) -> None:
+    """期次污染双形态（P1 重校轮）：按实例序号交替，确定性（无 RNG）。
+
+    round-1 校准实证：只改 `period` 标签时唯一能拦它的机制是 A2 期次检查 → 不一致比
+    1.000（too_hard，矩阵单点依赖 A2）。重校形态：
+
+    - form A（`label_only`，**偶数**实例，= 现状）：只把 `claim["period"]` 改成载荷标签；
+    - form B（`label_and_ref`，奇数实例）：同时把 claim 的 `field_ref` 期次段改到一个
+      **相邻真实期次**（如 2025 → 2024，该期真值与申报值不同）→ 期次与值级两路都不一致，
+      A2 关态下值级校验也能拦（两态都 caught → 该实例不再携带 A2 信息）；
+    - 相邻期次解析不出真值、或真值与申报值一致时回落 form A，并如实记
+      `shift_form="label_only_fallback"`（不假造 form B 的拦截效果）。
+    """
     from finance_agent.metric_vocab import field_ref_period_segment
 
     target = _select_flat_claim(
@@ -372,15 +390,107 @@ def _inject_period_shift(out: dict, case: InjectionCase, injection: dict) -> Non
     agent, idx, flat = target
     claim = out["analyst_reports"][agent]["claims"][idx]
     label = str((case.payload.get("set") or {}).get("period_label") or "2026Q3")
+    variant = "label_and_ref" if _case_instance_index(case.case_id) % 2 == 1 else "label_only"
+    mutated_fields = [f"{agent}.claims[{idx}].period"]
+    injected_values: dict[str, Any] = {"period": label}
+    shift: dict[str, Any] | None = None
+    if variant == "label_and_ref":
+        shift = _adjacent_period_shift(claim, out["snapshot"])
+        if shift is None:
+            variant = "label_only_fallback"  # 无相邻真实期次可换 → 回落 label-only
+        else:
+            claim["field_ref"] = shift["field_ref"]
+            mutated_fields.append(f"{agent}.claims[{idx}].field_ref")
+            injected_values["field_ref"] = shift["field_ref"]
+            injected_values["period_segment"] = {"from": shift["from"], "to": shift["to"]}
     claim["period"] = label
     injection.update(
         mutated_agent=agent,
         mutated_claim_index=idx,
         mutated_flat_index=flat,
-        mutated_fields=[f"{agent}.claims[{idx}].period"],
-        injected_values={"period": label},
+        mutated_fields=mutated_fields,
+        injected_values=injected_values,
         polluted_values=[label],
+        shift_form=variant,
+        notes=(
+            [
+                f"form B：field_ref 期次段 {shift['from']} → {shift['to']}"
+                f"（该期真值 {shift['ground_truth']!r} ≠ 申报值 → 值级校验两态都能拦）"
+            ]
+            if shift is not None
+            else []
+        ),
     )
+
+
+def _case_instance_index(case_id: str) -> int:
+    """用例实例序号（`{ticker}-{pollution_type}-{i}` 末段）；解析不出记 0（= form A）。
+
+    形态分派只用实例序号（无 RNG）：同 case_id 同形态，重跑可复现。
+    """
+    tail = str(case_id).rsplit("-", 1)[-1]
+    try:
+        return int(tail)
+    except ValueError:
+        return 0
+
+
+def _adjacent_periods(segment: str) -> list[str]:
+    """期次段的相邻期次候选：先上一年，再下一年（保留季度/日期尾部形态）。"""
+    match = re.match(r"^((?:19|20)\d{2})(.*)$", segment)
+    if match is None:
+        return []
+    year, tail = int(match.group(1)), match.group(2)
+    return [f"{year - 1:04d}{tail}", f"{year + 1:04d}{tail}"]
+
+
+def _replace_period_segment(field_ref: str, segment: str, candidate: str) -> str | None:
+    """把 field_ref 里的期次段替换为相邻期次（首个命中段，段内括号索引形态亦支持）。"""
+    parts = field_ref.split(".")
+    for i, part in enumerate(parts):
+        if re.sub(r"\[(-?\d+)\]$", "", part) == segment:
+            parts[i] = candidate
+            return ".".join(parts)
+    return None
+
+
+def _adjacent_period_shift(claim: dict, snapshot: dict) -> dict[str, Any] | None:
+    """form B 的期次段改写：只有「相邻期次真值可解析且与申报值不同」才采用。
+
+    真值解析复用校验器的单一实现（`citation._resolve_field_ref`，与数值型值级校验同一
+    路径）与同一容差（`citation.value_close`）——口径不得复制。解析不出（期次不在真实
+    数据里）或真值与申报值一致（值级校验抓不到）→ None（调用方回落 label-only）。
+    """
+    from finance_agent import citation as citation_mod
+    from finance_agent.metric_vocab import field_ref_period_segment
+
+    field_ref = str(claim.get("field_ref") or "")
+    segment = field_ref_period_segment(field_ref)
+    stated = claim.get("stated_value")
+    if segment is None or not _is_number(stated):
+        return None
+    for candidate in _adjacent_periods(segment):
+        shifted_ref = _replace_period_segment(field_ref, segment, candidate)
+        if shifted_ref is None:
+            continue
+        try:
+            ground_truth = citation_mod._resolve_field_ref(
+                shifted_ref, snapshot, str(claim.get("period") or "") or None
+            )
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            continue
+        if not _is_number(ground_truth):
+            continue
+        stated_number = float(cast(Any, stated))
+        ground_truth_number = float(cast(Any, ground_truth))
+        if not citation_mod.value_close(stated_number, ground_truth_number):
+            return {
+                "field_ref": shifted_ref,
+                "from": segment,
+                "to": candidate,
+                "ground_truth": ground_truth_number,
+            }
+    return None
 
 
 def _inject_fabricated_event(out: dict, case: InjectionCase, injection: dict) -> None:
@@ -1234,27 +1344,33 @@ def run_real_case(
     `polluted_values` / `field_names` / `changed_keys` / `consumed_overlap`）：注入键
     未落在管线消费面上即判 void（`_real_status`），不冒充「拦下」。
 
-    **预判 void（零消耗）**：注入不可施加（`applied=False`，如缺决策 dict）或未改变快照
+    **预判 void（零消耗）**：注入不可施加（`applied=False`，如缺目标结构）或未改变快照
     （`changed` 为空）在运行前即可确认，此时 SHALL 直接判 void 并跳过图运行——
-    P1 真跑腿实证：illegal_price 单元缺决策 dict 时仍跑满 38 次调用才事后判 void。
+    P1 真跑腿实证：曾对不可施加的注入跑满 38 次调用才事后判 void。
+
+    **决策层后置注入（P1 重校轮）**：唯一例外是决策点（illegal_price）而产物快照无决策
+    dict——污染对象（决策）只有跑图才存在，故此型改走 `_run_post_graph_decision_case`
+    （跑图产出决策 → 内存注入 → A5 两态校验），成本如实入账，不再据「快照无决策」预判 void
+    （round-1 据此 4/4 判 void，决策层注入拿不到任何信息）。
     """
     runner = graph_runner or default_graph_runner
     resolved_variant = variant or ("full" if case.injection_point == "decision" else "analysts")
     surface = _real_surface(case.mechanism_id, case.injection_point)
     original = product.get("snapshot") or {}
+    if case.injection_point == "decision" and not _decision_dicts(original):
+        return _run_post_graph_decision_case(
+            product,
+            case,
+            runner=runner,
+            variant=resolved_variant,
+            surface=surface,
+            query=query,
+            llm_meter=llm_meter,
+            price_check_fn=price_check_fn,
+        )
     polluted, effect = apply_injection(original, case)
     changed = _changed_keys(original, polluted)
-    injected = {
-        # 污染标记/命中字段一律取自注入效果记录（不再从 payload 猜：payload 只描述目标结构）
-        "polluted_values": list(effect.polluted_values),
-        "field_names": list(effect.field_names),
-        "changed_keys": changed,
-        "consumed_overlap": sorted(set(changed) & ANALYST_CONSUMED_KEYS),
-        "injection_effective": bool(changed),
-        "applied": effect.applied,
-        "applied_reason": effect.reason,
-        "target": effect.target,
-    }
+    injected = _injection_record(effect, changed)
     if not effect.applied:
         return _prevoid_real_case(
             product,
@@ -1333,6 +1449,242 @@ def run_real_case(
     return pair, unit
 
 
+def _injection_record(effect: Any, changed: list[str], *, post_graph: bool = False) -> dict:
+    """单元注入效果记录（真跑腿单一口径）：污染标记/命中字段一律取自注入效果记录，
+    不从 payload 猜（payload 只描述目标结构）。`post_graph` 标记决策层后置流程。"""
+    return {
+        "polluted_values": list(effect.polluted_values),
+        "field_names": list(effect.field_names),
+        "changed_keys": list(changed),
+        "consumed_overlap": sorted(set(changed) & ANALYST_CONSUMED_KEYS),
+        "injection_effective": bool(changed),
+        "applied": effect.applied,
+        "applied_reason": effect.reason,
+        "target": effect.target,
+        "decision_key": str(effect.target) if (post_graph and effect.applied) else None,
+        "post_graph": post_graph,
+    }
+
+
+def _decision_dicts(state: dict) -> dict[str, dict]:
+    """state 里的决策 dict（键序同注入载荷 target 顺序：trader_plan 优先）。
+
+    TradeDecision 对象（trader/risk_judge 直接写 state 的形态）先归一为 dict；
+    hold/watch 等无价位的决策也照收——「有没有决策」与「能不能注入」是两件事。
+    """
+    out: dict[str, dict] = {}
+    for key in DECISION_KEYS:
+        plan: Any = state.get(key)
+        if hasattr(plan, "model_dump"):
+            plan = plan.model_dump()
+        if isinstance(plan, dict) and plan:
+            out[key] = plan
+    return out
+
+
+def _run_post_graph_decision_case(
+    product: dict,
+    case: InjectionCase,
+    *,
+    runner: Callable[..., dict],
+    variant: str,
+    surface: str,
+    query: str,
+    llm_meter: Callable[[], int] | None,
+    price_check_fn: Callable[[dict], dict] | None,
+) -> tuple[EscapePair, dict]:
+    """决策层后置注入（P1 重校轮）：产物无决策 dict 时的唯一正确面。
+
+    P1 轮 1 实证：材料步只跑 analysts 变体 → 产物无 `trader_plan`/`final_trade_decision`
+    → 旧流程按「注入不可施加」预判 void（4/4 void，决策层注入拿不到任何信息）。污染对象
+    （决策）只有跑图才存在，故本流程：
+
+    1. 先跑**一趟**变体图（真跑成本，meter 差量如实计账）；
+    2. 取产出决策（`trader_plan` 优先——A5 sanity 读它；回退 `final_trade_decision`）；
+    3. 在内存里把污染打到该决策 dict 上（`apply_injection`，同一 op）；
+    4. A5 开关 ON/OFF 各跑一次价位 sanity（`validate_trade_prices` 或注入的纯核心）。
+
+    **为什么是「1 次图运行 + 2 次校验」而不是「2 次图运行」**：配对比较要求两态喂同一个
+    污染决策；每态各跑一次图只会得到两个不同的 LLM 决策（非确定性），配对失去意义且成本
+    翻倍。sanity 是纯规则函数（无 LLM），两态切换的是机制开关、不是输入。图运行成本记在
+    单元级 `post_graph`（`shared_graph_runs`/`shared_llm_calls`），两态载荷记
+    `shared_graph_run=True` + 0 自有消耗，避免重复计账也不漏计。
+
+    跑图后仍无决策、或产出决策不可注入（hold 无价位要求等）→ 判 void，但**图已跑**：
+    成本如实入账（`graph_runs=1` + meter 差量），不得写 0。
+    """
+    before = _meter(llm_meter)
+    state = dict(runner(variant=variant, snapshot=product.get("snapshot") or {}, query=query))
+    after = _meter(llm_meter)
+    shared_calls = None if before is None or after is None else after - before
+    produced = _decision_dicts(state)
+    if not produced:
+        snapshot_effect = apply_injection(product.get("snapshot") or {}, case)[1]
+        return _post_graph_void_case(
+            product,
+            case,
+            variant=variant,
+            shared_runs=1,
+            shared_calls=shared_calls,
+            reason=(
+                "跑图后产物仍无决策 dict（trader_plan/final_trade_decision 均不在跑图产物）："
+                "决策层注入无目标"
+            ),
+            injected=_injection_record(snapshot_effect, [], post_graph=True),
+        )
+    polluted_decisions, effect = apply_injection(produced, case)
+    changed = _changed_keys(produced, polluted_decisions)
+    injected = _injection_record(effect, changed, post_graph=True)
+    if not effect.applied or not changed:
+        reason = (
+            f"注入不可施加（{injected['applied_reason']}）"
+            if not effect.applied
+            else "注入未改变产出的决策 dict（该型在本跑图产物上无污染可测）"
+        )
+        return _post_graph_void_case(
+            product,
+            case,
+            variant=variant,
+            shared_runs=1,
+            shared_calls=shared_calls,
+            reason=f"跑图产出决策后仍不可注：{reason}",
+            injected=injected,
+        )
+    decision_key = str(effect.target)
+    polluted_decision = polluted_decisions[decision_key]
+    check_state = {**state, decision_key: polluted_decision}
+    if decision_key != "trader_plan":
+        # A5 sanity 只读 trader_plan：终态决策键不是它时按 sanity 的消费面喂同一决策对象
+        # （不改数值、不复制字段）——否则 sanity 看到空 plan 恒放行，开关两态无差。
+        check_state["trader_plan"] = polluted_decision
+    payloads: dict[str, dict] = {}
+    for on in (True, False):
+        key = "on" if on else "off"
+        with mechanism_toggle(case.mechanism_id, on=on, surface=surface) as toggle:
+            from finance_agent.nodes import validate as validate_mod
+
+            fn = price_check_fn or validate_mod.validate_trade_prices
+            check = fn(check_state)
+        payload = toggle.payload()
+        outcome = classify_terminal({**check_state, **check}, case, injected=injected)
+        payloads[key] = {
+            "ran": True,
+            "shared_graph_run": True,  # 图只跑一趟：两态共用同一污染决策输入
+            "graph_runs": 0,
+            "polluted_present": outcome["polluted_present"],
+            "flagged": outcome["flagged"],
+            "citation": outcome["citation"],
+            "decision": outcome["decision"],
+            "mechanism": payload,
+            "llm_calls": 0,  # 校验是纯规则（无 LLM）：本态自有消耗为 0
+        }
+    on_state = classify_offline(
+        polluted_present=bool(payloads["on"]["polluted_present"]),
+        flagged=bool(payloads["on"]["flagged"]),
+    )
+    off_state = classify_offline(
+        polluted_present=bool(payloads["off"]["polluted_present"]),
+        flagged=bool(payloads["off"]["flagged"]),
+    )
+    pair = EscapePair(case.case_id, on_state, off_state)
+    status, reason = _real_status(injected, payloads)
+    unit_id = f"{case.case_id}::{LEG_REAL}"
+    unit = {
+        "unit_id": unit_id,
+        "case_id": case.case_id,
+        "ticker": product.get("ticker"),
+        "leg": LEG_REAL,
+        "cost_class": COST_CLASS[case.pollution_type],
+        "pollution_type": case.pollution_type,
+        "injection_point": case.injection_point,
+        "mechanism_id": case.mechanism_id,
+        "variant": variant,
+        "on_state": on_state,
+        "off_state": off_state,
+        "status": status,
+        "status_reason": reason,
+        "llm_calls": shared_calls,  # 两态自有消耗 0；共享图运行量即全部已知消耗
+        "graph_runs": 1,  # 共享图运行（每单元 1 趟：产出决策一次，两态校验复用）
+        "evidence_paths": _evidence_paths(product, unit_id),
+        "injection": injected,
+        "post_graph": {
+            "decision_key": decision_key,
+            "shared_graph_runs": 1,
+            "shared_llm_calls": shared_calls,
+            "validations_per_state": 1,
+            "note": (
+                "决策层后置注入：图只跑一趟（两态共用同一污染决策输入），"
+                "A5 sanity 为纯规则、开关两态各跑一次；图运行成本记在此块与单元级字段"
+            ),
+        },
+        "on": payloads["on"],
+        "off": payloads["off"],
+    }
+    return pair, unit
+
+
+def _post_graph_void_case(
+    product: dict,
+    case: InjectionCase,
+    *,
+    variant: str,
+    shared_runs: int,
+    shared_calls: int | None,
+    reason: str,
+    injected: dict | None = None,
+) -> tuple[EscapePair, dict]:
+    """后置流程的 void：图已跑（成本如实入账）但单元不含拦截信息。
+
+    与 `_prevoid_real_case`（运行前预判，0 成本）区别：这里图运行已经发生，`graph_runs`
+    与 `llm_calls` 必须如实记，不得写成 0；两态载荷 `polluted_present`/`flagged` 记 None
+    （未观测，不得与「看过，没有」的 False 混淆）。
+    """
+    status_reason = f"void：{reason}；图已跑 {shared_runs} 次（成本如实计入，不写 0）"
+    skipped = {
+        "ran": True,  # 图确实跑了；但该单元无污染决策可供两态校验
+        "shared_graph_run": True,
+        "graph_runs": 0,
+        "skip_reason": status_reason,
+        "polluted_present": None,
+        "flagged": None,
+        "citation": {},
+        "decision": {},
+        "mechanism": None,
+        "llm_calls": 0,
+    }
+    unit_id = f"{case.case_id}::{LEG_REAL}"
+    unit = {
+        "unit_id": unit_id,
+        "case_id": case.case_id,
+        "ticker": product.get("ticker"),
+        "leg": LEG_REAL,
+        "cost_class": COST_CLASS[case.pollution_type],
+        "pollution_type": case.pollution_type,
+        "injection_point": case.injection_point,
+        "mechanism_id": case.mechanism_id,
+        "variant": variant,
+        "on_state": "",  # 未判定（同 error 单元口径）：不得读成 caught
+        "off_state": "",
+        "status": STATUS_VOID,
+        "status_reason": status_reason,
+        "llm_calls": shared_calls,
+        "graph_runs": shared_runs,
+        "evidence_paths": _evidence_paths(product, unit_id),
+        "injection": dict(injected or {}),
+        "post_graph": {
+            "decision_key": None,
+            "shared_graph_runs": shared_runs,
+            "shared_llm_calls": shared_calls,
+            "validations_per_state": 0,
+            "note": "决策层后置注入：图已跑但无（可注入的）产出决策 → 该单元不含拦截信息",
+        },
+        "on": dict(skipped),
+        "off": dict(skipped),
+    }
+    # 配对占位：void 单元不进配对（`pilot_report` 只对 status=ok 的单元配对），此处仅为返回契约
+    return EscapePair(case.case_id, "caught", "caught"), unit
+
+
 def _prevoid_real_case(
     product: dict,
     case: InjectionCase,
@@ -1346,6 +1698,9 @@ def _prevoid_real_case(
     触发条件（都在 `apply_injection` 之后、任何图运行之前可知）：注入不可施加
     （`applied=False`）或注入未改变快照（`changed` 为空）。两态载荷记 `ran=False` +
     `mechanism=None`——未运行即无开关记录，不得伪造「开态/关态已判定」。
+
+    决策点（illegal_price）产物无决策 dict **不走此路**：污染对象只有跑图才存在，走
+    `_run_post_graph_decision_case`（图已跑，成本如实入账，不写 0）。
     """
     status_reason = f"void：{reason}；预判于图运行之前（0 次图运行 / 0 次 LLM），该单元不含拦截信息"
     skipped = {
@@ -1475,8 +1830,9 @@ def _budget_block(units: list[dict], *, llm_meter_total: int | None = None) -> d
     真跑腿 SHALL 对**全部已尝试单元**（ok + void + error）计账——只算 ok 单元会把
     void/error 的消耗静默丢掉（P1 真跑腿实证低估 ≈10×）。`llm_calls` 只对**已知计量**
     求和，None 计量的单元单列在 `llm_calls_unknown_units`（此时 `llm_calls` 是下界）。
-    `runs` 的单位是图运行（每单元 2 态；预判 void 的单元 0 次），运行数未知的 error
-    单元单列在 `runs_unknown_units`。meter 绝对读数独立交叉核对两处数字。
+    `runs` 的单位是图运行（每单元 2 态；预判 void 的单元 0 次；决策层后置注入的单元 1 趟
+    两态共用），运行数未知的 error 单元单列在 `runs_unknown_units`。meter 绝对读数独立交叉
+    核对两处数字。
     """
     off_units = [u for u in units if _cost_class(u) == LEG_OFFLINE]
     real_units = [u for u in units if _cost_class(u) == LEG_REAL]
@@ -1514,7 +1870,8 @@ def _budget_block(units: list[dict], *, llm_meter_total: int | None = None) -> d
             ),
             "note": (
                 "计账单位 = 已尝试真跑单元（ok + void + error 全计，SHALL NOT 只算 ok）；"
-                "`runs` = 图运行次数（每单元 2 态，预判 void 的单元 0 次），"
+                "`runs` = 图运行次数（每单元 2 态，预判 void 的单元 0 次，"
+                "决策层后置注入的单元 1 趟且两态共用），"
                 "运行数未知的单元计入 `runs_unknown_units`；"
                 "`llm_calls` = 已知计量单元之和，None 计量单元单列于 `llm_calls_unknown_units`"
                 "（此时该值是下界）；`llm_meter_total_calls` 为 meter 绝对读数，仅供独立交叉核对"

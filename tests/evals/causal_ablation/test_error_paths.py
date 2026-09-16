@@ -89,17 +89,19 @@ class TestInjectionPayloads:
         cases = build_injection_cases(pollution, ticker="T", base_values=base, n=1)
         assert cases[0].payload, f"{pollution} 未构造 payload"
 
-    def test_mirror_narrative_marked_as_kline_row_reversal(self):
+    def test_mirror_narrative_marked_as_indicator_series_reversal(self):
         case = build_injection_cases("mirror_narrative", ticker="T", base_values={}, n=1)[0]
-        assert case.payload["op"] == "reverse_rows"
-        assert case.payload["target"] == "kline"
+        assert case.payload["op"] == "reverse_series"
+        assert case.payload["target"] == "technical_indicators"
+        assert case.payload["path"] == ["MA", "5"]
+        assert case.payload["fallback"]["target"] == "kline"
 
     def test_stale_macro_sets_old_as_of(self):
         case = build_injection_cases("stale_macro", ticker="T", base_values={}, n=1)[0]
         assert case.payload["as_of_date"] < "2026-09-01"
         assert case.payload["freshness"] == "stale"
 
-    def test_mirror_narrative_actually_reverses_kline_rows_on_apply(self):
+    def test_mirror_narrative_falls_back_to_kline_rows_without_indicators(self):
         from evals.causal_ablation.injection import apply_injection
 
         base = {"kline": pd.DataFrame({"日期": ["d1", "d2", "d3"], "收盘": [1.0, 2.0, 3.0]})}
@@ -107,6 +109,7 @@ class TestInjectionPayloads:
         out, effect = apply_injection(base, case)
         assert out["kline"]["收盘"].tolist() == [3.0, 2.0, 1.0]
         assert effect.applied is True
+        assert effect.target == "kline"
 
     def test_mirror_narrative_without_kline_records_not_applied(self):
         from evals.causal_ablation.injection import apply_injection
