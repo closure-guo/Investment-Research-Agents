@@ -65,3 +65,34 @@ delta：`revamp-ablation-v2-causal-claims`（worktree `.worktrees/ablation-v2`�
 **待重校（pilot 目的本身）**：period_shift（too_hard，降强度/换点）；context 级真跑注入（7/8 未到达产物，需强化靶点——建议改为「注入到分析师必然引用的字段」或经 claim 级注入）。
 **结构性缺口（登记）**：A6/A7 校验面无 FAIL 面；illegal_price 决策层钩子（材料步需捕获 decision dict）；`anchors` 形态归一入 spec（候选 delta）。
 **本轮不作为正式结论**：pilot 为强度校准轮；逃逸率待终裁。
+
+---
+
+## 7. Round 2（重校轮，2026-09-16，commit `63e6347`）
+
+**重校项与效果**（按预登记停止规则的逐型判定执行）：
+
+| 型 | round 1 | round 2 | 变化说明 |
+|---|---|---|---|
+| period_shift | 1.000 too_hard | **0.500 ok** | 双形态实例（偶=仅标签；奇=标签+field_ref 段位移）→ 一半实例被值检查在**双态**拦下 |
+| direction_error | 0.500 ok | 0.500 ok | 不变 |
+| unit_error | 0.900 ok | 0.900 ok | 不变 |
+| fabricated_event / stale_macro | 0.000 | 0.000 | 盲区不变（A6/A7 无 FAIL 面，结构性） |
+| **合计** | 0.485 ok | **0.374 ok** | 仍在健康区间 |
+
+**真跑腿 round 2**（12 单元 / **157 LLM 调用**，meter 交叉核对一致）：
+
+- `value_error` ×4 仍 void：「污染未到达产物」——分析师不引用被注入字段（`derived_series.chg_5d` / income_statement 营收格）→ **下一轮靶点：注入到产物 claim 实际引用的字段**（recompute 注册根优先，使 A3 值检查可拦）
+- `mirror_narrative` ×3 ok + 1 void：MA.5 反转**首次进入产物**（de-void 成功），但两态均 caught（一致对，无机制信号）——A2 开关效应未显现，需结合逐态证据读
+- `illegal_price` ×4 void：跑图产出的决策为 `action='watch'`（hold/watch 豁免价位要求）→ 注入不可施加 → **下一轮：筛选可执行决策（buy/sell）的标的/实例**
+
+阳性对照：显著（n=76，b=56，c=0，exact p=2.8e-17）→ 本轮阴性结论不作废。
+停止规则：总体不一致比 **0.374** 落健康区间；终裁 **180 条 < 300** 上限。
+终裁清单已更新为 **round 2 证据增补版**（新增逐态 `polluted_present` / `flagged` 列，便于逐条裁定）。
+
+## 8. 下一轮（round 3 候选，待 owner 决策）
+
+1. `value_error` 靶点改为「产物 claim 实际引用字段」（保证到达 + A3 可拦）
+2. `illegal_price` 可执行决策（buy/sell）筛选
+3. A6/A7 可测面定义（设计项；或按成本分型改读输入侧证据）
+4. 终裁 180 条回填 → `escape_rate` 出数（当前 `rate=None`，口径纪律）
