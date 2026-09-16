@@ -18,13 +18,15 @@ v3 据此换靶点（结构不变）：`value_error` 偶数实例打 `derived_se
 `payload` 其余键为该 op 的参数：
 
 - `dataframe_cell`     ：报表 DataFrame「最新报告期行 × 指定列」× factor
-                         （value_error 奇数实例 / 回落形态）；
+                         （value_error 回落形态）；
 - `derived_series_value`：派生值 dict 指定键 × factor（value_error 偶数实例；`fallback`
                          给旧单元格形态，缺 derived_series 时回落）；
 - `reverse_rows`       ：序列 DataFrame 行倒序（mirror_narrative 回落形态）；
 - `reverse_series`     ：嵌套 dict 指定路径的 list 序列倒序（mirror_narrative；`fallback`
                          给 kline 行序形态）；
-- `append_news`        ：news_list 追加假新闻 dict（fabricated_event）；
+- fabricated_event 的载荷为**分析师输出侧**（`claim_text`，由 `pilot_runner` 的离线注入器
+  消费）：round-3 重校实证「假新闻与假引用同源注入」等于给污染自证出处（A6 回声匹配必然
+  PASS），故不再提供 `append_news` 快照 op——真实形态是「claim 断言的事件在输入里不存在」；
 - `macro_stale`        ：macro_indicators 各项 as_of_date/freshness 置滞后（stale_macro）；
 - `decision_price`     ：决策 dict 破价位关系（illegal_price，trader_plan 优先）。
 
@@ -61,7 +63,7 @@ REVENUE_COLUMN = "营业总收入"
 CLOSE_COLUMN = "收盘"
 MACRO_STALE_AS_OF = "2026-05-01"
 MACRO_STALE_FRESHNESS = "stale"
-FABRICATED_NEWS_TITLE = "某公司宣布重大战略合作（注入）"
+FABRICATED_EVENT_TITLE = "某公司宣布重大战略合作（注入）"
 DECISION_KEYS: tuple[str, ...] = ("trader_plan", "final_trade_decision")
 # P1 重校轮真靶点：技术面 context 直读的两处（analysts._build_technical_context）
 DERIVED_SERIES_TARGET = "derived_series"
@@ -230,11 +232,13 @@ def _payload(
             "field": f"{TECHNICAL_TARGET}.{'.'.join(TECHNICAL_MA_PATH)}",
         }
     if pollution_type == "fabricated_event":
+        # round-3 重校：只注入 claim（编造事件），**不**写 news_list——同源注入会让
+        # A6 回声匹配必然 PASS（出处自造），单元不携带机制信息（round-2 10/10 案例如此）。
         return {
-            "op": "append_news",
-            "target": "news_list",
-            "news_append": [FABRICATED_NEWS_TITLE],
-            "field": "news_list",
+            "op": "fabricated_claim",
+            "target": "analyst_reports",
+            "claim_text": FABRICATED_EVENT_TITLE,
+            "field": "analyst_reports",
         }
     if pollution_type == "stale_macro":
         return {
@@ -429,32 +433,6 @@ def _fallback_effect(
     )
 
 
-def _apply_append_news(out: dict[str, Any], payload: dict[str, Any]) -> InjectionEffect:
-    """news_list 追加假事件（fabricated_event）：list[dict]，含真实形态字段。"""
-    target = str(payload.get("target") or "news_list")
-    field_names = (str(payload.get("field") or target),)
-    titles = [str(t) for t in (payload.get("news_append") or []) if str(t)]
-    if not titles:
-        return _noop(target, "载荷缺 news_append 标题（无假事件可注入）", field_names)
-    news = out.get(target)
-    if not isinstance(news, list):
-        return _noop(
-            target, f"缺目标列表 {target!r}（真实结构为 list[dict]，含 title）", field_names
-        )
-    title = titles[0]
-    out[target] = [
-        *news,
-        {
-            "title": title,
-            "content": title,
-            "datetime": payload.get("datetime"),
-            "source": "注入",
-            "url": None,
-        },
-    ]
-    return InjectionEffect(True, target=target, polluted_values=(title,), field_names=field_names)
-
-
 def _apply_macro_stale(out: dict[str, Any], payload: dict[str, Any]) -> InjectionEffect:
     """宏观时效标记置滞后（stale_macro）：逐指标 as_of_date/freshness。"""
     target = str(payload.get("target") or "macro_indicators")
@@ -516,7 +494,6 @@ _OPS: dict[str, Callable[[dict[str, Any], dict[str, Any]], InjectionEffect]] = {
     "derived_series_value": _apply_derived_series_value,
     "reverse_rows": _apply_reverse_rows,
     "reverse_series": _apply_reverse_series,
-    "append_news": _apply_append_news,
     "macro_stale": _apply_macro_stale,
     "decision_price": _apply_decision_price,
 }

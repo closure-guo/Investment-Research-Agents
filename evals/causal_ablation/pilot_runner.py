@@ -64,6 +64,7 @@ from evals.causal_ablation.escape import (
 from evals.causal_ablation.injection import (
     COST_CLASS,
     DECISION_KEYS,
+    FABRICATED_EVENT_TITLE,
     POLLUTION_TYPES,
     InjectionCase,
     apply_injection,
@@ -99,18 +100,29 @@ ADJUDICATION_LIMIT = 300
 # 预登记停止规则的健康区间
 DISSONANT_MIN, DISSONANT_MAX = 0.10, 0.90
 
-# 校验侧拦截面（spec letter：拦截 = 终态产物不含污染值 或有 FAIL 标记）。
-# False = 该型在校验链上不可能产出 FAIL（机制在 context 侧或只产 PASS/UNVERIFIABLE）——
-# 报告的 blind_spots 据此显式提示，防止把「拦截率 0」读成「机制无价值」。
+# 可测面分型（spec letter：拦截 = 终态产物不含污染值 或有 FAIL 标记）。
+#   "fail"         → 校验链能产 FAIL（拦截 = 被污染 claim 有 FAIL/修复）
+#   "traceability" → 机制只产 PASS ↔ UNVERIFIABLE（A6 回声匹配）：拦截 = **未静默放行**
+#                    （该 claim 在产物里无出处可溯 → 判定非 PASS）。round-2 把假事件与
+#                    假引用同源注入 → 回声必然 PASS，10/10 案例不携带 A6 信息；round-3
+#                    改为只注入 claim（见 `_inject_fabricated_event`），该面才可测。
+#   "input_side"   → 机制无校验侧消费者（A7 时效标记只喂分析师 context）：改读**输入侧
+#                    presence 证据**（`macro_freshness_warning`），不进不一致比读法。
+#   "none"         → 无任何已定义可测面 → 报告 blind_spots 显式披露（拦截率 0 不得读作
+#                    机制无价值）。
+FLAG_SURFACE_KIND: dict[str, str] = {
+    "value_error": "fail",
+    "direction_error": "fail",
+    "unit_error": "fail",
+    "period_shift": "fail",
+    "mirror_narrative": "none",
+    "fabricated_event": "traceability",
+    "stale_macro": "input_side",
+    "illegal_price": "fail",
+}
+# 「校验侧 FAIL 面」布尔视图（历史口径，by_type 报告沿用）
 VERIFICATION_FLAG_SURFACE: dict[str, bool] = {
-    "value_error": True,  # A3 校验链（value_mismatch）
-    "direction_error": True,  # A3（direction_mismatch）
-    "unit_error": True,  # A3（value_mismatch / internal_inconsistency）
-    "period_shift": True,  # A2 期次检查（semantic_period_mismatch）
-    "mirror_narrative": False,  # A2 语义头是 context 侧；无校验侧消费者
-    "fabricated_event": False,  # A6 回声匹配只产 PASS(echo)/UNVERIFIABLE
-    "stale_macro": False,  # A7 时效标记只被分析师 context 消费
-    "illegal_price": True,  # A5 价位 sanity（fail / corrected）
+    pollution_type: kind == "fail" for pollution_type, kind in FLAG_SURFACE_KIND.items()
 }
 
 REQUIRED_BASE_VALUES: tuple[str, ...] = ("revenue", "price", "growth", "entry")
@@ -321,17 +333,71 @@ def inject_offline(product: dict, case: InjectionCase) -> dict:
     return out
 
 
+def _injection_effective(original: dict, polluted: dict, snapshot: dict) -> bool:
+    """污染是否**真产生**可检偏差：用校验器单一实现跑原/污染两版 claim（口径不得复制）。
+
+    round-2 实证两类空转（`tests/validation/2026-09-16-p1-injection-pilot-validation.md` §9.1）：
+    ① 方向翻转在 stated 自带符号时对齐后有效值不变（-1.21 + positive → eff 仍 -1.21）；
+    ② 单位 ×1e8 在部分标的上恰是合法换算（亿元→元），污染值落在容差内。
+    判据：原版**非 FAIL** 且污染版 **FAIL**——即 FAIL 由污染造成，而非 claim 本来就有的
+    覆盖缺口（后者会冒充「拦下」）。
+    """
+    from finance_agent import citation as citation_mod
+
+    try:
+        orig = citation_mod.verify_claims([citation_mod.Claim.model_validate(original)], snapshot)
+        poll = citation_mod.verify_claims([citation_mod.Claim.model_validate(polluted)], snapshot)
+    except Exception:  # noqa: BLE001 - 脏 claim 不能作为注入目标
+        return False
+    if not orig or not poll:
+        return False
+    return orig[0].status != "FAIL" and poll[0].status == "FAIL"
+
+
+def _effective_direction_flip(claim: dict, snapshot: dict) -> str | None:
+    """可产生有效方向污染的翻转方向；None = 该 claim 不携带方向信息（跳过）。"""
+    if str(claim.get("direction") or "") not in ("positive", "negative"):
+        return None
+    flipped = "positive" if claim["direction"] == "negative" else "negative"
+    return (
+        flipped if _injection_effective(claim, {**claim, "direction": flipped}, snapshot) else None
+    )
+
+
+# 单位误用的倍率候选（取首个**产生真偏差**者）：先试域内常见换算（亿 1e8 / 万 1e4），
+# 被校验器归一化吸收则退到未注册量级（百万 1e6 / 千 1e3）。
+# 依据：校验器按设计把 万/亿/percent 换算归一（避免误报），故「恰好等于某注册换算」的
+# 倍率不构成错误——round-2 的 002415 即此形态（141.95 亿元 ×1e8 = 真值 元）。
+_UNIT_ERROR_FACTORS: tuple[float, ...] = (1.0e8, 1.0e4, 1.0e6, 1.0e3)
+
+
+def _effective_unit_error(claim: dict, snapshot: dict) -> float | None:
+    """可产生有效单位污染的污染值；None = 该 claim 不携带单位信息（跳过）。"""
+    stated = claim.get("stated_value")
+    if not _is_number(stated):
+        return None
+    for factor in _UNIT_ERROR_FACTORS:
+        polluted_value = float(cast(Any, stated)) * factor
+        if _injection_effective(claim, {**claim, "stated_value": polluted_value}, snapshot):
+            return polluted_value
+    return None
+
+
 def _inject_direction_error(out: dict, case: InjectionCase, injection: dict) -> None:
+    """方向污染（round-3 重校：只选**翻转产生有效偏差**的 claim）。
+
+    round-2 取首个有符号 claim 直接翻转：stated 自带符号时 `eff = stated×declared_sign`
+    对齐后不变 → A3 无从拦，20/40 单元是空操作（判词见 §9.1）。重校判据走校验器单一实现。
+    """
+    snapshot = out["snapshot"]
     target = _select_flat_claim(
         out["analyst_reports"],
-        lambda claim: (
-            claim.get("direction") in ("positive", "negative") and _is_signed_claim(claim)
-        ),
+        lambda claim: _effective_direction_flip(claim, snapshot) is not None,
         case.pollution_type,
     )
     agent, idx, flat = target
     claim = out["analyst_reports"][agent]["claims"][idx]
-    flipped = "positive" if claim["direction"] == "negative" else "negative"
+    flipped = cast(str, _effective_direction_flip(claim, snapshot))
     claim["direction"] = flipped
     injection.update(
         mutated_agent=agent,
@@ -343,16 +409,20 @@ def _inject_direction_error(out: dict, case: InjectionCase, injection: dict) -> 
 
 
 def _inject_unit_error(out: dict, case: InjectionCase, injection: dict) -> None:
+    """单位污染（round-3 重校：倍率取首个**真产生偏差**者）。
+
+    round-2 固定 ×1e8：在部分标的上恰是合法换算（亿元→元）→ 污染值与真值同量级，
+    4/40 单元不携带信息（判词见 §9.1）。候选倍率 1e8/1e4（亿/万 误用）。
+    """
+    snapshot = out["snapshot"]
     target = _select_flat_claim(
         out["analyst_reports"],
-        lambda claim: (
-            _is_number(claim.get("stated_value")) and claim.get("source_type") in ("data", "mixed")
-        ),
+        lambda claim: _effective_unit_error(claim, snapshot) is not None,
         case.pollution_type,
     )
     agent, idx, flat = target
     claim = out["analyst_reports"][agent]["claims"][idx]
-    polluted = float(claim["stated_value"]) * 1.0e8
+    polluted = cast(float, _effective_unit_error(claim, snapshot))
     claim["stated_value"] = polluted
     injection.update(
         mutated_agent=agent,
@@ -494,8 +564,13 @@ def _adjacent_period_shift(claim: dict, snapshot: dict) -> dict[str, Any] | None
 
 
 def _inject_fabricated_event(out: dict, case: InjectionCase, injection: dict) -> None:
-    headlines = list(case.payload.get("news_append") or ["某公司宣布重大战略合作（注入）"])
-    headline = str(headlines[0])
+    """编造事件（round-3 重校：**只**注入 claim，不写 news_list）。
+
+    round-2 把假新闻与假引用同源注入 → 回声匹配必然 PASS（出处是注入自造的），
+    10/10 案例不携带 A6 信息。真实形态是「claim 断言的事件在输入里不存在」：
+    A6 ON → 无出处可溯 → UNVERIFIABLE（可追溯性面「未静默放行」）；A6 OFF → 一律 PASS。
+    """
+    headline = str(case.payload.get("claim_text") or FABRICATED_EVENT_TITLE)
     reports = out["analyst_reports"]
     agent = sorted(reports)[-1]
     reports[agent].setdefault("claims", []).append(
@@ -508,17 +583,17 @@ def _inject_fabricated_event(out: dict, case: InjectionCase, injection: dict) ->
         }
     )
     idx = len(reports[agent]["claims"]) - 1
-    out["snapshot"]["news_list"] = list(out["snapshot"].get("news_list") or []) + [
-        {"title": headline, "date": (case.payload.get("set") or {}).get("date")}
-    ]
     injection.update(
         mutated_agent=agent,
         mutated_claim_index=idx,
         mutated_flat_index=len(_flat_claims(reports)) - 1,
-        mutated_fields=[f"{agent}.claims[{idx}]", "snapshot.news_list"],
-        injected_values={"field_ref": headline, "news_title": headline},
+        mutated_fields=[f"{agent}.claims[{idx}]"],
+        injected_values={"field_ref": headline},
         polluted_values=[headline],
-        notes=["假新闻与假引用同源注入：A6 回声匹配只能判「有无出处」，判不了真伪"],
+        notes=[
+            "只注入 claim（不写 news_list）：污染形态 = 断言的事件在输入里不存在；"
+            "A6 ON 判 UNVERIFIABLE（可追溯性面），A6 OFF 一律 PASS"
+        ],
     )
 
 
@@ -952,11 +1027,18 @@ def replay_offline(
             claims, state, markdown=markdown, a4_on=a4_on, repair_fn=repair_fn
         )
         marks = freshness_marks_present(state)
+        warning = macro_freshness_warning(state) if case.pollution_type == "stale_macro" else None
     fail_indices = list(chain["fail_indices"])
     repaired_indices = list(chain["repaired_indices"])
     # state 侧污染（stale_macro）target 为 None：校验链上无 claim 级标记面 → 无拦截（记 False，
-    # 非 None，以免与「没判定过」混淆；该机制的可观测差走 freshness_marks_present）
-    flagged = target is not None and (target in fail_indices or target in repaired_indices)
+    # 非 None，以免与「没判定过」混淆；该机制的可观测差走 freshness_marks_present / warning）
+    flagged = target is not None and _polluted_flagged(
+        pollution_type=case.pollution_type,
+        verdicts=chain["verdicts"],
+        target=target,
+        fail_indices=fail_indices,
+        repaired_indices=repaired_indices,
+    )
     other_fails = [i for i in fail_indices if i != target]
     return {
         "claims": chain["claims"],
@@ -971,11 +1053,46 @@ def replay_offline(
         "unverifiable": chain["unverifiable"],
         "polluted_present": _polluted_present_offline(polluted, chain["claims"], case),
         "freshness_marks_present": marks,
+        "freshness_warning_present": warning,
         "mechanism": toggle.payload(),
         "injection": dict(polluted["injection"]),
         "artifact_paths": dict(polluted["paths"]),
         "llm_calls": 0,
     }
+
+
+def _polluted_flagged(
+    *,
+    pollution_type: str,
+    verdicts: Sequence[dict],
+    target: int,
+    fail_indices: Sequence[int],
+    repaired_indices: Sequence[int],
+) -> bool:
+    """被污染 claim 是否被拦下——按该型的可测面分型（`FLAG_SURFACE_KIND`）。
+
+    `"traceability"`（A6）：机制只产 PASS ↔ UNVERIFIABLE，拦截 = **未静默放行**
+    （判定非 PASS：UNVERIFIABLE/FAIL 都算「有面」）；其余型：拦截 = 被污染 claim 上有
+    FAIL 或修复（spec letter）。把 UNVERIFIABLE 记成「拦下」仅限该型——它是该机制的
+    全部输出面，不是通用口径。
+    """
+    if FLAG_SURFACE_KIND.get(pollution_type) == "traceability":
+        if target >= len(verdicts):
+            return False
+        return str(verdicts[target].get("status") or "") != "PASS"
+    return target in fail_indices or target in repaired_indices
+
+
+def macro_freshness_warning(state: dict) -> bool:
+    """分析师宏观 context 是否带时效告警（A7 的**输入侧**可观测面，零 LLM）。
+
+    A7（`macro_freshness_mark`）无校验侧消费者：时效标记只被 `_build_macro_context`
+    消费（`freshness == "stale"` → 追加「数据滞后」降级提示）。presence 检查复用 context
+    构建器单一实现（口径不得复制），且 SHALL NOT 被读成拦截率。
+    """
+    from finance_agent.nodes.analysts import _build_macro_context
+
+    return "数据滞后" in _build_macro_context(state)
 
 
 def _flatten_claim_dicts(reports: dict) -> list[dict]:
@@ -1023,7 +1140,7 @@ def _offline_polluted_values(case: InjectionCase) -> list[Any]:
     """离线单元的污染标记：claim 侧取 payload set 值，新闻/宏观取注入的标题/日期。"""
     payload = case.payload
     values: list[Any] = list((payload.get("set") or {}).values())
-    values += list(payload.get("news_append") or [])
+    values += list(payload.get("claim_text") or [])
     if payload.get("as_of_date"):
         values.append(payload["as_of_date"])
     return values
@@ -1071,7 +1188,29 @@ def run_offline_case(
         "on": on,
         "off": off,
     }
+    input_side = _input_side_evidence_block(case.pollution_type, on=on, off=off)
+    if input_side:
+        unit["input_side"] = input_side
     return pair, unit
+
+
+def _input_side_evidence_block(pollution_type: str, *, on: dict, off: dict) -> dict | None:
+    """输入侧证据块（零 LLM presence 检查）：机制 ON/OFF 时告警是否进模型输入。
+
+    只对 `FLAG_SURFACE_KIND == "input_side"` 的型产出（当前仅 A7/时效标记）——
+    该机制在校验链上无消费者，读法按成本分型改走输入侧证据。
+    """
+    if FLAG_SURFACE_KIND.get(pollution_type) != "input_side":
+        return None
+    return {
+        "surface": "context_freshness_warning",
+        "present_on": bool(on.get("freshness_warning_present")),
+        "present_off": bool(off.get("freshness_warning_present")),
+        "note": (
+            "输入侧 presence 检查（非拦截率）：A7 时效标记只喂分析师 context——"
+            "ON 时「数据滞后」降级提示进入模型输入，OFF（剥标记）时不进"
+        ),
+    }
 
 
 def _evidence_paths(product: dict, unit_id: str) -> list[str]:
@@ -1776,6 +1915,64 @@ def mcnemar_exact_p(b: int, c: int) -> float:
     return min(1.0, 2.0 * tail)
 
 
+def _adjudicable_surface(pollution_type: str) -> bool:
+    """该型是否可进终裁清单：输入侧面（A7）无「拦截/逃逸」语义，判读走输入侧证据块。"""
+    return FLAG_SURFACE_KIND.get(pollution_type, "none") != "input_side"
+
+
+def _excluded_from_worklist(units: Sequence[dict]) -> dict[str, dict]:
+    """被排除出终裁清单的型及原因（SHALL NOT 静默减少清单条数）。"""
+    excluded: dict[str, dict] = {}
+    for unit in units:
+        pollution_type = str(unit["pollution_type"])
+        if unit.get("off_state") == "escaped" and not _adjudicable_surface(pollution_type):
+            block = excluded.setdefault(
+                pollution_type,
+                {
+                    "units": 0,
+                    "reason": (
+                        "输入侧面（无校验侧拦截语义）：判读走 input_side_evidence 的 "
+                        "presence 检查，不进逃逸终裁清单"
+                    ),
+                },
+            )
+            block["units"] += 1
+    return excluded
+
+
+def _input_side_evidence(units: Sequence[dict]) -> dict[str, dict]:
+    """按型汇总输入侧证据（`input_side` 块）：presence 检查读数，非拦截率。
+
+    判词只在「ON 全有告警且 OFF 全无」时给「机制生效」——其余如实记「需人工判读」，
+    不把部分命中读成生效。
+    """
+    blocks: dict[str, dict] = {}
+    for unit in units:
+        block = unit.get("input_side")
+        if not isinstance(block, dict):
+            continue
+        pollution_type = str(unit["pollution_type"])
+        agg = blocks.setdefault(
+            pollution_type,
+            {
+                "surface": block.get("surface"),
+                "units": 0,
+                "present_on": 0,
+                "present_off": 0,
+                "note": block.get("note"),
+            },
+        )
+        agg["units"] += 1
+        agg["present_on"] += int(bool(block.get("present_on")))
+        agg["present_off"] += int(bool(block.get("present_off")))
+    for agg in blocks.values():
+        if agg["present_on"] == agg["units"] and agg["present_off"] == 0:
+            agg["verdict"] = "机制生效（ON 全部有告警 / OFF 全部无）"
+        else:
+            agg["verdict"] = "需人工判读（ON/OFF 未全一致）"
+    return blocks
+
+
 def _pair_of(unit: dict) -> EscapePair:
     return EscapePair(str(unit["case_id"]), str(unit["on_state"]), str(unit["off_state"]))
 
@@ -1917,6 +2114,8 @@ def pilot_report(
             "calibration": _calibration(type_pairs),
             "escape_rate": escape_rate(type_pairs, adjudicated=set()),
             "verification_surface": VERIFICATION_FLAG_SURFACE.get(pollution_type, False),
+            # 可测面分型（fail / traceability / input_side / none）——读分型判词前先读它
+            "flag_surface": FLAG_SURFACE_KIND.get(pollution_type, "none"),
         }
     overall_rate = escape_rate(pairs, adjudicated=set())
     discordant = mcnemar_table(pairs) if pairs else {"b": 0.0, "c": 0.0, "discordant_ratio": 0.0}
@@ -1934,7 +2133,7 @@ def pilot_report(
             "polluted_values": list((u.get("injection") or {}).get("polluted_values") or []),
         }
         for u in ok
-        if u["off_state"] == "escaped"
+        if u["off_state"] == "escaped" and _adjudicable_surface(str(u["pollution_type"]))
     ]
     statuses = [str(u.get("status") or STATUS_ERROR) for u in units]
     positive_control = _positive_control(positive_control_units)
@@ -1988,17 +2187,22 @@ def pilot_report(
             "action": _stop_action(discordant["discordant_ratio"], len(worklist)),
         },
         "adjudication_worklist": worklist,
+        # 清单排除项（输入侧面型）：减少清单条数必须可见，不得静默
+        "worklist_excluded": _excluded_from_worklist(ok),
+        # 输入侧证据（零 LLM presence 检查）：机制无校验侧消费者时按成本分型改读的读数
+        "input_side_evidence": _input_side_evidence(ok),
+        # 盲区只列「无任何已定义可测面」的型（kind=none）；traceability/input_side 已有面
         "blind_spots": [
             {
                 "pollution_type": t,
                 "mechanism_id": v["mechanism_id"],
                 "reason": (
-                    "该型机制在校验链上无 FAIL 面（context 侧或只产 PASS/UNVERIFIABLE）："
-                    "拦截率 0 不代表机制无价值，须按成本分型改读输入侧/决策层证据"
+                    "该型无任何已定义可测面（机制在 context 侧且无输入侧 presence 检查）："
+                    "拦截率 0 不代表机制无价值，须先定义可测面再读"
                 ),
             }
             for t, v in by_type.items()
-            if not v["verification_surface"]
+            if v["flag_surface"] == "none"
         ],
         "units": units,
     }

@@ -166,6 +166,12 @@ class TestCaseGroups:
         assert len(worklist_rows(units)) == 2
         assert sum(g["instances"] for g in case_groups(population)) == 2
 
+    def test_input_side_types_excluded_from_adjudication(self):
+        """输入侧面型（A7）无「拦截/逃逸」语义 → 不进清单（判读走输入侧证据块）。"""
+        units = [_unit("a::offline_replay", pollution_type="stale_macro", mechanism_id="A7")]
+        assert adjudicable_units(units) == []
+        assert worklist_rows(units) == []
+
 
 class TestMachineReading:
     def test_caught_with_attributable_bucket_is_counterfactual_escape(self):

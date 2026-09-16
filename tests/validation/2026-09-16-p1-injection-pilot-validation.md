@@ -90,12 +90,12 @@ delta：`revamp-ablation-v2-causal-claims`（worktree `.worktrees/ablation-v2`�
 停止规则：总体不一致比 **0.374** 落健康区间；终裁 **180 条 < 300** 上限。
 终裁清单已更新为 **round 2 证据增补版**（新增逐态 `polluted_present` / `flagged` 列，便于逐条裁定）。
 
-## 8. 下一轮（round 3 候选，待 owner 决策）
+## 8. 下一轮（round 3 候选）
 
-1. `value_error` 靶点改为「产物 claim 实际引用字段」（保证到达 + A3 可拦）
-2. `illegal_price` 可执行决策（buy/sell）筛选
-3. A6/A7 可测面定义（设计项；或按成本分型改读输入侧证据）
-4. 终裁 180 条回填 → `escape_rate` 出数（当前 `rate=None`，口径纪律）
+1. `value_error` 靶点改为「产物 claim 实际引用字段」（保证到达 + A3 可拦）——**真跑型，待批**（§10 已把离线侧做完）
+2. `illegal_price` 可执行决策（buy/sell）筛选——**真跑型，待批**
+3. A6/A7 可测面定义 ——**已完成**（§10：可追溯性面 + 输入侧面）
+4. 终裁回填 → `escape_rate` 出数（当前 `rate=None`，口径纪律；清单已按 round 3 重生成）
 
 ## 9. 终裁材料补齐（2026-09-16，round-2 证据审读）
 
@@ -125,3 +125,36 @@ round-2 交付的终裁清单四列逐态证据**交付时全空**（`6f3fcc9` �
 按可归因子集重算，`direction_error` = 20/20、`unit_error` = 36/36（均贴 too_hard 边界）——
 即这两型的可检出污染**全靠 A3 单点**（同 period_shift 之于 A2），round-3 需按「双形态」思路
 补非 A3 可拦形态，而不是硬扩样本。
+
+## 10. Round 3（注入构造重校，2026-09-16，离线腿零 LLM）
+
+§9.1 的四项构造缺陷已修复（库侧 `evals/causal_ablation/pilot_runner.py` + `injection.py`，
+单测 316 条），离线腿重跑：`reports/ablation/p1-round3/`（200 单元 / **0 LLM 调用** /
+0 void / 0 error；`--legs offline`，未动真跑腿）。
+
+| 型 | round 2 | round 3 | 变化说明 |
+|---|---|---|---|
+| direction_error | 0.500（半数是空操作） | **1.000** | 只选「翻转真改变有效值」的 claim（`_effective_direction_flip`，判据走校验器单一实现） |
+| unit_error | 0.900（4 例是合法换算） | **1.000** | 倍率按「是否被归一化吸收」挑选（`_effective_unit_error`）：1e8→恰等于真值、1e4→「万」、1e6→percent(×100) 均被吸收 → 退到 1e3 |
+| fabricated_event | 0.000（无面 + 自证出处） | **1.000** | 改为**只注入 claim**（不写 news_list）+ **可追溯性面**（拦截 = 未静默放行，判定非 PASS） |
+| period_shift | 0.500 | 0.500 | 不变（双形态仍有效） |
+| stale_macro | 0.000（无面） | 0.000（校验面） | 改读**输入侧面**：presence 检查 40/40 ON 有「数据滞后」告警、0/40 OFF → 判「机制生效」 |
+| **合计** | 0.374 | **0.700** | 落健康区间；阳性对照显著（b=80 c=0 p=1.65e-24）；0 void / 0 error |
+
+**读法（重要）**：direction/unit/fabricated 三型的 1.000 = **单点依赖**（该污染只有唯一机制能
+拦下），是结构事实而非测量缺陷——**不得按「too_hard → 再降强度」处理**：污染现在已是有效的，
+再降就退回空操作（round-2 的教训）。stale_macro 的 0.000 只反映「校验链上无此面」，其读数由
+`input_side_evidence` 取代。
+
+**可测面分型**（新增 `FLAG_SURFACE_KIND`，报告 `by_type[*].flag_surface`）：`fail`（A2/A3/A5 型）/
+`traceability`（A6：PASS↔UNVERIFIABLE）/ `input_side`（A7：context presence）/ `none`（无面 → 盲区）。
+`blind_spots` 现只列 `none` 型（round-3 离线批次为空）。
+
+**清单变化**：终裁清单 180 → **140 条**（stale_macro 40 条移出清单：输入侧面无「拦截/逃逸」
+语义，判读走 presence 证据；`worklist_excluded` 显式披露，不静默减条）；案例级 **40 条**
+（10 标的 × 4 型），机器预读**全部为「真逃逸候选（反事实型）」**——不再有空操作/无面/自证出处单元。
+两份 CSV 已按 round-3 台账重生成（`--resume reports/ablation/p1-round3/resume.json`）。
+
+**spec 候选更新（sync 前须处理）**：现行 spec 的拦截定义是「终态产物不含污染值 **或** 有 FAIL 标记」；
+round-3 引入两类新可测面（`traceability` 的「未静默放行」、`input_side` 的 presence 检查），
+须在 delta 的 spec 里补写这两类面的定义与读法边界（否则报告读数与 spec letter 不一致）。

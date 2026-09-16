@@ -432,8 +432,15 @@ def _print_summary(report: dict) -> None:
     )
     print(f"预算: {json.dumps(report['budget'], ensure_ascii=False)}")
     print(f"停止规则: {json.dumps(report['stop_rules'], ensure_ascii=False)}")
+    if report.get("input_side_evidence"):
+        print(
+            "输入侧证据（presence 检查，非拦截率）: "
+            f"{json.dumps(report['input_side_evidence'], ensure_ascii=False)}"
+        )
     if report["blind_spots"]:
-        print(f"盲区（无校验侧拦截面，拦截率 0 不可读作机制无价值）: {report['blind_spots']}")
+        print(f"盲区（无任何已定义可测面，拦截率 0 不可读作机制无价值）: {report['blind_spots']}")
+    if report.get("worklist_excluded"):
+        print(f"清单排除（无拦截/逃逸语义，判读走输入侧证据）: {report['worklist_excluded']}")
     print(f"终裁工作清单: {len(report['adjudication_worklist'])} 条待人工终裁", flush=True)
 
 

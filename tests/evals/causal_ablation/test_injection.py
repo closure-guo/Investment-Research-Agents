@@ -221,12 +221,18 @@ class TestPayloadTargets:
         }
         assert "close_series" not in case.payload
 
-    def test_fabricated_event_targets_news_list(self):
+    def test_fabricated_event_is_claim_side_without_snapshot_op(self):
+        """round-3 重校：假事件**只**注入 claim（不写 news_list）。
+
+        同源注入等于给污染自证出处 → A6 回声匹配必然 PASS，单元不携带机制信息
+        （round-2 实证 10/10 案例如此）。真实形态 = 断言的事件在输入里不存在。
+        """
         case = _case("fabricated_event")
-        assert case.payload["op"] == "append_news"
-        assert case.payload["target"] == "news_list"
-        assert len(case.payload["news_append"]) == 1
-        assert isinstance(case.payload["news_append"][0], str)
+        assert case.payload["op"] == "fabricated_claim"
+        assert case.payload["target"] == "analyst_reports"
+        assert isinstance(case.payload["claim_text"], str)
+        assert "news_list" not in case.payload
+        assert "news_append" not in case.payload
 
     def test_stale_macro_targets_real_freshness_fields(self):
         case = _case("stale_macro")
@@ -440,23 +446,12 @@ class TestApplyMirrorNarrative:
 
 
 class TestApplyFabricatedEvent:
-    def test_appends_news_item_to_news_list(self):
+    def test_claim_side_payload_is_not_a_snapshot_op(self):
+        """载荷是分析师输出侧（离线腿消费）：apply_injection 不得静默写占位键。"""
         snapshot = _snapshot()
-        out, effect = apply_injection(snapshot, _case("fabricated_event"))
-        assert effect.applied is True
-        assert len(out["news_list"]) == len(snapshot["news_list"]) + 1
-        appended = out["news_list"][-1]
-        assert appended["title"] == effect.polluted_values[0]
-        assert "注入" in appended["title"]
-        # 真实 state 无 news 键（舆情 context 读 news_list）——不得再写占位键
-        assert "news" not in out
-
-    def test_missing_news_list_records_applied_false(self):
-        snapshot = _snapshot()
-        snapshot.pop("news_list")
         out, effect = apply_injection(snapshot, _case("fabricated_event"))
         assert effect.applied is False
-        assert "news_list" in effect.reason
+        assert "未登记快照操作" in effect.reason
         assert set(out) == set(snapshot)
 
 

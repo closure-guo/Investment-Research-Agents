@@ -171,12 +171,21 @@ def _worklist_row(unit: dict) -> dict:
 
 
 def adjudicable_units(units: Sequence[dict]) -> list[dict]:
-    """终裁口径的单元全集（与 `pilot_report` 一致：`status=ok` 且关态逃逸）。
+    """终裁口径的单元全集（与 `pilot_report` 一致：`status=ok`、关态逃逸、非输入侧面）。
 
     清单与案例表 SHALL 用同一口径取数——两处各写一遍过滤条件会让「判 50 案例」
     与「判 180 行」对不上（案例表若含未逃逸/void 单元，实例数会虚增）。
+    输入侧面型（A7 时效标记）无「拦截/逃逸」语义 → 不进清单（判读走输入侧证据块）。
     """
-    return [u for u in units if u.get("status") == "ok" and u.get("off_state") == "escaped"]
+    from evals.causal_ablation.pilot_runner import FLAG_SURFACE_KIND
+
+    return [
+        u
+        for u in units
+        if u.get("status") == "ok"
+        and u.get("off_state") == "escaped"
+        and FLAG_SURFACE_KIND.get(str(u.get("pollution_type")), "none") != "input_side"
+    ]
 
 
 def worklist_rows(units: Sequence[dict]) -> list[dict]:

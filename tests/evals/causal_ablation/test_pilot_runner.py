@@ -276,14 +276,16 @@ class TestOfflineInjection:
         assert claim["stated_value"] == 100.0
         assert polluted["injection"]["mutated_flat_index"] == 2
 
-    def test_fabricated_event_appends_claim_and_news(self):
+    def test_fabricated_event_appends_claim_only(self):
+        """round-3 重校：只注入 claim（编造事件），**不**写 news_list——出处不得由注入自造。"""
         product = _make_product()
         polluted = pr.inject_offline(product, _case("fabricated_event"))
         news = [n["title"] for n in polluted["snapshot"]["news_list"]]
-        assert "某公司宣布重大战略合作（注入）" in news
+        assert "某公司宣布重大战略合作（注入）" not in news
         appended = polluted["analyst_reports"]["technical"]["claims"][-1]
         assert appended["source_type"] == "event"
         assert "某公司宣布重大战略合作（注入）" in appended["field_ref"]
+        assert polluted["injection"]["mutated_fields"] == ["technical.claims[2]"]
         # 原产物与原始快照均未被写入
         assert len(product["snapshot"]["news_list"]) == 1
         assert len(product["analyst_reports"]["technical"]["claims"]) == 2
@@ -317,6 +319,90 @@ class TestOfflineInjection:
 
 
 # ── period_shift 双形态（P1 重校轮）──
+
+
+class TestEffectiveInjectionTargets:
+    """round-3 重校：注入必须**真产生**可检偏差——空操作/等价换算的单元不携带机制信息。
+
+    判据走校验器单一实现（`pr._injection_effective`）：原版非 FAIL 且污染版 FAIL。
+    """
+
+    def test_direction_error_skips_inert_flip_targets(self):
+        snapshot = {
+            **_snapshot(),
+            "growth_rates": {"fundamental": {"revenue": -0.1005, "profit": 0.25}},
+        }
+        reports = {
+            "fundamental": {
+                "claims": [
+                    {  # 惰性：stated 自带负号 → 翻转后 eff 不变（对齐规则不改号）
+                        "claim_type": "numerical",
+                        "source_type": "data",
+                        "field_ref": "growth_rates.fundamental.revenue",
+                        "stated_value": -0.1005,
+                        "direction": "negative",
+                        "interpretation": "营业总收入同比下滑 10.05%",
+                    },
+                    {  # 有效：stated 为正 → 翻成 negative 后 eff 变号 → A3 可拦
+                        "claim_type": "numerical",
+                        "source_type": "data",
+                        "field_ref": "growth_rates.fundamental.profit",
+                        "stated_value": 0.25,
+                        "direction": "positive",
+                        "interpretation": "归母净利润同比增长 25%",
+                    },
+                ],
+                "markdown": "",
+            }
+        }
+        polluted = pr.inject_offline(
+            _make_product(reports=reports, snapshot=snapshot), _case("direction_error")
+        )
+        assert polluted["injection"]["mutated_fields"] == ["fundamental.claims[1].direction"]
+        assert polluted["injection"]["injected_values"]["direction"] == "negative"
+
+    def test_direction_error_without_effective_target_raises(self):
+        snapshot = {
+            **_snapshot(),
+            "growth_rates": {"fundamental": {"revenue": -0.1005}},
+        }
+        reports = {
+            "fundamental": {
+                "claims": [
+                    {
+                        "claim_type": "numerical",
+                        "source_type": "data",
+                        "field_ref": "growth_rates.fundamental.revenue",
+                        "stated_value": -0.1005,
+                        "direction": "negative",
+                        "interpretation": "营业总收入同比下滑 10.05%",
+                    }
+                ],
+                "markdown": "",
+            }
+        }
+        with pytest.raises(pr.InjectionError, match="无可选目标 claim"):
+            pr.inject_offline(
+                _make_product(reports=reports, snapshot=snapshot), _case("direction_error")
+            )
+
+    def test_unit_error_skips_scales_absorbed_by_normalization(self):
+        """被归一化吸收的量级必须跳过：×1e8（恰等于真值，亿元→元）、×1e4（「万」换算）、
+        ×1e6（比值 100 落入 percent 带）——所选污染值须**确实**让校验器判 FAIL。"""
+        claim = {
+            "claim_type": "numerical",
+            "source_type": "data",
+            "field_ref": "income_statement.20251231.营业总收入",
+            "stated_value": 10.0,
+            "direction": "positive",
+            "interpretation": "营业总收入 10.00亿元",
+        }
+        reports = {"fundamental": {"claims": [dict(claim)], "markdown": ""}}
+        polluted = pr.inject_offline(_make_product(reports=reports), _case("unit_error"))
+        polluted_claim = polluted["analyst_reports"]["fundamental"]["claims"][0]
+        # ×1e8 → 1.0e9：恰好等于真值（合法换算），不构成错误 → 不得被选中
+        assert polluted_claim["stated_value"] != pytest.approx(1.0e9)
+        assert pr._injection_effective(claim, polluted_claim, _snapshot()) is True
 
 
 class TestPeriodShiftDualForm:
@@ -591,16 +677,17 @@ class TestOfflineReplay:
         assert on["flagged"] is True and on["polluted_present"] is True
         assert off["flagged"] is False and off["polluted_present"] is True
 
-    def test_fabricated_event_verdict_is_pass_echo_or_unverifiable(self):
+    def test_fabricated_event_traceability_surface(self):
+        """A6 可测面（round-3）：无出处的编造事件在开态判 UNVERIFIABLE（未静默放行），
+        关态被补丁为裸 PASS → 该型在**可追溯性面**上可测（机制无 FAIL 面）。"""
         product = _make_product()
         on = pr.replay_offline(product, _case("fabricated_event"), mechanism_on=True)
         off = pr.replay_offline(product, _case("fabricated_event"), mechanism_on=False)
-        # 文本型：开态走真实回声匹配（命中注入的假新闻 → PASS(echo)），关态被补丁为裸 PASS
-        assert [v["status"] for v in on["verdicts"]][-1] == "PASS"
-        assert [v.get("unit_normalized") for v in on["verdicts"]][-1] == "echo"
-        assert [v.get("unit_normalized") for v in off["verdicts"]][-1] is None
-        # spec 口径：无 FAIL → 两态均未拦截（该型无校验侧拦截面，报告按盲区上报）
-        assert on["flagged"] is False and off["flagged"] is False
+        assert [v["status"] for v in on["verdicts"]][-1] == "UNVERIFIABLE"
+        assert [v["status"] for v in off["verdicts"]][-1] == "PASS"
+        assert on["flagged"] is True and off["flagged"] is False
+        # 污染值仍在产物里（claim 原文）——拦截是「未静默放行」而非「值被删」
+        assert on["polluted_present"] is True and off["polluted_present"] is True
 
     def test_stale_macro_marks_and_strip_are_recorded(self):
         product = _make_product()
@@ -609,6 +696,9 @@ class TestOfflineReplay:
         assert on["freshness_marks_present"] is True
         assert off["freshness_marks_present"] is False
         assert on["polluted_present"] is True and off["polluted_present"] is True
+        # A7 输入侧面（round-3）：告警进分析师 context 与否 = 该机制的可观测差
+        assert on["freshness_warning_present"] is True
+        assert off["freshness_warning_present"] is False
 
     def test_a4_repair_participates_only_when_injected(self):
         product = _make_product()
@@ -1390,20 +1480,49 @@ class TestPilotReport:
         assert report["counts"]["void_injection"] == 1
         assert report["discordant"]["overall"]["b"] == 3.0
 
-    def test_blind_spots_listed_for_types_without_verification_surface(self, tmp_path: Path):
+    def test_blind_spots_only_for_types_without_any_surface(self, tmp_path: Path):
+        """round-3：A6 走可追溯性面、A7 走输入侧面 → 不再列盲区；只有 kind=none 才列。"""
         units = self._units()
         fabricated = pr.run_offline_case(_make_product(), _case("fabricated_event"))[1]
         stale = pr.run_offline_case(_make_product(), _case("stale_macro"))[1]
+        mirror = {
+            **units[0],
+            "unit_id": "mirror",
+            "case_id": "mirror",
+            "pollution_type": "mirror_narrative",
+            "mechanism_id": "A2",
+        }
         report = pr.pilot_report(
-            units + [fabricated, stale],
+            units + [fabricated, stale, mirror],
             prereg_dir=_prereg_dir(tmp_path / "prereg"),
             positive_control_units=[],
         )
-        assert {b["pollution_type"] for b in report["blind_spots"]} == {
-            "fabricated_event",
-            "stale_macro",
-        }
+        assert {b["pollution_type"] for b in report["blind_spots"]} == {"mirror_narrative"}
         assert all(b["reason"] for b in report["blind_spots"])
+        assert report["by_type"]["fabricated_event"]["flag_surface"] == "traceability"
+        assert report["by_type"]["stale_macro"]["flag_surface"] == "input_side"
+
+    def test_input_side_types_excluded_from_worklist_but_disclosed(self, tmp_path: Path):
+        """输入侧面型无「拦截/逃逸」语义：不进终裁清单，但排除项必须可见（不得静默）。"""
+        stale = pr.run_offline_case(_make_product(), _case("stale_macro"))[1]
+        report = pr.pilot_report(
+            [stale], prereg_dir=_prereg_dir(tmp_path / "prereg"), positive_control_units=[]
+        )
+        assert report["adjudication_worklist"] == []
+        assert report["worklist_excluded"]["stale_macro"]["units"] == 1
+        assert "输入侧面" in report["worklist_excluded"]["stale_macro"]["reason"]
+
+    def test_input_side_evidence_reports_presence_verdict(self, tmp_path: Path):
+        """A7 输入侧证据：ON 全部有告警 / OFF 全无 → 「机制生效」（presence 检查，非拦截率）。"""
+        stale = pr.run_offline_case(_make_product(), _case("stale_macro"))[1]
+        report = pr.pilot_report(
+            [stale], prereg_dir=_prereg_dir(tmp_path / "prereg"), positive_control_units=[]
+        )
+        block = report["input_side_evidence"]["stale_macro"]
+        assert block["surface"] == "context_freshness_warning"
+        assert block["units"] == 1
+        assert block["present_on"] == 1 and block["present_off"] == 0
+        assert "机制生效" in block["verdict"]
 
 
 class TestBudgetHonesty:
