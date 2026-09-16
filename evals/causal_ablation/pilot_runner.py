@@ -1521,6 +1521,7 @@ def run_real_case(
     query: str = DEFAULT_QUERY,
     llm_meter: Callable[[], int] | None = None,
     price_check_fn: Callable[[dict], dict] | None = None,
+    decision_cache: dict[str, dict] | None = None,
 ) -> tuple[EscapePair, dict]:
     """真跑型单例：apply_injection → 变体图（ON/OFF 两态）→ 终态判定 → 配对。
 
@@ -1554,6 +1555,8 @@ def run_real_case(
             query=query,
             llm_meter=llm_meter,
             price_check_fn=price_check_fn,
+            cache=decision_cache,
+            cache_key=f"{resolved_variant}|{query}|{product.get('ticker')}",
         )
     polluted, effect = apply_injection(original, case)
     changed = _changed_keys(original, polluted)
@@ -1679,6 +1682,8 @@ def _run_post_graph_decision_case(
     query: str,
     llm_meter: Callable[[], int] | None,
     price_check_fn: Callable[[dict], dict] | None,
+    cache: dict[str, dict] | None = None,
+    cache_key: str = "",
 ) -> tuple[EscapePair, dict]:
     """决策层后置注入（P1 重校轮）：产物无决策 dict 时的唯一正确面。
 
@@ -1699,11 +1704,34 @@ def _run_post_graph_decision_case(
 
     跑图后仍无决策、或产出决策不可注入（hold 无价位要求等）→ 判 void，但**图已跑**：
     成本如实入账（`graph_runs=1` + meter 差量），不得写 0。
+
+    **决策复用（round-3 二阶段）**：同一标的的同类实例（载荷确定性相同）只需**一趟图**——
+    首单元跑图后把状态与「不可执行」判词写入 `cache`，同标的后续单元直接复用（0 成本）。
+    否则 4 实例各烧一趟全图（round-2 实测 4×38 次调用，其中 3 趟是纯重复）。
     """
-    before = _meter(llm_meter)
-    state = dict(runner(variant=variant, snapshot=product.get("snapshot") or {}, query=query))
-    after = _meter(llm_meter)
-    shared_calls = None if before is None or after is None else after - before
+    cached = cache.get(cache_key) if (cache is not None and cache_key) else None
+    if cached is not None and cached.get("skip_reason"):
+        snapshot_effect = apply_injection(product.get("snapshot") or {}, case)[1]
+        return _post_graph_void_case(
+            product,
+            case,
+            variant=variant,
+            shared_runs=0,
+            shared_calls=0,
+            reason=f"决策复用（本标的首单元已判定）：{cached['skip_reason']}",
+            injected=_injection_record(snapshot_effect, [], post_graph=True),
+        )
+    if cached is not None:
+        state = cached["state"]
+        shared_runs, shared_calls = 0, 0
+    else:
+        before = _meter(llm_meter)
+        state = dict(runner(variant=variant, snapshot=product.get("snapshot") or {}, query=query))
+        after = _meter(llm_meter)
+        shared_calls = None if before is None or after is None else after - before
+        shared_runs = 1
+        if cache is not None and cache_key:
+            cache[cache_key] = {"state": state}
     produced = _decision_dicts(state)
     if not produced:
         snapshot_effect = apply_injection(product.get("snapshot") or {}, case)[1]
@@ -1711,7 +1739,7 @@ def _run_post_graph_decision_case(
             product,
             case,
             variant=variant,
-            shared_runs=1,
+            shared_runs=shared_runs,
             shared_calls=shared_calls,
             reason=(
                 "跑图后产物仍无决策 dict（trader_plan/final_trade_decision 均不在跑图产物）："
@@ -1728,11 +1756,14 @@ def _run_post_graph_decision_case(
             if not effect.applied
             else "注入未改变产出的决策 dict（该型在本跑图产物上无污染可测）"
         )
+        if cache is not None and cache_key in cache:
+            # 决策本身不可执行（hold/watch 豁免价位要求）→ 同标的后续实例零成本跳过
+            cache[cache_key]["skip_reason"] = reason
         return _post_graph_void_case(
             product,
             case,
             variant=variant,
-            shared_runs=1,
+            shared_runs=shared_runs,
             shared_calls=shared_calls,
             reason=f"跑图产出决策后仍不可注：{reason}",
             injected=injected,
@@ -1791,17 +1822,18 @@ def _run_post_graph_decision_case(
         "status": status,
         "status_reason": reason,
         "llm_calls": shared_calls,  # 两态自有消耗 0；共享图运行量即全部已知消耗
-        "graph_runs": 1,  # 共享图运行（每单元 1 趟：产出决策一次，两态校验复用）
+        "graph_runs": shared_runs,  # 本单元自有图运行（复用命中 = 0）
         "evidence_paths": _evidence_paths(product, unit_id),
         "injection": injected,
         "post_graph": {
             "decision_key": decision_key,
-            "shared_graph_runs": 1,
+            "shared_graph_runs": shared_runs,
             "shared_llm_calls": shared_calls,
             "validations_per_state": 1,
             "note": (
-                "决策层后置注入：图只跑一趟（两态共用同一污染决策输入），"
-                "A5 sanity 为纯规则、开关两态各跑一次；图运行成本记在此块与单元级字段"
+                f"决策层后置注入：图只跑 {'一趟（本单元采集）' if shared_runs else '零趟（复用本标的首单元决策）'}"
+                "（两态共用同一污染决策输入），A5 sanity 为纯规则、开关两态各跑一次；"
+                "图运行成本记在此块与单元级字段"
             ),
         },
         "on": payloads["on"],

@@ -902,6 +902,81 @@ class TestClassification:
 # ── 真跑腿（graph_runner 注入） ──
 
 
+class TestDecisionReuse:
+    """round-3 二阶段：同一标的的决策层单元复用一趟全图（round-2 实测 4 实例各跑一趟）。"""
+
+    def _product_without_decision(self):
+        snapshot = {k: v for k, v in _snapshot().items() if k not in ("trader_plan",)}
+        return _make_product(snapshot=snapshot)
+
+    def _actionable_state(self, snapshot: dict) -> dict:
+        """可执行买入决策 + sanity 消费面（价位带）——A5 才能判出 fail（同已有用例 fixture）。"""
+        plan = {"action": "buy", "entry_price": 100.0, "stop_loss": 95.0, "target_price": 115.0}
+        return {
+            "trader_plan": dict(plan),
+            "final_trade_decision": dict(plan),
+            "kline": snapshot["kline"],
+            "price_levels": {
+                "available": True,
+                "entry_ref": 100.0,
+                "atr": 3.0,
+                "full_band": [90.0, 130.0],
+                "stop_band_long": {"low": 95.0, "high": 98.0},
+                "target_band_long": {"low": 110.0, "high": 116.0},
+            },
+            "final_report": "# 报告",
+        }
+
+    def _illegal_cases(self, n=4):
+        from evals.causal_ablation.injection import build_injection_cases
+
+        return build_injection_cases(
+            "illegal_price",
+            ticker="600519",
+            base_values={"revenue": 1.0e9, "price": 100.0, "growth": -0.1005, "entry": 100.0},
+            n=n,
+        )
+
+    def test_four_units_share_one_graph_run(self):
+        calls: list[int] = []
+
+        def runner(*, variant, snapshot, query=""):
+            calls.append(1)
+            return self._actionable_state(snapshot)
+
+        cache: dict[str, dict] = {}
+        units = [
+            pr.run_real_case(
+                self._product_without_decision(), case, graph_runner=runner, decision_cache=cache
+            )[1]
+            for case in self._illegal_cases()
+        ]
+        assert len(calls) == 1  # 4 个实例只跑一趟图
+        assert [u["graph_runs"] for u in units] == [1, 0, 0, 0]
+        assert all(u["status"] == "ok" for u in units)
+        assert all(u["on_state"] == "caught" and u["off_state"] == "escaped" for u in units)
+
+    def test_non_actionable_decision_short_circuits_later_units(self):
+        calls: list[int] = []
+
+        def runner(*, variant, snapshot, query=""):
+            calls.append(1)
+            plan = {"action": "watch", "confidence": 0.5}
+            return {"trader_plan": dict(plan), "final_trade_decision": dict(plan)}
+
+        cache: dict[str, dict] = {}
+        units = [
+            pr.run_real_case(
+                self._product_without_decision(), case, graph_runner=runner, decision_cache=cache
+            )[1]
+            for case in self._illegal_cases()
+        ]
+        assert len(calls) == 1  # 首单元判定「不可执行」后，后续实例零成本跳过
+        assert all(u["status"] == "void_injection" for u in units)
+        assert "决策复用" in units[1]["status_reason"]
+        assert [u["graph_runs"] for u in units] == [1, 0, 0, 0]
+
+
 class TestRealRun:
     def test_value_error_pair_flips_with_a3_graph_surface(self, monkeypatch):
         """fake graph_runner 调真实（可被补丁的）verify_citations 节点：A3 关 → 逃逸。

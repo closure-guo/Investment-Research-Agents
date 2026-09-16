@@ -91,6 +91,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--resume", type=Path, default=None, help="续跑台账路径（默认 out-dir/resume.json）"
     )
     parser.add_argument(
+        "--pollution-types",
+        nargs="+",
+        default=None,
+        help="只跑指定污染型（缺省全部 8 类；用于真跑型分批申报成本）",
+    )
+    parser.add_argument(
         "--adjudication-csv",
         type=Path,
         default=ADJUDICATION_CSV,
@@ -281,6 +287,7 @@ def run_pilot(
     graph_runner: Callable[..., dict] | None = None,
     llm_meter: Callable[[], int] | None = None,
     adjudication_csv: Path | None = None,
+    pollution_types: Sequence[str] | None = None,
 ) -> Path:
     """P1 跑批主流程：门禁 → 读产物 → 构用例 → 跑腿 → 落单元/报告。"""
     # 1) 预登记门禁：缺预登记拒绝启动（spec「缺预登记拒绝跑批」）
@@ -293,6 +300,8 @@ def run_pilot(
     units: list[dict] = list(resume.get("units") or [])
     done = set(resume.get("done_unit_ids") or [])
     real_cases = int(resume.get("real_run_cases") or 0)
+    # 决策复用缓存（同标的同类实例共用一趟全图；键 = variant|query|ticker）
+    decision_cache: dict[str, dict] = {}
     selected = (
         {"offline": True, "real": False}
         if legs == "offline"
@@ -321,7 +330,9 @@ def run_pilot(
 
     for ticker in tickers:
         product = products[ticker]
-        for case in pr.build_pilot_cases(product, instances=instances):
+        for case in pr.build_pilot_cases(
+            product, instances=instances, pollution_types=pollution_types
+        ):
             cost_class = COST_CLASS[case.pollution_type]
             planned[cost_class] += 1
             if not selected["offline" if cost_class == pr.LEG_OFFLINE else "real"]:
@@ -337,7 +348,11 @@ def run_pilot(
                     _, unit = pr.run_offline_case(product, case)
                 else:
                     _, unit = pr.run_real_case(
-                        product, case, graph_runner=graph_runner, llm_meter=llm_meter
+                        product,
+                        case,
+                        graph_runner=graph_runner,
+                        llm_meter=llm_meter,
+                        decision_cache=decision_cache,
                     )
                     real_cases += 1
             except Exception as exc:  # noqa: BLE001 - 单单元失败不拖垮整批，如实记 error 单元
@@ -371,6 +386,7 @@ def run_pilot(
         "instances": instances,
         "legs": legs,
         "real_run_limit": real_run_limit,
+        "pollution_types": list(pollution_types) if pollution_types else list(POLLUTION_TYPES),
         "real_run_cases": real_cases,
         "materials_dir": Path(materials_dir).as_posix(),
         "adjudication_csv": (Path(adjudication_csv).as_posix() if adjudication_csv else None),
@@ -501,6 +517,7 @@ def main() -> None:
             prereg_dir=args.prereg_dir,
             resume_path=args.resume,
             adjudication_csv=args.adjudication_csv,
+            pollution_types=args.pollution_types,
             llm_meter=_install_cost_meter() if args.legs != "offline" else None,
         )
     except (MissingPreregistrationError, pr.MissingProductError, pr.InjectionError) as exc:
