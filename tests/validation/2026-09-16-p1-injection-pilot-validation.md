@@ -155,6 +155,6 @@ round-2 交付的终裁清单四列逐态证据**交付时全空**（`6f3fcc9` �
 （10 标的 × 4 型），机器预读**全部为「真逃逸候选（反事实型）」**——不再有空操作/无面/自证出处单元。
 两份 CSV 已按 round-3 台账重生成（`--resume reports/ablation/p1-round3/resume.json`）。
 
-**spec 候选更新（sync 前须处理）**：现行 spec 的拦截定义是「终态产物不含污染值 **或** 有 FAIL 标记」；
-round-3 引入两类新可测面（`traceability` 的「未静默放行」、`input_side` 的 presence 检查），
-须在 delta 的 spec 里补写这两类面的定义与读法边界（否则报告读数与 spec letter 不一致）。
+**spec 更新（已落 delta）**：新增 `### Requirement: 可测面分型与注入有效性`——四类可测面
+（`fail`/`traceability`/`input_side`/`none`）的定义与读法边界、注入有效性要求（空操作/等价换算/
+自证出处三类形态 SHALL NOT 作为实验单元）、输入侧面不冒充拦截；`openspec validate --strict` 通过。

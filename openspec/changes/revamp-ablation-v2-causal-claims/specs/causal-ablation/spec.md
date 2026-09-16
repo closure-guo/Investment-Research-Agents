@@ -45,6 +45,33 @@
 - **WHEN** 汇总逃逸率
 - **THEN** 误报 SHALL 归入四桶拆报口径，SHALL NOT 被计作「拦下」或「逃逸」
 
+### Requirement: 可测面分型与注入有效性
+
+每类污染 SHALL 登记其**可测面分型**（`fail` / `traceability` / `input_side` / `none`）并在报告逐型披露：
+
+- `fail`：校验链能产 FAIL，拦截 = 被污染 claim 上有 FAIL 或修复；
+- `traceability`：机制只产 PASS ↔ UNVERIFIABLE（A6 回声匹配），拦截 = **未静默放行**（被污染 claim 判定非 PASS）。该面 SHALL NOT 被泛化为通用口径——UNVERIFIABLE 是覆盖缺口而非错误，仅该型机制的全部输出面即此；
+- `input_side`：机制无校验侧消费者（A7 时效标记只喂分析师 context），改读输入侧 presence 证据（降级告警是否进入模型输入）。该读数 SHALL NOT 被读作拦截率，该型单元 SHALL NOT 进逃逸终裁清单（无「拦截/逃逸」语义），排除项 SHALL 在报告显式披露；
+- `none`：无任何已定义可测面 → 报告 blind_spots 显式披露。
+
+污染构造 SHALL 保证**注入有效**：污染版在目标机制开启时产生可检偏差，且该偏差由污染**造成**（原版非 FAIL——否则 FAIL 来自 claim 本就有的覆盖缺口，属伪拦截）。空操作（对齐后有效值不变）、等价换算（污染值恰为已注册的单位/百分比归一等价）、自证出处（把「出处」与污染一并注入使回声必然命中）三类形态 SHALL NOT 作为实验单元。
+
+#### Scenario: 空操作污染被跳过
+
+- **WHEN** 构造某污染单元而其污染值在目标机制开启时不产生可检偏差（如方向翻转在 stated 自带符号时对齐后有效值不变）
+- **THEN** 该候选 SHALL 被跳过并另选目标；无可选目标时 SHALL 显式报错，SHALL NOT 静默产出该单元
+
+#### Scenario: 污染不得自证出处
+
+- **GIVEN** 事件编造型污染
+- **WHEN** 构造注入载荷
+- **THEN** SHALL NOT 把被断言事件的出处（news_list 等源）与 claim 一并注入——否则回声匹配必然命中，单元不携带机制信息
+
+#### Scenario: 输入侧面不冒充拦截
+
+- **WHEN** 汇总可测面为 `input_side` 的污染型指标
+- **THEN** 报告 SHALL 分列输入侧 presence 证据与判词，SHALL NOT 把该校验面读数（0 拦截）读作机制无价值
+
 ### Requirement: 注入成本结构二分
 
 注入矩阵的实验单元 SHALL 按成本结构分型：**离线重放型**（校验侧机制，对已有产物 JSON 污染后重放校验器，零 LLM 调用）与**真跑型**（输入侧联动与决策层机制，需全管线 run）。跑批预算 SHALL 按分型分别申报；SHALL NOT 以单一「run 等效数」掩盖两类成本的数量级差异。
