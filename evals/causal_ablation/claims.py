@@ -85,8 +85,8 @@ DEFAULT_REGISTRY: tuple[CausalClaim, ...] = (
         primary_metric="价位越带率 / 无出处价位率",
         method="code",
         effect_expectation=(
-            "待 027-price-validate-state-keys-dropped 修复后的遥测实证"
-            "（该回路曾因 state 键未声明从未生效）"
+            "大：注入法实测拦截率 1.000（16/16，4 标的；2026-09-17），"
+            "且为价位幻觉的唯一防线（关态即全放行）；027 的 state 键缺陷已修，本例即其修复后的首次实证"
         ),
         exposure_metric=("≈0：决策层默认不产可执行价位（3 标的 × 3 轮实测全 watch，P1 round-3）"),
         exposure_source="生产遥测 B4：决策动作分布（buy/sell/watch）+ 价位打回率",

@@ -179,6 +179,8 @@ def product_from_state(state: dict, *, digest: str) -> dict:
         "financial_indicators",
         "technical_indicators",
         "derived_series",
+        # 价位面（validate_trade_prices 的消费键；此前漏存 → A5 单元因「不可用」跳过校验）
+        "price_levels",
         "quarterly_trend",
         "profitability_metrics",
         "solvency_metrics",
