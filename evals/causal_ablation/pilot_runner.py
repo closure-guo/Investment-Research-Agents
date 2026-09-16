@@ -2205,6 +2205,64 @@ def _excluded_from_worklist(units: Sequence[dict]) -> dict[str, dict]:
     return excluded
 
 
+def traffic_columns(units: Sequence[dict]) -> dict:
+    """三栏口径（owner 裁决②）：拦截率（主）/ 暴露率（辅）/ 关态穿透率（对照）+ 跑批口径（附录）。
+
+    - **拦截率** = 开态被拦 / 开态到达机制面前——机制只对「它见到的」负责（因果责任对齐）；
+    - **暴露率** = 开态到达产物 / 全部注入单元——void 的去向在此交代；
+    - **关态穿透率** = 关态到达产物 / 全部注入单元——阳性对照（污染本身能穿透管线）；
+    - **跑批口径**（附录）= 关态逃逸 / 全部注入单元——混合暴露与拦截两件事，
+      SHALL NOT 当主指标（会让机制背上不属于它的账）。
+
+    输入侧面型（A7）不进任一栏（无「拦截/逃逸」语义，读数见 `input_side_evidence`）。
+    分母为 0 时比率记 None（「0」与「没判定过」不混）。
+    """
+    population = [
+        u for u in units if FLAG_SURFACE_KIND.get(str(u["pollution_type"]), "none") != "input_side"
+    ]
+    injected = len(population)
+    ok = [u for u in population if u.get("status") == STATUS_OK]
+    on_reached = [u for u in ok if (u.get("on") or {}).get("polluted_present")]
+    off_reached = [u for u in ok if (u.get("off") or {}).get("polluted_present")]
+    caught = [u for u in on_reached if (u.get("on") or {}).get("flagged")]
+    escapes = [u for u in off_reached if not (u.get("off") or {}).get("flagged")]
+
+    def _rate(num: int, den: int) -> float | None:
+        return (num / den) if den else None
+
+    return {
+        "interception_rate": {
+            "label": "拦截率（主指标）",
+            "numerator": len(caught),
+            "denominator": len(on_reached),
+            "value": _rate(len(caught), len(on_reached)),
+            "note": "开态被拦 / 开态到达机制面前：机制只对「它见到的」负责",
+        },
+        "exposure_rate": {
+            "label": "暴露率（辅报）",
+            "numerator": len(on_reached),
+            "denominator": injected,
+            "value": _rate(len(on_reached), injected),
+            "note": "开态到达产物 / 全部注入单元：void 的去向在此交代",
+        },
+        "off_state_penetration": {
+            "label": "关态穿透率（对照）",
+            "numerator": len(off_reached),
+            "denominator": injected,
+            "value": _rate(len(off_reached), injected),
+            "note": "关态到达产物 / 全部注入单元：阳性对照——污染本身能穿透管线",
+        },
+        "batch_ratio_appendix": {
+            "label": "跑批口径（附录，非主指标）",
+            "numerator": len(escapes),
+            "denominator": injected,
+            "value": _rate(len(escapes), injected),
+            "note": "关态逃逸 / 全部注入单元：混合暴露与拦截，SHALL NOT 当主指标",
+        },
+        "population": {"units_total": len(units), "injected": injected},
+    }
+
+
 def _input_side_evidence(units: Sequence[dict]) -> dict[str, dict]:
     """按型汇总输入侧证据（`input_side` 块）：presence 检查读数，非拦截率。
 
@@ -2385,7 +2443,12 @@ def pilot_report(
             # 可测面分型（fail / traceability / input_side / none）——读分型判词前先读它
             "flag_surface": FLAG_SURFACE_KIND.get(pollution_type, "none"),
         }
-    overall_rate = escape_rate(pairs, adjudicated=adjudicated)
+    adjudicable_pairs = [
+        pair
+        for unit, pair in zip(ok, pairs, strict=True)
+        if FLAG_SURFACE_KIND.get(str(unit["pollution_type"]), "none") != "input_side"
+    ]
+    overall_rate = escape_rate(adjudicable_pairs, adjudicated=adjudicated)
     discordant = mcnemar_table(pairs) if pairs else {"b": 0.0, "c": 0.0, "discordant_ratio": 0.0}
     worklist = [
         {
@@ -2440,6 +2503,8 @@ def pilot_report(
             "adjudicated": len(adjudicated),
             "note": "未终裁单元不入分子分母：rate=None 表示尚无终裁（spec「逃逸须终裁确认」）",
         },
+        # 三栏口径（owner 裁决②）：拦截率（主）/ 暴露率（辅）/ 关态穿透率（对照）+ 附录
+        "metric_columns": traffic_columns(units),
         "by_type": by_type,
         "positive_control": positive_control,
         "negative_results_status": "ok" if positive_control["sensitivity_confirmed"] else "void",

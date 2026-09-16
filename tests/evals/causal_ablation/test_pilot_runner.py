@@ -902,6 +902,68 @@ class TestClassification:
 # ── 真跑腿（graph_runner 注入） ──
 
 
+class TestTrafficColumns:
+    """三栏口径（owner 裁决②）：拦截率（主）/ 暴露率（辅）/ 关态穿透率（对照）+ 附录。"""
+
+    def _unit(
+        self,
+        uid,
+        *,
+        on_present,
+        on_flagged,
+        off_present,
+        off_flagged,
+        status="ok",
+        pollution_type="direction_error",
+    ):
+        return {
+            "unit_id": uid,
+            "pollution_type": pollution_type,
+            "status": status,
+            "on": {"polluted_present": on_present, "flagged": on_flagged},
+            "off": {"polluted_present": off_present, "flagged": off_flagged},
+        }
+
+    def test_columns_over_mixed_units(self):
+        units = [
+            self._unit("a", on_present=True, on_flagged=True, off_present=True, off_flagged=False),
+            self._unit("b", on_present=True, on_flagged=False, off_present=True, off_flagged=False),
+            self._unit(
+                "c",
+                on_present=False,
+                on_flagged=False,
+                off_present=False,
+                off_flagged=False,
+                status="void_injection",
+            ),
+        ]
+        cols = pr.traffic_columns(units)
+        # 拦截率（主）：开态到达 2，其中被拦 1
+        assert cols["interception_rate"]["value"] == pytest.approx(0.5)
+        assert cols["interception_rate"]["denominator"] == 2
+        # 暴露率：开态到达 2 / 注入 3
+        assert cols["exposure_rate"]["value"] == pytest.approx(2 / 3)
+        # 关态穿透率（对照）：关态到达 2 / 注入 3
+        assert cols["off_state_penetration"]["value"] == pytest.approx(2 / 3)
+        # 附录：关态逃逸 2 / 注入 3
+        assert cols["batch_ratio_appendix"]["value"] == pytest.approx(2 / 3)
+
+    def test_input_side_types_excluded_from_all_columns(self):
+        units = [
+            self._unit(
+                "s",
+                on_present=True,
+                on_flagged=False,
+                off_present=True,
+                off_flagged=False,
+                pollution_type="stale_macro",
+            )
+        ]
+        cols = pr.traffic_columns(units)
+        assert cols["population"]["injected"] == 0
+        assert cols["interception_rate"]["value"] is None  # 分母 0 → None（非 0）
+
+
 class TestFrozenReplay:
     """冻结重放（round-3 三层分工的离线构造层推荐形态）：1 趟真跑 + 2 态确定性重放。"""
 
