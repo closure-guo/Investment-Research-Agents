@@ -445,6 +445,58 @@ class TestApplyMirrorNarrative:
 # ── apply_injection：fabricated_event（news_list 追加）──
 
 
+class TestApplyDictPathValue:
+    """value_error 真靶点（round-3 二阶段）：claim 实际引用且可重算的嵌套字段。"""
+
+    def test_pollutes_nested_metric_leaf(self):
+        snapshot = {**_snapshot(), "profitability_metrics": {"ROE": {"2025": 32.5}}}
+        case = InjectionCase(
+            "t-value_error-0",
+            "value_error",
+            "context",
+            "A3",
+            {
+                "op": "dict_path_value",
+                "target": "profitability_metrics",
+                "path": ["ROE", "2025"],
+                "factor": 0.5,
+                "field": "profitability_metrics.ROE.2025",
+            },
+        )
+        out, effect = apply_injection(snapshot, case)
+        assert effect.applied is True
+        assert effect.target == "profitability_metrics.ROE.2025"
+        assert out["profitability_metrics"]["ROE"]["2025"] == pytest.approx(16.25)
+        assert snapshot["profitability_metrics"]["ROE"]["2025"] == 32.5  # 不改入参
+
+    def test_missing_leaf_falls_back_with_auditable_reason(self):
+        snapshot = _snapshot()
+        case = InjectionCase(
+            "t-value_error-0",
+            "value_error",
+            "context",
+            "A3",
+            {
+                "op": "dict_path_value",
+                "target": "profitability_metrics",
+                "path": ["ROE", "2025"],
+                "factor": 0.5,
+                "field": "profitability_metrics.ROE.2025",
+                "fallback": {
+                    "op": "dataframe_cell",
+                    "target": "income_statement",
+                    "column": "营业总收入",
+                    "row": "latest",
+                    "factor": 0.5,
+                },
+            },
+        )
+        out, effect = apply_injection(snapshot, case)
+        assert effect.applied is True
+        assert "回落" in effect.reason
+        assert float(out["income_statement"]["营业总收入"].iloc[0]) == pytest.approx(5.0e8)
+
+
 class TestApplyFabricatedEvent:
     def test_claim_side_payload_is_not_a_snapshot_op(self):
         """载荷是分析师输出侧（离线腿消费）：apply_injection 不得静默写占位键。"""

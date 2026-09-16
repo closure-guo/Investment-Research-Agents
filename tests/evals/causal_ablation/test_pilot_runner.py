@@ -321,6 +321,70 @@ class TestOfflineInjection:
 # ── period_shift 双形态（P1 重校轮）──
 
 
+class TestClaimValueTargets:
+    """value_error 真跑靶点（round-3 二阶段）：产物 claim 实际引用 + 校验器可重算的字段。"""
+
+    def _reports(self):
+        return {
+            "fundamental": {
+                "claims": [
+                    {
+                        "claim_type": "computational",
+                        "source_type": "data",
+                        "field_ref": "profitability_metrics.ROE.2025",
+                        "stated_value": 32.53,
+                    },
+                    {
+                        "claim_type": "computational",
+                        "source_type": "data",
+                        "field_ref": "profitability_metrics.ROE.2025",
+                        "stated_value": 32.53,
+                    },
+                    {
+                        "claim_type": "numerical",
+                        "source_type": "data",
+                        "field_ref": "income_statement.20251231.营业总收入",
+                        "stated_value": 1.0e9,
+                    },
+                ],
+                "markdown": "",
+            }
+        }
+
+    def _snapshot(self):
+        return {**_snapshot(), "profitability_metrics": {"ROE": {"2025": 32.53, "2024": 36.02}}}
+
+    def test_picks_cited_recomputable_fields_by_citation_count(self):
+        product = _make_product(reports=self._reports(), snapshot=self._snapshot())
+        targets = pr.claim_value_targets(product)
+        assert targets[0]["field_ref"] == "profitability_metrics.ROE.2025"
+        assert targets[0]["citations"] == 2
+        assert targets[0]["root"] == "profitability_metrics"
+        assert targets[0]["path"] == ["ROE", "2025"]
+        # income_statement 不在重算注册表 → 不作为 value_error 靶点（A3 无从抓偏差）
+        assert all(t["root"] != "income_statement" for t in targets)
+
+    def test_unresolvable_cited_field_is_skipped(self):
+        reports = self._reports()
+        reports["fundamental"]["claims"].append(
+            {
+                "claim_type": "computational",
+                "source_type": "data",
+                "field_ref": "profitability_metrics.不存在.2025",
+                "stated_value": 1.0,
+            }
+        )
+        targets = pr.claim_value_targets(_make_product(reports=reports, snapshot=self._snapshot()))
+        assert all(t["field_ref"] != "profitability_metrics.不存在.2025" for t in targets)
+
+    def test_value_error_payload_uses_claim_target(self):
+        product = _make_product(reports=self._reports(), snapshot=self._snapshot())
+        cases = pr.build_pilot_cases(product, instances=2, pollution_types=["value_error"])
+        assert cases[0].payload["op"] == "dict_path_value"
+        assert cases[0].payload["field"] == "profitability_metrics.ROE.2025"
+        assert cases[0].payload["target"] == "profitability_metrics"
+
+
 class TestEffectiveInjectionTargets:
     """round-3 重校：注入必须**真产生**可检偏差——空操作/等价换算的单元不携带机制信息。
 

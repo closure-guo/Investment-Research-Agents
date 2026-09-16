@@ -260,6 +260,41 @@ def base_values_from_product(product: dict) -> dict[str, float]:
     return values
 
 
+def claim_value_targets(product: dict) -> list[dict]:
+    """产物 claim 实际引用且**校验器可重算**的字段（value_error 真跑靶点，round-3 二阶段）。
+
+    round-2 真跑实证：打利润表单元格 / 派生值 `chg_5d` 都到不了产物（分析师不逐字引用）。
+    靶点条件：① field_ref 根在 `citation._COMPUTATIONAL_RECALC`（A3 能从原始数据重算 →
+    注入的偏差可被检出）；② 该路径在快照里解析为数值（注入有目标）。按被引用次数降序
+    （分析师越常引用，注入越可能到达产物）。解析与重算口径复用校验器单一实现。
+    """
+    from finance_agent import citation as citation_mod
+
+    snapshot = product.get("snapshot") or {}
+    counts: dict[str, int] = {}
+    for _, _, claim in _flat_claims(product.get("analyst_reports") or {}):
+        field_ref = str(claim.get("field_ref") or "")
+        parts = field_ref.split(".")
+        if len(parts) < 2 or parts[0] not in citation_mod._COMPUTATIONAL_RECALC:
+            continue
+        try:
+            value = citation_mod._resolve_field_ref(field_ref, snapshot, None)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            continue
+        if not _is_number(value):
+            continue
+        counts[field_ref] = counts.get(field_ref, 0) + 1
+    return [
+        {
+            "root": ref.split(".")[0],
+            "path": ref.split(".")[1:],
+            "field_ref": ref,
+            "citations": n,
+        }
+        for ref, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
 def build_pilot_cases(
     product: dict,
     *,
@@ -273,10 +308,16 @@ def build_pilot_cases(
     if not ticker:
         raise ProductError("产物缺 ticker：用例 id 须携带标的")
     cases: list[InjectionCase] = []
+    targets = claim_value_targets(product)
     for pollution_type in pollution_types or list(POLLUTION_TYPES):
         cases.extend(
             build_injection_cases(
-                pollution_type, ticker=ticker, base_values=base, n=instances, seed=seed
+                pollution_type,
+                ticker=ticker,
+                base_values=base,
+                n=instances,
+                seed=seed,
+                targets=targets,
             )
         )
     return cases

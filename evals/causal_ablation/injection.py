@@ -19,8 +19,9 @@ v3 据此换靶点（结构不变）：`value_error` 偶数实例打 `derived_se
 
 - `dataframe_cell`     ：报表 DataFrame「最新报告期行 × 指定列」× factor
                          （value_error 回落形态）；
-- `derived_series_value`：派生值 dict 指定键 × factor（value_error 偶数实例；`fallback`
-                         给旧单元格形态，缺 derived_series 时回落）；
+- `dict_path_value`    ：任意嵌套 dict 数值叶子 × factor（value_error 真靶点，round-3
+                         二阶段：claim 实际引用且可重算的字段，如 `profitability_metrics.ROE.2025`）；
+- `derived_series_value`：派生值 dict 指定键 × factor（`fallback` 给旧单元格形态）；
 - `reverse_rows`       ：序列 DataFrame 行倒序（mirror_narrative 回落形态）；
 - `reverse_series`     ：嵌套 dict 指定路径的 list 序列倒序（mirror_narrative；`fallback`
                          给 kline 行序形态）；
@@ -155,6 +156,13 @@ class InjectionEffect:
         }
 
 
+def _pick_target(targets: Sequence[dict[str, Any]] | None, index: int) -> dict[str, Any] | None:
+    """按实例轮换挑选 claim 级靶点（同 seed 同结果：顺序由构造方定序）。"""
+    if not targets:
+        return None
+    return targets[index % len(targets)]
+
+
 def build_injection_cases(
     pollution_type: str,
     *,
@@ -162,6 +170,7 @@ def build_injection_cases(
     base_values: dict[str, Any],
     n: int = 4,
     seed: int = 0,
+    targets: Sequence[dict[str, Any]] | None = None,
 ) -> list[InjectionCase]:
     """确定性构造 n 个污染单元（同 seed 同结果；实例序号 index 亦参与构造，决定形态分派）。"""
     if pollution_type not in POLLUTION_TYPES:
@@ -170,7 +179,7 @@ def build_injection_cases(
     rng = random.Random(f"{seed}:{ticker}:{pollution_type}")  # noqa: S311 — 可复现 fixture，非加密用途
     cases: list[InjectionCase] = []
     for i in range(n):
-        payload = _payload(pollution_type, base_values, rng, index=i)
+        payload = _payload(pollution_type, base_values, rng, index=i, targets=targets)
         cases.append(
             InjectionCase(
                 case_id=f"{ticker}-{pollution_type}-{i}",
@@ -184,7 +193,12 @@ def build_injection_cases(
 
 
 def _payload(
-    pollution_type: str, base_values: dict[str, Any], rng: random.Random, *, index: int = 0
+    pollution_type: str,
+    base_values: dict[str, Any],
+    rng: random.Random,
+    *,
+    index: int = 0,
+    targets: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if pollution_type == "value_error":
         factor = 1.0 + rng.choice([-1.0, 1.0]) * rng.uniform(0.05, 0.50)
@@ -199,8 +213,19 @@ def _payload(
             "declared_original": _declared(base_values, "revenue"),
             "field": f"income_statement.{REVENUE_COLUMN}",
         }
+        picked = _pick_target(targets, index)
+        if picked is not None:
+            # round-3 二阶段真靶点：claim 实际引用 + 可重算字段（按实例轮换）
+            return {
+                "op": "dict_path_value",
+                "target": picked["root"],
+                "path": list(picked["path"]),
+                "factor": factor,
+                "field": picked["field_ref"],
+                "fallback": cell,
+            }
         if index % 2 == 1:
-            # 奇数实例保留旧单元格形态（对照组：真跑实证它到不了产物）
+            # 无 claim 靶点时保留旧单元格形态（真跑实证它到不了产物）
             return cell
         # 偶数实例：真靶点 = 技术面 context 的「常用派生值」表（`_build_technical_context`
         # 明示 analyst 直接引用、field_ref 前缀 derived_series.），且 derived_series 在
@@ -433,6 +458,28 @@ def _fallback_effect(
     )
 
 
+def _apply_dict_path_value(out: dict[str, Any], payload: dict[str, Any]) -> InjectionEffect:
+    """嵌套 dict 数值叶子 × factor（value_error 真靶点，round-3 二阶段）。
+
+    靶点 = **产物 claim 实际引用且校验器可重算**的字段（如 `profitability_metrics.ROE.2025`）：
+    round-2 打利润表格 / 派生值都到不了产物（分析师不逐字引用），而重算注册表里的字段
+    既是分析师会引用的，又让 A3 能从原始数据重算抓偏差。叶子缺失/非数值 → 回落并如实记原因。
+    """
+    root = str(payload.get("target") or "")
+    path = [str(part) for part in (payload.get("path") or [])]
+    label = ".".join([root, *path])
+    field_names = (str(payload.get("field") or label), root)
+    node: Any = out.get(root)
+    for part in path[:-1]:
+        node = node.get(part) if isinstance(node, dict) else None
+    if not path or not isinstance(node, dict) or not _is_number(node.get(path[-1])):
+        return _fallback_effect(out, payload, field_names, f"缺可用数值叶子 {label}")
+    original = float(node[path[-1]])
+    polluted = original * float(payload.get("factor") or 1.0)
+    node[path[-1]] = polluted
+    return InjectionEffect(True, target=label, polluted_values=(polluted,), field_names=field_names)
+
+
 def _apply_macro_stale(out: dict[str, Any], payload: dict[str, Any]) -> InjectionEffect:
     """宏观时效标记置滞后（stale_macro）：逐指标 as_of_date/freshness。"""
     target = str(payload.get("target") or "macro_indicators")
@@ -494,6 +541,7 @@ _OPS: dict[str, Callable[[dict[str, Any], dict[str, Any]], InjectionEffect]] = {
     "derived_series_value": _apply_derived_series_value,
     "reverse_rows": _apply_reverse_rows,
     "reverse_series": _apply_reverse_series,
+    "dict_path_value": _apply_dict_path_value,
     "macro_stale": _apply_macro_stale,
     "decision_price": _apply_decision_price,
 }
