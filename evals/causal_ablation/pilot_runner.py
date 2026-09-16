@@ -1406,6 +1406,7 @@ def run_frozen_case(
                 "（不得按「不含该值 = 拦下」记）"
             ),
             injected=(frozen.get("injection_effect") or {}),
+            leg=LEG_FROZEN,
         )
     on_state = classify_state(
         polluted_present=bool(on["polluted_present"]), flagged=bool(on["flagged"])
@@ -2031,6 +2032,7 @@ def _post_graph_void_case(
     shared_calls: int | None,
     reason: str,
     injected: dict | None = None,
+    leg: str = LEG_REAL,
 ) -> tuple[EscapePair, dict]:
     """后置流程的 void：图已跑（成本如实入账）但单元不含拦截信息。
 
@@ -2051,12 +2053,12 @@ def _post_graph_void_case(
         "mechanism": None,
         "llm_calls": 0,
     }
-    unit_id = f"{case.case_id}::{LEG_REAL}"
+    unit_id = f"{case.case_id}::{leg}"
     unit = {
         "unit_id": unit_id,
         "case_id": case.case_id,
         "ticker": product.get("ticker"),
-        "leg": LEG_REAL,
+        "leg": leg,
         "cost_class": COST_CLASS[case.pollution_type],
         "pollution_type": case.pollution_type,
         "injection_point": case.injection_point,

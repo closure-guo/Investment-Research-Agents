@@ -985,6 +985,7 @@ class TestFrozenReplay:
         )
         assert unit["status"] == pr.STATUS_VOID
         assert "暴露未实现" in unit["status_reason"]
+        assert unit["leg"] == pr.LEG_FROZEN  # void 也不得标成 real_run
 
 
 class TestDecisionReuse:
