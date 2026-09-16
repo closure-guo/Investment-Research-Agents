@@ -19,6 +19,11 @@ class CausalClaim:
     primary_metric: str
     method: str  # code | nli | judge
     effect_expectation: str
+    # 机制价值 = 暴露率 × 拦截率：拦截率由注入法测（primary_metric），暴露率由生产遥测测。
+    # 缺暴露率栏会把「拦截率表」误读成「机制价值排行榜」——P1 round-3 实证：A5 拦截率面
+    # 全 void 而暴露率 ≈0（决策层默认不产可执行价位），其期望价值趋零。
+    exposure_metric: str = "待遥测基线（生产流量）"
+    exposure_source: str = "生产遥测"
     suspended: str | None = None  # 悬置原因；None = 有对应实验
 
 
@@ -32,6 +37,8 @@ DEFAULT_REGISTRY: tuple[CausalClaim, ...] = (
         primary_metric="计算型 claim 数值错误率",
         method="code",
         effect_expectation="大：多位数心算错误率经验值 20%+",
+        exposure_metric=("计算型 claim 占比 × 未被重算覆盖比例（自然分布）"),
+        exposure_source="生产遥测：citation 重算注册表命中率 + claim 类型分布",
     ),
     CausalClaim(
         id="A2",
@@ -42,6 +49,8 @@ DEFAULT_REGISTRY: tuple[CausalClaim, ...] = (
         primary_metric="负索引/期次错位率",
         method="code",
         effect_expectation="中：incident 022 实证同族失败模式",
+        exposure_metric="序列型/期次型 claim 占比（自然分布）",
+        exposure_source="生产遥测：claim field_ref 根分布",
     ),
     CausalClaim(
         id="A3",
@@ -52,6 +61,8 @@ DEFAULT_REGISTRY: tuple[CausalClaim, ...] = (
         primary_metric="注入污染逃逸率",
         method="code",
         effect_expectation="大：自然分布真幻觉≈0，需注入法测",
+        exposure_metric=("自然分布真幻觉 ≈0（已登记）；无出处数字出现率待遥测"),
+        exposure_source="生产遥测：citation 四桶 + UNVERIFIABLE 三分类计数",
     ),
     CausalClaim(
         id="A4",
@@ -62,6 +73,8 @@ DEFAULT_REGISTRY: tuple[CausalClaim, ...] = (
         primary_metric="修复前后真 FAIL 率差",
         method="code",
         effect_expectation="中：只覆盖 <3 处的稀疏场景",
+        exposure_metric="稀疏残余 value_mismatch 发生率（<3 处场景）",
+        exposure_source="生产遥测：citation_fail_buckets.value_mismatch 分布",
     ),
     CausalClaim(
         id="A5",
@@ -75,6 +88,8 @@ DEFAULT_REGISTRY: tuple[CausalClaim, ...] = (
             "待 027-price-validate-state-keys-dropped 修复后的遥测实证"
             "（该回路曾因 state 键未声明从未生效）"
         ),
+        exposure_metric=("≈0：决策层默认不产可执行价位（3 标的 × 3 轮实测全 watch，P1 round-3）"),
+        exposure_source="生产遥测 B4：决策动作分布（buy/sell/watch）+ 价位打回率",
     ),
     CausalClaim(
         id="A6",
@@ -85,6 +100,8 @@ DEFAULT_REGISTRY: tuple[CausalClaim, ...] = (
         primary_metric="事件型 claim 不可回声率",
         method="code",
         effect_expectation="未知——当前最薄防线，实验价值最高",
+        exposure_metric="无出处文本 claim 出现率（自然分布）",
+        exposure_source="生产遥测：citation UNVERIFIABLE(text) 计数 / 文本 claim 占比",
     ),
     CausalClaim(
         id="A7",
@@ -95,6 +112,8 @@ DEFAULT_REGISTRY: tuple[CausalClaim, ...] = (
         primary_metric="stale 引用率",
         method="code",
         effect_expectation="小但确定",
+        exposure_metric="宏观数据 stale 频率（自然分布）",
+        exposure_source="生产遥测：macro_indicators.freshness 分布",
     ),
     CausalClaim(
         id="B1",

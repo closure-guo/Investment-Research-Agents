@@ -75,3 +75,13 @@
 8. **事件观察项（不构成任务）**：① FM return 真实事件取证（calibrate-fm-approval 4.3 转观察，
    出现时按口径取证）；② news-topic-search 引导生效性日常观察；③ latency 趋势告警启用
    依赖 Windows 计划任务挂载 nightly。
+
+## 决策层「全 watch」取证（P1 round-3 发现）
+
+**现象**：P1 注入 pilot 三轮实测（600519 ×2 轮 + 000001 ×1 轮）中，Trader/FM 产出的 `trader_plan` 与 `final_trade_decision` **全部为 `action='watch'`**，导致价位 sanity（A5）在真实决策分布上无可校验对象（暴露率 ≈0）。
+
+**为什么值得单独取证**：决策层极少给出可执行方案，本身是系统行为层面的待解释现象——可能与 calibrate-fm-approval 记录的 FM 44 次 return、决策层整体保守同源。
+
+**取证内容**：① 生产流量上 watch / buy / sell 的占比分布；② 成因分解——是风控否决的下游结果，还是 Trader/FM 的默认姿态（prompt 倾向 / 阈值过严 / 输入信息不足）；③ 若属默认姿态，评估是否需要在 prompt 或流程上给出可执行方案（这是个产品决策，取证先行）。
+
+**阻塞关系**：族 B（B3 数字出处率 / B5 pairwise）的 MDE 反算以决策动作分布为输入 → 本取证为 P2 前置。
