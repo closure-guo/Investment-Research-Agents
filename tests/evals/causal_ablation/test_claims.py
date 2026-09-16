@@ -25,9 +25,18 @@ class TestRegistryShape:
             assert c.claim and c.failure_mode and c.primary_metric
             assert c.method in {"code", "nli", "judge"}
 
-    def test_a5_effect_expectation_is_pending_not_proven(self):
+    def test_a5_effect_expectation_cites_measurement(self):
+        """A5 效应量必须**可溯源**：027 修复前不得声称已实证；实测后须带读数与范围（不许裸断言）。
+
+        演变：本测试原钉「含『待』字 = 未实证」（incident 027 修正期）；2026-09-17 注入法实测
+        拦截率 1.000（16/16，4 标的）→ 契约升级为「须引用具体读数与样本范围」。
+        """
         a5 = next(c for c in DEFAULT_REGISTRY if c.id == "A5")
-        assert "待" in a5.effect_expectation  # incident 027 修正：不得声称已实证
+        text = a5.effect_expectation
+        assert "待" in text or ("1.000" in text and "16/16" in text), (
+            "A5 效应量要么标注待实证，要么引用实测读数与样本范围"
+        )
+        assert "027" in text  # 引用须消歧到 027-price-validate-state-keys-dropped 语境
 
 
 class TestValidation:
