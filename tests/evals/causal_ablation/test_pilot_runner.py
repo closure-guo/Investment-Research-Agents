@@ -361,6 +361,23 @@ class TestEffectiveInjectionTargets:
         assert polluted["injection"]["mutated_fields"] == ["fundamental.claims[1].direction"]
         assert polluted["injection"]["injected_values"]["direction"] == "negative"
 
+    def test_direction_error_records_real_polluted_marker(self):
+        """报告列 `polluted_values` 必须是**真实污染值**：方向型 = 翻转后的方向词。
+
+        round-3 实测缺陷：方向型未写标记 → 回落到载荷 `set` 的申报对照值（从未被施加），
+        人工终裁按它去产物里找污染必然找不到。
+        """
+        polluted = pr.inject_offline(_make_product(), _case("direction_error"))
+        injection = polluted["injection"]
+        claim = polluted["analyst_reports"][injection["mutated_agent"]]["claims"][
+            injection["mutated_claim_index"]
+        ]
+        assert injection["polluted_values"] == [claim["direction"]]
+        assert injection["polluted_values"] != list(
+            (_case("direction_error").payload.get("set") or {}).values()
+        )
+        assert injection["injected_values"]["field_ref"] == claim["field_ref"]
+
     def test_direction_error_without_effective_target_raises(self):
         snapshot = {
             **_snapshot(),

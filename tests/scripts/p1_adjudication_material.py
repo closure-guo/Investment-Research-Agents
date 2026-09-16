@@ -62,8 +62,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     population = adjudicable_units(units)
     rows = worklist_rows(population)
     cases = case_groups(population)
-    write_worklist_csv(Path(args.worklist), rows)
-    write_cases_csv(Path(args.cases), cases)
+    try:
+        write_worklist_csv(Path(args.worklist), rows)
+        write_cases_csv(Path(args.cases), cases)
+    except PermissionError as exc:
+        # 终裁材料常被 Excel/WPS 打开着：给可执行的提示，不甩 traceback
+        print(
+            f"[拒绝写入] 文件被占用（可能正在 Excel/WPS 中打开）：{exc.filename}——关闭后重试",
+            file=sys.stderr,
+        )
+        return 3
     print(f"台账: {resume_path.as_posix()}（单元 {len(units)}）")
     print(f"单元级清单: {len(rows)} 行 → {Path(args.worklist).as_posix()}（四列证据已回填）")
     print(f"案例级清单: {len(cases)} 行 → {Path(args.cases).as_posix()}（同标的同型实例已折叠）")

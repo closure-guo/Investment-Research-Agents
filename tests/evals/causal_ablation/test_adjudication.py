@@ -166,6 +166,12 @@ class TestCaseGroups:
         assert len(worklist_rows(units)) == 2
         assert sum(g["instances"] for g in case_groups(population)) == 2
 
+    def test_case_row_carries_polluted_field(self):
+        """终裁要知道「动了哪条 claim」——污染值列不足以定位（方向型尤其）。"""
+        units = [_unit("600519-direction_error-0::offline_replay")]
+        groups = case_groups(units)
+        assert groups[0]["polluted_field"] == "growth_rates.profitability.营业收入"
+
     def test_input_side_types_excluded_from_adjudication(self):
         """输入侧面型（A7）无「拦截/逃逸」语义 → 不进清单（判读走输入侧证据块）。"""
         units = [_unit("a::offline_replay", pollution_type="stale_macro", mechanism_id="A7")]
@@ -296,6 +302,28 @@ class TestCli:
         assert code == 0
         assert len(list(csv.DictReader(worklist.read_text(encoding="utf-8-sig").splitlines()))) == 5
         assert len(list(csv.DictReader(cases.read_text(encoding="utf-8-sig").splitlines()))) == 2
+
+    def test_locked_output_reports_actionable_error(self, tmp_path, monkeypatch, capsys):
+        """材料常被 Excel/WPS 打开：被占用时给可执行提示（退出码 3），不甩 traceback。"""
+        resume = tmp_path / "resume.json"
+        resume.write_text(json.dumps({"units": []}), encoding="utf-8")
+
+        def boom(path, rows):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(cli, "write_cases_csv", boom)
+        code = cli.main(
+            [
+                "--resume",
+                str(resume),
+                "--worklist",
+                str(tmp_path / "w.csv"),
+                "--cases",
+                str(tmp_path / "c.csv"),
+            ]
+        )
+        assert code == 3
+        assert "被占用" in capsys.readouterr().err
 
     def test_missing_resume_is_refused_without_writing(self, tmp_path):
         worklist, cases = tmp_path / "worklist.csv", tmp_path / "cases.csv"

@@ -404,7 +404,14 @@ def _inject_direction_error(out: dict, case: InjectionCase, injection: dict) -> 
         mutated_claim_index=idx,
         mutated_flat_index=flat,
         mutated_fields=[f"{agent}.claims[{idx}].direction"],
-        injected_values={"direction": flipped},
+        injected_values={
+            "direction": flipped,
+            "field_ref": claim.get("field_ref"),
+            "stated_value": claim.get("stated_value"),
+        },
+        # 真实污染标记 = 翻转后的方向词。**不是**载荷 `set` 里的申报对照值——那个值从未
+        # 被施加，若写进报告，人工终裁会按错误标记去产物里找污染（实测被问到过）。
+        polluted_values=[flipped],
     )
 
 

@@ -64,6 +64,7 @@ CASES_COLUMNS: tuple[str, ...] = (
     "leg",
     "instances",
     "unit_ids",
+    "polluted_field",
     "polluted_values",
     "on_state",
     "off_state",
@@ -240,6 +241,8 @@ def case_groups(units: Sequence[dict]) -> list[dict]:
                 "leg": head.get("leg"),
                 "instances": len(group),
                 "unit_ids": unit_ids,
+                # 被污染的字段（终裁要知道「动了哪条 claim」，光看污染值不够）
+                "polluted_field": str(_polluted_claim(head).get("field_ref") or ""),
                 "polluted_values": list((head.get("injection") or {}).get("polluted_values") or []),
                 "on_state": head.get("on_state"),
                 "off_state": head.get("off_state"),
