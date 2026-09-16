@@ -73,6 +73,7 @@ CASES_COLUMNS: tuple[str, ...] = (
     "on_flag_bucket",
     "ground_truth",
     "delta",
+    "delta_note",
     "machine_reading",
     "human_verdict(真逃逸?/误报?/待查)",
 )
@@ -135,6 +136,22 @@ def _self_certified(unit: dict) -> bool:
     """
     fields = (unit.get("injection") or {}).get("mutated_fields") or []
     return any(str(f).startswith("snapshot.") for f in fields)
+
+
+def delta_note(verdict: dict) -> str:
+    """`delta` 列的读法标注。
+
+    该列按「同一单位容差比对」设计，但校验器在 FAIL 时回落到**原始候选**（不做
+    百分比/单位归一）——面值是百分数、真值是小数这类形态下，delta 是跨单位原始差
+    （实测：002415 面值 18.52 vs 真值 0.1852 → delta 18.71，按同一单位应为 0.37）。
+    故逐行标注读法：判词看桶，`delta` 不读作幅度。
+    """
+    delta = verdict.get("delta")
+    if not isinstance(delta, int | float):
+        return "无 delta（语义类检查不做数值比对）"
+    if str(verdict.get("status") or "") == "FAIL":
+        return "原始差（未归一）：只示比对不通过，不读作幅度"
+    return "同单位差（比对通过）"
 
 
 def _inert_pass(verdict: dict) -> bool:
@@ -254,6 +271,7 @@ def case_groups(units: Sequence[dict]) -> list[dict]:
                 "on_flag_bucket": str(verdict.get("bucket") or ""),
                 "ground_truth": verdict.get("ground_truth"),
                 "delta": verdict.get("delta"),
+                "delta_note": delta_note(verdict),
                 "machine_reading": machine_reading(head),
             }
         )

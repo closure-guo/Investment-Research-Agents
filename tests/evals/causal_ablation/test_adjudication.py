@@ -166,6 +166,30 @@ class TestCaseGroups:
         assert len(worklist_rows(units)) == 2
         assert sum(g["instances"] for g in case_groups(population)) == 2
 
+    def test_case_row_labels_delta_readability(self):
+        """FAIL 的 delta 是未归一原始差（面值百分数 vs 真值小数会跨单位）→ 逐行标注读法。"""
+        caught = _unit(
+            "600519-direction_error-0::offline_replay",
+            on_flagged=True,
+            on_state="caught",
+            on_verdict={
+                "status": "FAIL",
+                "bucket": "direction_mismatch",
+                "ground_truth": 0.4228,
+                "delta": 42.70,
+            },
+        )
+        semantic = _unit(
+            "600519-period_shift-0::offline_replay",
+            pollution_type="period_shift",
+            mechanism_id="A2",
+            on_flagged=True,
+            on_state="caught",
+            on_verdict={"status": "FAIL", "bucket": "semantic_period_mismatch"},
+        )
+        assert "不读作幅度" in case_groups([caught])[0]["delta_note"]
+        assert "无 delta" in case_groups([semantic])[0]["delta_note"]
+
     def test_case_row_carries_polluted_field(self):
         """终裁要知道「动了哪条 claim」——污染值列不足以定位（方向型尤其）。"""
         units = [_unit("600519-direction_error-0::offline_replay")]
