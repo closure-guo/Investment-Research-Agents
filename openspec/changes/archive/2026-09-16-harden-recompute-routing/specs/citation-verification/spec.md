@@ -38,3 +38,8 @@ percent/万/亿候选归一 + 相对容差），SHALL NOT 各自维护容差语�
 
 - **WHEN** 注册表扩展或路由变更后执行任意校验
 - **THEN** 数值容差（绝对 0.01 / 相对 0.5%）与三态裁决（PASS/FAIL/UNVERIFIABLE）语义 SHALL 与既有契约一致
+
+#### Scenario: 快照派生字段可验
+
+- **WHEN** Agent 报告含 `garp_result`、`anomalies` 等快照派生字段的 claim
+- **THEN** 校验 SHALL 经注册的重算/集合比对得出 PASS/FAIL，SHALL NOT 恒为 UNVERIFIABLE
