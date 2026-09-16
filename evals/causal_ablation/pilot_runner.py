@@ -2449,7 +2449,13 @@ def pilot_report(
         if FLAG_SURFACE_KIND.get(str(unit["pollution_type"]), "none") != "input_side"
     ]
     overall_rate = escape_rate(adjudicable_pairs, adjudicated=adjudicated)
-    discordant = mcnemar_table(pairs) if pairs else {"b": 0.0, "c": 0.0, "discordant_ratio": 0.0}
+    # 合计人口 = 可终裁人口（排除输入侧面型）：与 escape_rate / metric_columns 同口径，
+    # 否则 stale_macro 那类无拦截语义的单元会把合计不一致比稀释（本批 0.880 → 0.702）
+    discordant = (
+        mcnemar_table(adjudicable_pairs)
+        if adjudicable_pairs
+        else {"b": 0.0, "c": 0.0, "discordant_ratio": 0.0}
+    )
     worklist = [
         {
             "unit_id": u["unit_id"],
@@ -2493,7 +2499,7 @@ def pilot_report(
             "by_type": {t: v["mcnemar"] for t, v in by_type.items()},
         },
         "calibration": {
-            "overall": _calibration(pairs),
+            "overall": _calibration(adjudicable_pairs),
             "by_type": {t: v["calibration"] for t, v in by_type.items()},
             "min_pairs": MIN_PAIRS_FOR_CALIBRATION,
         },
