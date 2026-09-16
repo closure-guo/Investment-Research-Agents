@@ -96,3 +96,32 @@ delta：`revamp-ablation-v2-causal-claims`（worktree `.worktrees/ablation-v2`�
 2. `illegal_price` 可执行决策（buy/sell）筛选
 3. A6/A7 可测面定义（设计项；或按成本分型改读输入侧证据）
 4. 终裁 180 条回填 → `escape_rate` 出数（当前 `rate=None`，口径纪律）
+
+## 9. 终裁材料补齐（2026-09-16，round-2 证据审读）
+
+round-2 交付的终裁清单四列逐态证据**交付时全空**（`6f3fcc9` 只加了列头未填值）——人工
+无从判读。本轮补齐为可判材料：库侧 `evals/causal_ablation/adjudication.py` + 薄壳
+`tests/scripts/p1_adjudication_material.py`（20 条单测，`tests/evals/causal_ablation/test_adjudication.py`）。
+
+- **单元级清单**（180 行，`2026-09-16-p1-adjudication-worklist.csv`）：四列证据回填，
+  新增 `on_flag_bucket` 列（真拦 vs 伪拦截可分辨）；已填的人工裁定按 `unit_id` 继承，
+  重生成不覆盖人工终裁。
+- **案例级清单**（50 行，`2026-09-16-p1-adjudication-cases.csv`）：同标的同型的确定性实例
+  **完全相同**（注入载荷与污染 claim 一致）→ 折叠为案例：**判 50 次而非 180 次**
+  （period_shift 每标的 2 实例，其余 4 实例；实例数之和 == 清单行数，有单测守口径）。
+- **机器预读列**（证据整理，SHALL NOT 读作终裁）：23 真逃逸候选（反事实型）/ 10 无拦截面 /
+  10 自证出处 / 5 未产生有效差异 / 1 伪拦截 / 1 覆盖缺口。
+
+### 9.1 证据审读新发现的注入构造缺陷（登记为 round-3 修复项）
+
+| 缺陷 | 实证 | 影响 |
+|---|---|---|
+| `direction_error` 半数翻转是**空操作** | stated 自带符号（如 -1.21），翻成 positive 后 `eff = stated×(+1)` 与原来相同 → A3 PASS（delta≈0）；只有 stated 为正、翻成 negative 才产生真矛盾 | 20/40 单元不携带机制信息 |
+| `unit_error` 的 ×1e8 在部分标的上**恰是合法换算** | 002415 原值 141.95（亿元）×1e8 = 1.4195e10（元），与真值相对差 2.6e-5（容差内）→ PASS | 4/40 单元是无效污染（终裁应判「误报」） |
+| `fabricated_event` **自证出处** | 假新闻与假引用同源注入（`mutated_fields` 含 `snapshot.news_list`）→ 回声匹配必然 PASS | 10/10 案例不携带 A6 信息（A6 可测面须与注入改造同做） |
+| **伪拦截** | 002594 的 on 态 FAIL 桶为 `path_unresolvable`（field_ref 本就解析不出），与翻转无关 | 1 案例不得算机制功劳（`on_flag_bucket` 列即为可分辨而加） |
+
+**这些缺陷不改变 round-2 的停止规则判词**（0.374 仍落健康区间），但改变分型的可读性：
+按可归因子集重算，`direction_error` = 20/20、`unit_error` = 36/36（均贴 too_hard 边界）——
+即这两型的可检出污染**全靠 A3 单点**（同 period_shift 之于 A2），round-3 需按「双形态」思路
+补非 A3 可拦形态，而不是硬扩样本。
