@@ -167,7 +167,7 @@ claim 本就解析不出，与污染无关）；③ 关态真逃逸吗。三条�
 
 | 现象 | 原因 |
 |---|---|
-| `period_shift` 的 `ground_truth`/`delta` 为空 | A2 期次检查是**语义检查**（申报期次在数据里存在吗），不做数值比对 → 无真值/差值可报；拦截证据看 `on_flag_bucket=semantic_period_mismatch` |
+| `period_shift` / `002415-unit_error` 的 `ground_truth`/`delta` 为空 | **语义类检查**（A2 期次检查「申报期次在数据里存在吗」、内部回声检查「值与 claim 正文自相矛盾吗」）只报「不匹配」，不做数值比对 → 无真值/差值可报；拦截证据看桶名（`semantic_period_mismatch` / `internal_inconsistency`） |
 | `fabricated_event` 的 `on_verdict=UNVERIFIABLE/-` | A6 可追溯性面：该机制没有判 FAIL 的能力，"无出处的 claim 不静默放行"即算拦下（见 §10 可测面分型） |
 | `direction_error` 的 `delta` ≈ 2×`ground_truth` | 污染是方向标签翻面，有效值变号 → 原始差 = 2 倍真值（正常算术，非异常） |
 | `unit_error` 中 `002415` 的桶是 `internal_inconsistency` | 值被放大到与 claim 正文自相矛盾，先被内部一致性抓到（同属 A3 校验链，仍算真拦） |
