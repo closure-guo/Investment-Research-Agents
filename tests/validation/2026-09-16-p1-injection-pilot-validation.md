@@ -155,6 +155,24 @@ round-2 交付的终裁清单四列逐态证据**交付时全空**（`6f3fcc9` �
 （10 标的 × 4 型），机器预读**全部为「真逃逸候选（反事实型）」**——不再有空操作/无面/自证出处单元。
 两份 CSV 已按 round-3 台账重生成（`--resume reports/ablation/p1-round3/resume.json`）。
 
+### 10.1 终裁清单读法（图例）
+
+**三问**：① 污染真进产物了吗（`polluted_field` + `polluted_values` 非空、`off_state=escaped`）；
+② 开态那次拦下是真拦吗（`on_flag_bucket` ∈ {`direction_mismatch`/`value_mismatch`/
+`semantic_period_mismatch`/`internal_inconsistency`}；**`path_unresolvable` 是伪拦截**——FAIL 来自
+claim 本就解析不出，与污染无关）；③ 关态真逃逸吗。三条成立 → 填「真逃逸」。
+`instances`/`unit_ids`：同一标的同一型的实例**完全相同**，判一次、组内套用。
+
+**看起来奇怪但正常的格子**（不是漏填，是结构如此）：
+
+| 现象 | 原因 |
+|---|---|
+| `period_shift` 的 `ground_truth`/`delta` 为空 | A2 期次检查是**语义检查**（申报期次在数据里存在吗），不做数值比对 → 无真值/差值可报；拦截证据看 `on_flag_bucket=semantic_period_mismatch` |
+| `fabricated_event` 的 `on_verdict=UNVERIFIABLE/-` | A6 可追溯性面：该机制没有判 FAIL 的能力，"无出处的 claim 不静默放行"即算拦下（见 §10 可测面分型） |
+| `direction_error` 的 `delta` ≈ 2×`ground_truth` | 污染是方向标签翻面，有效值变号 → 原始差 = 2 倍真值（正常算术，非异常） |
+| `unit_error` 中 `002415` 的桶是 `internal_inconsistency` | 值被放大到与 claim 正文自相矛盾，先被内部一致性抓到（同属 A3 校验链，仍算真拦） |
+| `polluted_values` 曾是方向型的申报对照值 | round-3 实测缺陷（commit `875b6c5`）：方向型漏写真实标记 → 已修为翻转后的方向词，并加 `polluted_field` 列 |
+
 **spec 更新（已落 delta）**：新增 `### Requirement: 可测面分型与注入有效性`——四类可测面
 （`fail`/`traceability`/`input_side`/`none`）的定义与读法边界、注入有效性要求（空操作/等价换算/
 自证出处三类形态 SHALL NOT 作为实验单元）、输入侧面不冒充拦截；`openspec validate --strict` 通过。
