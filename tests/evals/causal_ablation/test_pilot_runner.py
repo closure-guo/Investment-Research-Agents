@@ -1050,6 +1050,26 @@ class TestFrozenReplay:
         assert unit["leg"] == pr.LEG_FROZEN  # void 也不得标成 real_run
 
 
+class TestPriceSurfaceMissing:
+    """价位面缺失（price_levels 不可用 → sanity 跳过）= 没测到，不得记作「逃逸」。"""
+
+    def test_skipped_price_check_yields_void(self):
+        snapshot = _snapshot()
+        snapshot.pop("trader_plan")
+
+        # 假图：产出可执行决策，但**不带** price_levels → sanity 跳过
+        def runner(*, variant, snapshot, query=""):
+            plan = {"action": "buy", "entry_price": 100.0, "stop_loss": 95.0, "target_price": 115.0}
+            return {"trader_plan": dict(plan), "final_trade_decision": dict(plan)}
+
+        product = _make_product(snapshot=snapshot)
+        case = pr.build_pilot_cases(product, instances=1, pollution_types=["illegal_price"])[0]
+        _, unit = pr.run_real_case(product, case, graph_runner=runner)
+        assert unit["status"] == pr.STATUS_VOID
+        assert "价位校验面缺失" in unit["status_reason"]
+        assert unit["on_state"] == ""  # 不是 escaped
+
+
 class TestDecisionReuse:
     """round-3 二阶段：同一标的的决策层单元复用一趟全图（round-2 实测 4 实例各跑一趟）。"""
 

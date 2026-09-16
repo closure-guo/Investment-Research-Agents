@@ -1988,6 +1988,23 @@ def _run_post_graph_decision_case(
         polluted_present=bool(payloads["off"]["polluted_present"]),
         flagged=bool(payloads["off"]["flagged"]),
     )
+    on_check = (payloads["on"].get("decision") or {}).get("price_check") or {}
+    if str(on_check.get("result")) == "pass" and "不可用" in str(on_check.get("note") or ""):
+        # 价位数 sanity 的消费面（price_levels）缺失 → 校验被跳过：该单元**没测到**
+        # （与「注入不可施加」/「暴露未实现」同级），SHALL NOT 记成「逃逸」——否则
+        # 机制背上不属于它的账（P1 illegal 批实测：4/4 ok 单元实为 sk- 跳过）
+        return _post_graph_void_case(
+            product,
+            case,
+            variant=variant,
+            shared_runs=shared_runs,
+            shared_calls=shared_calls,
+            reason=(
+                f"价位校验面缺失（price_levels 不可用 → sanity 跳过：{on_check.get('note')}）："
+                "该单元不含拦截信息，不得记作「逃逸」"
+            ),
+            injected=injected,
+        )
     pair = EscapePair(case.case_id, on_state, off_state)
     status, reason = _real_status(injected, payloads)
     unit_id = f"{case.case_id}::{LEG_REAL}"
