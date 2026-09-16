@@ -172,7 +172,14 @@ round-2 交付的终裁清单四列逐态证据**交付时全空**（`6f3fcc9` �
    `path_unresolvable` 伪拦截同类。真跑型配对的可比性前提 SHALL 是**两态都到达产物**；当前实现按
    spec letter「不含该值 = 拦下」记，会把采样噪声记成拦截。**修法**：两态未同时到达 → 判
    `void_injection`（不含拦截信息），不计入配对。
-2. **A5 在真实决策分布上无可测面**：3 标的（600519 两轮 + 000001）全产出 `watch` → 价位 sanity
+2. **重算拦截依赖 `claim_type=computational`（结构性覆盖缺口）**：冻结重放首批（600519-value_error-0）
+   里，分析师把 `cashflow_metrics.FCF.2025` 标成 `claim_type="numerical"` → A3 走 `_verify_numerical`，
+   真值**从被污染的 state 解析**（`ground_truth == 污染值`）→ PASS，污染结构性不可检；只有标成
+   `computational` 才走 `_COMPUTATIONAL_RECALC` 重算路径（从原始报表重算 → 能抓偏差）。
+   即：**能不能拦住 value_error，取决于分析师给 claim 贴的标签**（LLM 决定的路径选择）。
+   处置候选：① 校验器对「重算注册表根」的数值型 claim 也强制重算；② prompt 要求指标字典引用标
+   `computational`。二者都是产品侧改动，登记待决策。
+3. **A5 在真实决策分布上无可测面**：3 标的（600519 两轮 + 000001）全产出 `watch` → 价位 sanity
    无校验对象。这不是注入缺陷而是**暴露度事实**（默认 query 下决策层极少给出可执行价位）。
    A5 的读法要么改按 B4 遥测（价位合法性打回率/修正触发率）改读，要么接受"暴露度≈0"作为结论；
    登记为待决策项。
