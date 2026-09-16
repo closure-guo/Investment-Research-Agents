@@ -314,6 +314,11 @@ def _recompute_snapshot(state: dict, key: str) -> object:
     return value
 
 
+def _recomputable_root(claim: Claim) -> bool:
+    """claim 的 field_ref 根是否在重算注册表内（路由判据；两级判定与 `_verify_computational` 同源）。"""
+    return claim.field_ref.split(".")[0] in _COMPUTATIONAL_RECALC
+
+
 def _verify_computational(claim: Claim, state: dict) -> CitationResult:
     """计算型 claim：从原始数据重算指标，用相对容差 0.5% 比对。"""
     parts = claim.field_ref.split(".")
@@ -327,7 +332,8 @@ def _verify_computational(claim: Claim, state: dict) -> CitationResult:
     try:
         recalculated = recalc_fn(state)
     except (KeyError, TypeError):
-        return CitationResult(status="UNVERIFIABLE", claim=claim)
+        # 重算输入不可得（state 缺原始报表等）→ 覆盖缺口（调用方据此决定是否降级直读）
+        return CitationResult(status="UNVERIFIABLE", claim=claim, coverage_gap=True)
 
     # 从重算结果中按 sub_path 取值（dict 键 + list 序号，与 _resolve_field_ref 语义一致）
     current: object = recalculated
@@ -392,39 +398,8 @@ def _verify_computational(claim: Claim, state: dict) -> CitationResult:
             delta=None,
             bucket="path_unresolvable",
         )
-    # ehr-style-claim-direction：有符号量根键（derived_series）的 direction 申报
-    # 与真值符号对齐后比对，符号冲突 FAIL + direction_mismatch——与数值型共用
-    # _align_signed_effective 单一实现（恒正水平量上的申报仍按字面误读降级）。
-    eff, direction_fail, direction_misapplied = _align_signed_effective(claim, stated, ground_truth)
-    if direction_fail is not None:
-        return direction_fail
-    delta = abs(ground_truth - eff)
-
-    # fix(percent-unit)：同 _verify_numerical——重算指标多为小数比率
-    # （dupont 费率 0.118 = 11.8%），LLM 以百分比申报，归一 100 倍口径
-    # 更贴近时采用（2026-09-08 trace 04b872ae 实测误报）。
-    OTHER_SCALE = 100.0
-    if ground_truth != 0 and eff != 0:
-        normalized = min(
-            abs(ground_truth - eff / OTHER_SCALE),
-            abs(ground_truth / OTHER_SCALE - eff),
-        )
-        if normalized < delta:
-            delta = normalized
-
-    # 相对容差 0.5%（FinGround 标准）
-    passed = delta < ABS_TOL if ground_truth == 0 else delta / abs(ground_truth) < REL_TOL
-
-    return CitationResult(
-        status="PASS" if passed else "FAIL",
-        claim=claim,
-        ground_truth=ground_truth,
-        delta=delta,
-        bucket=None if passed else "value_mismatch",
-        # 与数值路径（_verify_numerical）同口径：非 signed 根键上的
-        # negative/positive 申报记覆盖缺口（spec「符号校验限定有符号量」）
-        coverage_gap=claim.direction is None or direction_misapplied,
-    )
+    # 数值分支统一走共用比对（含方向对齐/候选归一/相对容差——口径不得复制）
+    return _compare_numeric_claim(claim, stated, ground_truth)
 
 
 _PUNCT_CHARS = (
@@ -567,7 +542,17 @@ def _verify_numerical(claim: Claim, state: dict) -> CitationResult:
     # 真值符号对齐（「下滑 10.05%」↔ gt=-10.05 用 eff=-10.05 比对），符号冲突
     # 直接 FAIL + direction_mismatch 桶；符号一致后走既有容差（值级偏差仍归
     # value_mismatch）。flat/None 无数值方向语义 → 原值比对。
-    eff, direction_fail, direction_misapplied = _align_signed_effective(claim, sv_float, gt_float)
+    return _compare_numeric_claim(claim, sv_float, gt_float)
+
+
+def _compare_numeric_claim(claim: Claim, stated: float, gt_float: float) -> CitationResult:
+    """数值型/计算型的**共用**比对：方向对齐 → 候选归一（percent/万/亿）→ 相对容差。
+
+    `harden-recompute-routing`：计算型此前自带一套简化比对（只有 ×100 归一），
+    与数值型不一致 → 同一 claim 换个标签就换一套容差语义。两条路径统一到此实现
+    （口径不得复制），数值型与计算型只在**真值来源**上不同（直读 vs 重算）。
+    """
+    eff, direction_fail, direction_misapplied = _align_signed_effective(claim, stated, gt_float)
     if direction_fail is not None:
         return direction_fail
     # 候选统一按「各自参照系」判相对容差（阶段 1，incident 026）：
@@ -1056,7 +1041,21 @@ def verify_claims(claims: list[Claim], state: dict) -> list[CitationResult]:
         elif claim.source_type == "event":
             results.append(_verify_event(claim, state))
         elif claim.claim_type == "numerical":
-            results.append(_verify_data_claim(claim, state, _verify_numerical))
+            # harden-recompute-routing：校验深度不得由被校验对象的自我声明决定——
+            # field_ref 命中重算注册表根时**无视 claim_type** 一律走重算路径
+            # （否则 LLM 把自算值标成 numerical 即可跳过重算，自算错误逃逸；
+            #  P1 冻结批实证：5/5 载体 claim 标 numerical → 从被污染 state 取真值 → 恒 PASS）。
+            if _recomputable_root(claim):
+                verdict = _verify_data_claim(claim, state, _verify_computational)
+                if verdict.status == "UNVERIFIABLE" and verdict.coverage_gap:
+                    # 重算输入不可得 → 退回直读比对，但**保留覆盖缺口标记**（降级可见，
+                    # 不静默；state 齐备时重算恒优先——生产 state 恒含原始报表）
+                    verdict = _verify_data_claim(claim, state, _verify_numerical).model_copy(
+                        update={"coverage_gap": True}
+                    )
+            else:
+                verdict = _verify_data_claim(claim, state, _verify_numerical)
+            results.append(verdict)
         elif claim.claim_type == "computational":
             results.append(_verify_data_claim(claim, state, _verify_computational))
         elif claim.claim_type == "comparative":

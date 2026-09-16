@@ -26,6 +26,30 @@ def _num(ref: str, stated) -> Claim:
     )
 
 
+class TestRecomputeRouting:
+    """harden-recompute-routing：校验深度不得由 claim 的自我声明决定。
+
+    冻结批实证（P1 round-3）：LLM 把指标字典引用标成 `numerical` → 校验器直读（被污染的）
+    state → 真值 == 申报值 → 恒 PASS，重算路径永不触发。修复：field_ref 命中重算注册表根
+    的 claim 一律走重算（真值来自原始数据而非可被污染的派生 dict）。
+    """
+
+    def test_numerical_label_on_recomputable_root_is_still_recomputed(self):
+        import pandas as pd
+
+        state = {
+            "kline": pd.DataFrame({"日期": ["2026-08-01", "2026-08-04"], "收盘": [99.0, 100.0]}),
+            "derived_series": {"chg_5d": 999.0},  # 与下面 claim 一致的「污染后」派生值
+        }
+        verdict = verify_claims([_num("derived_series.chg_5d", 999.0)], state)[0]
+        assert verdict.status == "FAIL"  # 重算（来自 kline）≠ 999.0 → 抓出污染
+
+    def test_unregistered_root_keeps_direct_read(self):
+        state = {"income_statement": {"20251231": {"营业总收入": 1.0e9}}}
+        verdict = verify_claims([_num("income_statement.20251231.营业总收入", 1.0e9)], state)[0]
+        assert verdict.status == "PASS"  # 非注册表根 → 直读比对（原行为不变）
+
+
 class TestNegativeIndex:
     """修 A：负索引 = 最新一期，与序列长度及裁剪窗口解耦。"""
 
