@@ -902,6 +902,91 @@ class TestClassification:
 # ── 真跑腿（graph_runner 注入） ──
 
 
+class TestFrozenReplay:
+    """冻结重放（round-3 三层分工的离线构造层推荐形态）：1 趟真跑 + 2 态确定性重放。"""
+
+    def _product(self):
+        return _make_product(snapshot={**_snapshot(), "derived_series": {"chg_5d": -0.0279}})
+
+    def _case(self):
+        return InjectionCase(
+            "600519-value_error-0",
+            "value_error",
+            "context",
+            "A3",
+            {
+                "op": "dict_path_value",
+                "target": "derived_series",
+                "path": ["chg_5d"],
+                "factor": 1.5,
+                "field": "derived_series.chg_5d",
+            },
+        )
+
+    def _runner_with(self, stated: float):
+        def runner(*, variant, snapshot, query=""):
+            return {
+                "analyst_reports": {
+                    "technical": {
+                        "claims": [
+                            {
+                                "claim_type": "computational",
+                                "source_type": "data",
+                                "field_ref": "derived_series.chg_5d",
+                                "stated_value": stated,
+                                "interpretation": "5日涨跌幅",
+                            }
+                        ],
+                        "markdown": "",
+                    }
+                }
+            }
+
+        return runner
+
+    def test_frozen_run_yields_deterministic_pair(self):
+        polluted = -0.0279 * 1.5
+        pair, unit = pr.run_frozen_case(
+            self._product(), self._case(), graph_runner=self._runner_with(polluted)
+        )
+        assert unit["leg"] == pr.LEG_FROZEN
+        assert unit["status"] == pr.STATUS_OK
+        assert (pair.on_state, pair.off_state) == ("caught", "escaped")
+        assert unit["graph_runs"] == 1 and unit["on"]["llm_calls"] == 0
+
+    def test_model_reports_are_normalized(self):
+        """真实运行的 analyst_reports 是 pydantic 模型 → 冻结前后必须归一为 dict。"""
+
+        class _Report:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def model_dump(self):
+                return self._payload
+
+        def runner(*, variant, snapshot, query=""):
+            claim = {
+                "claim_type": "computational",
+                "source_type": "data",
+                "field_ref": "derived_series.chg_5d",
+                "stated_value": -0.0279 * 1.5,
+                "interpretation": "5日涨跌幅",
+            }
+            return {"analyst_reports": {"technical": _Report({"claims": [claim], "markdown": ""})}}
+
+        _, unit = pr.run_frozen_case(self._product(), self._case(), graph_runner=runner)
+        assert unit["status"] == pr.STATUS_OK
+        assert unit["frozen"]["frozen_claims"] == 1
+
+    def test_pollution_not_reaching_frozen_claims_is_void(self):
+        """污染未到达冻结 claim = 暴露未实现（与「拦下」区分——真跑腿此前被误记的那类）。"""
+        pair, unit = pr.run_frozen_case(
+            self._product(), self._case(), graph_runner=self._runner_with(-0.0279)
+        )
+        assert unit["status"] == pr.STATUS_VOID
+        assert "暴露未实现" in unit["status_reason"]
+
+
 class TestDecisionReuse:
     """round-3 二阶段：同一标的的决策层单元复用一趟全图（round-2 实测 4 实例各跑一趟）。"""
 

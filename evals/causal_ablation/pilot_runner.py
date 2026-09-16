@@ -81,6 +81,7 @@ from evals.causal_ablation.units import UnitJudgment
 
 LEG_OFFLINE = "offline_replay"
 LEG_REAL = "real_run"
+LEG_FROZEN = "frozen_replay"
 STATUS_OK = "ok"
 STATUS_VOID = "void_injection"
 STATUS_ERROR = "error"
@@ -1264,6 +1265,185 @@ def _input_side_evidence_block(pollution_type: str, *, on: dict, off: dict) -> d
 def _evidence_paths(product: dict, unit_id: str) -> list[str]:
     paths = [str(v) for v in (product.get("paths") or {}).values() if v]
     return paths + [f"unit:{unit_id}"]
+
+
+# ── 冻结重放腿（round-3 三层分工：离线构造层的推荐形态）──
+
+
+def freeze_analyst_output(
+    product: dict, case: InjectionCase, *, frozen_dir: Path | None = None
+) -> dict:
+    """把「污染 context 下真跑一趟分析师」的产出落盘冻结（供重放与审计）。
+
+    返回冻结产物（与产物同构：snapshot=污染快照 + analyst_reports=该趟产出）；
+    `frozen_dir` 给定时同时落盘（`ticker.case_id.json/.pkl`），供人工核验与重放复现。
+    """
+    polluted, effect = apply_injection(product.get("snapshot") or {}, case)
+    frozen = {
+        "ticker": product.get("ticker"),
+        "snapshot_digest": product.get("snapshot_digest"),
+        "snapshot": polluted,
+        "analyst_reports": {},
+        "citation": {},
+        "base_values": dict(product.get("base_values") or {}),
+        "paths": dict(product.get("paths") or {}),
+        "frozen_from": case.case_id,
+    }
+    if frozen_dir is not None:
+        frozen["paths"] = save_product(
+            Path(frozen_dir) / f"{product.get('ticker')}.{case.case_id}", frozen
+        )
+    return frozen | {"injection_effect": effect.as_dict()}
+
+
+def _normalize_reports(reports: Any) -> dict[str, dict]:
+    """分析师产出归一为 dict（真实运行返回 pydantic 模型；离线载荷是 dict）。"""
+    out: dict[str, dict] = {}
+    for agent, report in (reports or {}).items():
+        if hasattr(report, "model_dump"):
+            out[str(agent)] = dict(report.model_dump())
+        elif isinstance(report, dict):
+            out[str(agent)] = report
+    return out
+
+
+def replay_frozen(
+    frozen: dict,
+    case: InjectionCase,
+    *,
+    mechanism_on: bool,
+    a4_on: bool = False,
+    repair_fn: Callable[..., Any] | str | None = None,
+) -> dict:
+    """冻结重放单态：对冻结 claim 重放校验链（机制开/关），**零 LLM**。
+
+    `flagged` 只认**携带污染标记的 claim** 上的 FAIL/修复（与离线腿同口径：误报不进分母）。
+    """
+    reports = frozen.get("analyst_reports") or {}
+    claims = list(_flatten_claim_dicts(reports))
+    markdown = "\n\n".join(str(reports[a].get("markdown") or "") for a in sorted(reports))
+    markers = list((frozen.get("injection_effect") or {}).get("polluted_values") or [])
+    with mechanism_toggle(case.mechanism_id, on=mechanism_on) as toggle:
+        state = toggle.transform_state(frozen.get("snapshot") or {})
+        chain = run_citation_chain(
+            claims, state, markdown=markdown, a4_on=a4_on, repair_fn=repair_fn
+        )
+    fail_indices = list(chain["fail_indices"])
+    repaired_indices = list(chain["repaired_indices"])
+    carriers = [
+        i for i, claim in enumerate(chain["claims"]) if _claim_carries_marker(claim, markers)
+    ]
+    flagged = any(i in fail_indices or i in repaired_indices for i in carriers)
+    return {
+        "claims": chain["claims"],
+        "verdicts": chain["verdicts"],
+        "flagged": flagged,
+        "carrier_indices": carriers,
+        "fail_buckets": chain["fail_buckets"],
+        "unverifiable": chain["unverifiable"],
+        "polluted_present": bool(carriers),
+        "mechanism": toggle.payload(),
+        "llm_calls": 0,
+    }
+
+
+def _claim_carries_marker(claim: dict, markers: Sequence[Any]) -> bool:
+    """claim 是否携带污染标记（值级命中：stated_value 与任一标记 close）。"""
+    stated = claim.get("stated_value")
+    if not _is_number(stated):
+        return any(str(m) and str(m) in str(claim.get("field_ref") or "") for m in markers)
+    return any(_is_number(m) and _close(float(stated), float(m)) for m in markers)
+
+
+def run_frozen_case(
+    product: dict,
+    case: InjectionCase,
+    *,
+    graph_runner: Callable[..., dict] | None = None,
+    llm_meter: Callable[[], int] | None = None,
+    frozen_dir: Path | None = None,
+    query: str = DEFAULT_QUERY,
+) -> tuple[EscapePair, dict]:
+    """冻结重放单元：**1 趟真跑（分析师）+ 2 态离线重放**。
+
+    真跑层此前的主要缺陷是配对噪声（两态 = 两次独立 LLM 采样，写不写被污染字段随机）。
+    冻结重放把分析师输出冻结为单一事实 → 两态只差机制这一个变量（确定性配对）。
+    污染未到达冻结产物（无 claim 携带标记）→ void（**暴露未实现**，不含拦截信息——
+    与「拦截」区分，这正是真跑腿此前被误记的那类）。
+    """
+    if case.pollution_type not in REAL_TYPES:
+        raise InjectionError(f"{case.pollution_type} 非真跑型，冻结重放只承接 {REAL_TYPES}")
+    frozen = freeze_analyst_output(product, case, frozen_dir=frozen_dir)
+    effect_applied = bool((frozen.get("injection_effect") or {}).get("applied"))
+    if not effect_applied:
+        return _prevoid_real_case(
+            product,
+            case,
+            injected=(frozen.get("injection_effect") or {}),
+            variant="analysts",
+            reason=f"注入不可施加（{(frozen.get('injection_effect') or {}).get('reason')}）",
+        )
+    before = _meter(llm_meter)
+    state = dict(
+        (graph_runner or default_graph_runner)(
+            variant="analysts", snapshot=frozen["snapshot"], query=query
+        )
+    )
+    after = _meter(llm_meter)
+    calls = None if before is None or after is None else after - before
+    frozen["analyst_reports"] = _normalize_reports(state.get("analyst_reports"))
+    on = replay_frozen(frozen, case, mechanism_on=True)
+    off = replay_frozen(frozen, case, mechanism_on=False)
+    if not on["polluted_present"]:
+        return _post_graph_void_case(
+            product,
+            case,
+            variant="analysts",
+            shared_runs=1,
+            shared_calls=calls,
+            reason=(
+                "污染未到达冻结产物（无 claim 携带污染标记）：暴露未实现，不含拦截信息"
+                "（不得按「不含该值 = 拦下」记）"
+            ),
+            injected=(frozen.get("injection_effect") or {}),
+        )
+    on_state = classify_state(
+        polluted_present=bool(on["polluted_present"]), flagged=bool(on["flagged"])
+    )
+    off_state = classify_state(
+        polluted_present=bool(off["polluted_present"]), flagged=bool(off["flagged"])
+    )
+    unit_id = f"{case.case_id}::{LEG_FROZEN}"
+    unit = {
+        "unit_id": unit_id,
+        "case_id": case.case_id,
+        "ticker": product.get("ticker"),
+        "leg": LEG_FROZEN,
+        "cost_class": COST_CLASS[case.pollution_type],
+        "pollution_type": case.pollution_type,
+        "injection_point": case.injection_point,
+        "mechanism_id": case.mechanism_id,
+        "variant": "analysts",
+        "on_state": on_state,
+        "off_state": off_state,
+        "status": STATUS_OK,
+        "status_reason": "",
+        "llm_calls": calls,
+        "graph_runs": 1,
+        "evidence_paths": _evidence_paths(product, unit_id),
+        "injection": frozen.get("injection_effect") or {},
+        "frozen": {
+            "frozen_claims": len(_flatten_claim_dicts(frozen["analyst_reports"])),
+            "carrier_indices": on["carrier_indices"],
+            "note": (
+                "污染 context 下真跑一趟分析师并冻结其 claim 列表；两态重放只差机制开关"
+                "（确定性配对，无采样噪声）"
+            ),
+        },
+        "on": on,
+        "off": off,
+    }
+    return EscapePair(case.case_id, on_state, off_state), unit
 
 
 # ── 真跑腿 ──

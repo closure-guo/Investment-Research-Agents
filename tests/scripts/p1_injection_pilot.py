@@ -76,7 +76,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--instances", type=int, default=INSTANCES, help="每类污染的实例数")
     parser.add_argument(
-        "--legs", choices=("offline", "real", "both"), default=LEGS, help="跑哪些腿（默认 both）"
+        "--legs",
+        choices=("offline", "real", "frozen", "both"),
+        default=LEGS,
+        help="跑哪些腿（默认 both；frozen = 真跑型走冻结重放：1 趟真跑 + 2 态确定性重放）",
     )
     parser.add_argument(
         "--real-run-limit",
@@ -306,7 +309,9 @@ def run_pilot(
         {"offline": True, "real": False}
         if legs == "offline"
         else (
-            {"offline": False, "real": True} if legs == "real" else {"offline": True, "real": True}
+            {"offline": False, "real": True}
+            if legs in ("real", "frozen")
+            else {"offline": True, "real": True}
         )
     )
     planned = {"offline_replay": 0, "real_run": 0}
@@ -346,6 +351,15 @@ def run_pilot(
             try:
                 if cost_class == pr.LEG_OFFLINE:
                     _, unit = pr.run_offline_case(product, case)
+                elif legs == "frozen":
+                    _, unit = pr.run_frozen_case(
+                        product,
+                        case,
+                        graph_runner=graph_runner,
+                        llm_meter=llm_meter,
+                        frozen_dir=Path(out_dir) / "frozen",
+                    )
+                    real_cases += 1
                 else:
                     _, unit = pr.run_real_case(
                         product,
