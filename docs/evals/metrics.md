@@ -62,7 +62,7 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 
 对外材料（README / 简历素材等）引用消融数字时须引用 `status: active` 的报告；「未获统计支持」不得转写为「据此可裁剪」（统计不支持 ≠ 无价值，裁剪需独立证据）。被推翻的报告须就地标注（原文保留 + 撤回说明 + 指向权威版本），不得只改数字。
 
-### 1.7 因果消融 v2 口径（delta `revamp-ablation-v2-causal-claims`，2026-09-16 切点，未跑批）
+### 1.7 因果消融 v2 口径（delta `revamp-ablation-v2-causal-claims`，2026-09-16 切点；P1 正式批已跑）
 
 准入判据 = **因果下游检验**：指标的失败模式须因果地依赖被消融对象，才可作层增量主指标（切题度这类通用正确性指标不依赖任何层 → 出局；v1 的 judge 四维不再作层增量裁决依据，判定本身保留为辅助观测）。
 
@@ -70,10 +70,10 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 |---|---|
 | ① 因果下游指标与判定方式 | 进矩阵对象须先在因果主张登记表登记（族 A 反幻觉 A1–A7 / 族 B 编排 B1–B6：因果主张 + 失败模式 + 主指标 + 判定方式 + 效应量预期；`evals/causal_ablation/claims.py`），且持有效预登记（主指标 / MDE / 阈值换算依据 / 样本量依据 / 停止规则 / rubric 版本锁定，`preregister.py`）。判定方式 `code｜nli｜judge`，逐单元落库 `unit_id/ticker/run/variant/unit_type/judgment/method/confidence`（`units.py`）。族 A 主指标=逃逸率族（A3 注入污染逃逸率为代表）+ 计算型 claim 数值错误率 / 负索引·期次错位率 / 修复前后真 FAIL 率差 / 事件型 claim 不可回声率 / stale 引用率等；族 B 主指标=B1 风险点增量率（nli）/ B2 交锋修正率（judge）/ B3 风控数字出处率（code）/ B4 sanity 打回率（code）/ B5 pairwise 盲评胜率（judge）/ B6 事后结算胜率（code，不作层间归因，`family_b.py`）。推断单元=**标的**（簇 bootstrap B=10,000 + ICC 折算有效 n 披露；`aggregate.py`） |
 | ② 校准门控 | 凡 `method ∈ {nli, judge}` 的指标（B1/B2/B5 及族 A 的 nli/judge 腿）rubric 与人工标注一致率 **≥0.80** 才允许进消融结论；每批抽 ≥20% 单元人工复核，一致率 <0.80 该批判定作废并重校准；`code` 判定不适用（`calibration_gate.py`） |
-| ③ 逃逸率 | 逃逸 = 污染值原样出现在终态产物**且未被告警**、且经人工终裁确认为真逃逸。**分母 = 已终裁单元数**；未终裁单列 `pending`（不进分子也不进分母）；无任何终裁时 `rate = None`，**不得报 0%**（「0 逃逸」≠「没判定过」）。校验器误报走四桶拆报（blocked / analyst_true_fail / surgical_repaired / verifier_normalized，桶名以 `escape.py::VERIFIER_BUCKETS` 为准；§1.3 为 citation 四桶同族拆报），**不进逃逸率分母**；四桶拆报进消融聚合，`citation_pass` 标量退出层增量比较路径（只留产出、不作层增量裁决，见 §2 切点段） |
+| ③ 指标三栏（2026-09-16 owner 裁决②，`traffic_columns`） | **拦截率（主）** = 开态被拦 / 开态到达机制面前（机制只对「它见到的」负责）；**暴露率（辅）** = 开态到达产物 / 全部注入单元（void 的去向在此交代）；**关态穿透率（对照）** = 关态到达 / 注入（阳性对照）；**跑批口径降附录**（关态逃逸 / 注入，混合暴露与拦截，SHALL NOT 当主指标）。输入侧面型（A7）不进任一栏。旧口径（逃逸 = 污染值原样出现在终态产物**且未被告警**、且经人工终裁确认为真逃逸；**分母 = 已终裁单元数**；未终裁单列 `pending`；无终裁时 `rate = None`，**不得报 0%**）保留为「逃逸终裁」纪律，用于附录栏与四桶拆报。校验器误报走四桶拆报（blocked / analyst_true_fail / surgical_repaired / verifier_normalized，桶名以 `escape.py::VERIFIER_BUCKETS` 为准；§1.3 为 citation 四桶同族拆报），**不进逃逸率分母**；四桶拆报进消融聚合，`citation_pass` 标量退出层增量比较路径（只留产出、不作层增量裁决，见 §2 切点段） |
 | ④ 结论句式与注册表 | 合法结论仅两句式：**真阴性**（CI 整体低于成本阈值 →「在本实验分辨率（MDE=X）下…建议降级/裁剪」）｜**分辨率不足**（须写出 MDE 与 CI 并给扩样方向）。**裸「未获统计支持」非法**——结论句必带 MDE（`conclusion.py`）；阳性对照测不出显著差异 → 本轮全部阴性作废（灵敏度未证实不得进注册表）。报告头部须带生命周期字段（`status`：`active` 或 `superseded-by: <路径>`，字面格式与校验见 `evals/causal_ablation/report_status.py`，取代者指针须真实存在）；索引 [`README.md`](README.md) 渲染状态与「未标注生命周期」清单，引用纪律见 §1.6 |
 
-统计口径（`diff_mean` 点估计 / 标的配对 / 维度适用性 / 快照 digest / 报告状态头契约）见 §1.5，本小节不重复；judge 材料口径切点（`debate_history` 锚点骨架行）见 §2，跨该切点的 debate_quality 不可直接比较。
+**P1 正式批（2026-09-16，离线四型 20 标的 × 4 实例，零 LLM）**：拦截率 316/316 = **1.000**；暴露率 316/320 = 0.988（4 单元无注入靶点）；关态穿透率 0.988；跑批口径（附录）278/320 = 0.869；分型不一致比合计 **0.702**（b=278, c=0，阳性对照 b=156 c=0 p=2.2e-47 显著）；单点依赖三型（direction/unit/fabricated 各 1.000）、period_shift 0.525、stale_macro 走输入侧面（80/80 有告警）。终裁：278 单元待判（其中 140 已由 round-3 继承），案例级 79 条。材料生成成本：10 新标的 ≈200 次调用；离线腿 0 次。统计口径（`diff_mean` 点估计 / 标的配对 / 维度适用性 / 快照 digest / 报告状态头契约）见 §1.5，本小节不重复；judge 材料口径切点（`debate_history` 锚点骨架行）见 §2，跨该切点的 debate_quality 不可直接比较。
 
 ---
 
