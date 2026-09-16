@@ -223,3 +223,39 @@ claim 本就解析不出，与污染无关）；③ 关态真逃逸吗。三条�
 **spec 更新（已落 delta）**：新增 `### Requirement: 可测面分型与注入有效性`——四类可测面
 （`fail`/`traceability`/`input_side`/`none`）的定义与读法边界、注入有效性要求（空操作/等价换算/
 自证出处三类形态 SHALL NOT 作为实验单元）、输入侧面不冒充拦截；`openspec validate --strict` 通过。
+
+## 13. owner 裁决落地与修法 (a) 摸底（2026-09-16）
+
+**裁决①（value_error 本轮结论 + 立项修 a）**：本轮结论 = **拦截率 ≈0，根因 claim_type 标签路由**
+（5/5 载体 claim 标 `numerical` → 校验器从被污染 state 取真值 → 恒 PASS）；「待修复后重测」单独立项。
+修法选 (a)（校验器对注册表根的 claim 无视标签一律重算），不修 (b)（prompt 强制标签）——原则：
+**校验深度不得由被校验对象的自我声明决定**。
+**威胁模型诚实边界**：context 指标字典注入在生产对应「state 本身被污染」，其正经防线在数据层
+（三表勾稽/多源回退），citation 链路拦不住它属分工使然；本缺口真正的生产暴露面是
+**LLM 自算值标成 numerical → 跳过重算 → 自算错误逃逸**。严重度按此定级。
+
+**裁决②（主指标口径）**：主指标 = **开态条件逃逸率**（分母 = 开态下污染到达机制面前的单元）；
+辅报 暴露率（到达产物 ÷ 全部注入单元）；对照 关态穿透率（阳性对照角色）；跑批口径降为附录
+透明度指标。`escape.py` 与报告的三栏结构按此改造。
+
+**裁决③（归档 + incident）**：本批结论归 v2.2；claim_type 路由缺口登记为 incident
+（消融设施发现的第一个机制存在性缺陷）。
+
+### 修法 (a) 摸底三问
+
+1. **改动面**：路由点在 `citation.verify_claims` 的 claim_type 分派（numerical → `_verify_numerical` /
+   computational → `_verify_computational`）。**但不能直接把 numerical 送进 `_verify_computational`**：
+   后者只做「重算 + 0.5% 相对容差」，**没有 `_verify_numerical` 的单位/百分比候选归一**（面值亿元/百分数
+   vs 重算原始值）→ 会造出一批**跨单位误报**。正确形状：**重算得真值，再走既有比较机制**（把
+   `_verify_numerical` 的比较段抽为共用实现，口径不复制）。
+2. **流量与 fixture 覆盖**：注册表 10 个根；10 标的中**挂在注册表根但标签非 computational 的 claim = 324 条**
+   （technical_indicators 116 / profitability_metrics 53 / derived_series 49 / solvency_metrics 34 /
+   cashflow_metrics 29）——修复后这批**全部新走重算**，而现有 fixture 覆盖的是重算函数本身（spec §72
+   要求每根键独立 fixture），**未覆盖「重算真值 × 面值口径 stated」的组合** → 需先补这类 fixture 并做
+   误报基线测量，再开闸。
+3. **spec 影响**：`openspec/specs/citation-verification/spec.md` §72「计算型声明重算注册表全覆盖」是
+   按 **claim_type=computational** 写的；修 (a) 改变路由规则 → 该 Requirement 需 MODIFIED，**走 delta**
+   （主规范库不得手改）。
+
+**修复后的验证（复利兑现）**：冻结 claim 已落盘（`reports/ablation/p1-frozen/frozen/`），修完 (a)
+**零 LLM** 重放即出「修复前后拦截率」对比，同时充当该修复的回归测试。
