@@ -90,6 +90,9 @@ OFFLINE_TYPES: tuple[str, ...] = tuple(t for t in POLLUTION_TYPES if COST_CLASS[
 REAL_TYPES: tuple[str, ...] = tuple(t for t in POLLUTION_TYPES if COST_CLASS[t] == LEG_REAL)
 
 DEFAULT_PREREG_DIR = Path("evals/ablation/preregister")
+# 门禁只认本实验的预登记文档（文件名子串）：同目录的后续实验（P2 族 B、A4 补测）
+# 各有自己的预登记，不得顶替 P1 的门禁口径（2026-09-17 实测踩到）
+PREREG_P1_NAME = "p1-injection-pilot"
 DEFAULT_QUERY = "综合评估财务与投资价值"
 
 # 每型校准判词下限：样本不足只报 insufficient（不得用 n 太小的数字下结论）
@@ -959,11 +962,16 @@ def run_citation_chain(
     markdown: str = "",
     a4_on: bool = False,
     repair_fn: Callable[..., Any] | str | None = None,
+    claim_agents: Sequence[str] | None = None,
 ) -> dict:
     """离线校验链：verify_claims（可被 A3 补丁旁路）→ 稀疏 value_mismatch 单点修复（可被 A4 补丁 no-op）。
 
     `repair_fn=None`（默认）表示修复步骤不参与——离线腿零 LLM 由构造保证；
     显式传 callable 或 `"module"`（按模块属性解析）才引入修复，且须计入预算。
+
+    `claim_agents` 给出每条 claim 所属分析师时，**重校验仲裁按该分析师的范围**（同
+    citation_node：修复后只要求被修复分析师的 claims 全 PASS）——不传则按全库判
+    （默认保持原语义；全库判会把别处的无关 FAIL 算到修复头上，A4 补测实测踩到）。
     """
     from finance_agent import citation as citation_mod
 
@@ -982,6 +990,7 @@ def run_citation_chain(
         for i, v in enumerate(verdicts)
         if v.status == "FAIL" and v.bucket == "value_mismatch"
     ]
+    replaced: dict[int, Any] = {}
     if a4_on and repair_fn is not None and 0 < len(sparse) < SPARSE_REPAIR_LIMIT:
         fn: Callable[..., Any]
         if isinstance(repair_fn, str):
@@ -1004,10 +1013,16 @@ def run_citation_chain(
         }
         if replaced:
             updated_claims = [replaced.get(i, c) for i, c in enumerate(claim_list)]
-            re_verdicts = list(citation_mod.verify_claims(updated_claims, state))
+            scope = _reverify_scope(updated_claims, replaced, claim_agents)
+            re_verdicts = list(
+                citation_mod.verify_claims([updated_claims[i] for i in scope], state)
+            )
             if all(v.status != "FAIL" for v in re_verdicts):
-                # 重校验是仲裁（同 citation_node 语义）：修复后全 PASS 才算修复成功
-                claim_list, verdicts, repaired = updated_claims, re_verdicts, True
+                # 重校验是仲裁（同 citation_node 语义）：修复范围内全 PASS 才算修复成功
+                merged = list(verdicts)
+                for slot, index in enumerate(scope):
+                    merged[index] = re_verdicts[slot]
+                claim_list, verdicts, repaired = updated_claims, merged, True
                 repaired_indices = sorted(replaced)
                 markdown = new_markdown
     fail_indices = [i for i, v in enumerate(verdicts) if v.status == "FAIL"]
@@ -1030,7 +1045,38 @@ def run_citation_chain(
         ],
         "fail_buckets": fail_buckets,
         "unverifiable": sum(1 for v in verdicts if v.status == "UNVERIFIABLE"),
+        # 重校验仲裁口径（None = 修复未参与）："agent" = 按被修复分析师（同 citation_node），
+        # "all" = 全库。附全库读数供交叉核对（全库口径会把别处的无关 FAIL 算到修复头上）。
+        # 修复产出的 claim（下标 → payload；被仲裁拒收时也从这里可查，供 A4 补测核对
+        # 「LLM 改写值对不对」与「流水线是否记账」两件事分开读）
+        "repaired_claims": {
+            str(idx): _claim_payload(claim) for idx, claim in sorted(replaced.items())
+        }
+        if repair_participated
+        else {},
+        "reverify_scope": (
+            None if not repair_participated else ("agent" if claim_agents else "all")
+        ),
+        "reverify_global_all_pass": (
+            None if not repair_participated else all(v.status != "FAIL" for v in verdicts)
+        ),
+        # 链末正文（保守口径：重校验未全过时**不**采纳 LLM 改写，见上方仲裁分支）。
+        # A4 补测读「正文里还有没有错值」须看它；生产在重校验失败时保留改写并回退
+        # 全量重试（citation_node 先回填再重校验），该差异由 `repair_records` 交代。
+        "markdown": markdown,
     }
+
+
+def _reverify_scope(
+    updated_claims: list[Any],
+    replaced: dict[int, Any],
+    claim_agents: Sequence[str] | None,
+) -> list[int]:
+    """重校验范围：给了归属就取被修复分析师的全部 claim（同 citation_node），否则全库。"""
+    if claim_agents is None:
+        return list(range(len(updated_claims)))
+    agents = {claim_agents[i] for i in replaced}
+    return [i for i, agent in enumerate(claim_agents) if agent in agents]
 
 
 def _claim_payload(claim: Any) -> dict:
@@ -2183,9 +2229,17 @@ def _meter(meter: Callable[[], int] | None) -> int | None:
 # ── 报告 ──
 
 
-def assert_launch_allowed(prereg_dir: Path | None = None) -> Preregistration:
-    """跑批入口门禁：无有效预登记即拒绝（spec「缺预登记拒绝跑批」）。"""
-    return assert_preregistered(Path(prereg_dir) if prereg_dir else DEFAULT_PREREG_DIR)
+def assert_launch_allowed(
+    prereg_dir: Path | None = None, *, name_contains: str = PREREG_P1_NAME
+) -> Preregistration:
+    """跑批入口门禁：无有效预登记即拒绝（spec「缺预登记拒绝跑批」）。
+
+    默认只认本 pilot 的预登记文档（`PREREG_P1_NAME` 子串）——同目录后来者
+    （P2 族 B / A4 补测）不得顶替本实验的门禁口径。
+    """
+    return assert_preregistered(
+        Path(prereg_dir) if prereg_dir else DEFAULT_PREREG_DIR, name_contains=name_contains
+    )
 
 
 def mcnemar_exact_p(b: int, c: int) -> float:

@@ -75,7 +75,7 @@ def _write_materials(tmp_path: Path) -> Path:
 def _write_prereg(tmp_path: Path) -> Path:
     prereg_dir = tmp_path / "prereg"
     prereg_dir.mkdir(parents=True, exist_ok=True)
-    (prereg_dir / "2026-09-16-p1.md").write_text(
+    (prereg_dir / "2026-09-16-p1-injection-pilot.md").write_text(
         "- 主指标: 逃逸率\n- MDE: 6pp\n- 决策阈值: 拦截率 < 50% 判薄防线（依据：见 D6）\n"
         "- 样本量依据: 10 标的 × 8 类 × 4 实例\n- 停止规则: 不一致对子 < 10% 停跑\n"
         "- rubric 版本: judge-v8\n",

@@ -72,8 +72,17 @@ DEFAULT_REGISTRY: tuple[CausalClaim, ...] = (
         failure_mode="错误数字进入报告",
         primary_metric="修复前后真 FAIL 率差",
         method="code",
-        effect_expectation="中：只覆盖 <3 处的稀疏场景",
-        exposure_metric="稀疏残余 value_mismatch 发生率（<3 处场景）",
+        effect_expectation=(
+            "中：实测修复回路把注入错误的改写值改对 20/20 且终稿留错 0/20，"
+            "但流水线只记账 4/22——「同分析师另有其它 FAIL」时 all_passed=False，"
+            "value_mismatch_repaired 遥测低估 16/20（incident 029）；"
+            "自然分布的稀疏失败 2/2 因正文值型定位落空而无法参与（P1-A4 批，2026-09-17）"
+        ),
+        exposure_metric=(
+            "稀疏残余 value_mismatch 发生率（<3 处场景）：20 标的离线复算命中 2/20（0.10）；"
+            "可修复面上限 = 可产生 value_mismatch 的数值 claim 占比 765/1070（71.5%）"
+            "× 正文可定位率 757/765（99.0%）"
+        ),
         exposure_source="生产遥测：citation_fail_buckets.value_mismatch 分布",
     ),
     CausalClaim(

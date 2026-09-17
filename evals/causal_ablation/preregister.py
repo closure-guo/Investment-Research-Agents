@@ -53,10 +53,19 @@ def parse_preregister(text: str) -> Preregistration:
     return Preregistration(path=Path("<inline>"), fields=fields, raw=text or "")
 
 
-def find_latest_preregister(dir_path: Path) -> Preregistration | None:
+def find_latest_preregister(
+    dir_path: Path, *, name_contains: str | None = None
+) -> Preregistration | None:
+    """最新预登记文档；`name_contains` 限定为本实验自己的文档。
+
+    多实验共用同一目录时，只取「目录里最新」会把跑 P1 的门禁读成别家（如 P2 族 B）的
+    文档——门禁必须校验**本实验**的预登记（2026-09-17 叠加 P2 后实测踩到）。
+    """
     if not dir_path.exists():
         return None
     candidates = sorted(dir_path.glob("*.md"))
+    if name_contains:
+        candidates = [c for c in candidates if name_contains in c.name]
     if not candidates:
         return None
     latest = candidates[-1]
@@ -65,8 +74,8 @@ def find_latest_preregister(dir_path: Path) -> Preregistration | None:
     return parsed
 
 
-def assert_preregistered(dir_path: Path) -> Preregistration:
-    found = find_latest_preregister(dir_path)
+def assert_preregistered(dir_path: Path, *, name_contains: str | None = None) -> Preregistration:
+    found = find_latest_preregister(dir_path, name_contains=name_contains)
     if found is None:
         raise MissingPreregistrationError(f"未找到预登记文档（{dir_path}）：无预登记不得跑批")
     if not found.valid:

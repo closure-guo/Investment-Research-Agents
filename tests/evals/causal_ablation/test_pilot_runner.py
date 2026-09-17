@@ -1653,7 +1653,8 @@ def _prereg_dir(tmp_path: Path, *, valid: bool = True) -> Path:
     )
     if not valid:
         body = "- 主指标: 逃逸率\n"
-    (tmp_path / "2026-09-16-p1.md").write_text(body, encoding="utf-8")
+    # 文件名须含本实验子串：门禁按名锁定自己的预登记（同目录后来者不得顶替）
+    (tmp_path / "2026-09-16-p1-injection-pilot.md").write_text(body, encoding="utf-8")
     return tmp_path
 
 
