@@ -169,33 +169,8 @@ def product_from_state(state: dict, *, digest: str) -> dict:
             ],
             "markdown": str(report.get("markdown") or ""),
         }
-    snapshot_keys = (
-        "stock_code",
-        "kline",
-        "benchmark_kline",
-        "income_statement",
-        "balance_sheet",
-        "cash_flow_statement",
-        "financial_indicators",
-        "technical_indicators",
-        "derived_series",
-        # 价位面（validate_trade_prices 的消费键；此前漏存 → A5 单元因「不可用」跳过校验）
-        "price_levels",
-        "quarterly_trend",
-        "profitability_metrics",
-        "solvency_metrics",
-        "efficiency_metrics",
-        "cashflow_metrics",
-        "growth_rates",
-        "dupont_tree",
-        "macro_indicators",
-        "industry_info",
-        "news_list",
-        "key_events",
-        "announcements",
-        "research_reports",
-    )
-    snapshot = {k: state[k] for k in snapshot_keys if k in state}
+    snapshot_keys = _snapshot_keys(state)
+    snapshot = {k: state[k] for k in snapshot_keys}
     from evals.ablation import citation_buckets_from_state
 
     base_values = derive_base_values(state)
@@ -213,6 +188,51 @@ def product_from_state(state: dict, *, digest: str) -> dict:
             "fail_buckets": dict(state.get("citation_fail_buckets") or {}),
         },
     }
+
+
+# 快照 = 除「非数据键」外的全部 state（**白名单改为排除式**）：白名单会随代码漂移漏键，
+# 已实测两次同类丢面——① price_levels（A5 sanity 消费面，§15）；② compute 输出 6 键
+# （anomalies/garp_result/health_score/price_levels/risk_metrics/traffic_lights，A1 补测
+# 建单元时才发现）。排除项只留「不可序列化 / 与测量无关」的键。
+_SNAPSHOT_EXCLUDE: frozenset[str] = frozenset(
+    {
+        "llm_config",
+        "api_key",
+        "callbacks",
+        "writer",
+        "query",
+        "focus",
+        "enable_web_search",
+        "analyst_reports",  # 单独以 claims + markdown 形态落盘
+        "file_paths",
+    }
+)
+
+
+def _snapshot_keys(state: dict) -> list[str]:
+    """快照键：state 全部数据键 - 排除项，并**强制**包含 compute 的全部输出键。
+
+    compute 输出缺一即报错（不静默丢面）：A1/A5 两个补测都因缺面判 void，
+    根因都是「白名单手抄漂移」。缺面在这里就拦住。
+    """
+    from finance_agent.nodes.compute import compute_metrics
+
+    keys = sorted(k for k in state if k not in _SNAPSHOT_EXCLUDE and not k.startswith("_"))
+    try:
+        compute_keys = set(compute_metrics(dict(state)).keys())
+    except Exception as exc:  # noqa: BLE001 - 原始输入不全：不阻断材料生成，但如实交代
+        print(
+            f"[警告] compute_metrics 在本次 state 上跑不动（{type(exc).__name__}: {exc}）："
+            "跳过 compute 输出键完整性校验",
+            flush=True,
+        )
+        return keys
+    missing = sorted(compute_keys - set(keys))
+    if missing:
+        raise pr.ProductError(
+            f"快照缺 compute 输出键 {missing}：材料会丢测量面（A5/A1 两次踩过），补进快照再落盘"
+        )
+    return keys
 
 
 def _default_snapshot_builder(ticker: str) -> dict:
@@ -249,7 +269,9 @@ def run_materials(
     """
     builder = snapshot_builder or _default_snapshot_builder
     runner = graph_runner or _default_analysts_runner
-    digest_fn = digest or (lambda s: str(s.get("__digest__") or "injected"))  # noqa: E731
+    # 默认走真实摘要（曾用占位 "injected"：产物里的 snapshot_digest 不可核验——
+    # 「三变体输入一致」的审计声明因此悬空；回填脚本已按新口径补真摘要）
+    digest_fn = digest or _default_digest
 
     written: list[str] = []
     for ticker in tickers:

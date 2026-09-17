@@ -169,6 +169,8 @@ def product_summary(product: dict) -> dict:
         },
         "base_values": product.get("base_values") or {},
         "citation": product.get("citation") or {},
+        # 材料回填留痕（compute 输出键补齐：补了哪些键 / 摘要前后）——不得静默改产物
+        "snapshot_backfill": product.get("snapshot_backfill"),
         "analyst_reports": {
             agent: {
                 "claims": len(report.get("claims") or []),

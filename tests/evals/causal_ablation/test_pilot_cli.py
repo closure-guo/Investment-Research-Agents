@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from evals.causal_ablation import pilot_runner as pr
 
@@ -185,3 +186,107 @@ class TestRealLegBudgetAccounting:
         assert unit["graph_runs"] == 0 and unit["llm_calls"] == 0
         assert "预判" in unit["status_reason"]
         assert "0 次图运行" in unit["status_reason"]
+
+
+# ── 材料快照口径（白名单漂移两次后改排除式 + 完整性守卫）──
+
+
+class TestSnapshotKeys:
+    def _complete_state(self) -> dict:
+        """能跑通 compute_metrics 的最小 state（原始输入齐 + 注入基值）。"""
+        from finance_agent.nodes.compute import compute_metrics
+
+        raw = {
+            "stock_code": "600519",
+            "income_statement": pd.DataFrame(
+                {"报告日": ["20251231", "20241231"], "营业总收入": [1.0e9, 9.0e8]}
+            ),
+            "balance_sheet": pd.DataFrame(
+                {"报告日": ["20251231", "20241231"], "总资产": [5.0e9, 4.6e9]}
+            ),
+            "cash_flow_statement": pd.DataFrame(
+                {"报告日": ["20251231", "20241231"], "经营活动产生的现金流量净额": [3.0e8, 2.5e8]}
+            ),
+            "kline": pd.DataFrame(
+                {
+                    "日期": [f"2026-07-{d:02d}" for d in range(1, 31)],
+                    "开盘": [95.0] * 30,
+                    "最高": [96.0] * 30,
+                    "最低": [94.0] * 30,
+                    "收盘": [95.5 + i * 0.2 for i in range(30)],
+                    "成交量": [1.0e6] * 30,
+                }
+            ),
+            "benchmark_kline": pd.DataFrame(
+                {"日期": [f"2026-07-{d:02d}" for d in range(1, 31)], "收盘": [3000.0] * 30}
+            ),
+            "news_list": [],
+        }
+        return {**raw, **compute_metrics(raw)}  # type: ignore[arg-type]
+
+    def test_keys_include_every_compute_output(self):
+        """白名单曾漏 6 键（anomalies/garp_result/health_score/price_levels/
+        risk_metrics/traffic_lights）→ 改排除式后必须全含。"""
+        from finance_agent.nodes.compute import compute_metrics
+
+        state = self._complete_state()
+        keys = cli._snapshot_keys(state)
+        missing = set(compute_metrics(state)) - set(keys)  # type: ignore[arg-type]
+        assert missing == set(), f"快照缺 compute 输出键 {missing}"
+
+    def test_non_data_keys_are_excluded(self):
+        state = {**self._complete_state(), "llm_config": {"api_key": "x"}, "query": "q"}
+        keys = cli._snapshot_keys(state)
+        assert "llm_config" not in keys and "query" not in keys
+        assert "analyst_reports" not in keys  # 单独以 claims+markdown 落盘
+
+    def test_compute_output_missing_from_state_raises(self, monkeypatch):
+        """state 里 compute 跑得出键、但它被排除式漏掉 → 显式报错（不静默丢面）。"""
+        state = self._complete_state()
+        monkeypatch.setattr(
+            cli, "_SNAPSHOT_EXCLUDE", frozenset(set(cli._SNAPSHOT_EXCLUDE) | {"health_score"})
+        )
+        with pytest.raises(pr.ProductError, match="health_score"):
+            cli._snapshot_keys(state)
+
+    def test_state_without_raw_inputs_skips_guard_with_warning(self, capsys):
+        keys = cli._snapshot_keys({"stock_code": "600519"})
+        assert keys == ["stock_code"]
+        assert "跳过 compute 输出键完整性校验" in capsys.readouterr().out
+
+
+class TestMaterialsBackfill:
+    def _load_backfill(self):
+        spec = importlib.util.spec_from_file_location(
+            "backfill_materials_under_test",
+            _ROOT / "tests" / "scripts" / "backfill_materials_compute_outputs.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_backfill_adds_only_missing_keys_and_records_trace(self):
+        backfill = self._load_backfill()
+        snapshot = TestSnapshotKeys()._complete_state()
+        for key in ("health_score", "risk_metrics", "price_levels"):
+            snapshot.pop(key, None)
+        kept = snapshot["cashflow_metrics"]
+        product = {"ticker": "600519", "snapshot": snapshot, "snapshot_digest": "injected"}
+        result = backfill.backfill_product(product)
+        assert result["keys_added"] == ["health_score", "price_levels", "risk_metrics"]
+        assert result["written"] is True
+        filled = result["product"]
+        assert filled["snapshot_backfill"]["keys_added"] == result["keys_added"]
+        assert filled["snapshot_backfill"]["digest_before"] == "injected"
+        assert filled["snapshot_backfill"]["digest_after"] != "injected"
+        assert filled["snapshot"]["cashflow_metrics"] is kept  # 已有值原样（不覆盖）
+        assert product["snapshot_digest"] == "injected"  # 入参不被就地改写
+
+    def test_complete_product_is_noop(self):
+        backfill = self._load_backfill()
+        product = {"ticker": "600519", "snapshot": TestSnapshotKeys()._complete_state()}
+        result = backfill.backfill_product(product)
+        assert result["keys_added"] == []
+        assert result["written"] is False

@@ -36,8 +36,18 @@ DEFAULT_REGISTRY: tuple[CausalClaim, ...] = (
         failure_mode="计算幻觉",
         primary_metric="计算型 claim 数值错误率",
         method="code",
-        effect_expectation="大：多位数心算错误率经验值 20%+",
-        exposure_metric=("计算型 claim 占比 × 未被重算覆盖比例（自然分布）"),
+        effect_expectation=(
+            "实测（P1-A1 批，2026-09-17，10 标的 × 2 态，102 次调用）："
+            "机制价值在**产出面**而非错误率——注入在场时 58.6%（355/606）的 claim 锚在代码算出的指标上，"
+            "缺席时降到 2.3%（9/388）、claim 总量 -36%、路径不可解析率 0.2%→13.4%（数字失去可核对锚）。"
+            "登记主张里的「LLM 自算并算错」**本批无样本**（可重算根 claim 319→4，0 FAIL）："
+            "当前提示词下分析师不自算派生指标、而是回落原始报表路径——不是被证伪，是没有发生；"
+            "要测该形态需另设「要求自行推导指标」的变体（待 owner 决策）"
+        ),
+        exposure_metric=(
+            "计算型（派生指标）claim 占比实测 58.6%（355/606）；"
+            "「未被重算覆盖比例」自然分布待遥测（重算注册表 10 根 vs compute 输出 14 键）"
+        ),
         exposure_source="生产遥测：citation 重算注册表命中率 + claim 类型分布",
     ),
     CausalClaim(
