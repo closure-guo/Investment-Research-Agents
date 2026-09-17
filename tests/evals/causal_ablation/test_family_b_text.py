@@ -113,10 +113,13 @@ class TestB2:
 
 
 class TestMaterials:
-    def test_b1_rows_carry_decision_context_and_empty_labels(self):
+    def test_b1_rows_export_all_points_with_similarity(self):
+        """导出**全部**空方论点（带 max_similarity）——阈值未标定前不预筛，
+        否则未校准的「新增」判据会焊进判定集。"""
         unit = {"ticker": "600519", "_state": _state(), "b1": ft.b1_unit(_state())}
         rows = ft.judge_material_rows([unit])
-        assert len(rows) == 1
+        assert len(rows) == 2  # 两条 bear 论点都在，不论阈值判它新旧
+        assert all(isinstance(r["max_similarity"], float) for r in rows)
         row = rows[0]
         assert row["decision_action"] == "hold"
         assert "潜在减值" in row["decision_reasoning"]

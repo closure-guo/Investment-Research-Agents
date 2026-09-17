@@ -120,6 +120,14 @@ class TestB5Pairwise:
         assert out[0]["judge_parse_failed"] is True  # 少一票如实记
         assert out[0]["verdict"] == "tie"
 
+    def test_unit_id_is_preserved_for_caching(self):
+        """判定结果要能按 unit_id 回读缓存（丢掉 id 会让已花的判定调用匹配不上）。"""
+        out = fj.run_b5_pairwise(
+            [dict(self._pair(), unit_id="600519::b5")],
+            llm_fn=_judge_returning({"winner": "A"}),
+        )
+        assert out[0]["unit_id"] == "600519::b5"
+
     def test_position_is_deterministic_per_pair_key(self):
         first = fj.run_b5_pairwise([self._pair()], llm_fn=_judge_returning({"winner": "A"}))
         second = fj.run_b5_pairwise([self._pair()], llm_fn=_judge_returning({"winner": "A"}))
@@ -158,3 +166,40 @@ class TestCalibrationMaterial:
             [{"ticker": "a", "judge_label": None, "judge_parse_failed": True}], key="absorbed"
         )
         assert got["per_ticker"]["a"]["rate"] is None  # 不得记 0
+
+
+class TestSpreadSampling:
+    """成本闸门不得引入顺序偏倚：带相似度时按相似度等距抽样（覆盖两端极端样本）。"""
+
+    def _rows(self, n: int) -> list[dict]:
+        return [
+            {
+                "unit_id": f"u{i}",
+                "ticker": "600519",
+                "risk_point": f"p{i}",
+                "max_similarity": i / 10,
+            }
+            for i in range(n)
+        ]
+
+    def test_evenly_spread_over_similarity(self):
+        out = fj.run_b1_judgments(
+            self._rows(10), llm_fn=lambda _p: json.dumps({"absorbed": True}), per_ticker=3
+        )
+        sims = [r["max_similarity"] for r in out]
+        assert sims == [0.0, 0.4, 0.9]  # 两端 + 居中（min4.5→round 4），而不是前 3 个
+
+    def test_fewer_rows_than_limit_keeps_all(self):
+        out = fj.run_b1_judgments(
+            self._rows(2), llm_fn=lambda _p: json.dumps({"absorbed": False}), per_ticker=4
+        )
+        assert len(out) == 2
+
+    def test_without_similarity_falls_back_to_prefix(self):
+        rows = [{"unit_id": f"u{i}", "ticker": "t", "risk_point": str(i)} for i in range(5)]
+        out = fj.run_b2_judgments(
+            [dict(r, rebutted_point="a", rebuttal_text="b") for r in rows],
+            llm_fn=lambda _p: json.dumps({"corrected": True}),
+            per_ticker=2,
+        )
+        assert [r["unit_id"] for r in out] == ["u0", "u1"]

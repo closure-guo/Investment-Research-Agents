@@ -85,6 +85,54 @@ def _install_meter():
     return lambda: len(pilot_util._usage_ledger)
 
 
+def _judged_path(out_dir: Path, kind: str) -> Path:
+    return Path(out_dir) / f"judged-{kind}.jsonl"
+
+
+def _load_judged(out_dir: Path, kind: str) -> dict[str, dict]:
+    """已判行（按 unit_id）：崩溃/重跑都不重烧判定调用。"""
+    path = _judged_path(out_dir, kind)
+    if not path.exists():
+        return {}
+    done: dict[str, dict] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            row = json.loads(line)
+            done[str(row.get("unit_id") or "")] = row
+    return done
+
+
+def _append_judged(out_dir: Path, kind: str, rows: Sequence[dict]) -> None:
+    path = _judged_path(out_dir, kind)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + chr(10))
+
+
+def _run_with_cache(rows, kind, out_dir, runner) -> list[dict]:
+    """只跑未判的行；新结果立即落盘（判定调用花钱，崩溃不重来）。"""
+    done = _load_judged(out_dir, kind)
+    todo = [r for r in rows if str(r.get("unit_id") or "") not in done]
+    print(f"[判定] {kind}: 待跑 {len(todo)}/{len(rows)}（已缓存 {len(done)}）", flush=True)
+    if todo:
+        fresh = runner(todo)
+        _append_judged(out_dir, kind, fresh)
+        print(
+            f"[判定] {kind}: 新判 {len(fresh)} 行已落盘 {_judged_path(out_dir, kind).name}",
+            flush=True,
+        )
+        done.update({str(r.get("unit_id") or ""): r for r in fresh})
+    # 按 unit_id 去重：输入行会重复（同一 rebuttal 目标被多条消息反驳），
+    # 不去重会把同一条判定重复计入比率（分母虚高）
+    picked: dict[str, dict] = {}
+    for row in rows:
+        uid = str(row.get("unit_id") or "")
+        if uid in done:
+            picked[uid] = done[uid]
+    return list(picked.values())
+
+
 def _write_csv(path: Path, rows: Sequence[dict], columns: Sequence[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as fh:
@@ -121,13 +169,18 @@ def main() -> None:
     else:
         meter = _install_meter()
         before = meter() if meter else None
+        # 判定材料要用**完整** b1_unit（含 all_points；报告里的 b1_b2_code 才用裁剪版）
         b1_rows = ft.judge_material_rows(
-            [{"ticker": t, "_state": states[t], "b1": _b1_code(states[t])} for t in tickers]
+            [{"ticker": t, "_state": states[t], "b1": ft.b1_unit(states[t])} for t in tickers]
         )
+        print(f"[判定] B1 材料行 {len(b1_rows)}（全空方论点，未按阈值预筛）", flush=True)
         b2_rows = ft.b2_material_rows([{"ticker": t, "_state": states[t]} for t in tickers])
         budget = args.max_judge_calls
-        b1_judged = fj.run_b1_judgments(b1_rows) if budget > 0 else []
-        b2_judged = fj.run_b2_judgments(b2_rows)
+        out_dir = Path(args.out_dir)
+        b1_judged = (
+            _run_with_cache(b1_rows, "b1", out_dir, fj.run_b1_judgments) if budget > 0 else []
+        )
+        b2_judged = _run_with_cache(b2_rows, "b2", out_dir, fj.run_b2_judgments)
         after = meter() if meter else None
         report["judge"] = {
             "b1": fj.gate_verdict(b1_judged, method="nli"),
@@ -139,12 +192,12 @@ def main() -> None:
         calib_dir = Path(args.calibration_dir)
         _write_csv(
             calib_dir / "2026-09-17-p2-calibration-b1.csv",
-            fj.calibration_sample(fj.calibration_rows(b1_judged, material_key="risk_point")),
+            ft.calibration_sample(fj.calibration_rows(b1_judged, material_key="risk_point")),
             fj.CALIBRATION_COLUMNS,
         )
         _write_csv(
             calib_dir / "2026-09-17-p2-calibration-b2.csv",
-            fj.calibration_sample(fj.calibration_rows(b2_judged, material_key="rebuttal_text")),
+            ft.calibration_sample(fj.calibration_rows(b2_judged, material_key="rebuttal_text")),
             fj.CALIBRATION_COLUMNS,
         )
         print(
@@ -175,7 +228,12 @@ def main() -> None:
                 )
                 or ""
             )
-        b5 = fj.run_b5_pairwise(pairs)
+        b5 = _run_with_cache(
+            [dict(p, unit_id=f"{p['ticker']}::b5") for p in pairs],
+            "b5",
+            Path(args.out_dir),
+            fj.run_b5_pairwise,
+        )
         report["judge_b5"] = {
             "verdicts": {r["ticker"]: r["verdict"] for r in b5},
             "position_first": {r["ticker"]: r["position_first"] for r in b5},
@@ -216,6 +274,7 @@ def main() -> None:
 
 
 def _b1_code(state: dict) -> dict:
+    """报告用的 B1 code 读数（不含逐条明细 all_points——明细另存判定材料）。"""
     got = ft.b1_unit(state)
     return {k: v for k, v in got.items() if k != "all_points"}
 

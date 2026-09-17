@@ -158,24 +158,36 @@ def _run_rows(
     per_ticker: int,
 ) -> list[dict]:
     fn = llm_fn or default_judge_fn()
-    seen: dict[str, int] = {}
-    out: list[dict] = []
+    group: dict[str, list[dict]] = {}
     for row in rows:
-        ticker = str(row.get("ticker") or "")
-        if seen.get(ticker, 0) >= per_ticker:
-            continue
-        seen[ticker] = seen.get(ticker, 0) + 1
-        parsed = _ask_json(prompt_fn(row), fn)
-        label = parsed.get(key) if isinstance(parsed, dict) else None
-        out.append(
-            {
-                **row,
-                "judge_label": label,
-                "judge_reason": (parsed or {}).get("reason"),
-                "judge_parse_failed": parsed is None,
-            }
-        )
+        group.setdefault(str(row.get("ticker") or ""), []).append(row)
+    out: list[dict] = []
+    for ticker_rows in group.values():
+        for row in _spread(ticker_rows, per_ticker):
+            parsed = _ask_json(prompt_fn(row), fn)
+            label = parsed.get(key) if isinstance(parsed, dict) else None
+            out.append(
+                {
+                    **row,
+                    "judge_label": label,
+                    "judge_reason": (parsed or {}).get("reason"),
+                    "judge_parse_failed": parsed is None,
+                }
+            )
     return out
+
+
+def _spread(rows: Sequence[dict], limit: int) -> list[dict]:
+    """每标的取 `limit` 行：带相似度时按相似度**等距抽样**（覆盖两端的极端样本），
+    否则取前 N 行。确定性（同输入同结果），成本闸门不改变可复现性。"""
+    if limit <= 0 or len(rows) <= limit:
+        return list(rows)
+    if all(isinstance(r.get("max_similarity"), (int, float)) for r in rows):
+        ordered = sorted(rows, key=lambda r: float(r["max_similarity"]))
+        step = (len(ordered) - 1) / (limit - 1) if limit > 1 else 0
+        picked = {int(round(i * step)) for i in range(limit)} if limit > 1 else {0}
+        return [ordered[i] for i in sorted(picked)]
+    return list(rows[:limit])
 
 
 def run_b5_pairwise(
@@ -210,6 +222,8 @@ def run_b5_pairwise(
                 raw_votes.append("tie")
         out.append(
             {
+                # 保留调用方给的 unit_id（判定缓存按它回读；此前丢掉导致结果匹配不上）
+                "unit_id": pair.get("unit_id"),
                 "pair_key": pair.get("pair_key"),
                 "ticker": pair.get("ticker"),
                 "position_first": first,

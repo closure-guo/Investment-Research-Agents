@@ -172,7 +172,9 @@ def judge_material_rows(units: Sequence[dict]) -> list[dict]:
     for unit in units:
         state = unit.get("_state") or {}
         context = decision_context(state)
-        for index, point in enumerate((unit.get("b1") or {}).get("points") or []):
+        # 导出**全部**空方论点（不按阈值预筛）：阈值未标定前，预筛会把未校准的判据
+        # 焊进判定集；带 max_similarity 一起导出，采样与「新增」重算都在下游做
+        for index, point in enumerate((unit.get("b1") or {}).get("all_points") or []):
             rows.append(
                 {
                     "unit_id": f"{unit.get('ticker')}::b1::{index}",
