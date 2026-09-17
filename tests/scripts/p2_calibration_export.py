@@ -63,6 +63,8 @@ B1_COLUMNS = (
     "unit_id",
     "ticker",
     "风险点",
+    "角色/轮次",
+    "原话上下文(解歧义用：该轮正文节选)",
     "分析师发现·最相似3条(附相似度,判「是否新增」用)",
     "分析师发现总条数",
     "决策动作",
@@ -158,8 +160,26 @@ def _refs_text(refs: object) -> str:
     )
 
 
+def _context_lookup(state: dict) -> dict[str, dict]:
+    """空方论点文本 → {角色/轮次, 该轮正文节选}（论点脱离上下文会歧义，如「不改变趋势」指哪个方向）。"""
+    out: dict[str, dict] = {}
+    for message in state.get("debate_history") or []:
+        data = message.model_dump() if hasattr(message, "model_dump") else message
+        excerpt = _clip(data.get("content"), 320)
+        for argument in data.get("key_arguments") or []:
+            arg = argument.model_dump() if hasattr(argument, "model_dump") else argument
+            text = str(arg.get("text") or "")
+            if text:
+                out[text] = {
+                    "角色/轮次": f"{data.get('role')} r{data.get('round')}",
+                    "原话上下文(解歧义用：该轮正文节选)": excerpt,
+                }
+    return out
+
+
 def _b1_rows(existing: dict[str, dict], *, tickers: Sequence[str]) -> list[dict]:
     findings_cache: dict[str, str] = {}  # 按 unit_id（同标的各风险点的 top3 不同）
+    context_cache: dict[str, dict[str, dict]] = {}  # 按 ticker
     keep = _current_material_ids("b1", tickers)
     rows: list[dict] = []
     for row in _load_judged("b1"):
@@ -167,6 +187,10 @@ def _b1_rows(existing: dict[str, dict], *, tickers: Sequence[str]) -> list[dict]
             continue
         ticker = str(row.get("ticker") or "")
         cache_key = str(row.get("unit_id") or ticker)
+        if ticker not in context_cache:
+            context_cache[ticker] = _context_lookup(
+                fb.load_material(MATERIALS_DIR, ticker)["state"]
+            )
         if cache_key not in findings_cache:
             state = fb.load_material(MATERIALS_DIR, ticker)["state"]
             refs = ft.analyst_reference_points(state)
@@ -181,6 +205,7 @@ def _b1_rows(existing: dict[str, dict], *, tickers: Sequence[str]) -> list[dict]
             "unit_id": row.get("unit_id"),
             "ticker": ticker,
             "风险点": _clip(row.get("risk_point")),
+            **context_cache[ticker].get(str(row.get("risk_point") or ""), {}),
             "分析师发现·最相似3条(附相似度,判「是否新增」用)": findings_cache[cache_key]["top"],
             "分析师发现总条数": findings_cache[cache_key]["total"],
             "决策动作": row.get("decision_action"),
