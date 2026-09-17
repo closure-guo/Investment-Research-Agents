@@ -63,7 +63,8 @@ B1_COLUMNS = (
     "unit_id",
     "ticker",
     "风险点",
-    "分析师发现摘要(判「是否新增」用)",
+    "分析师发现·最相似3条(附相似度,判「是否新增」用)",
+    "分析师发现总条数",
     "决策动作",
     "决策理由",
     "证据引用",
@@ -158,22 +159,30 @@ def _refs_text(refs: object) -> str:
 
 
 def _b1_rows(existing: dict[str, dict], *, tickers: Sequence[str]) -> list[dict]:
-    findings_cache: dict[str, str] = {}
+    findings_cache: dict[str, str] = {}  # 按 unit_id（同标的各风险点的 top3 不同）
     keep = _current_material_ids("b1", tickers)
     rows: list[dict] = []
     for row in _load_judged("b1"):
         if str(row.get("unit_id") or "") not in keep:
             continue
         ticker = str(row.get("ticker") or "")
-        if ticker not in findings_cache:
+        cache_key = str(row.get("unit_id") or ticker)
+        if cache_key not in findings_cache:
             state = fb.load_material(MATERIALS_DIR, ticker)["state"]
-            briefs = " ｜ ".join(_clip(f, 90) for f in ft.analyst_reference_points(state)[:6])
-            findings_cache[ticker] = briefs
+            refs = ft.analyst_reference_points(state)
+            point = str(row.get("risk_point") or "")
+            # 按与风险点的字面相似度排序取前 3（附相似度）：原来截断前 6 条会把真正相关的那条切掉
+            ranked = sorted(((ft.text_similarity(point, ref), ref) for ref in refs), reverse=True)[
+                :3
+            ]
+            top = " ｜ ".join(f"[{sim:.2f}] {_clip(ref, 80)}" for sim, ref in ranked)
+            findings_cache[cache_key] = {"top": top, "total": len(refs)}
         item = {
             "unit_id": row.get("unit_id"),
             "ticker": ticker,
             "风险点": _clip(row.get("risk_point")),
-            "分析师发现摘要(判「是否新增」用)": findings_cache[ticker],
+            "分析师发现·最相似3条(附相似度,判「是否新增」用)": findings_cache[cache_key]["top"],
+            "分析师发现总条数": findings_cache[cache_key]["total"],
             "决策动作": row.get("decision_action"),
             "决策理由": _clip(row.get("decision_reasoning"), 700),
             "证据引用": _clip(_refs_text(row.get("evidence_refs")), 300),
@@ -244,6 +253,7 @@ def main() -> None:
         ("b2", B2_COLUMNS, _b2_rows),
         ("b5", B5_COLUMNS, _b5_rows),
     )
+    locked: list[str] = []
     for kind, columns, builder in targets:
         path = out / f"2026-09-17-p2-calibration-{kind}.csv"
         existing = _read_existing(path, columns)
@@ -251,12 +261,24 @@ def main() -> None:
         total = len(rows)
         if not ns.all:
             rows = ft.calibration_sample(rows, fraction=ns.fraction)
-        count = _write(path, rows, columns)
+        try:
+            count = _write(path, rows, columns)
+        except PermissionError:
+            # 文件被占用（Excel 打开中）：不静默失败、也不硬写坏别人的表
+            print(
+                f"[拒绝写入] {path.name} 被占用（Excel？）：请关闭后重跑本脚本；"
+                "已填的人工判定不会丢（按 unit_id 回读）",
+                file=sys.stderr,
+            )
+            locked.append(path.name)
+            continue
         kept = len(existing)
         print(
             f"[导出] {path.as_posix()}：{count}/{total} 行"
             f"（抽样 {ns.fraction:.0%}{'（全量）' if ns.all else ''}；保留已填人工判定 {kept} 行）"
         )
+    if locked:
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":
