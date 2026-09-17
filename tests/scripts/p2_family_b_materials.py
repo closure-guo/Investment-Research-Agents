@@ -59,6 +59,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=OUT_DIR, help="材料目录（续跑看它）")
     parser.add_argument("--prereg-dir", type=Path, default=PREREG_DIR)
     parser.add_argument("--ticks", type=int, default=0, help="只跑前 N 只（0=全部；通路验证用）")
+    parser.add_argument(
+        "--variant",
+        choices=("full", "analysts"),
+        default="full",
+        help="跑哪个变体（full=层间对照臂；analysts=B5 盲评的另一臂渲染报告）",
+    )
     return parser.parse_args(argv)
 
 
@@ -101,6 +107,12 @@ def main() -> None:
         graph = build_variant_graph(variant)  # type: ignore[arg-type]
         return dict(graph.invoke({**snapshot, "focus": query}))
 
+    if args.variant != "full":
+        print(
+            f"[说明] 本趟跑 {args.variant} 变体（B5 盲评对照臂）；B3/B4 读数仍以 full 材料为准",
+            flush=True,
+        )
+
     meter = _install_meter()
     units = fb.run_materials(
         tickers,
@@ -108,6 +120,7 @@ def main() -> None:
         out_dir=args.out_dir,
         graph_runner=runner,
         llm_meter=meter,
+        variant=args.variant,
     )
     report = fb.family_b_code_report(units)
     report["generated_at"] = datetime.now().isoformat(timespec="seconds")

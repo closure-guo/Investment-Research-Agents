@@ -154,14 +154,43 @@ def b4_unit(state: dict) -> dict:
     }
 
 
-def unit_from_state(ticker: str, state: dict, *, llm_calls: int | None) -> dict:
+def b4_unit_with_sanity(state: dict) -> dict:
+    """B4：变体图**没有** sanity 节点（`build_variant_graph` 不含 validate）→ 用生产同一实现
+    `validate_trade_prices` 在产物决策上补算，得到「该决策进生产 sanity 会怎样」。
+
+    与真跑主图的差异（如实披露）：生产主图在 fail 时还会**打回 Trader 重出一次**
+    （`price_check_feedback` 回路），本函数只跑单次校验——故读的是「首判分布」，
+    不是完整回路的打回率。
+    """
+    from finance_agent.nodes.validate import validate_trade_prices
+
+    try:
+        produced = validate_trade_prices(dict(state))
+    except Exception as exc:  # noqa: BLE001 - 补算失败如实标注，不静默当 pass
+        return {
+            "params_total": 0,
+            "needs_price": None,
+            "result": None,
+            "note": f"validate_trade_prices 补算失败：{type(exc).__name__}: {exc}",
+            "computed_by": "validate_trade_prices（失败）",
+        }
+    merged = {**state, **produced}
+    unit = b4_unit(merged)
+    unit["computed_by"] = "validate_trade_prices（同一实现；变体图无该节点，单次校验无打回回路）"
+    return unit
+
+
+def unit_from_state(
+    ticker: str, state: dict, *, llm_calls: int | None, variant: str = P2_VARIANT
+) -> dict:
+    b4 = b4_unit(state) if state.get("price_check") else b4_unit_with_sanity(state)
     return {
         "unit_id": f"{ticker}::b34",
         "ticker": ticker,
         "leg": P2_LEG,
-        "variant": P2_VARIANT,
+        "variant": variant,
         "b3": b3_unit(state),
-        "b4": b4_unit(state),
+        "b4": b4,
         "llm_calls": llm_calls,
     }
 
@@ -169,20 +198,26 @@ def unit_from_state(ticker: str, state: dict, *, llm_calls: int | None) -> dict:
 # ── 材料跑批（真跑，逐标的续跑） ──
 
 
-def material_path(materials_dir: Path, ticker: str) -> Path:
-    return Path(materials_dir) / f"{ticker}.full.pkl"
+def material_path(materials_dir: Path, ticker: str, variant: str = P2_VARIANT) -> Path:
+    return Path(materials_dir) / f"{ticker}.{variant}.pkl"
 
 
 def save_material(
-    materials_dir: Path, ticker: str, *, state: dict, llm_calls: int | None, snapshot_digest: str
+    materials_dir: Path,
+    ticker: str,
+    *,
+    state: dict,
+    llm_calls: int | None,
+    snapshot_digest: str,
+    variant: str = P2_VARIANT,
 ) -> dict[str, str]:
     """落盘：pickle 承载全状态 + JSON 摘要（键名/大小/关键读数）。"""
     materials_dir = Path(materials_dir)
     materials_dir.mkdir(parents=True, exist_ok=True)
-    pickle_path = material_path(materials_dir, ticker)
+    pickle_path = material_path(materials_dir, ticker, variant)
     payload = {
         "ticker": ticker,
-        "variant": P2_VARIANT,
+        "variant": variant,
         "snapshot_digest": snapshot_digest,
         "state": state,
         "llm_calls": llm_calls,
@@ -192,7 +227,7 @@ def save_material(
         pickle.dump(payload, fh)
     summary = {
         "ticker": ticker,
-        "variant": P2_VARIANT,
+        "variant": variant,
         "snapshot_digest": snapshot_digest,
         "llm_calls": llm_calls,
         "keys": sorted(k for k in state if k != "__capture_dropped__"),
@@ -202,13 +237,13 @@ def save_material(
         "saved_at": payload["saved_at"],
         "pickle": pickle_path.as_posix(),
     }
-    json_path = materials_dir / f"{ticker}.full.json"
+    json_path = materials_dir / f"{ticker}.{variant}.json"
     json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"pickle": pickle_path.as_posix(), "json": json_path.as_posix()}
 
 
-def load_material(materials_dir: Path, ticker: str) -> dict:
-    path = material_path(materials_dir, ticker)
+def load_material(materials_dir: Path, ticker: str, variant: str = P2_VARIANT) -> dict:
+    path = material_path(materials_dir, ticker, variant)
     if not path.exists():
         raise pr.MissingProductError(f"缺 P2 材料：{path.as_posix()}（先跑 materials 腿）")
     with path.open("rb") as fh:
@@ -223,20 +258,29 @@ def run_materials(
     graph_runner: Callable[..., dict],
     llm_meter: Callable[[], int] | None = None,
     query: str = pr.DEFAULT_QUERY,
+    variant: str = P2_VARIANT,
 ) -> list[dict]:
-    """逐标的跑 full 变体（同快照）；已有材料跳过（续跑不重烧 token）。"""
+    """逐标的跑指定变体（同快照）；已有材料跳过（续跑不重烧 token）。
+
+    `variant="full"` = 层间对照臂（对 P1 的 analysts 产物）；`variant="analysts"` = B5 盲评
+    需要的另一臂渲染报告（P1 材料只存了 claims/markdown，没有 `final_report`）。
+    """
     units: list[dict] = []
     for ticker in tickers:
-        path = material_path(Path(out_dir), ticker)
+        path = material_path(Path(out_dir), ticker, variant)
         if path.exists():
-            payload = load_material(Path(out_dir), ticker)
+            payload = load_material(Path(out_dir), ticker, variant)
             print(f"[跳过] {ticker}：已有材料（{path.name}）", flush=True)
-            units.append(unit_from_state(ticker, payload["state"], llm_calls=payload["llm_calls"]))
+            units.append(
+                unit_from_state(
+                    ticker, payload["state"], llm_calls=payload["llm_calls"], variant=variant
+                )
+            )
             continue
         product = pr.load_product(pr.product_path(Path(snapshot_materials_dir), ticker))
         snapshot = dict(product.get("snapshot") or {})
         before = pr._meter(llm_meter)
-        state = dict(graph_runner(variant=P2_VARIANT, snapshot=snapshot, query=query))
+        state = dict(graph_runner(variant=variant, snapshot=snapshot, query=query))
         after = pr._meter(llm_meter)
         calls = None if before is None or after is None else after - before
         captured = capture_state(state)
@@ -246,8 +290,9 @@ def run_materials(
             state=captured,
             llm_calls=calls,
             snapshot_digest=str(product.get("snapshot_digest") or ""),
+            variant=variant,
         )
-        units.append(unit_from_state(ticker, captured, llm_calls=calls))
+        units.append(unit_from_state(ticker, captured, llm_calls=calls, variant=variant))
         print(f"[材料] {ticker} → {path.name}（calls={calls}）", flush=True)
     return units
 
@@ -291,6 +336,8 @@ def family_b_code_report(units: Sequence[dict], *, ticker_count: int | None = No
             "metric": "sanity 打回率 / 修正触发率",
             "method": "code",
             "denominator_note": "分母 = 需申报价位的决策（buy/sell）；hold/watch 无价位要求，不进分母",
+            "computed_by": "validate_trade_prices（生产同一实现；消融变体图不含 sanity 节点，"
+            "故在产物决策上补算——单次校验，不含生产主图的打回 Trader 重出回路）",
             "checked_units": len(price_units),
             "results": {r: results.count(r) for r in sorted({str(r) for r in results})},
             "fail_rate": (returned / len(price_units)) if price_units else None,

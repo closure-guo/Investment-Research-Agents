@@ -1,0 +1,160 @@
+"""族 B 判定腿测试（零 LLM）：prompt 契约、解析容错、成本闸门、盲评协议、校准材料。"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from evals.causal_ablation import family_b_judge as fj
+
+
+def _judge_returning(payload: dict | str):
+    def fn(prompt: str) -> str:
+        return payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+
+    return fn
+
+
+class TestPrompts:
+    def test_b1_prompt_carries_decision_context(self):
+        prompt = fj.b1_prompt(
+            {
+                "risk_point": "存货跌价准备计提不充分",
+                "decision_action": "hold",
+                "decision_reasoning": "潜在减值未反映",
+                "evidence_refs": [{"claim": "空头排列", "source": "technical"}],
+                "fm_decision": "approve",
+                "fm_reasoning": "同意",
+            }
+        )
+        for token in ("存货跌价", "hold", "潜在减值", "空头排列", "approve"):
+            assert token in prompt
+        assert '"absorbed"' in prompt  # 输出契约在 prompt 里
+
+    def test_b2_prompt_carries_both_sides(self):
+        prompt = fj.b2_prompt({"rebutted_point": "需求崩塌", "rebuttal_text": "基数效应"})
+        assert "需求崩塌" in prompt and "基数效应" in prompt
+
+    def test_b5_prompt_asks_decision_value_not_length(self):
+        prompt = fj.b5_prompt("AAA", "BBB")
+        assert "决策辅助价值" in prompt and "不看篇幅" in prompt
+
+
+class TestB1B2Runs:
+    def _rows(self, n: int, ticker: str = "600519") -> list[dict]:
+        return [
+            {"unit_id": f"{ticker}::b1::{i}", "ticker": ticker, "risk_point": f"p{i}"}
+            for i in range(n)
+        ]
+
+    def test_labels_and_reasons_recorded(self):
+        out = fj.run_b1_judgments(
+            self._rows(2), llm_fn=_judge_returning({"absorbed": True, "reason": "理由在决策里"})
+        )
+        assert [r["judge_label"] for r in out] == [True, True]
+        assert out[0]["judge_reason"] == "理由在决策里"
+        assert out[0]["judge_parse_failed"] is False
+
+    def test_per_ticker_cap_is_deterministic(self):
+        rows = self._rows(10)
+        out = fj.run_b1_judgments(rows, llm_fn=_judge_returning({"absorbed": False}), per_ticker=3)
+        assert [r["unit_id"] for r in out] == ["600519::b1::0", "600519::b1::1", "600519::b1::2"]
+
+    def test_parse_failure_is_none_not_false(self):
+        """解析失败不得记 false（那是「未吸收」的意思，与「没判定」是两回事）。"""
+        out = fj.run_b1_judgments(self._rows(1), llm_fn=lambda _p: "不是 JSON")
+        assert out[0]["judge_label"] is None
+        assert out[0]["judge_parse_failed"] is True
+
+    def test_exception_is_recorded_as_parse_failure(self):
+        def boom(_p: str) -> str:
+            raise RuntimeError("gateway down")
+
+        out = fj.run_b1_judgments(self._rows(1), llm_fn=boom)
+        assert out[0]["judge_parse_failed"] is True and out[0]["judge_label"] is None
+
+    def test_b2_uses_corrected_key(self):
+        out = fj.run_b2_judgments(
+            [{"unit_id": "u", "ticker": "600519", "rebutted_point": "a", "rebuttal_text": "b"}],
+            llm_fn=_judge_returning({"corrected": True, "reason": "让步了"}),
+        )
+        assert out[0]["judge_label"] is True
+
+
+class TestB5Pairwise:
+    def _pair(self, *, key: str = "600519") -> dict:
+        return {
+            "pair_key": key,
+            "ticker": "600519",
+            "report_a_id": "analysts",
+            "report_b_id": "full",
+            "report_a": "报告甲",
+            "report_b": "报告乙",
+        }
+
+    def test_three_votes_majority(self):
+        votes = iter([{"winner": "A"}, {"winner": "A"}, {"winner": "B"}])
+        out = fj.run_b5_pairwise([self._pair()], llm_fn=lambda _p: json.dumps(next(votes)))
+        assert len(out[0]["votes"]) == 3
+        assert out[0]["verdict"] == out[0]["votes"][0]  # 2:1 多数
+
+    def test_verdict_maps_back_to_real_arm(self):
+        """A/B 是展示位，判定须映射回真实臂（否则位置随机化会污染结论）。"""
+        out = fj.run_b5_pairwise(
+            [self._pair()], llm_fn=_judge_returning({"winner": "A", "reason": "r"})
+        )
+        assert out[0]["votes"] == [out[0]["position_first"]] * 3
+        assert out[0]["verdict"] == out[0]["position_first"]
+
+    def test_tie_and_failed_votes(self):
+        calls = {"n": 0}
+
+        def flaky(_p: str) -> str:
+            # 前两次都返回垃圾：`_ask_json` 失败会重试一次，只坏第一次会被重试救回来
+            calls["n"] += 1
+            return "垃圾" if calls["n"] <= 2 else json.dumps({"winner": "tie"})
+
+        out = fj.run_b5_pairwise([self._pair()], llm_fn=flaky)
+        assert out[0]["votes"] == ["tie", "tie"]  # 失败票不入票箱
+        assert out[0]["judge_parse_failed"] is True  # 少一票如实记
+        assert out[0]["verdict"] == "tie"
+
+    def test_position_is_deterministic_per_pair_key(self):
+        first = fj.run_b5_pairwise([self._pair()], llm_fn=_judge_returning({"winner": "A"}))
+        second = fj.run_b5_pairwise([self._pair()], llm_fn=_judge_returning({"winner": "A"}))
+        assert first[0]["position_first"] == second[0]["position_first"]
+
+
+class TestCalibrationMaterial:
+    def test_rows_carry_material_and_empty_human_column(self):
+        judged = [
+            {
+                "unit_id": "600519::b1::0",
+                "ticker": "600519",
+                "risk_point": "存货跌价",
+                "judge_label": True,
+                "judge_reason": "r",
+            }
+        ]
+        rows = fj.calibration_rows(judged, material_key="risk_point")
+        assert rows[0]["human_label(与判定一致?是/否)"] == ""
+        assert rows[0]["material"] == "存货跌价"
+
+    def test_gate_verdict_reports_facts_only(self):
+        judged = [
+            {"ticker": "a", "judge_label": True, "judge_parse_failed": False},
+            {"ticker": "a", "judge_label": False, "judge_parse_failed": False},
+            {"ticker": "b", "judge_label": None, "judge_parse_failed": True},
+        ]
+        verdict = fj.gate_verdict(judged, method="nli")
+        assert verdict["rows"] == 3 and verdict["labeled"] == 2
+        assert verdict["parse_failed"] == 1
+        assert verdict["positive_rate"] == pytest.approx(0.5)
+        assert "provisional" in verdict["status"]
+
+    def test_summarize_rate_none_when_nothing_labeled(self):
+        got = fj.summarize(
+            [{"ticker": "a", "judge_label": None, "judge_parse_failed": True}], key="absorbed"
+        )
+        assert got["per_ticker"]["a"]["rate"] is None  # 不得记 0

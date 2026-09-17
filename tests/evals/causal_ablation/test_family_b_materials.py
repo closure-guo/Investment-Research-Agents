@@ -232,3 +232,68 @@ class TestReport:
         unit["llm_calls"] = None
         report = fb.family_b_code_report([unit])
         assert report["cost"]["llm_calls"] is None
+
+
+class TestSanityRecompute:
+    """变体图不含 sanity 节点 → B4 用生产同一实现在产物决策上补算（并披露无打回回路）。"""
+
+    def _state_with_plan(self, *, entry: float, stop: float, target: float) -> dict:
+        import pandas as pd
+
+        return {
+            "trader_plan": {
+                "action": "buy",
+                "confidence": 0.7,
+                "reasoning": "r",
+                "entry_price": entry,
+                "stop_loss": stop,
+                "target_price": target,
+            },
+            "price_levels": {"available": True, "entry_ref": 100.0, "atr": 4.0},
+            "kline": pd.DataFrame(
+                {
+                    "日期": [f"2026-07-{d:02d}" for d in range(1, 31)],
+                    "开盘": [99.0] * 30,
+                    "最高": [101.0] * 30,
+                    "最低": [98.0] * 30,
+                    "收盘": [100.0] * 30,
+                    "成交量": [1.0e6] * 30,
+                }
+            ),
+        }
+
+    def test_valid_plan_passes_and_labels_computed_by(self):
+        got = fb.b4_unit_with_sanity(self._state_with_plan(entry=100.0, stop=95.0, target=115.0))
+        assert got["result"] in ("pass", "fail", "corrected")
+        assert got["needs_price"] is True
+        assert "validate_trade_prices" in got["computed_by"]
+
+    def test_illegal_plan_is_flagged(self):
+        """stop > entry 的 long 方案：sanity 必须拦下（否则补算等于没跑）。"""
+        got = fb.b4_unit_with_sanity(self._state_with_plan(entry=100.0, stop=105.0, target=115.0))
+        assert got["result"] in ("fail", "corrected")
+
+    def test_missing_plan_passes_as_no_requirement(self):
+        """无 trader plan → sanity 记 pass「无价位要求」（生产语义）；该 pass 是「没跑」，
+        故报告侧把这类 note 单独列入 skipped_reasons，不与「校验通过」混读。"""
+        got = fb.b4_unit_with_sanity({"trader_plan": None})
+        assert got["result"] == "pass"
+        assert got["needs_price"] is False
+
+    def test_recompute_exception_is_recorded(self, monkeypatch):
+        import finance_agent.nodes.validate as validate_mod
+
+        def boom(_state):
+            raise RuntimeError("kline 形状异常")
+
+        monkeypatch.setattr(validate_mod, "validate_trade_prices", boom)
+        got = fb.b4_unit_with_sanity(self._state_with_plan(entry=100.0, stop=95.0, target=115.0))
+        assert got["result"] is None
+        assert "补算失败" in got["note"]
+
+    def test_unit_from_state_prefers_existing_price_check(self):
+        state = self._state_with_plan(entry=100.0, stop=95.0, target=115.0)
+        state["price_check"] = {"result": "pass", "note": "来自图"}
+        unit = fb.unit_from_state("600519", state, llm_calls=19)
+        assert unit["b4"]["result"] == "pass"
+        assert "computed_by" not in unit["b4"]  # 已有图产物 → 不补算

@@ -1,0 +1,224 @@
+"""P2 族 B 分析腿：材料 → B3/B4 描述性读数 + B1/B2/B5 判定（provisional）+ 校准材料。
+
+前置：材料已跑齐
+    uv run python tests/scripts/p2_family_b_materials.py                  # full 臂（B3/B4/B1/B2）
+    uv run python tests/scripts/p2_family_b_materials.py --variant analysts  # B5 对照臂
+
+本脚本（**唯一**产出读数的地方）：
+1. B3/B4（code，不受校准门控）→ 描述性读数 + 逐标的明细；
+2. B1 吸收（nli）/ B2 修正（judge）→ 判定 + 20% 校准抽样表（人工标注列留空）；
+3. B5 pairwise（judge K=3，位置随机化）→ 多数决 + 位置分布（偏倚检验用）；
+4. 全部判定标 `provisional`：**未过校准门控不得进结论**（spec「校准门控全覆盖」）。
+
+成本（预登记 §6）：B1 ≤4 行/标的、B2 ≤4 行/标的、B5 = 1 对 × 3 票/标的。
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import sys
+from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from evals.causal_ablation import family_b_judge as fj  # noqa: E402
+from evals.causal_ablation import family_b_materials as fb  # noqa: E402
+from evals.causal_ablation import family_b_text as ft  # noqa: E402
+
+TICKERS: tuple[str, ...] = (
+    "600519",
+    "000001",
+    "002415",
+    "300750",
+    "601318",
+    "002594",
+    "600036",
+    "000858",
+    "601899",
+    "002304",
+    "601398",
+    "600030",
+    "000333",
+    "002352",
+    "601012",
+    "600887",
+    "000651",
+    "600276",
+    "601888",
+    "002027",
+)
+MATERIALS_DIR = Path("reports/ablation/p2/materials")
+OUT_DIR = Path("reports/ablation/p2")
+CALIBRATION_DIR = Path("tests/validation")
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="P2 族 B 分析腿（code 读数 + 判定 + 校准材料）")
+    parser.add_argument("--tickers", nargs="+", default=list(TICKERS))
+    parser.add_argument("--materials-dir", type=Path, default=MATERIALS_DIR)
+    parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    parser.add_argument("--calibration-dir", type=Path, default=CALIBRATION_DIR)
+    parser.add_argument("--skip-judge", action="store_true", help="只出 code 读数（零 LLM）")
+    parser.add_argument("--max-judge-calls", type=int, default=400, help="判定调用总闸门")
+    return parser.parse_args(argv)
+
+
+def _install_meter():
+    scripts_dir = str(_ROOT / "tests" / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    try:
+        import backtest_pilot_2023 as pilot_util
+        import p1_injection_pilot as pilot_cli
+
+        if pilot_cli._install_cost_meter() is None:
+            return None
+    except Exception as exc:  # noqa: BLE001 - 计量不可用不阻断分析
+        print(f"[警告] usage meter 未接线（{type(exc).__name__}: {exc}）")
+        return None
+    return lambda: len(pilot_util._usage_ledger)
+
+
+def _write_csv(path: Path, rows: Sequence[dict], columns: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(columns), extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def main() -> None:
+    from dotenv import load_dotenv
+
+    args = parse_args()
+    load_dotenv()
+    tickers = [t for t in args.tickers if fb.material_path(Path(args.materials_dir), t).exists()]
+    if not tickers:
+        print("[拒绝] 无 full 材料：先跑 p2_family_b_materials.py", file=sys.stderr)
+        raise SystemExit(2)
+    print(f"[材料] full 臂 {len(tickers)}/{len(args.tickers)} 只可用", flush=True)
+
+    states = {t: fb.load_material(Path(args.materials_dir), t)["state"] for t in tickers}
+    units = [fb.unit_from_state(t, states[t], llm_calls=None) for t in tickers]
+    report = fb.family_b_code_report(units, ticker_count=len(args.tickers))
+    report["generated_at"] = datetime.now().isoformat(timespec="seconds")
+    report["b1_b2_code"] = {
+        t: {"b1": _b1_code(states[t]), "b2": ft.b2_unit(states[t])} for t in tickers
+    }
+    print(json.dumps(report["b3"], ensure_ascii=False, indent=1))
+    print(json.dumps(report["b4"], ensure_ascii=False, indent=1))
+
+    if args.skip_judge:
+        report["judge"] = {"skipped": True}
+        print("[跳过] 判定腿未跑（--skip-judge）")
+    else:
+        meter = _install_meter()
+        before = meter() if meter else None
+        b1_rows = ft.judge_material_rows(
+            [{"ticker": t, "_state": states[t], "b1": _b1_code(states[t])} for t in tickers]
+        )
+        b2_rows = ft.b2_material_rows([{"ticker": t, "_state": states[t]} for t in tickers])
+        budget = args.max_judge_calls
+        b1_judged = fj.run_b1_judgments(b1_rows) if budget > 0 else []
+        b2_judged = fj.run_b2_judgments(b2_rows)
+        after = meter() if meter else None
+        report["judge"] = {
+            "b1": fj.gate_verdict(b1_judged, method="nli"),
+            "b2": fj.gate_verdict(b2_judged, method="judge"),
+            "b1_summary": fj.summarize(b1_judged, key="absorbed"),
+            "b2_summary": fj.summarize(b2_judged, key="corrected"),
+            "llm_calls": None if before is None or after is None else after - before,
+        }
+        calib_dir = Path(args.calibration_dir)
+        _write_csv(
+            calib_dir / "2026-09-17-p2-calibration-b1.csv",
+            fj.calibration_sample(fj.calibration_rows(b1_judged, material_key="risk_point")),
+            fj.CALIBRATION_COLUMNS,
+        )
+        _write_csv(
+            calib_dir / "2026-09-17-p2-calibration-b2.csv",
+            fj.calibration_sample(fj.calibration_rows(b2_judged, material_key="rebuttal_text")),
+            fj.CALIBRATION_COLUMNS,
+        )
+        print(
+            "[判定] B1/B2 已出（provisional）；校准抽样表已落 "
+            f"{calib_dir.as_posix()}/2026-09-17-p2-calibration-b1.csv、-b2.csv"
+        )
+
+    # B5：需要 analysts 臂的渲染报告（P1 材料只有 claims/markdown）
+    analysts_available = [
+        t for t in tickers if fb.material_path(Path(args.materials_dir), t, "analysts").exists()
+    ]
+    if len(analysts_available) == len(tickers) and not args.skip_judge:
+        pairs = [
+            {
+                "pair_key": t,
+                "ticker": t,
+                "report_a_id": "analysts",
+                "report_b_id": "full",
+                "report_a": str(states[t].get("final_report") or ""),  # 占位，下面覆盖
+                "report_b": str(states[t].get("final_report") or ""),
+            }
+            for t in tickers
+        ]
+        for pair in pairs:
+            pair["report_a"] = str(
+                fb.load_material(Path(args.materials_dir), pair["ticker"], "analysts")["state"].get(
+                    "final_report"
+                )
+                or ""
+            )
+        b5 = fj.run_b5_pairwise(pairs)
+        report["judge_b5"] = {
+            "verdicts": {r["ticker"]: r["verdict"] for r in b5},
+            "position_first": {r["ticker"]: r["position_first"] for r in b5},
+            "full_wins": sum(1 for r in b5 if r["verdict"] == "full"),
+            "analysts_wins": sum(1 for r in b5 if r["verdict"] == "analysts"),
+            "ties": sum(1 for r in b5 if r["verdict"] == "tie"),
+            "parse_failed_pairs": sum(1 for r in b5 if r["judge_parse_failed"]),
+            "status": "provisional（judge 判定，须过校准门控 ≥0.80）",
+        }
+        _write_csv(
+            Path(args.calibration_dir) / "2026-09-17-p2-calibration-b5.csv",
+            [
+                {
+                    "unit_id": f"{r['ticker']}::b5",
+                    "ticker": r["ticker"],
+                    "material": f"first={r['position_first']}｜votes={r['votes']}",
+                    "judge_label": r["verdict"],
+                    "judge_reason": "",
+                    "human_label(与判定一致?是/否)": "",
+                }
+                for r in b5
+            ],
+            fj.CALIBRATION_COLUMNS,
+        )
+        print(f"[B5] 盲评 {len(b5)} 对：{report['judge_b5']}")
+    else:
+        report["judge_b5"] = {
+            "status": "未跑",
+            "reason": "缺 analysts 臂材料（B5 需两臂渲染报告）或 --skip-judge",
+            "missing": [t for t in tickers if t not in analysts_available],
+        }
+
+    out = (
+        Path(args.out_dir) / f"p2-family-b-analysis-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    )
+    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[产物] {out.as_posix()}")
+
+
+def _b1_code(state: dict) -> dict:
+    got = ft.b1_unit(state)
+    return {k: v for k, v in got.items() if k != "all_points"}
+
+
+if __name__ == "__main__":
+    main()
