@@ -12,6 +12,12 @@ class TestVariantGraph:
             graph = build_variant_graph(variant)
             assert graph is not None
 
+    def test_through_trader_contains_trader_but_no_risk_layers(self):
+        """B5 修正臂（2026-09-18 owner 批准）：裁掉风控辩论+FM、保留 Trader——
+        两臂都含决策层，消掉 analysts 对 full 的同义反复口径。"""
+        graph = build_variant_graph("through_trader")
+        assert graph is not None
+
     def test_unknown_variant_raises(self):
         import pytest
 
@@ -220,7 +226,7 @@ class TestAnchorCoverageWiring:
         monkeypatch.setattr(ablation, "run_variant_once", fake_run_once)
         ablation.run_ablation(["600519"], repeats=2, judge_repeats=1)
         records = {r["variant"]: r for r in captured["runs"] if r["ticker"] == "600519"}
-        assert len(captured["runs"]) == 6
+        assert len(captured["runs"]) == 8
         assert records["analysts"]["argument_anchor_coverage"] is None, "无论点不得伪造 0"
         assert records["analysts"]["argument_anchor_coverage_detail"] is None
         assert records["plus_debate"]["argument_anchor_coverage"] == 0.25
@@ -349,7 +355,7 @@ class TestCitationBucketWiring:
         monkeypatch.setattr(ablation, "run_variant_once", fake_run_once)
         ablation.run_ablation(["600519"], repeats=2, judge_repeats=1)
         records = {r["variant"]: r for r in captured["runs"] if r["ticker"] == "600519"}
-        assert len(captured["runs"]) == 6
+        assert len(captured["runs"]) == 8
         for variant in ("analysts", "plus_debate", "full"):
             assert records[variant]["citation_buckets"] == {
                 "blocked": 0,
@@ -856,6 +862,16 @@ class TestJudgeDimApplicability:
 
         assert _applicable_dims("plus_debate") == ("report_relevance", "debate_quality")
 
+    def test_through_trader_has_decision_but_no_consistency(self):
+        from evals.ablation import _applicable_dims
+
+        # B5 修正臂：有 Trader 决策层（grounding 可评）、无风控辩论/FM（consistency 不评）
+        assert _applicable_dims("through_trader") == (
+            "report_relevance",
+            "debate_quality",
+            "decision_grounding",
+        )
+
     def test_full_all_dims(self):
         from evals.ablation import _applicable_dims
 
@@ -1117,7 +1133,7 @@ class TestRunAblationScoringDelegation:
         monkeypatch.setattr(ablation, "score_run", spy, raising=False)
         self._patch_pipeline(ablation, monkeypatch)
         report = ablation.run_ablation(["600519"], repeats=2, judge_repeats=2)
-        assert len(calls) == 6, "1 标的 × 3 变体 × 2 重复 = 每 run 一次库侧判分入口"
+        assert len(calls) == 8, "1 标的 × 4 变体 × 2 重复 = 每 run 一次库侧判分入口"
         assert all(call[3] == 2 for call in calls), "judge_repeats 须透传"
         assert {call[:3] for call in calls} == {
             (variant, "600519", repeat) for variant in ablation._VARIANTS for repeat in range(2)

@@ -59,6 +59,8 @@ class _FakeAblation:
             return ("report_relevance",)
         if variant == "plus_debate":
             return ("report_relevance", "debate_quality")
+        if variant == "through_trader":
+            return ("report_relevance", "debate_quality", "decision_grounding")
         return tuple(self.JUDGE_DIMS)
 
     # 被驱动 monkeypatch 的入口
@@ -623,7 +625,9 @@ class TestScoringDelegation:
         env.ablation = real_ablation
         path = _run(env, tickers=["600519"], repeats=1)
 
-        assert scored == [(variant, "600519", 0) for variant in ["analysts", "plus_debate", "full"]]
+        assert scored == [
+            (v, "600519", 0) for v in ["analysts", "plus_debate", "through_trader", "full"]
+        ]
         for variant in ["analysts", "plus_debate", "full"]:
             material = env.materials / f"{variant}-600519-0.json"
             assert json.loads(material.read_text(encoding="utf-8")) == {

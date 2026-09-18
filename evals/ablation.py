@@ -61,9 +61,11 @@ from finance_agent.nodes.trader import trader
 from finance_agent.routing import after_citation, after_fund_manager
 from finance_agent.state import AnalysisState
 
-Variant = Literal["analysts", "plus_debate", "full"]
+Variant = Literal["analysts", "plus_debate", "through_trader", "full"]
 JUDGE_DIMS = ["report_relevance", "debate_quality", "decision_grounding", "consistency"]
-_VARIANTS: tuple[Variant, ...] = ("analysts", "plus_debate", "full")
+_VARIANTS: tuple[Variant, ...] = ("analysts", "plus_debate", "through_trader", "full")
+# through_trader（B5 修正臂，2026-09-18）：analysts+辩论+研究经理+Trader，无风控辩论/FM——
+# 两臂都含决策层，修 analysts 对 full 的同义反复口径（analysts 臂无决策章节而判据问决策）。
 
 
 def _applicable_dims(variant: Variant) -> tuple[str, ...]:
@@ -76,6 +78,9 @@ def _applicable_dims(variant: Variant) -> tuple[str, ...]:
         return ("report_relevance",)
     if variant == "plus_debate":
         return ("report_relevance", "debate_quality")
+    if variant == "through_trader":
+        # 有 Trader 决策层、无风控辩论/FM——consistency 评的是全链闭合，裁层臂不评
+        return ("report_relevance", "debate_quality", "decision_grounding")
     return tuple(JUDGE_DIMS)
 
 
@@ -128,7 +133,7 @@ def build_variant_graph(variant: Variant) -> CompiledStateGraph:
     render_target = "generate_report"
 
     # ── Layer II: Bull/Bear 两轮辩论（轮次间 barrier）──
-    if variant in ("plus_debate", "full"):
+    if variant in ("plus_debate", "through_trader", "full"):
         g.add_node("debate_r1_entry", _node(_entry))
         g.add_node("bull_r1", _node(bull_debater))
         g.add_node("bear_r1", _node(bear_debater))
@@ -170,6 +175,10 @@ def build_variant_graph(variant: Variant) -> CompiledStateGraph:
         g.add_edge("risk_judge", "fund_manager")
         # 退回 trader（最多 1 次）或放行生成报告——同主图 after_fund_manager
         g.add_conditional_edges("fund_manager", after_fund_manager)
+    elif variant == "through_trader":
+        g.add_node("trader", _node(trader))
+        g.add_edge("research_manager", "trader")
+        g.add_edge("trader", "generate_report")
     elif variant == "plus_debate":
         g.add_edge("research_manager", "generate_report")
 
