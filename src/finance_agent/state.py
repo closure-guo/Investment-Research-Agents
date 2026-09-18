@@ -154,7 +154,10 @@ class AnalysisState(TypedDict, total=False):
     citation_fail_buckets: dict[str, int]  # 桶计数（value_mismatch/path_unresolvable/...）
     citation_coverage_gap: bool  # 覆盖率缺口（重试准入路由读取；incident 027 补声明）
     value_mismatch_repaired: (
-        int  # 数值失配修复数（analyst_true_fail 口径组件；incident 027 补声明）
+        int  # 数值失配修复数（deprecated all_passed 口径，保留一轮跨口径对照；incident 029）
+    )
+    value_mismatch_repaired_claims: (
+        int  # 按 claim 修复记账：重校验后目标 claim PASS 即计（incident 029 处置）
     )
     citation_coverage: float  # 正文数字普查覆盖率（0-1，监控不进路由）
 

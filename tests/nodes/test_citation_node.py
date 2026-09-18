@@ -994,6 +994,41 @@ class TestSurgicalRepair:
         md2 = rpt.markdown if hasattr(rpt, "markdown") else rpt["markdown"]
         assert "38.0%" in md2 and "99.0%" not in md2
 
+    def test_per_claim_accounting_when_unrelated_fail_blocks_all_passed(self, monkeypatch):
+        """incident 029 处置（任务 3）：修复改对了目标 claim，但同分析师另有无关 FAIL
+        （path_unresolvable，all_passed=False）——目标 claim 仍须计入
+        value_mismatch_repaired_claims；旧 all_passed 口径字段保持 0（deprecated 对照）。"""
+        md = "2023 年资产负债率为 99.0%，杠杆水平异常偏高。"
+        unrelated = Claim(
+            claim_type="numerical",
+            source_type="data",
+            field_ref="solvency_metrics.不存在的指标.2023",
+            stated_value=1.0,
+            interpretation="无关指标（制造非 value_mismatch 的残余 FAIL）",
+        )
+
+        def fake_repair(markdown, failures, llm_config=None):
+            return markdown.replace("99.0%", "38.0%"), [
+                {
+                    "agent": "fundamental",
+                    "field_ref": "x",
+                    "ground_truth": 38.0,
+                    "repaired": True,
+                    "updated_claim": self._bad(stated=38.0).model_copy(
+                        update={"interpretation": "2023 年资产负债率为 38.0%，杠杆水平异常偏高。"}
+                    ),
+                }
+            ]
+
+        monkeypatch.setattr(citation_node, "repair_claims", fake_repair)
+        out = verify_citations(self._state([self._bad(), unrelated], md))
+        # 新口径：目标 claim 修好即计（不被无关 FAIL 拦截）
+        assert out["value_mismatch_repaired_claims"] == 1
+        # 旧口径（deprecated）：all_passed=False → 0
+        assert out["value_mismatch_repaired"] == 0
+        # 行为不变：仍有残余 FAIL → 该分析师照走全量定向重试
+        assert "fundamental" in out["citation_retry_targets"]
+
     def test_dense_fail_falls_back_to_full_retry(self, monkeypatch):
         claims = [self._bad(99.0 + i) for i in range(4)]
         md = "资产负债率 99.0%、99.1%、99.2%、99.3% 均异常。"
