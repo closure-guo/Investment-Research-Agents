@@ -23,5 +23,5 @@
 ## 5. 验证与收口
 
 - [ ] 5.1 全套单测 + ruff + mypy 过；既有四桶/重试语义回归不红
-- [ ] 5.2 用 601318 / 600276 两个终裁案例做验收夹具（假 FAIL 复现 → 修复后判 blocked/contract_error）
-- [ ] 5.3 validation 报告：四件修复对照终裁证据的验证记录 + 人工验证报告落 `tests/validation/`
+- [x] 5.2 用 601318 / 600276 两个终裁案例做验收夹具（假 FAIL 复现 → 修复后判 blocked/contract_error）
+- [x] 5.3 validation 报告：四件修复对照终裁证据的验证记录 + 人工验证报告落 `tests/validation/`
