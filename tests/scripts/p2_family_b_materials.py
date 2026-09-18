@@ -61,9 +61,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ticks", type=int, default=0, help="只跑前 N 只（0=全部；通路验证用）")
     parser.add_argument(
         "--variant",
-        choices=("full", "analysts"),
+        choices=("full", "analysts", "through_trader"),
         default="full",
-        help="跑哪个变体（full=层间对照臂；analysts=B5 盲评的另一臂渲染报告）",
+        help="跑哪个变体（full=层间对照臂；analysts/through_trader=B5 盲评对照臂的渲染报告；"
+        "through_trader 含 Trader 决策层——B5 修正口径，预登记 §9）",
     )
     return parser.parse_args(argv)
 
