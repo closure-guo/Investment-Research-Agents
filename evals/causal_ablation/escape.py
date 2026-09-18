@@ -9,6 +9,9 @@ VERIFIER_BUCKETS: tuple[str, ...] = (
     "analyst_true_fail",
     "surgical_repaired",
     "verifier_normalized",
+    # 值槽类型错填（eval-driven-contract-fixes 任务 2）：claim 契约病（变化量入水平槽），
+    # 校验器侧不计逃逸分母、不算分析师幻觉
+    "claim_contract_error",
 )
 
 

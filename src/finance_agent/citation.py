@@ -98,6 +98,9 @@ class CitationResult(BaseModel):
             "direction_mismatch",
             # 比较型差值申报（非三枚举 stated_value）：显式降级，独立桶计缺口
             "comparative_delta_unregistered",
+            # 值槽类型错填（eval-driven-contract-fixes 任务 2）：变化量入水平值槽，
+            # claim 契约病——不算分析师幻觉、不触发修复（600276 A4 自然腿终裁）
+            "claim_contract_error",
         ]
         | None
     ) = None
@@ -528,6 +531,23 @@ def _unit_from_interpretation(claim: Claim) -> str | None:
     return None
 
 
+# 值槽类型错填（eval-driven-contract-fixes 任务 2）：interpretation 声明数值为
+# 环比/同比变化量（…个百分点）而 field_ref 真值为水平值 → claim 契约错，非分析师幻觉
+_DELTA_SLOT_RE = re.compile(r"(环比|同比)[^。；]{0,16}个百分点")
+
+
+def _is_delta_in_level_slot(interpretation: str | None, gt_float: float, stated: float) -> bool:
+    """双信号判据：①变化量措辞（环比/同比…个百分点）②与真值量级差 >10 倍。
+
+    单一信号不判——环比措辞配变化量字段（量级一致）是合法 claim；量级差但无
+    变化量措辞走既有 percent/亿/万 归一候选。依据：600276 A4 自然腿终裁
+    （PMI 环比 0.6 填进水平值槽 49.8，正文算术正确，修复回路定位落空是正确行为）。"""
+    if not _DELTA_SLOT_RE.search(str(interpretation or "")):
+        return False
+    s, g = abs(float(stated)), abs(gt_float)
+    return s > 0 and g > 0 and (g / s > 10 or s / g > 10)
+
+
 def _verify_numerical(claim: Claim, state: dict) -> CitationResult:
     """数值型 claim：直接读 state 字段，绝对容差 0.01 比对。
 
@@ -553,6 +573,14 @@ def _verify_numerical(claim: Claim, state: dict) -> CitationResult:
             ground_truth=None,
             delta=None,
             bucket="path_unresolvable",
+        )
+    if _is_delta_in_level_slot(claim.interpretation, gt_float, sv_float):
+        return CitationResult(
+            status="FAIL",
+            claim=claim,
+            ground_truth=gt_float,
+            delta=None,
+            bucket="claim_contract_error",
         )
     # ehr-style-claim-direction：已申报方向 → 先按 sign(stated)×direction 与
     # 真值符号对齐（「下滑 10.05%」↔ gt=-10.05 用 eff=-10.05 比对），符号冲突

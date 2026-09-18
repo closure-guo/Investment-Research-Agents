@@ -80,3 +80,14 @@ class TestFalsePositiveSplit:
     def test_unknown_bucket_rejected(self):
         with pytest.raises(ValueError, match="未知桶"):
             split_verifier_buckets({"误报": 1})
+
+
+class TestClaimContractErrorBucket:
+    """claim_contract_error 桶（任务 2）：校验器侧契约病，进拆报不计逃逸分母。"""
+
+    def test_contract_error_bucket_accepted_in_split(self):
+        from evals.causal_ablation.escape import split_verifier_buckets
+
+        got = split_verifier_buckets({"claim_contract_error": 2, "analyst_true_fail": 1})
+        assert got["claim_contract_error"] == 2
+        assert got["total"] == 3

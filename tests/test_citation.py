@@ -1057,3 +1057,59 @@ class TestSynonymColumnDisambiguation:
 
         state = self._state({"归属于母公司的净利润": 100.0, "归母净利润": 200.0})
         assert _resolve_field_ref("income_statement.归母净利润", state) == 100.0
+
+
+class TestClaimContractError:
+    """值槽类型校验（eval-driven-contract-fixes 任务 2；600276 A4 自然腿终裁：
+    PMI 环比变化 0.6 填进水平值槽 49.8，正文算术正确，claim 契约错——不算分析师幻觉、不触发修复）。"""
+
+    @staticmethod
+    def _state() -> dict:
+        return {
+            "macro_indicators": {
+                "pmi": {
+                    "records": [
+                        {"报告日": "2026-08-31", "制造业-指数": 49.8},
+                        {"报告日": "2026-07-31", "制造业-指数": 49.2},
+                    ]
+                }
+            }
+        }
+
+    def test_delta_in_level_slot_is_contract_error_not_value_mismatch(self):
+        claim = Claim(
+            claim_type="numerical",
+            source_type="data",
+            field_ref="macro_indicators.pmi.0.制造业-指数",
+            stated_value=0.6,
+            interpretation="制造业 PMI 由 7月 49.2 回升至 8月 49.8，环比改善 0.6 个百分点",
+        )
+        (r,) = verify_claims([claim], self._state())
+        assert r.status == "FAIL"
+        assert r.bucket == "claim_contract_error"  # 不进 value_mismatch（幻觉口径）
+
+    def test_level_value_in_level_slot_unaffected(self):
+        claim = Claim(
+            claim_type="numerical",
+            source_type="data",
+            field_ref="macro_indicators.pmi.0.制造业-指数",
+            stated_value=49.8,
+            interpretation="制造业 PMI 8月为 49.8",
+        )
+        (r,) = verify_claims([claim], self._state())
+        assert r.status == "PASS"
+        assert r.bucket is None
+
+    def test_delta_wording_with_consistent_magnitude_not_contract_error(self):
+        """双信号判据：环比措辞但量级一致（真值本就是变化量字段）→ 走正常比对。"""
+        state = {"growth": {"records": [{"指标": 0.55}]}}
+        claim = Claim(
+            claim_type="numerical",
+            source_type="data",
+            field_ref="growth.records.0.指标",
+            stated_value=0.6,
+            interpretation="环比改善 0.6 个百分点",
+        )
+        (r,) = verify_claims([claim], state)
+        assert r.bucket in (None, "value_mismatch")  # 正常路径，非契约错误
+        assert r.bucket != "claim_contract_error"
