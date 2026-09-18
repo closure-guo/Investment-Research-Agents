@@ -29,11 +29,21 @@ def merge_write(
     user_columns: tuple[str, ...] = DEFAULT_USER_COLS,
     *,
     dry_run: bool = False,
+    init_user_col: str | None = None,
 ) -> int:
     with path.open(encoding="utf-8-sig", newline="") as fh:
         reader = csv.DictReader(fh)
         rows = list(reader)
         fields = list(reader.fieldnames or [])
+
+    if init_user_col:
+        if init_user_col in fields:
+            print(f"[拒绝] 用户列 {init_user_col} 已存在，无需初始化")
+            return 4
+        fields.append(init_user_col)
+        for r in rows:
+            r[init_user_col] = ""
+        user_columns = tuple(user_columns) + (init_user_col,)
 
     user_set = set(user_columns)
     # 约束 1：更新内容碰用户列 → 拒绝
@@ -93,9 +103,16 @@ def main() -> int:
     ap.add_argument("--updates", required=True, help="JSON 文件：{unit_id: {机器列: 新值}}")
     ap.add_argument("--user-cols", nargs="*", default=list(DEFAULT_USER_COLS))
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--init-user-col", default=None, help="初始化一个新的空用户列（并纳入保护）")
     args = ap.parse_args()
     updates = json.loads(Path(args.updates).read_text(encoding="utf-8"))
-    return merge_write(Path(args.file), updates, tuple(args.user_cols), dry_run=args.dry_run)
+    return merge_write(
+        Path(args.file),
+        updates,
+        tuple(args.user_cols),
+        dry_run=args.dry_run,
+        init_user_col=args.init_user_col,
+    )
 
 
 if __name__ == "__main__":
