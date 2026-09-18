@@ -205,8 +205,8 @@ class TestSpreadSampling:
         assert [r["unit_id"] for r in out] == ["u0", "u1"]
 
 
-class TestPromptV2:
-    """v2（2026-09-18 校准终裁驱动）：B1 双问 + 通道分账 + 判例；B2 顶撞判例。"""
+class TestPromptV2Archived:
+    """v2 归档（2026-09-18 验证未过门 0.825/0.750/0.690）：默认回 v1，v2 只作单变量迭代基线。"""
 
     ROW = {
         "unit_id": "600000::b1::0",
@@ -220,48 +220,39 @@ class TestPromptV2:
         "reference_points": ["营收零增长", "利润微增"],
     }
 
-    def test_b1_prompt_dual_question_channel_rule_and_reference_pool(self):
+    def test_v1_is_default_rubric_and_prompt(self):
+        assert fj.B1_RUBRIC == "b1-v1" and fj.B2_RUBRIC == "b2-v1"
         prompt = fj.b1_prompt(self.ROW)
-        assert '"new_risk_point"' in prompt and '"absorbed"' in prompt  # 双问输出契约
-        assert "营收零增长" in prompt and "利润微增" in prompt  # 参照池进材料
-        assert "辩论下游" in prompt and "分析师通道" in prompt  # 通道分账规则
-        assert "权重主张" in prompt  # 框架/判断判例表
-        assert "（来源 technical）" in prompt  # 引用带来源标签（分账依据）
+        assert '"absorbed"' in prompt
+        assert '"new_risk_point"' not in prompt  # v1 默认单问（v2 双问未过门不进默认）
+        assert "营收零增长" not in prompt  # v1 不带参照池
 
-    def test_b1_prompt_without_reference_pool_renders_placeholder(self):
-        row = {k: v for k, v in self.ROW.items() if k != "reference_points"}
-        assert "（无）" in fj.b1_prompt(row)
+    def test_b1_prompt_v2_keeps_dual_question_channel_rule_and_exemplars(self):
+        prompt = fj.b1_prompt_v2(self.ROW)
+        assert '"new_risk_point"' in prompt and '"absorbed"' in prompt
+        assert "营收零增长" in prompt and "利润微增" in prompt
+        assert "辩论下游" in prompt and "分析师通道" in prompt
+        assert "权重主张" in prompt
+        assert "（来源 technical）" in prompt
 
-    def test_b1_run_records_newness_label_and_rubric(self):
+    def test_b2_prompt_v2_keeps_adjudicated_exemplars(self):
+        prompt = fj.b2_prompt_v2({"rebutted_point": "需求崩塌", "rebuttal_text": "基数效应"})
+        assert "顶撞" in prompt and "拨备" in prompt
+
+    def test_runner_override_for_single_variant_experiments(self):
         judged = fj.run_b1_judgments(
             [self.ROW],
             llm_fn=_judge_returning({"new_risk_point": True, "absorbed": False, "reason": "x"}),
+            prompt_fn=fj.b1_prompt_v2,
+            rubric="b1-v2a",
         )
         assert judged[0]["judge_label"] is False
         assert judged[0]["judge_new_risk_point"] is True
-        assert judged[0]["rubric"] == fj.B1_RUBRIC
+        assert judged[0]["rubric"] == "b1-v2a"
 
     def test_b1_run_v1_payload_newness_is_none_not_crash(self):
         judged = fj.run_b1_judgments(
             [self.ROW], llm_fn=_judge_returning({"absorbed": True, "reason": "x"})
         )
         assert judged[0]["judge_new_risk_point"] is None
-
-    def test_b2_prompt_carries_adjudicated_exemplars(self):
-        prompt = fj.b2_prompt({"rebutted_point": "需求崩塌", "rebuttal_text": "基数效应"})
-        assert "顶撞" in prompt  # 顶撞型修正判例
-        assert "拨备" in prompt  # 终裁 false 判例（另种可能无实证）
-
-    def test_b2_run_stamps_rubric(self):
-        judged = fj.run_b2_judgments(
-            [
-                {
-                    "unit_id": "600000::b2::0",
-                    "ticker": "600000",
-                    "rebutted_point": "a",
-                    "rebuttal_text": "b",
-                }
-            ],
-            llm_fn=_judge_returning({"corrected": False, "reason": "x"}),
-        )
-        assert judged[0]["rubric"] == fj.B2_RUBRIC
+        assert judged[0]["rubric"] == "b1-v1"

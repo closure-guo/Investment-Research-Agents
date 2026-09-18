@@ -25,9 +25,12 @@ B1_PER_TICKER = 4
 B2_PER_TICKER = 4
 B5_VOTES = 3
 
-# rubric 版本（校准门控绑定；v2 = 2026-09-18 校准终裁驱动的通道分账 + 双问 + 顶撞判例）
-B1_RUBRIC = "b1-v2"
-B2_RUBRIC = "b2-v2"
+# rubric 版本（校准门控绑定）。默认 = v1（2026-09-18 过门：B1 吸收 0.875 / B2 0.906）。
+# v2（通道分账+双问+顶撞判例）2026-09-18 校准样本验证**未过门**：B1 吸收 0.825 / B1 新增 0.750 /
+# B2 0.690（顶撞判例判松 + 通道规则判严 + 双变量同动无法归因）——模板归档为 _*_TEMPLATE_V2，
+# 只作单变量迭代基线，不得进结论。
+B1_RUBRIC = "b1-v1"
+B2_RUBRIC = "b2-v1"
 
 JudgeFn = Callable[[str], str]
 
@@ -54,9 +57,42 @@ def _ask_json(prompt: str, llm_fn: JudgeFn) -> dict | None:
     return None
 
 
-# ── B1：新增风险点是否被决策吸收（nli） ──
+# ── B1：新增风险点是否被决策吸收（nli）── v1 默认（过门 0.875）──
 
-_B1_TEMPLATE = """你是判定员。对下面这条「辩论空方风险点」回答两个问题。
+_B1_TEMPLATE = """你是判定员。判断「决策是否吸收了下面这条风险点」。
+
+判定口径（宁严勿宽）：
+- 吸收 = 决策的理由/依据里**明确回应**了该风险点（采纳、量化、或作为不行动的理由）；
+- 只是同一主题被提到但未回应风险本身 → 未吸收；
+- 决策方向与该风险相反但给出理由 → 算吸收（理由即回应）。
+
+风险点：{risk_point}
+
+决策动作：{action}
+决策理由：{reasoning}
+决策依据引用：{evidence_refs}
+基金经理裁决：{fm_decision}；理由：{fm_reasoning}
+
+只输出 JSON: {{"absorbed": true|false, "reason": "<一句话依据>"}}"""
+
+
+def b1_prompt(row: dict) -> str:
+    refs = "；".join(
+        f"{r.get('claim')}（来源 {r.get('source')}）" for r in row.get("evidence_refs") or []
+    )
+    return _B1_TEMPLATE.format(
+        risk_point=row.get("risk_point") or "",
+        action=row.get("decision_action") or "",
+        reasoning=row.get("decision_reasoning") or "",
+        evidence_refs=refs or "（无）",
+        fm_decision=row.get("fm_decision") or "（无）",
+        fm_reasoning=row.get("fm_reasoning") or "（无）",
+    )
+
+
+# ── B1 v2（归档：2026-09-18 未过门 0.825/0.750，单变量迭代基线）──
+
+_B1_TEMPLATE_V2 = """你是判定员。对下面这条「辩论空方风险点」回答两个问题。
 
 Q1「是否新增」（new_risk_point）：风险点里有没有分析师发现**没有提供过**的判断或事实？
 判法（两问口诀）：把风险点里分析师已说过的事实全部删掉，看剩下什么——
@@ -87,12 +123,12 @@ fundamental/technical/macro/sentiment = 分析师通道；debate_*/risk_*/resear
 只输出 JSON: {{"new_risk_point": true|false, "absorbed": true|false, "reason": "<一句话依据>"}}"""
 
 
-def b1_prompt(row: dict) -> str:
+def b1_prompt_v2(row: dict) -> str:
     refs = "；".join(
         f"{r.get('claim')}（来源 {r.get('source')}）" for r in row.get("evidence_refs") or []
     )
     points = [str(p) for p in row.get("reference_points") or []]
-    return _B1_TEMPLATE.format(
+    return _B1_TEMPLATE_V2.format(
         risk_point=row.get("risk_point") or "",
         n_references=len(points),
         reference_points=" ｜ ".join(points) or "（无）",
@@ -104,9 +140,32 @@ def b1_prompt(row: dict) -> str:
     )
 
 
-# ── B2：被反驳的论点是否被修正（judge） ──
+# ── B2：被反驳的论点是否被修正（judge）── v1 默认（过门 0.906）──
 
 _B2_TEMPLATE = """你是判定员。判断「后续轮次的反驳是否**修正**了被反驳的论点」。
+
+判定口径（宁严勿宽）：
+- 修正 = 反驳给出了与原论点冲突的证据/推理，且原论点被放弃或收窄（改口、让步、降级措辞）；
+- 只是重申立场、换个说法重复、或新增无关论点 → 未修正；
+- 双方各说各话（原论点未被回应）→ 未修正。
+
+被反驳的论点（前一轮）：{rebutted_point}
+
+反驳行文（后一轮）：{rebuttal_text}
+
+只输出 JSON: {{"corrected": true|false, "reason": "<一句话依据>"}}"""
+
+
+def b2_prompt(row: dict) -> str:
+    return _B2_TEMPLATE.format(
+        rebutted_point=row.get("rebutted_point") or "",
+        rebuttal_text=row.get("rebuttal_text") or "",
+    )
+
+
+# ── B2 v2（归档：2026-09-18 未过门 0.690——顶撞判例判松，单变量迭代基线）──
+
+_B2_TEMPLATE_V2 = """你是判定员。判断「后续轮次的反驳是否**修正**了被反驳的论点」。
 
 判定口径（宁严勿宽）：
 - 修正 = 反驳给出了与原论点冲突的证据/推理，**直接顶撞原论点本身**（否定其前提、归因或结论，逼其收窄或放弃）；
@@ -126,8 +185,8 @@ _B2_TEMPLATE = """你是判定员。判断「后续轮次的反驳是否**修正
 只输出 JSON: {{"corrected": true|false, "reason": "<一句话依据>"}}"""
 
 
-def b2_prompt(row: dict) -> str:
-    return _B2_TEMPLATE.format(
+def b2_prompt_v2(row: dict) -> str:
+    return _B2_TEMPLATE_V2.format(
         rebutted_point=row.get("rebutted_point") or "",
         rebuttal_text=row.get("rebuttal_text") or "",
     )
@@ -159,31 +218,44 @@ def b5_prompt(report_a: str, report_b: str) -> str:
 
 
 def run_b1_judgments(
-    rows: Sequence[dict], *, llm_fn: JudgeFn | None = None, per_ticker: int = B1_PER_TICKER
+    rows: Sequence[dict],
+    *,
+    llm_fn: JudgeFn | None = None,
+    per_ticker: int = B1_PER_TICKER,
+    prompt_fn: Callable[[dict], str] | None = None,
+    rubric: str | None = None,
 ) -> list[dict]:
-    """B1 双问判定（新增 + 吸收；每标的取前 N 行；行数上限是成本闸门，写进预登记 §6）。"""
+    """B1 吸收判定（每标的取前 N 行；行数上限是成本闸门，写进预登记 §6）。
+
+    prompt_fn/rubric 覆盖仅用于**单变量迭代实验**（如 b1_prompt_v2 + "b1-v2"）——
+    非 v1 rubric 的判定未过校准门控，不得进结论。"""
     return _run_rows(
         rows,
-        prompt_fn=b1_prompt,
+        prompt_fn=prompt_fn or b1_prompt,
         key="absorbed",
         llm_fn=llm_fn,
         per_ticker=per_ticker,
         extra_keys=("new_risk_point",),
-        rubric=B1_RUBRIC,
+        rubric=rubric or B1_RUBRIC,
     )
 
 
 def run_b2_judgments(
-    rows: Sequence[dict], *, llm_fn: JudgeFn | None = None, per_ticker: int = B2_PER_TICKER
+    rows: Sequence[dict],
+    *,
+    llm_fn: JudgeFn | None = None,
+    per_ticker: int = B2_PER_TICKER,
+    prompt_fn: Callable[[dict], str] | None = None,
+    rubric: str | None = None,
 ) -> list[dict]:
-    """B2 修正判定（每标的取前 N 行）。"""
+    """B2 修正判定（每标的取前 N 行；覆盖参数语义同 run_b1_judgments）。"""
     return _run_rows(
         rows,
-        prompt_fn=b2_prompt,
+        prompt_fn=prompt_fn or b2_prompt,
         key="corrected",
         llm_fn=llm_fn,
         per_ticker=per_ticker,
-        rubric=B2_RUBRIC,
+        rubric=rubric or B2_RUBRIC,
     )
 
 

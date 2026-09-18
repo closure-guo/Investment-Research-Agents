@@ -221,13 +221,18 @@ def main() -> None:
                 "b1",
                 out_dir,
                 fj.run_b1_judgments,
-                version=fj.B1_RUBRIC.removeprefix("b1-"),
+                # rubric 非默认版才用带后缀的缓存文件（v1 缓存 = 原 judged-b1.jsonl，已过门继续复用）
+                version=None if fj.B1_RUBRIC.endswith("-v1") else fj.B1_RUBRIC.removeprefix("b1-"),
             )
             if budget > 0
             else []
         )
         b2_judged = _run_with_cache(
-            b2_rows, "b2", out_dir, fj.run_b2_judgments, version=fj.B2_RUBRIC.removeprefix("b2-")
+            b2_rows,
+            "b2",
+            out_dir,
+            fj.run_b2_judgments,
+            version=None if fj.B2_RUBRIC.endswith("-v1") else fj.B2_RUBRIC.removeprefix("b2-"),
         )
         after = meter() if meter else None
         report["judge"] = {
