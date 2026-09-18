@@ -30,5 +30,9 @@
 ## 回归与遗留
 
 - 受影响测试区全绿：citation 族 + causal_ablation（500+）+ debate prompts（27）+ citation_node（含修复记账）；mypy/ruff 全过。
-- 全套后端回归（不带 -x）跑批中——结果出来后补记于本节。
+- 全套后端回归已完成（41 分钟，剔除 4 个 live 网络测试）：**2991 过 + 24 失败**；24 失败
+  全部同源——任务 2 新桶未传播进 `evals/ablation` 的桶抽取与方向表（第五桶传播缺口，
+  commit 73c6bfa 修复：抽取器补 `citation_fail_buckets` 源、方向表登记 True、24 处精确
+  断言更新）。修复后 tests/evals 全量 **1049 过**，citation/node/prompt 区 120 过。
+  4 个 live 测试为网络环境既有失败（与本次无关）。
 - 提示词收紧效果验证：下一轮 P2 材料跑批后复扫 grounding（预期无源率显著下降），登记为下轮验证点。
