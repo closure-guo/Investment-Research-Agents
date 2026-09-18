@@ -203,3 +203,65 @@ class TestSpreadSampling:
             per_ticker=2,
         )
         assert [r["unit_id"] for r in out] == ["u0", "u1"]
+
+
+class TestPromptV2:
+    """v2（2026-09-18 校准终裁驱动）：B1 双问 + 通道分账 + 判例；B2 顶撞判例。"""
+
+    ROW = {
+        "unit_id": "600000::b1::0",
+        "ticker": "600000",
+        "risk_point": "机构资金持续撤离，趋势未扭转",
+        "decision_action": "hold",
+        "decision_reasoning": "维持观望",
+        "evidence_refs": [{"claim": "空头排列", "source": "technical"}],
+        "fm_decision": "approve",
+        "fm_reasoning": "同意",
+        "reference_points": ["营收零增长", "利润微增"],
+    }
+
+    def test_b1_prompt_dual_question_channel_rule_and_reference_pool(self):
+        prompt = fj.b1_prompt(self.ROW)
+        assert '"new_risk_point"' in prompt and '"absorbed"' in prompt  # 双问输出契约
+        assert "营收零增长" in prompt and "利润微增" in prompt  # 参照池进材料
+        assert "辩论下游" in prompt and "分析师通道" in prompt  # 通道分账规则
+        assert "权重主张" in prompt  # 框架/判断判例表
+        assert "（来源 technical）" in prompt  # 引用带来源标签（分账依据）
+
+    def test_b1_prompt_without_reference_pool_renders_placeholder(self):
+        row = {k: v for k, v in self.ROW.items() if k != "reference_points"}
+        assert "（无）" in fj.b1_prompt(row)
+
+    def test_b1_run_records_newness_label_and_rubric(self):
+        judged = fj.run_b1_judgments(
+            [self.ROW],
+            llm_fn=_judge_returning({"new_risk_point": True, "absorbed": False, "reason": "x"}),
+        )
+        assert judged[0]["judge_label"] is False
+        assert judged[0]["judge_new_risk_point"] is True
+        assert judged[0]["rubric"] == fj.B1_RUBRIC
+
+    def test_b1_run_v1_payload_newness_is_none_not_crash(self):
+        judged = fj.run_b1_judgments(
+            [self.ROW], llm_fn=_judge_returning({"absorbed": True, "reason": "x"})
+        )
+        assert judged[0]["judge_new_risk_point"] is None
+
+    def test_b2_prompt_carries_adjudicated_exemplars(self):
+        prompt = fj.b2_prompt({"rebutted_point": "需求崩塌", "rebuttal_text": "基数效应"})
+        assert "顶撞" in prompt  # 顶撞型修正判例
+        assert "拨备" in prompt  # 终裁 false 判例（另种可能无实证）
+
+    def test_b2_run_stamps_rubric(self):
+        judged = fj.run_b2_judgments(
+            [
+                {
+                    "unit_id": "600000::b2::0",
+                    "ticker": "600000",
+                    "rebutted_point": "a",
+                    "rebuttal_text": "b",
+                }
+            ],
+            llm_fn=_judge_returning({"corrected": False, "reason": "x"}),
+        )
+        assert judged[0]["rubric"] == fj.B2_RUBRIC

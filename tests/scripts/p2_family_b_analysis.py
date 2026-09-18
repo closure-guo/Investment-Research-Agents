@@ -66,6 +66,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--calibration-dir", type=Path, default=CALIBRATION_DIR)
     parser.add_argument("--skip-judge", action="store_true", help="只出 code 读数（零 LLM）")
     parser.add_argument("--max-judge-calls", type=int, default=400, help="判定调用总闸门")
+    parser.add_argument(
+        "--calibration-only",
+        action="store_true",
+        help="只判已有校准样本内的行（v2 先验证再全量，防 300+ 次白烧）",
+    )
+    parser.add_argument(
+        "--no-calibration-export",
+        action="store_true",
+        help="不重写校准 CSV（人工已填的表绝不能被重跑覆盖——用 p2_calibration_export.py 重建）",
+    )
     return parser.parse_args(argv)
 
 
@@ -85,13 +95,14 @@ def _install_meter():
     return lambda: len(pilot_util._usage_ledger)
 
 
-def _judged_path(out_dir: Path, kind: str) -> Path:
-    return Path(out_dir) / f"judged-{kind}.jsonl"
+def _judged_path(out_dir: Path, kind: str, version: str | None = None) -> Path:
+    suffix = f"-{version}" if version else ""
+    return Path(out_dir) / f"judged-{kind}{suffix}.jsonl"
 
 
-def _load_judged(out_dir: Path, kind: str) -> dict[str, dict]:
-    """已判行（按 unit_id）：崩溃/重跑都不重烧判定调用。"""
-    path = _judged_path(out_dir, kind)
+def _load_judged(out_dir: Path, kind: str, version: str | None = None) -> dict[str, dict]:
+    """已判行（按 unit_id）：崩溃/重跑都不重烧判定调用。rubric 换版必须换缓存文件（v1 判定不作数）。"""
+    path = _judged_path(out_dir, kind, version)
     if not path.exists():
         return {}
     done: dict[str, dict] = {}
@@ -102,24 +113,26 @@ def _load_judged(out_dir: Path, kind: str) -> dict[str, dict]:
     return done
 
 
-def _append_judged(out_dir: Path, kind: str, rows: Sequence[dict]) -> None:
-    path = _judged_path(out_dir, kind)
+def _append_judged(
+    out_dir: Path, kind: str, rows: Sequence[dict], version: str | None = None
+) -> None:
+    path = _judged_path(out_dir, kind, version)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False) + chr(10))
 
 
-def _run_with_cache(rows, kind, out_dir, runner) -> list[dict]:
+def _run_with_cache(rows, kind, out_dir, runner, version: str | None = None) -> list[dict]:
     """只跑未判的行；新结果立即落盘（判定调用花钱，崩溃不重来）。"""
-    done = _load_judged(out_dir, kind)
+    done = _load_judged(out_dir, kind, version)
     todo = [r for r in rows if str(r.get("unit_id") or "") not in done]
     print(f"[判定] {kind}: 待跑 {len(todo)}/{len(rows)}（已缓存 {len(done)}）", flush=True)
     if todo:
         fresh = runner(todo)
-        _append_judged(out_dir, kind, fresh)
+        _append_judged(out_dir, kind, fresh, version)
         print(
-            f"[判定] {kind}: 新判 {len(fresh)} 行已落盘 {_judged_path(out_dir, kind).name}",
+            f"[判定] {kind}: 新判 {len(fresh)} 行已落盘 {_judged_path(out_dir, kind, version).name}",
             flush=True,
         )
         done.update({str(r.get("unit_id") or ""): r for r in fresh})
@@ -140,6 +153,19 @@ def _write_csv(path: Path, rows: Sequence[dict], columns: Sequence[str]) -> None
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _calibration_ids(calib_dir: Path) -> dict[str, set[str]]:
+    """已有校准表的 unit_id 集（--calibration-only 用：v2 先在人工已判的行上验证）。"""
+    out: dict[str, set[str]] = {}
+    for kind in ("b1", "b2"):
+        path = calib_dir / f"2026-09-17-p2-calibration-{kind}.csv"
+        ids: set[str] = set()
+        if path.exists():
+            with path.open(encoding="utf-8-sig", newline="") as fh:
+                ids = {str(r.get("unit_id") or "") for r in csv.DictReader(fh)}
+        out[kind] = {i for i in ids if i}
+    return out
 
 
 def main() -> None:
@@ -173,37 +199,63 @@ def main() -> None:
         b1_rows = ft.judge_material_rows(
             [{"ticker": t, "_state": states[t], "b1": ft.b1_unit(states[t])} for t in tickers]
         )
+        # v2 双问需要参照池（判「是否新增」用）：全量 16 条进材料，不截断
+        refs_by_ticker = {t: ft.analyst_reference_points(states[t]) for t in tickers}
+        for row in b1_rows:
+            row["reference_points"] = refs_by_ticker[str(row.get("ticker") or "")]
         print(f"[判定] B1 材料行 {len(b1_rows)}（全空方论点，未按阈值预筛）", flush=True)
         b2_rows = ft.b2_material_rows([{"ticker": t, "_state": states[t]} for t in tickers])
+        if args.calibration_only:
+            keep = _calibration_ids(Path(args.calibration_dir))
+            b1_rows = [r for r in b1_rows if str(r.get("unit_id")) in keep["b1"]]
+            b2_rows = [r for r in b2_rows if str(r.get("unit_id")) in keep["b2"]]
+            print(
+                f"[判定] --calibration-only：B1 {len(b1_rows)} 行 / B2 {len(b2_rows)} 行",
+                flush=True,
+            )
         budget = args.max_judge_calls
         out_dir = Path(args.out_dir)
         b1_judged = (
-            _run_with_cache(b1_rows, "b1", out_dir, fj.run_b1_judgments) if budget > 0 else []
+            _run_with_cache(
+                b1_rows,
+                "b1",
+                out_dir,
+                fj.run_b1_judgments,
+                version=fj.B1_RUBRIC.removeprefix("b1-"),
+            )
+            if budget > 0
+            else []
         )
-        b2_judged = _run_with_cache(b2_rows, "b2", out_dir, fj.run_b2_judgments)
+        b2_judged = _run_with_cache(
+            b2_rows, "b2", out_dir, fj.run_b2_judgments, version=fj.B2_RUBRIC.removeprefix("b2-")
+        )
         after = meter() if meter else None
         report["judge"] = {
             "b1": fj.gate_verdict(b1_judged, method="nli"),
             "b2": fj.gate_verdict(b2_judged, method="judge"),
             "b1_summary": fj.summarize(b1_judged, key="absorbed"),
+            "b1_newness_summary": fj.summarize(b1_judged, key="judge_new_risk_point"),
             "b2_summary": fj.summarize(b2_judged, key="corrected"),
             "llm_calls": None if before is None or after is None else after - before,
         }
         calib_dir = Path(args.calibration_dir)
-        _write_csv(
-            calib_dir / "2026-09-17-p2-calibration-b1.csv",
-            ft.calibration_sample(fj.calibration_rows(b1_judged, material_key="risk_point")),
-            fj.CALIBRATION_COLUMNS,
-        )
-        _write_csv(
-            calib_dir / "2026-09-17-p2-calibration-b2.csv",
-            ft.calibration_sample(fj.calibration_rows(b2_judged, material_key="rebuttal_text")),
-            fj.CALIBRATION_COLUMNS,
-        )
-        print(
-            "[判定] B1/B2 已出（provisional）；校准抽样表已落 "
-            f"{calib_dir.as_posix()}/2026-09-17-p2-calibration-b1.csv、-b2.csv"
-        )
+        if args.no_calibration_export:
+            print("[跳过] 校准 CSV 未重写（--no-calibration-export；人工表只能用 export 脚本重建）")
+        else:
+            _write_csv(
+                calib_dir / "2026-09-17-p2-calibration-b1.csv",
+                ft.calibration_sample(fj.calibration_rows(b1_judged, material_key="risk_point")),
+                fj.CALIBRATION_COLUMNS,
+            )
+            _write_csv(
+                calib_dir / "2026-09-17-p2-calibration-b2.csv",
+                ft.calibration_sample(fj.calibration_rows(b2_judged, material_key="rebuttal_text")),
+                fj.CALIBRATION_COLUMNS,
+            )
+            print(
+                "[判定] B1/B2 已出（provisional）；校准抽样表已落 "
+                f"{calib_dir.as_posix()}/2026-09-17-p2-calibration-b1.csv、-b2.csv"
+            )
 
     # B5：需要 analysts 臂的渲染报告（P1 材料只有 claims/markdown）
     analysts_available = [
@@ -243,21 +295,22 @@ def main() -> None:
             "parse_failed_pairs": sum(1 for r in b5 if r["judge_parse_failed"]),
             "status": "provisional（judge 判定，须过校准门控 ≥0.80）",
         }
-        _write_csv(
-            Path(args.calibration_dir) / "2026-09-17-p2-calibration-b5.csv",
-            [
-                {
-                    "unit_id": f"{r['ticker']}::b5",
-                    "ticker": r["ticker"],
-                    "material": f"first={r['position_first']}｜votes={r['votes']}",
-                    "judge_label": r["verdict"],
-                    "judge_reason": "",
-                    "human_label(与判定一致?是/否)": "",
-                }
-                for r in b5
-            ],
-            fj.CALIBRATION_COLUMNS,
-        )
+        if not args.no_calibration_export:
+            _write_csv(
+                Path(args.calibration_dir) / "2026-09-17-p2-calibration-b5.csv",
+                [
+                    {
+                        "unit_id": f"{r['ticker']}::b5",
+                        "ticker": r["ticker"],
+                        "material": f"first={r['position_first']}｜votes={r['votes']}",
+                        "judge_label": r["verdict"],
+                        "judge_reason": "",
+                        "human_label(与判定一致?是/否)": "",
+                    }
+                    for r in b5
+                ],
+                fj.CALIBRATION_COLUMNS,
+            )
         print(f"[B5] 盲评 {len(b5)} 对：{report['judge_b5']}")
     else:
         report["judge_b5"] = {
