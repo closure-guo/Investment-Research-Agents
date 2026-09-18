@@ -596,3 +596,29 @@ owner 终裁 14/14 行（正例全审 8 + 有源抽 6）**全部与机器一致�
 **结论**：A4 自然腿的 value_mismatch 2/2 全为契约病、0 条分析师幻觉——与 incident 026 一脉
 相承（校验器/契约误报 ≠ 幻觉，修契约不修分析师）。处置候选（挂已终裁桶）：
 ① 字段解析消歧（同名异义列须消歧或禁用短名）；② claim 抽取类型校验（delta 不得入 level 槽）。
+
+
+### 19.7 B5 重跑（两臂均含决策层）首读 + eval-driven-contract-fixes 四件落地（2026-09-18）
+
+**B5 修正口径首读（provisional，待校准门控）**：through_trader 臂（analysts+辩论+研究经理
++Trader，无风控辩论/FM）对 full——**full 19 : through_trader 1 : tie 0**，零解析失败，
+A 位先出示 9:11 位置均衡（无位置偏倚迹象）；600030 的 through_trader 胜出表明评审非无脑
+选边。**同义反复消除**（旧口径 20:0:0 的退化比较不复存在）：盲评首次表达真实偏好——
+带风控辩论+FM 的完整链路在 19/20 对里被判更有助于决策。材料 222 次 + 判定 60 次（owner
+已批 ~360）。校准样本 4 对已导出（`2026-09-18-p2-calibration-b5-through-trader.csv`，
+人工列留空）；一致率 ≥0.80 前读数维持 provisional。
+
+**eval-driven-contract-fixes 四件全部落地**（openspec change `eval-driven-contract-fixes`，
+TDD 全程）：
+1. **同义列消歧**（c2fbac2）：canonical 等价多列并存取官方全名（最长列名）——601318
+   「归属于母公司的净利润/归母净利润」假 FAIL 修复
+2. **claim 值槽类型校验**（dfad1d3）：环比/同比措辞 + 量级差>10 倍双信号 →
+   `claim_contract_error` 桶（不算幻觉、不触发修复）——600276 PMI 0.6/49.8 假 FAIL 修复
+3. **修复记账按 claim**（a5c8b5b）：`value_mismatch_repaired_claims` 上线接管
+   analyst_true_fail，旧 all_passed 口径 deprecated——incident 029 处置
+4. **辩手断言级锚定**（ed2bc75）：三份辩手提示词逐断言锚定 + 推断冒充数据反例判例，
+   deploy_prompts 已发布 production——grounding 无源率 12.5% 的处置
+
+验收夹具：601318/600276 终裁案例即测试夹具（TestSynonymColumnDisambiguation /
+TestClaimContractError）；全套受影响测试区（citation 族 + causal_ablation + debate prompts）
+全绿；全套回归跑批中。
