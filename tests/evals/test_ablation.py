@@ -281,6 +281,7 @@ class TestCitationBucketWiring:
             "analyst_true_fail": 2,
             "surgical_repaired": 1,
             "verifier_normalized": 3,
+            "claim_contract_error": 0,
             "total": 7,
         }
         assert set(out["citation_buckets"]) == set(VERIFIER_BUCKETS) | {"total"}, (
@@ -298,6 +299,7 @@ class TestCitationBucketWiring:
             "analyst_true_fail": 0,
             "surgical_repaired": 0,
             "verifier_normalized": 0,
+            "claim_contract_error": 0,
             "total": 0,
         }
 
@@ -323,6 +325,7 @@ class TestCitationBucketWiring:
             "analyst_true_fail": 0,
             "surgical_repaired": 0,
             "verifier_normalized": 0,
+            "claim_contract_error": 0,
             "total": 0,
         }
 
@@ -362,6 +365,7 @@ class TestCitationBucketWiring:
                 "analyst_true_fail": 1,
                 "surgical_repaired": 0,
                 "verifier_normalized": 2,
+                "claim_contract_error": 0,
                 "total": 3,
             }
             assert records[variant]["citation_pass"] is True, "标量字段保持产出（向后兼容）"
@@ -559,6 +563,7 @@ class TestCitationBucketAggregation:
             "analyst_true_fail": 2.0,
             "surgical_repaired": 0.0,
             "verifier_normalized": 3.0,
+            "claim_contract_error": 0.0,
         }
         assert (
             report["variants"]["plus_debate"]["citation_buckets_median"]["surgical_repaired"] == 1.0
@@ -649,6 +654,7 @@ class TestCitationBucketAggregation:
             "analyst_true_fail": None,
             "surgical_repaired": None,
             "verifier_normalized": None,
+            "claim_contract_error": None,
         }
 
 

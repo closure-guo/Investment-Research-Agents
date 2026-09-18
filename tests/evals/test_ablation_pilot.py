@@ -340,6 +340,7 @@ class TestCitationBucketsRecord:
         "analyst_true_fail": 2,
         "surgical_repaired": 0,
         "verifier_normalized": 3,
+        "claim_contract_error": 0,
         "total": 6,
     }
     _FULL = {
@@ -347,6 +348,7 @@ class TestCitationBucketsRecord:
         "analyst_true_fail": 0,
         "surgical_repaired": 2,
         "verifier_normalized": 1,
+        "claim_contract_error": 0,
         "total": 3,
     }
 

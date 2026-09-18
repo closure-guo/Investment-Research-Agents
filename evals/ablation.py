@@ -247,6 +247,10 @@ def citation_buckets_from_state(state: dict) -> dict[str, int]:
             # state 键 value_mismatch_repaired = 桶名 surgical_repaired
             "surgical_repaired": int(state.get("value_mismatch_repaired") or 0),
             "verifier_normalized": int(state.get("citation_verifier_normalized") or 0),
+            # 值槽类型错填（eval-driven-contract-fixes 任务 2）：计数在 fail_buckets
+            "claim_contract_error": int(
+                (state.get("citation_fail_buckets") or {}).get("claim_contract_error") or 0
+            ),
         }
     )
 
@@ -363,6 +367,8 @@ _CITATION_BUCKET_LOWER_IS_BETTER: dict[str, bool | None] = {
     # 工作量遥测：无好坏方向（校验器/修复的触发量与解析债）
     "surgical_repaired": None,  # 单点修复成功回填条数
     "verifier_normalized": None,  # 归一后由 FAIL 转 PASS 的计数
+    # claim 契约错（变化量入水平槽等）：LLM 契约缺陷计数，下降即改善
+    "claim_contract_error": True,
 }
 
 
