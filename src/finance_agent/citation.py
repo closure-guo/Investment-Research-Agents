@@ -171,6 +171,23 @@ def _resolve_column_alias(col_name: str, columns: Any) -> str | None:
     return None
 
 
+def _disambiguate_column(col_name: str, columns: Any) -> str | None:
+    """同义列消歧（eval-driven-contract-fixes 任务 1）。
+
+    canonical 等价的多列并存时取**最长列名**（官方科目全名，如「归属于母公司的净利润」
+    对「归母净利润」）——杜绝短名列精确命中后静默取错值（601318 A4 自然腿终裁：两列
+    数值 1347.78 亿 vs 235.23 亿，校验器取短名列产假 FAIL）。未注册 canonical 的列名
+    维持精确匹配语义；无任何匹配返回 None（上层按不可验证进 blocked 桶，不错值）。"""
+    cols = [str(c) for c in columns]
+    if col_name in cols:
+        canonical = canonical_metric(col_name)
+        if canonical is None:
+            return col_name
+        matches = [c for c in cols if canonical_metric(c) == canonical]
+        return max(matches, key=len) if matches else col_name
+    return _resolve_column_alias(col_name, columns)
+
+
 def _resolve_field_ref(
     field_ref: str, state: dict, claim_period: str | None = None
 ) -> object | None:
@@ -203,11 +220,10 @@ def _resolve_field_ref(
         elif _is_dataframe(current):
             if i + 1 < len(parts):
                 col_name = parts[i + 1]
-                if col_name not in current.columns:
-                    col = _resolve_column_alias(col_name, current.columns)
-                    if col is None:
-                        return None
-                    col_name = col
+                col = _disambiguate_column(col_name, current.columns)
+                if col is None:
+                    return None
+                col_name = col
                 mask = _dataframe_row_mask(current, part)
                 if mask is None:
                     return None
@@ -215,8 +231,8 @@ def _resolve_field_ref(
                 i += 2
                 continue
             # 路径止于列名（分析师省略行键）：取最新一行（与负索引「最新一期」
-            # 约定一致），列名同样走别名回退（r4-1 实测缺口）
-            col = _resolve_column_alias(part, current.columns)
+            # 约定一致），列名同样走消歧（同义列并存时官方全名优先）
+            col = _disambiguate_column(part, current.columns)
             if col is None:
                 return None
             value: object = current.iloc[-1][col]

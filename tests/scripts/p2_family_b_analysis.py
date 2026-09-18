@@ -262,16 +262,19 @@ def main() -> None:
                 f"{calib_dir.as_posix()}/2026-09-17-p2-calibration-b1.csv、-b2.csv"
             )
 
-    # B5：需要 analysts 臂的渲染报告（P1 材料只有 claims/markdown）
-    analysts_available = [
-        t for t in tickers if fb.material_path(Path(args.materials_dir), t, "analysts").exists()
+    # B5：两臂都含决策层（预登记 §9 修正口径，2026-09-18）——对照臂 through_trader
+    # （analysts+辩论+研究经理+Trader，无风控辩论/FM）对 full，消掉 analysts 对 full 的
+    # 同义反复（analysts 臂无决策章节而判据问决策）。缓存按臂分文件，防吃到旧臂判定。
+    b5_arm = "through_trader"
+    arm_available = [
+        t for t in tickers if fb.material_path(Path(args.materials_dir), t, b5_arm).exists()
     ]
-    if len(analysts_available) == len(tickers) and not args.skip_judge:
+    if len(arm_available) == len(tickers) and not args.skip_judge:
         pairs = [
             {
                 "pair_key": t,
                 "ticker": t,
-                "report_a_id": "analysts",
+                "report_a_id": b5_arm,
                 "report_b_id": "full",
                 "report_a": str(states[t].get("final_report") or ""),  # 占位，下面覆盖
                 "report_b": str(states[t].get("final_report") or ""),
@@ -280,7 +283,7 @@ def main() -> None:
         ]
         for pair in pairs:
             pair["report_a"] = str(
-                fb.load_material(Path(args.materials_dir), pair["ticker"], "analysts")["state"].get(
+                fb.load_material(Path(args.materials_dir), pair["ticker"], b5_arm)["state"].get(
                     "final_report"
                 )
                 or ""
@@ -290,6 +293,7 @@ def main() -> None:
             "b5",
             Path(args.out_dir),
             fj.run_b5_pairwise,
+            version=b5_arm,
         )
         report["judge_b5"] = {
             "verdicts": {r["ticker"]: r["verdict"] for r in b5},
@@ -320,8 +324,8 @@ def main() -> None:
     else:
         report["judge_b5"] = {
             "status": "未跑",
-            "reason": "缺 analysts 臂材料（B5 需两臂渲染报告）或 --skip-judge",
-            "missing": [t for t in tickers if t not in analysts_available],
+            "reason": f"缺 {b5_arm} 臂材料（B5 需两臂渲染报告）或 --skip-judge",
+            "missing": [t for t in tickers if t not in arm_available],
         }
 
     out = (

@@ -1022,3 +1022,38 @@ class TestPercentUnitNormalizationComputational:
         results = verify_claims([claim], state)
         assert results[0].status == "FAIL", results[0]
         assert results[0].bucket == "value_mismatch"
+
+
+class TestSynonymColumnDisambiguation:
+    """同义列名消歧（eval-driven-contract-fixes 任务 1；601318 A4 自然腿终裁案例：
+    「归属于母公司的净利润」与「归母净利润」两列并存且数值不同，短名精确命中曾静默取错值）。"""
+
+    @staticmethod
+    def _state(extra: dict[str, float]) -> dict:
+        import pandas as pd
+
+        return {"income_statement": pd.DataFrame({"报告日": ["20251231"], **extra})}
+
+    def test_short_name_redirects_to_official_full_column(self):
+        from finance_agent.citation import _resolve_field_ref
+
+        state = self._state({"归属于母公司的净利润": 100.0, "归母净利润": 200.0})
+        assert _resolve_field_ref("income_statement.20251231.归母净利润", state) == 100.0
+
+    def test_official_full_name_direct_hit_kept(self):
+        from finance_agent.citation import _resolve_field_ref
+
+        state = self._state({"归属于母公司的净利润": 100.0, "归母净利润": 200.0})
+        assert _resolve_field_ref("income_statement.20251231.归属于母公司的净利润", state) == 100.0
+
+    def test_single_column_still_resolves(self):
+        from finance_agent.citation import _resolve_field_ref
+
+        state = self._state({"归母净利润": 200.0})
+        assert _resolve_field_ref("income_statement.20251231.归母净利润", state) == 200.0
+
+    def test_rowkey_omitted_path_also_disambiguates(self):
+        from finance_agent.citation import _resolve_field_ref
+
+        state = self._state({"归属于母公司的净利润": 100.0, "归母净利润": 200.0})
+        assert _resolve_field_ref("income_statement.归母净利润", state) == 100.0
