@@ -127,3 +127,116 @@ class TestNewnessSweep:
         assert got["status"] == "ok"
         assert got["best"]["agreement"] == 1.0
         assert got["best"]["threshold"] > 0.1
+
+
+class TestBearGrounding:
+    """无源增量 grounding 扫描（bg-v1，预登记 2026-09-18）：宇宙裁剪 + prompt 契约 + 解析 + 报告。"""
+
+    @staticmethod
+    def _state() -> dict:
+        return {
+            "analyst_reports": {
+                "macro": {"summary": "M2 增速 7.5%，PMI 49.8 低于荣枯线"},
+                "technical": {"summary": "均线空头排列，MACD 零轴下方死叉"},
+            },
+            "debate_history": [
+                {
+                    "role": "bear",
+                    "round": 1,
+                    "content": "c1",
+                    "key_arguments": [
+                        {"text": "机构资金持续撤离", "kind": "data", "anchors": []},
+                        {"text": "PMI 压制需求", "kind": "data", "anchors": ["macro.PMI"]},
+                        {"text": "推断性论点", "kind": "inference", "anchors": []},
+                    ],
+                },
+                {
+                    "role": "bear",
+                    "round": 2,
+                    "content": "c2",
+                    "key_arguments": [{"text": "r2 数据论点", "kind": "data", "anchors": []}],
+                },
+            ],
+        }
+
+    def test_units_restrict_to_round1_kind_data_with_summaries(self):
+        from evals.causal_ablation import bear_grounding as bg
+
+        units = bg.grounding_units("600000", self._state())
+        assert [u["argument"] for u in units] == ["机构资金持续撤离", "PMI 压制需求"]
+        assert all("M2 增速" in u["summaries"] for u in units)
+        assert units[0]["unit_id"] == "600000::bg::0"
+        assert units[1]["anchors"] == ["macro.PMI"]
+
+    def test_prompt_carries_material_and_bidirectional_rule(self):
+        from evals.causal_ablation import bear_grounding as bg
+
+        prompt = bg.grounding_prompt(
+            {"summaries": "宏观：M2 增速 7.5%。", "argument": "机构资金持续撤离"}
+        )
+        for token in (
+            "M2",
+            "机构资金",
+            "方向相反",
+            '"supported"',
+            "unsupported_part",
+            "confidence",
+        ):
+            assert token in prompt
+
+    def test_run_parses_and_stamps_rubric(self):
+        from evals.causal_ablation import bear_grounding as bg
+
+        def llm(prompt: str) -> str:
+            return (
+                '{"supported": false, "unsupported_part": "机构资金持续撤离", '
+                '"reason": "摘要零资金流", "confidence": "low"}'
+            )
+
+        judged = bg.run_grounding(bg.grounding_units("600000", self._state()), llm_fn=llm)
+        assert judged[0]["judge_label"] is False
+        assert judged[0]["unsupported_part"] == "机构资金持续撤离"
+        assert judged[0]["confidence"] == "low"
+        assert judged[0]["rubric"] == bg.BG_RUBRIC
+
+    def test_report_rates_and_lists_unsupported(self):
+        from evals.causal_ablation import bear_grounding as bg
+
+        rows = [
+            {
+                "unit_id": "a",
+                "ticker": "t1",
+                "judge_label": False,
+                "unsupported_part": "X",
+                "anchors": [],
+            },
+            {
+                "unit_id": "b",
+                "ticker": "t1",
+                "judge_label": True,
+                "unsupported_part": "",
+                "anchors": [],
+            },
+            {
+                "unit_id": "c",
+                "ticker": "t2",
+                "judge_label": None,
+                "unsupported_part": "",
+                "anchors": [],
+            },
+        ]
+        report = bg.grounding_report(rows)
+        assert report["rate"] == 0.5  # None 不进分母
+        assert report["unsupported"] == [("a", "X", ())]
+
+    def test_calibration_sample_takes_all_positives_plus_slice_of_supported(self):
+        from evals.causal_ablation import bear_grounding as bg
+
+        rows = [
+            {"unit_id": f"u{i}", "judge_label": i >= 3, "ticker": "t", "argument": f"a{i}"}
+            for i in range(13)
+        ]  # u0-u2 无源（正例 label=False），u3-u12 有源
+        sample = bg.calibration_sample(rows, supported_fraction=0.1, seed=7)
+        ids = {r["unit_id"] for r in sample}
+        assert {"u0", "u1", "u2"} <= ids  # 正例全审
+        assert sum(1 for i in ids if int(i[1:]) >= 3) == 1  # 有源抽 10%
