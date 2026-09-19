@@ -382,7 +382,10 @@ def _build_technical_context(state: dict) -> str:
         if derived:
             derived_view = {k: (v if v is not None else "数据不足") for k, v in derived.items()}
             sections.append(
-                "常用派生值（工具预生成，直接引用；field_ref 前缀 derived_series.）:\n"
+                # 前缀用规范根键名 derived_series.（与 state 键一致）；校验器同时接受
+                # 简写 derived.（_ROOT_ALIASES 归一），此处以规范形态减少歧义
+                "常用派生值（工具预生成，直接引用；field_ref 前缀 derived_series.，"
+                "如 derived_series.chg_5d）:\n"
                 f"{json.dumps(derived_view, ensure_ascii=False)}"
             )
 

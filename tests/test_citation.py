@@ -361,6 +361,90 @@ class TestComputationalRegistryCoverage:
             "benchmark_kline": bench,
         }
 
+    def _full_state(self, balance_sheet, income_statement, cash_flow, indicators):
+        """_state + 触发 compute_metrics 其余分支（行业/行情/同业/季报）。"""
+        state = self._state(balance_sheet, income_statement, cash_flow, indicators)
+        state.update(
+            {
+                "industry_info": {"industry": "白酒"},
+                "stock_quote": {"PE": 20.0, "PB": 3.0},
+                "peer_financials": [{"code": "000001", "PE": 12.0, "PB": 1.1}],
+                "quarterly_income": income_statement.copy(),
+            }
+        )
+        return state
+
+    def test_recompute_registry_covers_all_compute_outputs(
+        self, balance_sheet, income_statement, cash_flow, indicators
+    ):
+        """覆盖门禁（派生键）：compute_metrics 全部产出键 ⊆ 注册表 ∪ 显式豁免表。
+
+        回归：r9「未注册 ~2.9 条/轮」的来源是 8 个派生键从未注册（靠人肉补不可持续）；
+        新派生键未注册即本测试红。豁免表每条须附理由。
+        """
+        from finance_agent.citation import _COMPUTATIONAL_RECALC, _UNREGISTERED_EXEMPT
+        from finance_agent.nodes.compute import compute_metrics
+
+        assert all(reason.strip() for reason in _UNREGISTERED_EXEMPT.values()), (
+            "豁免表每条必须附理由"
+        )
+        produced = set(
+            compute_metrics(
+                self._full_state(balance_sheet, income_statement, cash_flow, indicators)
+            )
+        )
+        missing = produced - set(_COMPUTATIONAL_RECALC) - set(_UNREGISTERED_EXEMPT)
+        assert not missing, f"未注册且未豁免的派生键：{sorted(missing)}"
+
+    def test_alias_root_recomputes(self, balance_sheet, income_statement, cash_flow, indicators):
+        """别名根在计算型路径同样生效（注册表查找走归一后的根，否则 UNVERIFIABLE）。"""
+        from finance_agent.citation import Claim, verify_claims
+        from finance_agent.nodes.compute import compute_metrics
+
+        state = self._full_state(balance_sheet, income_statement, cash_flow, indicators)
+        truth = compute_metrics(state)["derived_series"]["chg_5d"]
+        claim = Claim(
+            claim_type="computational",
+            source_type="data",
+            field_ref="derived.chg_5d",
+            stated_value=float(truth),
+            # 解读须回声申报值（_check_internal_echo：含数值则必须有一个能对上）
+            interpretation=f"近 5 日涨跌幅 {float(truth):.4f}",
+        )
+        (r,) = verify_claims([claim], state)
+        assert r.status == "PASS", r
+
+    def test_newly_registered_key_recomputes_pass_and_fail(
+        self, balance_sheet, income_statement, cash_flow, indicators
+    ):
+        """新注册派生键的可重算性：growth_rates 按同一份 compute 代码裁决 PASS/FAIL。
+
+        此前该根键未注册 → 按计算型引用恒 UNVERIFIABLE（既不判对也不判错）。
+        """
+        from finance_agent.citation import Claim, verify_claims
+        from finance_agent.nodes.compute import compute_metrics
+
+        state = self._full_state(balance_sheet, income_statement, cash_flow, indicators)
+        growth = compute_metrics(state)["growth_rates"]
+        dim, metric, rate = next(
+            (d, m, v) for d, mv in growth.items() for m, v in mv.items() if v is not None
+        )
+        ref = f"growth_rates.{dim}.{metric}"
+
+        ok = Claim(
+            claim_type="computational",
+            source_type="data",
+            field_ref=ref,
+            stated_value=float(rate),
+            interpretation="同比增速",
+        )
+        assert verify_claims([ok], state)[0].status == "PASS"
+
+        bad = ok.model_copy(update={"stated_value": float(rate) + 1.0})
+        result = verify_claims([bad], state)[0]
+        assert result.status == "FAIL"
+        assert result.bucket == "value_mismatch"
+
     def test_registry_covers_all_metric_families(self):
         from finance_agent.citation import _COMPUTATIONAL_RECALC
 
@@ -720,6 +804,104 @@ class TestComparativeBaseDeclaration:
         (r,) = verify_claims([self._claim()], self._STATE)
         assert r.status == "FAIL"
         assert r.bucket == "path_unresolvable"
+
+
+class TestComparativeDifferenceRecompute:
+    """① 比较型差值重算（close-citation-coverage-gaps）：「A 较 B 低约 X」数值差值申报。
+
+    此前 stated_value 为数值 → 一律 UNVERIFIABLE（既不判对也不判错、不计缺口），
+    归因表长期挂着该形态（metrics.md §3 follow-up ①）。
+    """
+
+    _STATE = {"profitability_metrics": {"净利率": {"2025": 19.07, "2024": 21.93}}}
+
+    def _claim(self, **kw):
+        params = {
+            "claim_type": "comparative",
+            "source_type": "data",
+            "field_ref": "profitability_metrics.净利率.2025",
+            "field_ref_b": "profitability_metrics.净利率.2024",
+            "stated_value": 2.86,
+            "interpretation": "2025 净利率较 2024 低约 2.86 个百分点",
+            "direction": "negative",
+        }
+        params.update(kw)
+        return Claim(**params)  # type: ignore[arg-type]
+
+    def test_difference_within_tolerance_passes(self):
+        (r,) = verify_claims([self._claim()], self._STATE)
+        assert r.status == "PASS", r
+        assert abs(r.ground_truth - (-2.86)) < 0.01
+
+    def test_difference_over_tolerance_fails_value_mismatch(self):
+        (r,) = verify_claims([self._claim(stated_value=5.0)], self._STATE)
+        assert r.status == "FAIL"
+        assert r.bucket == "value_mismatch"
+
+    def test_direction_sign_mismatch_fails(self):
+        # 实际 2025 低于 2024（差值为负），申报 direction=positive → 方向不符 FAIL
+        (r,) = verify_claims([self._claim(direction="positive")], self._STATE)
+        assert r.status == "FAIL"
+
+    def test_direction_undeclared_verifies_magnitude_with_gap(self):
+        # 未申报方向 → 仅量级比对（显式降级：PASS 但计覆盖缺口，不静默）
+        (r,) = verify_claims([self._claim(direction=None)], self._STATE)
+        assert r.status == "PASS"
+        assert r.coverage_gap is True
+
+    def test_direction_gap_flag_isolated_from_global_gap(self):
+        """隔离验证：metric_name/period 申报齐全（全局缺口口径不触发）时，
+        差值型的方向缺口标记由本分支负责——已申报→无缺口，未申报→计缺口。"""
+        declared = {"metric_name": "净利率", "period": "2025"}
+        (r_ok,) = verify_claims([self._claim(**declared)], self._STATE)
+        assert r_ok.status == "PASS"
+        assert r_ok.coverage_gap is False
+
+        (r_gap,) = verify_claims([self._claim(direction=None, **declared)], self._STATE)
+        assert r_gap.status == "PASS"
+        assert r_gap.coverage_gap is True
+
+    def test_difference_claim_does_not_require_base_value(self):
+        # 差值型申报对象是差值本身：stated_value_b 缺省不判「基期裸奔」（方向型仍保持 FAIL）
+        (r,) = verify_claims([self._claim()], self._STATE)
+        assert r.status == "PASS"
+
+    def test_base_value_still_checked_when_declared(self):
+        # 差值型若申报了基期值，仍按既有容差校验（错值 → FAIL）
+        (r,) = verify_claims([self._claim(stated_value_b=28.0)], self._STATE)
+        assert r.status == "FAIL"
+        assert r.bucket == "value_mismatch"
+
+
+class TestDerivedRootAlias:
+    """前缀契约一致性：context 提示 LLM 用 `derived.`，state 根键是 `derived_series`。
+
+    回归（close-citation-coverage-gaps 随同发现）：图通道修好后「常用派生值」节首次
+    真正渲染（此前 derived_series 被图静默丢弃），LLM 照提示写 `derived.chg_5d` 时
+    正确数值会被判 path_unresolvable 误 FAIL。别名归一后两种前缀都合法。
+    """
+
+    _STATE = {"derived_series": {"chg_5d": -0.0412}}
+
+    def _claim(self, ref: str):
+        return Claim(
+            claim_type="numerical",
+            source_type="data",
+            field_ref=ref,
+            stated_value=-0.0412,
+            interpretation="近 5 日涨跌幅 -4.12%",
+            metric_name="chg_5d",
+            period="2026-09-14",
+            direction="negative",
+        )
+
+    def test_alias_root_resolves_and_passes(self):
+        (r,) = verify_claims([self._claim("derived.chg_5d")], self._STATE)
+        assert r.status == "PASS", r
+
+    def test_canonical_root_unchanged(self):
+        (r,) = verify_claims([self._claim("derived_series.chg_5d")], self._STATE)
+        assert r.status == "PASS", r
 
 
 class TestClaimDirectionField:

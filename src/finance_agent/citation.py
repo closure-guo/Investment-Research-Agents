@@ -26,7 +26,7 @@ from finance_agent.metrics.efficiency import calc_efficiency
 from finance_agent.metrics.profitability import calc_profitability
 from finance_agent.metrics.risk import calc_risk
 from finance_agent.metrics.solvency import calc_solvency
-from finance_agent.metrics.technical import calc_derived_series, calc_technical
+from finance_agent.metrics.technical import calc_technical
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -174,6 +174,19 @@ def _resolve_column_alias(col_name: str, columns: Any) -> str | None:
     return None
 
 
+# 根键别名归一（前缀契约一致性）：analysts context 提示 LLM「field_ref 前缀 derived.」，
+# 而 state 根键是 `derived_series`——图通道修复后该 context 节首次真正渲染，LLM 照提示
+# 写 `derived.chg_5d` 时正确数值会被判 path_unresolvable 误 FAIL（2026-09-14 实测）。
+# 归一后两种前缀都合法；别名只做根段替换，不改其余路径语义。
+_ROOT_ALIASES: dict[str, str] = {"derived": "derived_series"}
+
+
+def _apply_root_alias(parts: list[str]) -> list[str]:
+    if parts and parts[0] in _ROOT_ALIASES:
+        return [_ROOT_ALIASES[parts[0]], *parts[1:]]
+    return parts
+
+
 def _disambiguate_column(col_name: str, columns: Any) -> str | None:
     """同义列消歧（eval-driven-contract-fixes 任务 1）。
 
@@ -206,7 +219,7 @@ def _resolve_field_ref(
       field_ref 语义（macro_indicators.cpi.0.<列>）不变。
     """
     state = {**state, "_claim_period": claim_period} if claim_period else state
-    parts = _normalize_quarter_segments(_expand_brackets(field_ref), state)
+    parts = _normalize_quarter_segments(_apply_root_alias(_expand_brackets(field_ref)), state)
     current: object = state
     i = 0
     while i < len(parts):
@@ -317,9 +330,23 @@ _COMPUTATIONAL_RECALC: dict[str, Callable[[dict], object]] = {
     # 阶段 2（incident 026）：快照派生字段用同一份 compute 代码重算（r2 约 23 条恒 UNVERIFIABLE）
     "garp_result": lambda s: _recompute_snapshot(s, "garp_result"),
     "anomalies": lambda s: _recompute_snapshot(s, "anomalies"),
-    # ground-comparative-delta-claims：派生值以同一份 calc_derived_series 重算
-    "derived_series": lambda s: calc_derived_series(s["kline"]),
+    # 派生键覆盖收口（close-citation-coverage-gaps）：compute_metrics 其余 8 个产出键
+    # 此前未注册 → 按计算型引用即 UNVERIFIABLE（r9 未注册 ~2.9 条/轮 的主要来源）。
+    # 统一走「同一份 compute 代码重算」，覆盖门禁见
+    # tests/test_citation.py::TestComputationalRegistryCoverage::test_recompute_registry_covers_all_compute_outputs
+    "derived_series": lambda s: _recompute_snapshot(s, "derived_series"),
+    "growth_rates": lambda s: _recompute_snapshot(s, "growth_rates"),
+    "health_score": lambda s: _recompute_snapshot(s, "health_score"),
+    "price_levels": lambda s: _recompute_snapshot(s, "price_levels"),
+    "relative_valuation": lambda s: _recompute_snapshot(s, "relative_valuation"),
+    "traffic_lights": lambda s: _recompute_snapshot(s, "traffic_lights"),
+    "peer_comparison": lambda s: _recompute_snapshot(s, "peer_comparison"),
+    "quarterly_trend": lambda s: _recompute_snapshot(s, "quarterly_trend"),
 }
+
+# 派生键豁免表（键 → 理由）。空 = 当前无豁免；加入豁免必须写清为什么不能重算，
+# 且仅用于「确定性不可重算」的键（如纯外部时序数据），不得用于「暂时懒得注册」。
+_UNREGISTERED_EXEMPT: dict[str, str] = {}
 
 
 def _recompute_snapshot(state: dict, key: str) -> object:
@@ -340,7 +367,7 @@ def _recomputable_root(claim: Claim) -> bool:
 
 def _verify_computational(claim: Claim, state: dict) -> CitationResult:
     """计算型 claim：从原始数据重算指标，用相对容差 0.5% 比对。"""
-    parts = claim.field_ref.split(".")
+    parts = _apply_root_alias(claim.field_ref.split("."))
     root = parts[0]
     sub_path = parts[1:]
 
@@ -641,13 +668,83 @@ def _compare_numeric_claim(claim: Claim, stated: float, gt_float: float) -> Cita
     )
 
 
-def _verify_comparative(claim: Claim, state: dict) -> CitationResult:
-    """比较型 claim：验证两侧数值 + 比较方向 + 基期值申报（v3 D3）。
+def _as_number(value: object) -> float | None:
+    """数值化申报值（供差值型 comparative 判别；bool 不算数值）。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
 
-    stated_value 为比较方向（greater_than/less_than/equal_to）；
-    field_ref_b/stated_value_b 为基期双端（D3）：基期值按与当期相同容差语义
-    比对 field_ref_b 真值；field_ref_b 设而 stated_value_b 缺 → FAIL
-    （比较基期裸奔被拦截）。
+
+def _verify_comparative_difference(
+    claim: Claim, a: float, b: float, stated_diff: float
+) -> CitationResult:
+    """差值型 comparative（close-citation-coverage-gaps ①）：
+
+    申报对象是差值本身（「A 较 B 低约 X」）。双端真值重算差值 `a - b`，与申报值按
+    容差比对（参考系取两操作数绝对值较大者）；`direction` 已申报则校验符号方向
+    （negative = 正文以正向数值表述负向差值），未申报仅比量级并计覆盖缺口（显式
+    降级，不静默 PASS）。基期值 `stated_value_b` 对差值型为可选——申报则按既有容差
+    校验，缺省不判「裸奔」（申报对象是差值本身）。
+    """
+    # 回声短路（兼容既有形态）：LLM 偶发以「某一端的值」填 stated_value（如 49.8），
+    # 不是差值申报——保持 UNVERIFIABLE（未知语义不武断判错，回归：
+    # test_comparative_numeric_direction_field_not_false_fail）。仅当申报既不等于
+    # a 也不等于 b 时按差值裁决。
+    for operand in (a, b):
+        if abs(abs(stated_diff) - abs(operand)) < max(ABS_TOL, abs(operand) * REL_TOL):
+            return CitationResult(status="UNVERIFIABLE", claim=claim)
+
+    diff = a - b
+    tol = max(ABS_TOL, max(abs(a), abs(b)) * REL_TOL)
+    magnitude_delta = abs(abs(stated_diff) - abs(diff))
+    magnitude_ok = magnitude_delta < tol
+
+    if claim.direction == "negative":
+        direction_ok = diff < 0
+    elif claim.direction == "positive":
+        direction_ok = diff > 0
+    elif claim.direction == "flat":
+        direction_ok = abs(diff) < ABS_TOL
+    else:
+        direction_ok = True  # 未申报：跳过方向检查（coverage_gap 标记）
+
+    if claim.field_ref_b is not None and claim.stated_value_b is not None:
+        base_stated = _as_number(claim.stated_value_b)
+        if base_stated is None or abs(b - base_stated) >= max(ABS_TOL, abs(b) * REL_TOL):
+            return CitationResult(
+                status="FAIL",
+                claim=claim,
+                ground_truth=b,
+                delta=None if base_stated is None else abs(b - base_stated),
+                bucket="value_mismatch",
+            )
+
+    passed = magnitude_ok and direction_ok
+    return CitationResult(
+        status="PASS" if passed else "FAIL",
+        claim=claim,
+        ground_truth=diff,
+        delta=magnitude_delta,
+        bucket=None if passed else "value_mismatch",
+        coverage_gap=claim.direction is None,
+    )
+
+
+def _verify_comparative(claim: Claim, state: dict) -> CitationResult:
+    """比较型 claim：验证两侧数值 + 比较方向/差值 + 基期值申报（v3 D3）。
+
+    两类申报：
+    - 方向型：stated_value 为 greater_than/less_than/equal_to → 校验比较方向；
+      field_ref_b/stated_value_b 为基期双端（D3）：基期值按与当期相同容差语义
+      比对 field_ref_b 真值；field_ref_b 设而 stated_value_b 缺 → FAIL（裸奔拦截）。
+    - 差值型：stated_value 为数值 → 双端重算差值比对（见 _verify_comparative_difference）。
     """
     val_a = _resolve_field_ref(claim.field_ref, state)
     val_b = _resolve_field_ref(claim.field_ref_b, state) if claim.field_ref_b else None
@@ -664,6 +761,9 @@ def _verify_comparative(claim: Claim, state: dict) -> CitationResult:
             status="FAIL", claim=claim, ground_truth=None, bucket="path_unresolvable"
         )
     delta = abs(a - b)
+    stated_diff = _as_number(claim.stated_value)
+    if stated_diff is not None:
+        return _verify_comparative_difference(claim, a, b, stated_diff)
     direction = str(claim.stated_value)
 
     if direction == "greater_than":

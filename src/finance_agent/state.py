@@ -116,6 +116,18 @@ class AnalysisState(TypedDict, total=False):
     # 派生风险指标（deterministic-derived-metrics）：validate 代码计算，辩论/裁决引用
     derived_metrics: dict  # {stop_distance_pct, risk_reward_ratio, missing_reason}
 
+    # 工具预算的价位参考与派生值（toolize-price-levels；incident 027 同型补漏：
+    # 二者 compute_metrics 一直产出但未声明 → 被图静默丢弃，三处消费方恒读 None：
+    # ① validate_trade_prices 的参考带/价格关系/偏离校验从未生效（恒走「不可用跳过」）
+    # ② Trader context 的「价位参考」节 ③ 分析师 context 的「常用派生值」表。
+    # 门禁：tests/test_graph_5layer.py::TestNodeOutputChannels（节点产出键 ⊆ 声明）
+    price_levels: (
+        dict  # calc_price_levels 产出：{available, entry_ref, *_band_*, full_band, reason?}
+    )
+    derived_series: (
+        dict  # calc_derived_series 产出：区间涨跌幅/距高低点回撤反弹（field_ref 前缀 derived.）
+    )
+
     # Layer IV: Risk Management（3 辩论者 + Risk Judge）
     risk_debate_history: Annotated[list[dict], add]
     final_trade_decision: dict  # TradeDecision 序列化

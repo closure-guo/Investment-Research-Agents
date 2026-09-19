@@ -31,6 +31,13 @@ round7 校准后的 delta 端到端验证（`tests/scripts/verify_deltas_e2e.py`
 
 - 图通道契约测试已固化；后续新增 state 键的 delta，tasks 中 MUST 包含「AnalysisState 声明 + 通道契约测试」步骤。
 
+## 补漏（2026-09-14，delta `close-citation-coverage-gaps`）
+
+同型漏网再发现两键：`compute_metrics` 一直产出 `derived_series` / `price_levels`（toolize-price-levels 的价位参考与派生值表），但未声明 → 被图静默丢弃 → 三处消费方恒读 None（validate 的参考带/价格关系/偏离三类 sanity 校验**从未生效**；Trader 价位参考节、分析师派生值表从未渲染）。
+
+- 处置：`AnalysisState` 补声明两键；守卫由「逐键补」升级为**系统性门禁**——`tests/test_graph_5layer.py::TestNodeOutputChannels` 断言 `compute_metrics` 全分支产出键 ⊆ 声明 ⊆ 图 `channels`；真实图验证 `tests/test_pipeline_stub.py::TestDerivedKeysSurviveGraphMerge`。
+- 教训强化：**027 的逐键守卫挡不住漏网键**（本次两键即漏网）——「产出键集合可枚举的节点」一律用集合级门禁，不逐键写断言。
+
 ## 关联复发（2026-09-15，delta `ground-comparative-delta-claims`）
 
 同根因第三、四例，由该 delta 的编译图端到端测试与代码质量审查发现：

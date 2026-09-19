@@ -308,3 +308,45 @@ class TestStreamingToolThinkPassthrough:
             f"流式工具的 THINK(node=trader) 应透传给 agent.run 消费者，"
             f"实际 THINK 事件: {[(e.metadata or {}).get('node') for e in think_events]}"
         )
+
+
+class TestDerivedKeysSurviveGraphMerge:
+    """③ close-citation-coverage-gaps 验证：`price_levels` / `derived_series` 穿过真实图合并。
+
+    此前两键未在 AnalysisState 声明 → LangGraph 合并静默丢弃（本地最小实验复现），
+    三处消费方（validate 参考带校验 / Trader 价位参考节 / 分析师派生值表）恒读 None。
+    本测试走真实图 + TESTING stub，断言带 K 线输入时两键出现在最终 state。
+    """
+
+    def test_derived_keys_present_in_graph_output(
+        self, testing_env, balance_sheet, income_statement, cash_flow
+    ):
+        from finance_agent.graph import build_5layer_graph
+
+        n = 40
+        kline = pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-02", periods=n, freq="B").strftime("%Y-%m-%d"),
+                "开盘": [10.0 + i * 0.1 for i in range(n)],
+                "收盘": [10.1 + i * 0.1 for i in range(n)],
+                "最高": [10.2 + i * 0.1 for i in range(n)],
+                "最低": [9.9 + i * 0.1 for i in range(n)],
+                "成交量": [1000 + i for i in range(n)],
+            }
+        )
+        out = build_5layer_graph().invoke(
+            {
+                "query": "深度分析600519",
+                "stock_code": "600519",
+                "stock_name": "贵州茅台",
+                "balance_sheet": balance_sheet,
+                "income_statement": income_statement,
+                "cash_flow_statement": cash_flow,
+                "kline": kline,
+                "benchmark_kline": kline.copy(),
+            }
+        )
+        assert out.get("price_levels", {}).get("available") is True, (
+            f"price_levels 未穿过图合并（027 同型静默丢弃）：{out.get('price_levels')}"
+        )
+        assert out.get("derived_series"), "derived_series 未穿过图合并（027 同型静默丢弃）"
