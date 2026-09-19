@@ -265,7 +265,9 @@ def main() -> None:
     # B5：两臂都含决策层（预登记 §9 修正口径，2026-09-18）——对照臂 through_trader
     # （analysts+辩论+研究经理+Trader，无风控辩论/FM）对 full，消掉 analysts 对 full 的
     # 同义反复（analysts 臂无决策章节而判据问决策）。缓存按臂分文件，防吃到旧臂判定。
-    b5_arm = "through_trader"
+    # 2026-09-18 上游冻结重跑（§19.7 混淆披露处置）：对照臂换 through_trader_frozen
+    # （与 full 共享 byte 级一致的分析师产物，仅下游独立重跑）——B5 差异收敛到目标层
+    b5_arm = "through_trader_frozen"
     arm_available = [
         t for t in tickers if fb.material_path(Path(args.materials_dir), t, b5_arm).exists()
     ]

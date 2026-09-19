@@ -658,3 +658,23 @@ bear_debater 单节点（新提示词），与旧 grounding 扫描（bg-v1）对
 预检拦截（要求先 `sync_prompts.py --once` 收编），且本环境 Langfuse 离线（localhost:3000
 拒绝连接，全会话 span export 失败同因）。本地 git 提示词（权威源）已就绪、运行时回退本地
 已验证（A/B 即证）；**待 Langfuse 在线后执行 sync + deploy 两步**，此为遗留动作项。
+
+
+### 19.9 B5 上游冻结重跑：纯层归因读数 full 17:3（2026-09-19，180 次调用）
+
+**执行**：owner 批准后落地——① 冻结重跑（`p2_b5_frozen_rerun.py`）：以 full 现有分析师产物
+为冻结上游，仅重跑 through_trader 下游链（bull/bear×2 → research_manager → trader → 渲染，
+6 次/标的 × 20 = 120 次），材料存 `through_trader_frozen` 变体；② 第四关自检：20/20 的
+两臂 analyst_reports **byte 级一致**；③ 判定 60 次（驱动换臂 `through_trader_frozen`，
+缓存独立于噪声版）。
+
+**纯层归因读数（provisional，待校准门控）**：**full 17 : through_trader_frozen 3 : tie 0**，
+零解析失败，A 位先出示 8:12 位置均衡。frozen 胜出 3 对（300750/600030/601888）——评审
+非无脑选边/选长。机器理由本批已落盘（1d46758 修复生效），三票明细随行。
+
+**跨口径对照**：噪声版 19:1（§19.7）→ 冻结版 17:3——方向一致、幅度略收：上游采样噪声
+确实贡献了约 2 对的偏移，但主结论**扛住冻结检验**：同字节上游下，风控辩论+FM 层使报告
+在 17/20 对里被判更有助于决策；评审理由集中于「决策可执行性」（价位/止损/仓位 vs 泛泛
+观望）。17:3 的 McNemar 式解读与 MDE（44pp）不在一个分辨率级——点估计 0.85 差异显著
+超越门槛，仍待 4 对人工校准（`2026-09-19-p2-calibration-b5-frozen.csv` + 预填 + 报告直链
+`2026-09-19-b5-frozen-calibration-reports/`）。
