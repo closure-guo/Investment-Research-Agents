@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from finance_agent.models import TradeDecision
 from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint
+from finance_agent.nodes.validate import apply_payout_self_check as _apply_payout_self_check
 from finance_agent.prompts.loader import load_prompt_with_meta
 
 
@@ -24,9 +25,18 @@ def trader(state: dict) -> dict:
         prompt_name=_pinfo.prompt_name,
         prompt_version=_pinfo.prompt_version,
     )
+    # 赔率自检（eval-driven-contract-fixes 任务 6）：初稿 reasoning 自报赔率 vs 自身价位
+    # 代码计算——冲突原位修正（确定性替换，无 LLM）
+    data["reasoning"], _payout_fixed = _apply_payout_self_check(
+        str(data.get("reasoning") or ""),
+        data.get("action"),
+        data.get("entry_price"),
+        data.get("stop_loss"),
+        data.get("target_price"),
+    )
     decision = TradeDecision.model_validate(data)
 
-    return {"trader_plan": decision}
+    return {"trader_plan": decision, "payout_ratio_corrected": _payout_fixed}
 
 
 def _build_trader_context(state: dict) -> str:

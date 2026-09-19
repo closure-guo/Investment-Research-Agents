@@ -25,3 +25,9 @@
 - [x] 5.1 全套单测 + ruff + mypy 过；既有四桶/重试语义回归不红
 - [x] 5.2 用 601318 / 600276 两个终裁案例做验收夹具（假 FAIL 复现 → 修复后判 blocked/contract_error）
 - [x] 5.3 validation 报告：四件修复对照终裁证据的验证记录 + 人工验证报告落 `tests/validation/`
+
+## 6. 交易指令赔率自检（derived-risk-metrics，2026-09-19 owner 批）
+
+- [x] 6.1 失败测试：reasoning 含「赔率约1.7:1」而代码计算 1.24 → 原位修正为 1.24:1 + telemetry；容差内不改；派生值缺失跳过
+- [x] 6.2 实现确定性自检函数（纯字符串替换，无 LLM）并接入 trader / fund_manager 产出路径
+- [x] 6.3 用 601899 / 000333 两个终裁案例做验收夹具

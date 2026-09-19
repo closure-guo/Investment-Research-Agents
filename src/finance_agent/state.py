@@ -159,6 +159,7 @@ class AnalysisState(TypedDict, total=False):
     value_mismatch_repaired_claims: (
         int  # 按 claim 修复记账：重校验后目标 claim PASS 即计（incident 029 处置）
     )
+    payout_ratio_corrected: bool  # 赔率自检：reasoning 自报赔率与代码计算冲突已原位修正
     citation_coverage: float  # 正文数字普查覆盖率（0-1，监控不进路由）
 
     # ── URL 信源溯源（Kimi 风格引用）──
