@@ -85,3 +85,12 @@
 
 - **WHEN** 报告聚合 judge 维度
 - **THEN** report_relevance / consistency SHALL 仅以健康监控口径呈现（CI 回归基线），SHALL NOT 出现在层增量结论句中
+
+#### Scenario: 驱动复用库侧适用性过滤
+
+- **GIVEN** 变体 `plus_debate`（无 Trader / 风控辩论 / RJ / FM 层）
+- **WHEN** 跑批驱动为其一条 run 判分
+- **THEN** 驱动 SHALL 经 `evals.ablation._applicable_dims("plus_debate")` 取维度集合
+- **AND** `decision_grounding` 与 `consistency` SHALL 记 `None` 且 SHALL NOT 发起 judge 调用
+- **AND** 驱动侧 SHALL NOT 存在按变体名硬编码的维度分支
+

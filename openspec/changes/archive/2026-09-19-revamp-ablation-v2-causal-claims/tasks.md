@@ -50,4 +50,5 @@
 - [x] 5.3 跑批执行：离线腿 200 单元（**0 LLM 已核验**）+ 限量真跑腿 13 单元（204 调用）；阳性对照显著（p=4.09e-16）；总体不一致比 0.485 落健康区间
 - [x] 5.4 校准报告 + 终裁清单：`tests/validation/2026-09-16-p1-injection-pilot-validation.md` + `2026-09-16-p1-adjudication-worklist.csv`（201 条待 owner 终裁）
 - [x] 5.5 P1 命中缺陷修复：anchors 形态崩溃（`09a5029`）+ 预算漏计/void 先跑后废（`fdfeb9f`）
-- [ ] 5.6（待 owner）终裁 201 条 → 回填 escape_rate；随后按校准结论重校注入强度（period_shift 降强度；context 级真跑强化靶点）
+- [x] 5.6（待 owner）终裁 201 条 → 回填 escape_rate；随后按校准结论重校注入强度（period_shift 降强度；context 级真跑强化靶点）
+  （完成核验 2026-09-19：①终裁由 P1 正式批覆盖——278/278 真逃逸终裁、pending=0（metrics §1.7）；②period_shift 强度重校完成——pilot 1.000 too_hard → 正式批 0.500 ok（双形态实例，validation §L77）；③context 级靶点强化演化为 claim/价位级注入——A4 正文一致注入 + A5 illegal_price（族 A 补测批））
