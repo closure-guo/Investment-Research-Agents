@@ -71,14 +71,29 @@ TBD - created by archiving change fix-citation-contract-diseases. Update Purpose
 
 ### Requirement: 计算型声明重算注册表全覆盖
 
-计算型 claim 的重算注册表 SHALL 覆盖 `metrics/` 模块的全部纯函数指标族（偿债、盈利、运营、现金流、杜邦、技术指标、风控指标）**以及全部由代码从数据快照计算的派生字段（含 `garp_result`、`anomalies`）**，每个注册根键 SHALL 有独立的重算 fixture 测试（从原始报表数据重算，不依赖 LLM、不调外部接口）。字符串枚举型派生字段（如 GARP failures 集合）SHALL 按集合相等比对。未注册根键的计算型 claim SHALL 判 UNVERIFIABLE，且 SHALL 计入覆盖缺口指标供覆盖率审计。
-(Previously: 未覆盖快照派生字段——r2 实测 garp_result 5/5、anomalies、空值比率字段共约 23 条恒为 UNVERIFIABLE)
+claim 的**校验深度 SHALL NOT 由其自我声明（`claim_type`）决定**：`field_ref` 根键命中重算注册表的
+claim（无论申报为 `numerical` 还是 `computational`）SHALL 一律从 state 原始数据重算 ground-truth；
+重算注册表 SHALL 覆盖 `metrics/` 模块的全部纯函数指标族（偿债、盈利、运营、现金流、杜邦、技术指标、
+风控指标）**以及全部由代码从数据快照计算的派生字段（含 `garp_result`、`anomalies`）**，每个注册根键
+SHALL 有独立的重算 fixture 测试（从原始报表数据重算，不依赖 LLM、不调外部接口）。字符串枚举型派生
+字段（如 GARP failures 集合）SHALL 按集合相等比对。未注册根键的计算型 claim SHALL 判 UNVERIFIABLE，
+且 SHALL 计入覆盖缺口指标供覆盖率审计。重算与直读两条路径 SHALL 共用同一比对实现（方向对齐 +
+percent/万/亿候选归一 + 相对容差），SHALL NOT 各自维护容差语义。重算输入不可得（如 state 缺原始报表）
+时 SHALL 显式降级回直读比对并保留覆盖缺口标记，SHALL NOT 静默等价于未校验。
+
+(Previously: 重算路由由 `claim_type=computational` 触发——LLM 把自算值标成 numerical 即可绕过重算，P1 冻结批 5/5 复现)
 
 #### Scenario: 已注册指标重算通过
 
-- **GIVEN** Agent 报告含计算型 claim（如 `solvency_metrics.资产负债率.2024`），其根键已注册
+- **GIVEN** Agent 报告含 claim（如 `solvency_metrics.资产负债率.2024`），其根键已注册
 - **WHEN** 执行校验
 - **THEN** 系统 SHALL 从 state 原始数据经对应纯函数重算 ground-truth，按相对容差 0.5% 判定 PASS/FAIL
+
+#### Scenario: 标签不得绕过重算
+
+- **GIVEN** claim 申报 `claim_type="numerical"` 而 `field_ref` 根键已注册重算
+- **WHEN** 该根键的派生 dict 与原始数据不一致（污染或自算错误）
+- **THEN** 校验 SHALL 判 FAIL（真值取自重算，SHALL NOT 取自可被污染的派生 dict）
 
 #### Scenario: 未注册根键显式降级
 
@@ -88,7 +103,7 @@ TBD - created by archiving change fix-citation-contract-diseases. Update Purpose
 
 #### Scenario: 容差语义不回归
 
-- **WHEN** 注册表扩展后执行任意校验
+- **WHEN** 注册表扩展或路由变更后执行任意校验
 - **THEN** 数值容差（绝对 0.01 / 相对 0.5%）与三态裁决（PASS/FAIL/UNVERIFIABLE）语义 SHALL 与既有契约一致
 
 #### Scenario: 快照派生字段可验
@@ -444,3 +459,96 @@ field_ref 解析 SHALL 对 DataFrame 行键同时尝试原始值与去连字符�
 
 - **WHEN** 对 fixture 中的 income_statement 营收真值注入 ±10% 偏差并生成对应 claim
 - **THEN** 校验 SHALL 判 value_mismatch FAIL，阻断层置位
+
+### Requirement: 单点修复的自动处置授权与边界
+
+`value_mismatch` 稀疏失败的单点修复属于**真错桶的受护栏自动处置**：下列三条护栏全部成立时，SHALL 免于「自动化处置须以逐条人工终裁为前置」的一般要求（AGENTS.md 红线，incident 026）；任一护栏失效 SHALL 视为策略变更（须走 delta）并恢复终裁前置。
+
+1. **不隐藏真错**：修复回填条数 SHALL 计入 `citation_analyst_true_fail`（修复会把真错藏进 PASS，真错口径必须包含它们），并 SHALL 单独计数为 `citation_surgical_repaired` 供观测修复触发与成功率。
+2. **重校验仲裁**：修复回填后 SHALL 立即整体重校验，并以重校验结果为该轮最终状态（改写引入的新错照常 FAIL，SHALL NOT 因「已修复过」放行）。
+3. **最小改写 + 可审计**：修复指令 SHALL 限制「只改错误数字及其直接联动措辞、禁止改写其他内容、禁止引入新数字」；每次修复 SHALL 在 trace 留痕（修前句/修后句/ground_truth/重校验结果）。
+
+**触发边界**：SHALL 仅当同一分析师同一轮 `value_mismatch` 失败数 < 3（稀疏）时发起；≥3 处 SHALL NOT 单点修复。自动重试关闭态下修复失败 SHALL 直接按阻断标记放行（`citation_blocked` 置位），SHALL NOT 触发分析师重跑。
+
+**变更纪律**：放宽稀疏阈值、移除真错口径、跳过强制重校验、允许修复引入新数字——任一 SHALL 先经 delta 修改本要求，SHALL NOT 作为实现细节直接调整。
+
+#### Scenario: 稀疏失败触发且计入真错
+
+- **GIVEN** 某分析师同轮 1 处 value_mismatch
+- **WHEN** 单点修复成功且重校验 PASS
+- **THEN** `citation_surgical_repaired` SHALL +1
+- **AND** `citation_analyst_true_fail` SHALL 同时计入该条（不因修复而消失）
+
+#### Scenario: 密集失败不触发
+
+- **WHEN** 同一分析师同轮 value_mismatch ≥ 3 处
+- **THEN** 系统 SHALL NOT 发起单点修复，按既有重试/放行路由处理
+
+#### Scenario: 护栏变更须走 delta
+
+- **WHEN** 需求方要放宽稀疏阈值、移除真错口径或跳过强制重校验
+- **THEN** SHALL 先开 delta 修改本要求，SHALL NOT 作为实现细节直接调整
+
+### Requirement: 比较型差值申报的显式降级与计数
+
+comparative claim 的 `stated_value` 不属比较方向枚举（`greater_than` / `less_than` / `equal_to`）时——典型为 LLM 把差值或差幅数字（「MA5 较 MA20 低约 2.3%」的 2.3）填入 `stated_value`——校验器 SHALL 判 UNVERIFIABLE，bucket SHALL 为 `comparative_delta_unregistered`，且 SHALL 计入覆盖缺口计数（与「未注册根键的计算型 claim」同一计数通道），SHALL NOT 静默不计。UNVERIFIABLE 拆报 SHALL 将其单列为第三类 `citation_unverifiable_comparative_delta`（与文本类、未注册类并列），实验报告与 trace SHALL 分别输出。
+
+本要求 SHALL NOT 为该路径新增验证语义：SHALL NOT 重算差值、SHALL NOT 判 PASS/FAIL、SHALL NOT 改变三枚举路径与 D3 基期校验的既有行为与执行顺序、SHALL NOT 触发阻断或重试。是否为比较型差值建立公式申报与重算（`formula` + `stated_delta`），SHALL 依据该计数在首轮实验中的占比与逐条人工归因另行决策，SHALL NOT 预先实现。
+
+#### Scenario: 差值数字填入 stated_value 被计数
+
+- **GIVEN** comparative claim `field_ref=technical_indicators.MA.5.-1`，`field_ref_b=technical_indicators.MA.20.-1`，`stated_value=2.3`
+- **WHEN** 执行校验
+- **THEN** 结果 SHALL 为 UNVERIFIABLE，bucket `comparative_delta_unregistered`
+- **AND** 覆盖缺口计数 SHALL +1，SHALL NOT 出现在阻断分母
+
+#### Scenario: 拆报单列
+
+- **WHEN** 一轮实验结束
+- **THEN** 报告 SHALL 含 `citation_unverifiable_comparative_delta` 计数，与 `citation_unverifiable_text`、`citation_unverifiable_unregistered` 并列
+- **AND** `citation_unverifiable_ratio` 的构成 SHALL 可按三类分解
+
+#### Scenario: 三枚举行为不变
+
+- **WHEN** comparative claim `stated_value="less_than"` 且两端真值 a < b、基期申报合规
+- **THEN** 校验 SHALL 判 PASS，与变更前完全一致
+- **AND** `stated_value="less_than"` 而 a ≥ b 时 SHALL 判 FAIL、bucket `value_mismatch`，与变更前一致
+
+#### Scenario: 不新增验证语义
+
+- **WHEN** 非枚举 `stated_value` 的 comparative claim 进入校验
+- **THEN** 校验器 SHALL NOT 尝试用两端真值重算差值与 `stated_value` 比对
+- **AND** 阻断层 SHALL NOT 因该类 claim 置位，路由 SHALL 不受影响
+
+### Requirement: 同义列名字段解析消歧
+
+校验器按 field_ref 对快照 DataFrame 取值或重算时，SHALL 先做**列名消歧**：当目标表存在多个语义同名/近义列（如利润表同时存在「归属于母公司的净利润」与「归母净利润」）且数值不同时，解析器 SHALL（按优先级）——① 命中官方科目全名列则视为唯一权威列；② 仅命中短名/别名时，若存在对应官方全名列 SHALL 改用全名列；③ 无法消歧时 SHALL 将该 claim 判为 `blocked`（解析歧义）并进四桶拆报的 blocked 桶，SHALL NOT 静默取任一列的值参与 value_mismatch 比较。
+
+依据：2026-09-18 A4 自然腿 owner 终裁（601318，报表 1347.78 亿为官方全名列真值、校验器取短名列 235.23 亿产生假 FAIL）。
+
+#### Scenario: 官方全名优先
+
+- **WHEN** field_ref 为 `income_statement.20251231.归母净利润`，且该表同时存在「归属于母公司的净利润」（官方全名）与「归母净利润」（短名）两列且数值不同
+- **THEN** 校验器 SHALL 取官方全名列的值作为 ground truth，短名 field_ref SHALL 映射到全名列
+
+#### Scenario: 不可消歧判 blocked
+
+- **WHEN** 存在多个近义列且无官方全名列可判定权威来源
+- **THEN** 该 claim SHALL 判 `blocked` 进解析桶，SHALL NOT 产生 value_mismatch FAIL
+
+### Requirement: claim 值槽语义类型校验
+
+数值型 claim 的 `stated_value` SHALL 与 `field_ref` 所指字段的**语义类型**一致（水平值 level 不得填变化量 delta，反之亦然）。当 claim 的 interpretation 表明其数值是区间变化量（环比/同比变化、差值），而 field_ref 指向水平值字段（或相反）时，校验器 SHALL 将该 claim 判为**契约错误**进解析桶（`claim_contract_error`），SHALL NOT 计入 value_mismatch（分析师幻觉口径），且 SHALL NOT 触发修复回路（正文往往正确，修的应是 claim 契约）。
+
+依据：2026-09-18 A4 自然腿 owner 终裁（600276，claim 把 PMI 环比变化 0.6 填进 PMI 水平值槽 49.8，正文算术正确）。
+
+#### Scenario: 变化量入水平槽判契约错误
+
+- **WHEN** claim 的 field_ref 为 `macro_indicators.pmi.0.制造业-指数`（水平值 49.8），stated_value 为 0.6 且 interpretation 为「环比回升 0.6 个百分点」
+- **THEN** 校验器 SHALL 判 `claim_contract_error` 进解析桶，SHALL NOT 判 value_mismatch
+
+#### Scenario: 契约错误不触发修复
+
+- **WHEN** 某 claim 判为 `claim_contract_error`
+- **THEN** 该 claim SHALL NOT 进入单点修复或全量重试路径，SHALL 在校验报告中单独呈现供契约修复
+

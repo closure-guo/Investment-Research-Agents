@@ -84,6 +84,8 @@
 
 judge 输入材料 SHALL 满足：debate_quality 的 `debate_history` SHALL 在原始辩论发言之前附骨架行——交锋覆盖统计（各方论点被回应数 N/M）与收敛信号摘要（第二轮起双方立场靠拢/共识点/核心分歧保留项）；consistency 的材料 SHALL 含【Trader 方案】节（TradeDecision 的 action / position_size / 价位与触发条件的结构化渲染），使「Trader 方案 → Risk Judge 裁决」是否静默推翻可核对。
 
+**debate_quality 结构化枚举与程序封顶（v6）**：prompt 内强制枚举经 round10 实测不足以稳定生效（LLM 自我枚举随机，8 行重判仍有漏判与回归），故 5 分档判据 SHALL 由代码承担——debate_quality 的输出契约 SHALL 在 JSON 中额外含 `points` 数组（每项 `{header, type}`，`header` 为论点标头原文，`type ∈ {data, qualitative}`）；`run_judge` SHALL 在解析后按枚举结果裁决：存在任一 `type="qualitative"` 时分数 SHALL 被压至 `min(score, 4)`，该封顶 SHALL NOT 依赖 LLM 是否自觉扣分，且 SHALL 在结果中标记 `cap_applied` 与 `qualitative_points` 数量。枚举缺失或格式非法时 SHALL 保持分数不变（fail-open）并标记 `enumeration_missing=true`——该标记 SHALL 随分数落库（eval 报告 comment / 消融 run 记录），SHALL NOT 静默视为「无纯定性论点」。其余维度输出契约与结果形状 SHALL 不变。
+
 #### Scenario: report_relevance 评估
 
 - **GIVEN** 用户查询 `{{query}}` 与最终报告 `{{report}}`
@@ -97,6 +99,33 @@ judge 输入材料 SHALL 满足：debate_quality 的 `debate_history` SHALL 在�
 - **WHEN** 运行 debate_quality Judge
 - **THEN** SHALL 按 1-5 rubric 打分（5 = 双方逐条交锋且引证据，1 = 单方输出或空洞）
 - **AND** v4 起 5 分档 SHALL 执行判例：论点列表（R1/R2 标头）中任一条为纯定性表述（无数据/事实支撑的断言，含「历史上……」类无样本论据）即降 4，即使该回应其余部分数据密集
+- **AND** v6 起该判例 SHALL 由程序按 `points` 枚举执行（见下）
+
+#### Scenario: 纯定性论点被程序封顶
+
+- **GIVEN** judge 返回 `score=5` 且 `points` 中含任一 `type="qualitative"` 的论点标头
+- **WHEN** 解析 judge 结果
+- **THEN** 最终分数 SHALL 为 4（`cap_applied=true`，`qualitative_points ≥ 1`）
+- **AND** SHALL NOT 因 LLM 给了 5 而放行（round10 实测漏判样本的兜底路径）
+
+#### Scenario: 全数据论点不封顶
+
+- **GIVEN** judge 返回 `score=5` 且 `points` 全部为 `type="data"`
+- **WHEN** 解析 judge 结果
+- **THEN** 最终分数 SHALL 保持 5（`cap_applied=false`）
+
+#### Scenario: 封顶不下压低于 4
+
+- **GIVEN** judge 返回 `score=3` 且 `points` 含纯定性论点
+- **WHEN** 解析 judge 结果
+- **THEN** 最终分数 SHALL 保持 3（封顶为 `min(score, 4)`，不额外下压）
+
+#### Scenario: 枚举缺失的可审计降级
+
+- **GIVEN** judge 输出缺 `points` 字段或类型非法（旧格式/模型未遵契约）
+- **WHEN** 解析 judge 结果
+- **THEN** 分数 SHALL 不变（fail-open，MUST NOT 按缺失推断为「无纯定性」而放行，也 MUST NOT 反向封顶）
+- **AND** 结果 SHALL 标记 `enumeration_missing=true` 并随分数落库，供校准与代裁识别机制未生效的行
 
 #### Scenario: decision_grounding 评估
 
@@ -116,6 +145,11 @@ judge 输入材料 SHALL 满足：debate_quality 的 `debate_history` SHALL 在�
 - **WHEN** Judge 返回非 JSON 或解析失败
 - **THEN** SHALL 重试一次；仍失败则该维度记 score=null
 - **AND** 不阻塞实验，但计入 judge 失败率
+
+#### Scenario: 非 debate 维度结果形状不变
+
+- **WHEN** 运行 report_relevance / decision_grounding / consistency Judge
+- **THEN** 结果字典 SHALL NOT 增加 `points` / `cap_applied` / `enumeration_missing` 键（既有精确断言契约不变）
 
 #### Scenario: 裁判成本独立核算
 
@@ -308,18 +342,95 @@ Judge 评估器 SHALL NOT 在未校准情况下用于线上决策（如阻塞 PR
 
 ### Requirement: 数据对齐消融实验
 
-系统 SHALL 支持数据对齐消融：构造三个架构变体——(a) 单分析师直出、(b) 分析师 + Bull/Bear 辩论、(c) 完整 5 层——所有变体接收**完全相同**的 state 快照（fetch_data / compute_metrics 输出重放），仅 Agent 编排不同。每变体 × 每标的 SHALL 重复运行 3 次取中位数。消融报告 SHALL 以 citation_pass 率与 judge 分数（带 CI）衡量各层增量价值，SHALL NOT 用单变体单次运行下结论。
+系统 SHALL 支持数据对齐消融：构造三个架构变体——(a) 单分析师直出、(b) 分析师 + Bull/Bear 辩论、(c) 完整 5 层——所有变体接收**完全相同**的 state 快照（fetch_data / compute_metrics 输出重放），仅 Agent 编排不同。每变体 × 每标的 SHALL 重复运行 3 次取中位数。快照对齐 SHALL 由代码保证：每条 run 前重算快照 digest 并与本次跑批登记值比对，不一致时跑批 SHALL 显式失败并报告标的与两侧 digest，SHALL NOT 静默继续（跨交易日续跑不得混入不同输入）。digest SHALL 为**内容稳定**哈希——同一数据在任意进程、任意次构建得到相同值，SHALL NOT 依赖内存布局（对象列 `ndarray.tobytes()` 序列化的是指针，该形态会致核验恒失败——G5 通路验证实测）。
+
+**指标层（v2 置换）**：层增量推断 SHALL 以因果主张登记表（`causal-ablation` 能力）对应的因果下游指标为主指标。原 judge 四维的安置：report_relevance / consistency SHALL 降级为 CI 回归健康监控（门禁族），SHALL NOT 参与层增量推断；debate_quality SHALL 从消融退役（由风险点增量率、交锋修正率与 pairwise 盲评替代）；decision_grounding 的 judge 版 SHALL 降级为抽查校准用，其 dg 检查（执行参数出处）SHALL 以代码化口径为主。citation 腿 SHALL 以四桶拆报口径（blocked / analyst_true_fail / surgical_repaired / verifier_normalized）呈现，SHALL NOT 以旧 `citation_pass` 标量作层增量解读。
+
+**跑批入口唯一化**：跑批驱动 SHALL 为薄壳——判分、维度适用性过滤、judge_vars 落盘 SHALL 全部调用库侧（`evals/ablation.py`）函数，驱动侧 SHALL NOT 存在判分/过滤/落盘的重复实现；判分口径变更 SHALL 只改库侧一处。
+
+**维度适用性过滤的唯一实现**：某变体不存在的层 SHALL NOT 被 judge 评分——评「不存在的层」只会产伪影（宽容评虚层 vs 挑剔评真层的不对称，incident #112）。变体→适用维度的映射 SHALL 只有一处实现（`evals.ablation._applicable_dims`），跑批驱动 SHALL 复用该实现，SHALL NOT 在驱动侧另行硬编码变体分支。适用性过滤 SHALL 在**判分调用前**生效：被过滤维度 SHALL 记 `None` 且 SHALL NOT 产生任何 judge 调用。
+
+**层增量点估计的字段名与配对单元**：层增量的点估计字段 SHALL 命名为 `diff_mean`（值为均值差，与 `paired_bootstrap_ci` 的 mean-diff 口径一致），SHALL NOT 沿用 `diff_median` 之类与实际统计量不符的名称。聚合报告 SHALL 披露配对单元为**标的**而非 run（同标的同变体重复先取中位数，再以标的为配对单元），并给出配对单元数——使「3 标的 × 10 重复」不等于「有效 n=30」这一点对读报告的人可见。
+
+**结论句式纪律**：消融结论 SHALL 只有两种合法形态——① CI 整体低于决策阈值时为真阴性结论（「在本实验分辨率（MDE=X）下，该对象增量低于其成本对应阈值，建议降级/裁剪」）；② CI 同时跨 0 与阈值时为诚实悬置（「分辨率不足，需扩至 N 只标的」）。裸「未获统计支持」SHALL NOT 作为合格结论，必须附 MDE；决策阈值 SHALL 附成本换算依据。
+
+**材料落盘与参数化**：消融每完成一条 run SHALL 落盘该 run 的 judge 输入材料（`judge_vars`）到独立文件（按 `(variant, ticker, repeat)` 命名），并在 run 记录中携带材料路径与 judge 明细（分数、纯定性论点数、是否封顶、枚举是否缺失）——使 rubric 变更后的重判 SHALL 可离线完成（不重跑管线、不依赖从 Langfuse 反解材料），并按同一口径复算。标的列表与重复次数 SHALL 经 CLI 参数化（默认值保持 3 标的 / 3 重复），实际取值 SHALL 写入产物 config；断点续跑的完成键 SHALL 仍为 `(variant, ticker, repeat)`，参数变更后已完成 run SHALL NOT 被重复消耗 token。
+
+**judge 分数取 K 次均值（噪声下限披露）**：round11 实测同一材料同一 rubric 的单次 judge 调用在 5/4 边界**双峰翻转**（宁德 04baff5c，n=13 次调用：4 分 7 次 / 5 分 6 次，σ≈0.5）——该噪声与消融待测的层级增量（0.25–0.5 量级）同阶，单次调用不足以支撑层间比较。故消融的 judge 分数 SHALL 以 K 次重复的**均值**为点估计（K 经 CLI 声明并写入产物，默认 ≥3）；SHALL NOT 用中位数——双峰分布 p→0.5 时中位不降翻转概率，均值才无偏且方差随 K 收缩。SHALL 记录每次分数与极差（`scores` / `score_spread`）使噪声保持可见，SHALL NOT 只留均值而静默抹掉离散度。解析失败/输入缺失的调用不计入均值但计入 `judge_failures`；封顶/枚举遥测取**最低分那次**调用的观测（最保守，任一次找到纯定性标头则封顶证据不丢）。
 
 #### Scenario: 变体输入对齐
 
 - **WHEN** 执行消融实验
 - **THEN** 三个变体的数据输入 SHALL 来自同一 trace 的 state 快照重放，差异只可归因于编排架构
+- **AND** 每条 run 前快照 digest SHALL 与跑批登记值比对通过，不一致时该 run SHALL 作废告警
 
 #### Scenario: 消融结论
 
 - **WHEN** 消融完成
-- **THEN** 报告 SHALL 给出每个新增层级的增量效果及 95% CI
-- **AND** 对 CI 含 0 的层级，报告 SHALL 明确标注"该层价值未获统计支持"，供成本裁剪决策参考
+- **THEN** 报告 SHALL 给出每个被消融对象的因果下游主指标效应量、95% CI 与 MDE
+- **AND** 结论 SHALL 符合两种合法句式之一（真阴性或诚实悬置），决策阈值 SHALL 附成本换算依据
+
+#### Scenario: judge 材料落盘可离线重判
+
+- **WHEN** 一条消融 run 完成
+- **THEN** 其 `judge_vars` SHALL 已写入 `reports/ablation/judge_vars/<variant>-<ticker>-<repeat>.json`，run 记录 SHALL 含该路径
+- **AND** 用该文件直接调用 `run_judge` SHALL 复现同一批 judge 分数（无需重跑管线）
+
+#### Scenario: 重复次数与标的参数化
+
+- **WHEN** 以 `--tickers ... --repeats N` 运行消融驱动
+- **THEN** 实际 TICKERS/REPEATS SHALL 写入产物 config，且 runs 条数 SHALL 为 `len(tickers) × 3 × N`（无可跳过项时）
+- **AND** 断点续跑文件中的完成键 SHALL 仍为 `(variant, ticker, repeat)`
+
+#### Scenario: judge 分数取均值并记录离散度
+
+- **GIVEN** 某 run 的 debate_quality 三次调用返回 `[5, 4, 4]`
+- **WHEN** 记录该 run 的 judge 分数
+- **THEN** 点估计 SHALL 为 4.33（均值），`scores` 与 `score_spread=1` SHALL 一并落盘
+- **AND** 全部调用失败时 SHALL 记 score=None 且 `judge_failures=K`（沿实验失败率口径，不静默给分）
+- **AND** 封顶/枚举遥测 SHALL 取自最低分那次调用（`[5,4,4]` → 取 4 分那次的枚举）
+
+#### Scenario: 材料落盘不改变聚合口径
+
+- **WHEN** 落盘材料后运行聚合
+- **THEN** `aggregate_results` 的输入 runs 形状 SHALL 与落盘前一致（新增字段为附加信息），既有聚合 CI 口径 SHALL NOT 因落盘而变化
+
+#### Scenario: 跑批入口唯一化
+
+- **WHEN** 消融驱动执行判分、维度适用性过滤或 judge_vars 落盘
+- **THEN** 这些逻辑 SHALL 经由库侧函数完成；驱动侧 SHALL NOT 内联判分/过滤/落盘实现
+- **AND** 被过滤维度 SHALL 记 `None` 且 SHALL NOT 发起 judge 调用
+
+#### Scenario: 跨进程续跑的快照 digest 核验
+
+- **GIVEN** 断点续跑台账已登记某标的的快照 digest
+- **WHEN** 重启后续跑重建该标的快照
+- **THEN** digest 与登记值不一致时跑批 SHALL 显式失败并输出标的与两侧 digest，SHALL NOT 继续消耗 token、SHALL NOT 将新旧 run 混入同一批次比较
+- **AND** digest SHALL 内容稳定：同一数据在任意进程、任意次构建得到相同值（对象列不得以指针序列化参与哈希）
+
+#### Scenario: 层增量点估计字段与配对单元
+
+- **WHEN** 读取聚合报告的层增量条目
+- **THEN** 点估计 SHALL 位于 `diff_mean` 字段，`diff_median` SHALL NOT 出现
+- **AND** 报告 SHALL 携带配对单元数与「配对单元=标的」的披露
+
+#### Scenario: citation 腿拆报呈现
+
+- **WHEN** 消融报告呈现 citation 相关结果
+- **THEN** SHALL 以四桶拆报口径（blocked / analyst_true_fail / surgical_repaired / verifier_normalized）呈现，SHALL NOT 以 citation_pass 标量作层增量比较
+
+#### Scenario: 旧四维不再作层增量
+
+- **WHEN** 报告聚合 judge 维度
+- **THEN** report_relevance / consistency SHALL 仅以健康监控口径呈现（CI 回归基线），SHALL NOT 出现在层增量结论句中
+
+#### Scenario: 驱动复用库侧适用性过滤
+
+- **GIVEN** 变体 `plus_debate`（无 Trader / 风控辩论 / RJ / FM 层）
+- **WHEN** 跑批驱动为其一条 run 判分
+- **THEN** 驱动 SHALL 经 `evals.ablation._applicable_dims("plus_debate")` 取维度集合
+- **AND** `decision_grounding` 与 `consistency` SHALL 记 `None` 且 SHALL NOT 发起 judge 调用
+- **AND** 驱动侧 SHALL NOT 存在按变体名硬编码的维度分支
 
 ### Requirement: 基准集 v1.1 构造规则
 
@@ -398,4 +509,75 @@ deep 边界类别 SHALL 覆盖至少一个「模糊名称无代码」的歧义�
 - **WHEN** data_map 含 `source`（如 `snapshot:akshare-2026-08-25`）
 - **THEN** 测量正常执行，source 随报告输出
 - **AND** 报告 SHALL 展示真值快照来源（供审计追溯）
+
+### Requirement: 评估报告结论状态与适用口径标注
+
+评估报告的结论是有生命周期的对象：新证据推翻旧结论时，旧结论 SHALL 自动失效，而不是留在原地等人发现。消融结果报告（`evals/ablation/results/*.md`）SHALL 在头部声明状态字段 `**status**:`，取值 SHALL 为 `active` 或 `superseded-by: <相对路径>`；`superseded-by` 的目标路径 SHALL 解析到仓库内真实存在的文件（悬空指针与无标记等价，都不允许）。被推翻的结论 SHALL 就地标注（原文保留 + 撤回说明 + 指向权威版本），SHALL NOT 只删数字或只改数字——只改数字会让读者以为结论仍成立。
+
+**权威报告的适用口径披露义务**：一份宣称覆盖前版结论的报告（如「权威版」）SHALL 披露其数字的适用口径，至少包含：① judge 校准状态（该跑批相对 judge 校准达标轮次的先后——校准前产出的分数不得表述为已校准）；② 维度适用性是否生效（该批次的各变体评了哪些维度；若评了不存在的层，相关层增量 SHALL 标注为无效比较而非层增量）；③ 层增量的配对单元与其数量；④ 已知契约噪声是否进入该报告用作层增量的指标（进了就 SHALL 声明该指标不作层增量解读）。披露 SHALL 位于报告头部或结论区，SHALL NOT 只藏在正文脚注。
+
+**对外材料引用纪律**：README 等对外材料引用消融数字时 SHALL 引用状态为 `active` 的报告，且结论措辞 SHALL 与该报告的 CI 纪律一致——「未获统计支持」SHALL NOT 被转写为「据此可裁剪」（统计不支持与价值为零是两个命题，裁剪决策需要独立证据）。
+
+> 本要求是本 delta 的最小落点：只覆盖消融结果报告的头部状态与权威报告的披露义务。完整的结论注册表（全库扫描 + 索引页状态徽章 + 状态迁移校验）留待后续 delta，见 design.md「不做的事」。
+
+#### Scenario: 被推翻的报告带 superseded 头部
+
+- **GIVEN** `evals/ablation/results/pilot.md` 的「风险辩论+基金经理层显著退步」结论已被 n=10 报告推翻（伪影 #109/#111/#112）
+- **WHEN** 读取该报告
+- **THEN** 头部 SHALL 含 `**status**: superseded-by: docs/evals/2026-09-03-消融n10权威结果.md`
+- **AND** 「简历素材对照」段 SHALL 保留原文并附撤回说明（结论被推翻 + 成本口径 41% vs 29% 的差异 + 指向权威版本）
+- **AND** 该路径 SHALL 在仓库中真实存在
+
+#### Scenario: 权威报告披露测量口径
+
+- **GIVEN** 某 n=10 报告自称「修复后权威版」，但其 90 批次产出于 judge 校准 round7 达标（2026-09-13）之前
+- **WHEN** 阅读该报告
+- **THEN** 报告 SHALL 声明该批次 judge 未校准
+- **AND** 报告 SHALL 声明 `plus_debate` 变体无 Trader/风控/FM 层，其 grounding / consistency 分数为 #112 伪影存活，对应的 full−plus_debate 层增量条目 SHALL 标注为无效比较
+- **AND** 报告 SHALL 声明层增量的配对单元为标的（3 个）而非 run（30 条）
+
+#### Scenario: 状态契约的机器校验
+
+- **WHEN** 运行报告状态契约测试
+- **THEN** `evals/ablation/results/*.md` 每份文件 SHALL 含合法 `**status**:` 头
+- **AND** `superseded-by` 指向的路径 SHALL 存在，否则测试 SHALL 失败
+
+### Requirement: 辩论论点锚点覆盖率
+
+系统 SHALL 提供确定性评估器 `argument_anchor_coverage`（零 LLM 调用）：从 state channel `debate_anchor_checks` 计算 `value = 有效锚定论点数 / 论点总数`（有效锚定 = 任一锚点 `resolved`；Layer II 与 Layer IV 合并计），并携带拆项 `unanchored_inference`（推断型零锚）、`unresolved`（申报了锚但无一解析/命中）、`missing_required`（data / event 型零锚）、`unspecified`（旧格式或 kind 非法）。论点总数为 0 时 SHALL 返回 null（不计入该维度）。该指标 SHALL 作为 NUMERIC Score 上报 Langfuse（与 `citation_coverage` 并列），SHALL 进入实验报告与消融 run 记录（`evals/run.py` / 消融驱动），使辩论层拥有不依赖 judge 取值域的层间比较信号。
+
+debate_quality 的 judge 材料 SHALL 在既有骨架行（交锋覆盖统计、收敛信号）之后追加**锚点覆盖骨架行**（各方 `anchored/total` 与拆项），并在每条论点编号前标注 `[kind 状态]`（如 `[data ✓]` / `[inference ○]` / `[data ✗ 锚不可解析]`）。本要求 SHALL NOT 改变 debate_quality 的 rubric 版本与 `points` 输出契约——锚点信息仅作确定性对照锚呈现；judge `points.type` 与辩手申报 `kind` 的交叉核对留待后续校准轮。
+
+指标口径 SHALL 登记至 `docs/evals/metrics.md` §1.2（定义 / 代码位置 / 拆项），judge 材料形态变化 SHALL 在时间线标注切点（跨切点 debate 分不可直接比较）。
+
+#### Scenario: 覆盖率确定性计算
+
+- **GIVEN** 一次 deep 全流程 `debate_anchor_checks` 含 12 条论点校验，其中 8 条 `anchored=true`、2 条 inference 零锚、1 条 data 型锚全部 unresolved、1 条 unspecified
+- **WHEN** 运行 `argument_anchor_coverage` 评估器
+- **THEN** SHALL 返回 `{name: "argument_anchor_coverage", value: 0.6667, comment: 含 unanchored_inference=2 / unresolved=1 / missing_required=0 / unspecified=1}`
+- **AND** SHALL NOT 发起任何 LLM 调用
+
+#### Scenario: 无论点时跳过
+
+- **WHEN** `debate_anchor_checks` 为空（quick 模式或辩论层未执行）
+- **THEN** 评估器 SHALL 返回 null，不报错、不计入该维度
+
+#### Scenario: judge 材料附锚点骨架行与状态标注
+
+- **WHEN** 提取 debate_quality 的 `debate_history` 材料
+- **THEN** 材料 SHALL 含「【锚点覆盖】bull a/b｜bear c/d｜风控 e/f（含拆项）」骨架行，位于交锋覆盖与收敛信号骨架行之后、原始发言之前
+- **AND** 每条论点行 SHALL 形如「①[data ✓] 论点原文」，`kind` 与状态取自 `debate_anchor_checks`，SHALL NOT 由材料提取阶段重新推断
+- **AND** rubric 版本与 `points` 契约 SHALL 保持 v6 不变
+
+#### Scenario: 消融与实验报告携带
+
+- **WHEN** 消融一条 run 完成或 `python -m evals.run` 一条 item 完成
+- **THEN** run / item 记录 SHALL 含 `argument_anchor_coverage` 的 value 与拆项
+- **AND** 消融聚合报告 SHALL 对该指标按既有配对 bootstrap 口径给出层间增量与 95% CI（与 judge 维度同法）
+
+#### Scenario: 口径登记与切点
+
+- **WHEN** 本变更合入并首轮实验收口
+- **THEN** `docs/evals/metrics.md` §1.2 SHALL 新增该指标行（定义 / 代码位置 / 拆项）
+- **AND** 时间线 SHALL 标注「judge 材料加锚点骨架行」切点，跨切点 debate_quality 分数 SHALL 标注不可直接比较
 

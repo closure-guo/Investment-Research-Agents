@@ -122,6 +122,21 @@ def _format_claims(claims: list) -> str:
     return "; ".join(items)
 
 
+def _argument_text(arg: object) -> str:
+    """论点文本：dict/pydantic DebateArgument 取 text，裸字符串原样（旧格式/夹具）。
+
+    不得 str() 整个论点对象——pydantic 会渲染成 ``text=... kind=... anchors=...``
+    或 dict-repr（``{'text': ...}``），把结构噪声灌进 judge 材料。
+    """
+    if isinstance(arg, str):
+        return arg.strip()
+    if isinstance(arg, dict):
+        return str(arg.get("text") or "").strip()
+    if hasattr(arg, "text"):
+        return str(arg.text or "").strip()
+    return "" if arg is None else str(arg).strip()
+
+
 def _rebuttal_coverage(history: list) -> str | None:
     """交锋覆盖率（D1 1.12）：各角色论点被对方回应的比例——零 token 确定性指标。
 
@@ -148,7 +163,9 @@ def _rebuttal_coverage(history: list) -> str | None:
             rnd = int(msg.get("round") or occurrence[role])
         except (TypeError, ValueError):
             rnd = occurrence[role]
-        args = [str(a).strip() for a in (msg.get("key_arguments") or []) if str(a).strip()]
+        # 论点文本按原位置取（不过滤空项）：rebuttal_to 的 1-based 编号对应对方
+        # key_arguments 的位置，过滤会让编号错位
+        args = [_argument_text(a) for a in (msg.get("key_arguments") or [])]
         messages.append((role, rnd, args, msg.get("rebuttal_to") or []))
 
     roles = {role for role, _, _, _ in messages}
@@ -227,14 +244,138 @@ def _summarize_debate(history: list) -> str:
     skeleton = _convergence_skeleton(history)
     if skeleton:
         parts.append(skeleton)
+    roles: dict[str, int] = {}
+    args_count = 0
+    concede = 0
+    persist = 0
     for msg in history:
         msg = _as_dict(msg)
         if not msg:
             continue
-        role = msg.get("role", "?")
+        role = str(msg.get("role", "?"))
+        roles[role] = roles.get(role, 0) + 1
+        args_count += len(msg.get("key_arguments") or [])
+        content = str(msg.get("content") or "")
+        concede += len(re.findall(r"确实|(?<!不)同意|部分接受|有道理|合理性", content))
+        persist += len(re.findall(r"不同意|反驳|恰恰相反|无法认同|不成立", content))
+    role_line = "/".join(f"{role}×{n}" for role, n in roles.items())
+    return (
+        f"收敛信号(程序统计，供参考): 发言 {len(history)} 轮({role_line})；"
+        f"论点共 {args_count} 条；让步语 {concede} 处、坚持/反驳语 {persist} 处"
+    )
+
+
+def anchor_coverage(checks: list) -> dict | None:
+    """论点锚点覆盖率（零 LLM）：anchored/total + 拆项；无论点返回 None。
+
+    checks 来自 state 通道 ``debate_anchor_checks``（Task 2/3 落盘结构）。
+    拆项桶名与 finance_agent.debate_anchors.anchor_stats（span 统计）一致——
+    两处口径必须同源：none=推断无锚（允许）、missing=data/event 无锚（违规）、
+    unresolved=锚未解析、unspecified=旧格式（无 kind 声明）。
+    """
+    valid = [c for c in checks if isinstance(c, dict)]
+    if not valid:
+        return None
+    anchored = sum(1 for c in valid if c.get("anchored"))
+    return {
+        "value": round(anchored / len(valid), 4),
+        "total": len(valid),
+        "anchored": anchored,
+        "unanchored_inference": sum(1 for c in valid if c.get("status") == "none"),
+        "unresolved": sum(1 for c in valid if c.get("status") == "unresolved"),
+        "missing_required": sum(1 for c in valid if c.get("status") == "missing"),
+        "unspecified": sum(1 for c in valid if c.get("status") == "unspecified"),
+    }
+
+
+# 锚点状态 → 材料标记。必须按 status 取（unspecified 条目的 anchor_statuses
+# 非权威，恒 unresolved），anchored 布尔只作覆盖计数。
+_STATUS_MARK = {
+    "resolved": "✓",
+    "unresolved": "✗",
+    "missing": "✗",
+    "none": "○",
+    "unspecified": "?",
+}
+# 骨架行分队：Layer II 多空各自一方，Layer IV 三方风险辩论者聚合为「风控」
+# （delta spec: 「bull a/b｜bear c/d｜风控 e/f（含拆项）」）
+_PARTY_ORDER = ("bull", "bear", "风控")
+_PARTY_OF = {
+    "bull": "bull",
+    "bear": "bear",
+    "aggressive": "风控",
+    "conservative": "风控",
+    "neutral": "风控",
+}
+
+
+def _party_coverage(checks: list) -> list[tuple[str, int, int]]:
+    """各方 (party, anchored, total)；缺席方不出现，未登记角色（非辩手）忽略。"""
+    totals: dict[str, tuple[int, int]] = {}
+    for c in checks:
+        party = _PARTY_OF.get(str(c.get("role")))
+        if party is None:
+            continue
+        anchored, total = totals.get(party, (0, 0))
+        totals[party] = (anchored + (1 if c.get("anchored") else 0), total + 1)
+    return [(p, *totals[p]) for p in _PARTY_ORDER if p in totals]
+
+
+def _summarize_debate(history: list, checks: list | None = None) -> str:
+    # 每条发言上限（字节）：多轮【bull】【bear】交替时保证全部轮次可见——
+    # 整体 head/tail 截断会把中间轮次连标签一起挖掉（judge 评「逐条交锋」时
+    # 看不到交锋过程，2026-09-10 实测回归：2fd1ee6d 的【bear】标签被挖掉）。
+    # 4 条发言 × 800 字节 ≈ 3200 < _JUDGE_MAX_BYTES(4096)，外层 _trunc 兜底不再命中。
+    _MESSAGE_MAX_BYTES = 24000  # round7 审计：单条风险辩论消息达 20.9KB，6000 仍拦腰截断
+    # 论点行上限：key_arguments 是每轮立场骨架（LLM 已结构化输出），截正文时骨架
+    # 必须全数在场——judge 的「逐条回应对方论点」以论点行为对照锚点。
+    _ARGUMENTS_MAX_BYTES = 2000
+
+    checks = [c for c in (checks or []) if isinstance(c, dict)]
+    by_key = {(c.get("role"), c.get("round"), c.get("index")): c for c in checks}
+    cov = anchor_coverage(checks)
+
+    parts: list[str] = []
+    skeleton = _convergence_skeleton(history)
+    if skeleton:
+        parts.append(skeleton)
+    # 锚点骨架行（确定性统计，数据来自 debate_anchor_checks 通道；旧 trace 无记录
+    # 则不产出）：各方 anchored/total（缺席方省略）+ 全局拆项
+    if cov:
+        parties = _party_coverage(checks)
+        if parties:
+            parts.append(
+                "【锚点覆盖】"
+                + "｜".join(f"{party} {anchored}/{total}" for party, anchored, total in parties)
+                + f"（推断无锚 {cov['unanchored_inference']}，未解析 {cov['unresolved']}，"
+                f"data/event 无锚 {cov['missing_required']}，旧格式 {cov['unspecified']}）"
+            )
+    occurrence: dict[str, int] = {}
+    for msg in history:
+        msg = _as_dict(msg)
+        if not msg:
+            continue
+        role = str(msg.get("role", "?"))
+        occurrence[role] = occurrence.get(role, 0) + 1
+        try:
+            rnd = int(msg.get("round") or occurrence[role])
+        except (TypeError, ValueError):
+            rnd = occurrence[role]
         content = msg.get("content", "")
         raw_args = msg.get("key_arguments") or []
-        items = [str(a).strip() for a in raw_args if str(a).strip()]
+        # 论点行前缀 [kind mark]：按 (role, round, index) 命中检查记录后以 status
+        # 取标记（index 用原始 1-based 位置，空文本项也占位）；无记录=旧路径仅文本
+        items: list[str] = []
+        for index, raw_arg in enumerate(raw_args, start=1):
+            text = _argument_text(raw_arg)
+            if not text:
+                continue
+            record = by_key.get((role, rnd, index))
+            mark = _STATUS_MARK.get(str((record or {}).get("status"))) if record else None
+            if record and mark:
+                items.append(f"[{record.get('kind') or 'unspecified'} {mark}] {text}")
+            else:
+                items.append(text)
         arg_line = ""
         if items:
             joined = "; ".join(items)
@@ -296,7 +437,9 @@ def extract_judge_vars(state: dict, query: str = "") -> dict[str, str]:
     report = _structured_report_var(state) or raw_report
     decision = state.get("final_trade_decision") or {}
     risk_debate = state.get("risk_debate_history") or []
-    risk_tail = _summarize_debate(risk_debate[-2:]) if risk_debate else ""
+    # 锚点检查记录（Task 3 通道）：多空 + 风控辩论的检查同通道累积；旧 trace 为空
+    anchor_checks = state.get("debate_anchor_checks") or []
+    risk_tail = _summarize_debate(risk_debate[-2:], anchor_checks) if risk_debate else ""
     decision_txt = _serialize_decision(decision)
     # D1：FM 操作定性随决策进 judge 变量——「approve 批准的是什么方向」直接可见
     fm_decision = state.get("fund_manager_decision") or ""
@@ -321,7 +464,9 @@ def extract_judge_vars(state: dict, query: str = "") -> dict[str, str]:
         # （旧行为=审批章复述，与 FM 节点逐字重复，consistency 无独立信号）
         "report_conclusion": _trunc(state.get("focus_summary") or extract_conclusion(raw_report)),
         "analyst_reports": _trunc(_summarize_analyst_reports(state.get("analyst_reports") or {})),
-        "debate_history": _trunc(_summarize_debate(state.get("debate_history") or [])),
+        "debate_history": _trunc(
+            _summarize_debate(state.get("debate_history") or [], anchor_checks)
+        ),
         "research_manager_decision": _trunc(state.get("research_manager_conclusion") or ""),
         # v8：Trader 原始方案（Layer III 输出）进 consistency 材料——
         # Trader 方案 → Risk Judge 裁决是否静默推翻此前无法核对（round8 代裁报告）
@@ -329,7 +474,7 @@ def extract_judge_vars(state: dict, query: str = "") -> dict[str, str]:
         # decision_grounding v6：被评的是 Risk Judge 裁决，其证据基础含风控指标与三方
         # 风险辩论——r1 复盘 8 条理由里 5 条抱怨风控数字无出处、3 条抱怨中性方论据无出处
         "risk_metrics": _format_risk_metrics(state.get("risk_metrics") or {}),
-        "risk_debate_history": _trunc(_summarize_debate(risk_debate)),
+        "risk_debate_history": _trunc(_summarize_debate(risk_debate, anchor_checks)),
         "trade_decision": _trunc(decision_txt),
         "risk_judgment": _append_within_budget(decision_txt, risk_tail),
         # #111：FM 理由随决策进 judge 变量（consistency 维度可见否决依据）

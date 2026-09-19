@@ -522,6 +522,171 @@ class TestComputationalRegistryCoverage:
         assert results[0].status == "PASS"
         assert report.coverage_gaps == 0
 
+    def test_registry_includes_derived_series(self):
+        from finance_agent.citation import _COMPUTATIONAL_RECALC
+
+        assert "derived_series" in _COMPUTATIONAL_RECALC
+
+    def test_derived_series_recalc_and_claim(self):
+        from finance_agent.citation import _COMPUTATIONAL_RECALC
+
+        kline = pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=80).strftime("%Y-%m-%d"),
+                "开盘": [10.0] * 80,
+                "收盘": [10.0 + i * 0.1 for i in range(80)],
+                "最高": [10.5 + i * 0.1 for i in range(80)],
+                "最低": [9.5 + i * 0.1 for i in range(80)],
+                "成交量": [1000.0] * 80,
+            }
+        )
+        state = {"kline": kline}
+        truth = _COMPUTATIONAL_RECALC["derived_series"](state)
+        spread = float(truth["ma_spread_5_20_pct"])
+        assert spread == pytest.approx(4.42, abs=0.01)
+
+        ok = Claim(
+            claim_type="computational",
+            source_type="data",
+            field_ref="derived_series.ma_spread_5_20_pct",
+            stated_value=spread,
+            interpretation="",
+        )
+        assert verify_claims([ok], state)[0].status == "PASS"
+
+        bad = Claim(
+            claim_type="computational",
+            source_type="data",
+            field_ref="derived_series.ma_spread_5_20_pct",
+            stated_value=spread * 1.1,
+            interpretation="",
+        )
+        (r,) = verify_claims([bad], state)
+        assert r.status == "FAIL"
+        assert r.bucket == "value_mismatch"
+
+    def test_derived_series_direction_check(self):
+        kline = pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=80).strftime("%Y-%m-%d"),
+                "开盘": [10.0] * 80,
+                "收盘": [10.0 + i * 0.1 for i in range(80)],
+                "最高": [10.5 + i * 0.1 for i in range(80)],
+                "最低": [9.5 + i * 0.1 for i in range(80)],
+                "成交量": [1000.0] * 80,
+            }
+        )
+        state = {"kline": kline}
+        base = {
+            "claim_type": "computational",
+            "source_type": "data",
+            "field_ref": "derived_series.ma_spread_5_20_pct",
+            "stated_value": 4.42,
+            "interpretation": "",
+        }
+        (ok,) = verify_claims([Claim(**base, direction="positive")], state)
+        assert ok.status == "PASS"
+        (bad,) = verify_claims([Claim(**base, direction="negative")], state)
+        assert bad.status == "FAIL"
+        assert bad.bucket == "direction_mismatch"
+
+    def test_derived_series_direction_alignment_pass(self):
+        """spec「派生值方向申报参与符号比对」：真值为负、direction 修饰后同号 → PASS。"""
+        from finance_agent.citation import _COMPUTATIONAL_RECALC
+
+        kline = pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=80).strftime("%Y-%m-%d"),
+                "开盘": [10.0] * 80,
+                "收盘": [10.0 - i * 0.1 for i in range(80)],
+                "最高": [10.5 - i * 0.1 for i in range(80)],
+                "最低": [9.5 - i * 0.1 for i in range(80)],
+                "成交量": [1000.0] * 80,
+            }
+        )
+        state = {"kline": kline}
+        spread = float(_COMPUTATIONAL_RECALC["derived_series"](state)["ma_spread_5_20_pct"])
+        assert spread < 0
+        base = {
+            "claim_type": "computational",
+            "source_type": "data",
+            "field_ref": "derived_series.ma_spread_5_20_pct",
+            "stated_value": abs(spread),
+            "interpretation": "",
+        }
+        (ok,) = verify_claims([Claim(**base, direction="negative")], state)
+        assert ok.status == "PASS"
+        assert ok.ground_truth == spread
+
+
+class TestComputationalDirectionCoverageGap:
+    """computational 方向误申报的覆盖缺口（与数值路径 `:607` 对齐）。
+
+    修复前 `_verify_computational` 丢弃 `_align_signed_effective` 返回的
+    direction_misapplied——非 signed 根键上的 negative/positive 申报不记缺口，
+    而数值路径记 `coverage_gap=claim.direction is None or direction_misapplied`
+    （spec「符号校验限定有符号量」：非 signed 申报 SHALL 记覆盖缺口）。
+    """
+
+    @staticmethod
+    def _kline() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=80).strftime("%Y-%m-%d"),
+                "开盘": [10.0] * 80,
+                "收盘": [10.0 + i * 0.1 for i in range(80)],
+                "最高": [10.5 + i * 0.1 for i in range(80)],
+                "最低": [9.5 + i * 0.1 for i in range(80)],
+                "成交量": [1000.0] * 80,
+            }
+        )
+
+    def test_misapplied_direction_on_non_signed_root_counts_gap(self):
+        # 恒正水平量（MA5）上的 direction="negative" 是「低于阈值」的字面误读：
+        # 值级照常 PASS，但必须与数值路径一致记覆盖缺口（不判 direction_mismatch）。
+        from finance_agent.metrics.technical import calc_technical
+
+        kline = self._kline()
+        state = {"kline": kline}
+        ma5 = calc_technical(kline)["MA"]["5"][-1]
+        assert ma5 is not None and ma5 > 0
+        claim = Claim(
+            claim_type="computational",
+            source_type="data",
+            field_ref="technical_indicators.MA.5.-1",
+            stated_value=float(ma5),
+            interpretation="",
+            metric_name="MA",
+            period=str(kline["日期"].iloc[-1]),
+            direction="negative",
+        )
+        (r,) = verify_claims([claim], state)
+        assert r.status == "PASS"
+        assert r.coverage_gap is True
+
+    def test_correct_direction_on_signed_root_keeps_no_gap(self):
+        # 有符号量（derived_series）申报方向且符号一致 → 不计缺口。
+        # 直调 _verify_computational：术语/期次缺口由外层 _verify_data_claim 承担，
+        # 本用例只钉方向申报本身不产生缺口。
+        from finance_agent.citation import _verify_computational
+        from finance_agent.metrics.technical import calc_derived_series
+
+        kline = self._kline()
+        state = {"kline": kline}
+        spread = float(calc_derived_series(kline)["ma_spread_5_20_pct"])
+        assert spread > 0
+        claim = Claim(
+            claim_type="computational",
+            source_type="data",
+            field_ref="derived_series.ma_spread_5_20_pct",
+            stated_value=spread,
+            interpretation="",
+            direction="positive",
+        )
+        r = _verify_computational(claim, state)
+        assert r.status == "PASS"
+        assert r.coverage_gap is False
+
 
 class TestComparativeBaseDeclaration:
     """refine-citation-coverage-v3 D3：comparative 基期值双端申报与校验。"""
@@ -857,3 +1022,94 @@ class TestPercentUnitNormalizationComputational:
         results = verify_claims([claim], state)
         assert results[0].status == "FAIL", results[0]
         assert results[0].bucket == "value_mismatch"
+
+
+class TestSynonymColumnDisambiguation:
+    """同义列名消歧（eval-driven-contract-fixes 任务 1；601318 A4 自然腿终裁案例：
+    「归属于母公司的净利润」与「归母净利润」两列并存且数值不同，短名精确命中曾静默取错值）。"""
+
+    @staticmethod
+    def _state(extra: dict[str, float]) -> dict:
+        import pandas as pd
+
+        return {"income_statement": pd.DataFrame({"报告日": ["20251231"], **extra})}
+
+    def test_short_name_redirects_to_official_full_column(self):
+        from finance_agent.citation import _resolve_field_ref
+
+        state = self._state({"归属于母公司的净利润": 100.0, "归母净利润": 200.0})
+        assert _resolve_field_ref("income_statement.20251231.归母净利润", state) == 100.0
+
+    def test_official_full_name_direct_hit_kept(self):
+        from finance_agent.citation import _resolve_field_ref
+
+        state = self._state({"归属于母公司的净利润": 100.0, "归母净利润": 200.0})
+        assert _resolve_field_ref("income_statement.20251231.归属于母公司的净利润", state) == 100.0
+
+    def test_single_column_still_resolves(self):
+        from finance_agent.citation import _resolve_field_ref
+
+        state = self._state({"归母净利润": 200.0})
+        assert _resolve_field_ref("income_statement.20251231.归母净利润", state) == 200.0
+
+    def test_rowkey_omitted_path_also_disambiguates(self):
+        from finance_agent.citation import _resolve_field_ref
+
+        state = self._state({"归属于母公司的净利润": 100.0, "归母净利润": 200.0})
+        assert _resolve_field_ref("income_statement.归母净利润", state) == 100.0
+
+
+class TestClaimContractError:
+    """值槽类型校验（eval-driven-contract-fixes 任务 2；600276 A4 自然腿终裁：
+    PMI 环比变化 0.6 填进水平值槽 49.8，正文算术正确，claim 契约错——不算分析师幻觉、不触发修复）。"""
+
+    @staticmethod
+    def _state() -> dict:
+        return {
+            "macro_indicators": {
+                "pmi": {
+                    "records": [
+                        {"报告日": "2026-08-31", "制造业-指数": 49.8},
+                        {"报告日": "2026-07-31", "制造业-指数": 49.2},
+                    ]
+                }
+            }
+        }
+
+    def test_delta_in_level_slot_is_contract_error_not_value_mismatch(self):
+        claim = Claim(
+            claim_type="numerical",
+            source_type="data",
+            field_ref="macro_indicators.pmi.0.制造业-指数",
+            stated_value=0.6,
+            interpretation="制造业 PMI 由 7月 49.2 回升至 8月 49.8，环比改善 0.6 个百分点",
+        )
+        (r,) = verify_claims([claim], self._state())
+        assert r.status == "FAIL"
+        assert r.bucket == "claim_contract_error"  # 不进 value_mismatch（幻觉口径）
+
+    def test_level_value_in_level_slot_unaffected(self):
+        claim = Claim(
+            claim_type="numerical",
+            source_type="data",
+            field_ref="macro_indicators.pmi.0.制造业-指数",
+            stated_value=49.8,
+            interpretation="制造业 PMI 8月为 49.8",
+        )
+        (r,) = verify_claims([claim], self._state())
+        assert r.status == "PASS"
+        assert r.bucket is None
+
+    def test_delta_wording_with_consistent_magnitude_not_contract_error(self):
+        """双信号判据：环比措辞但量级一致（真值本就是变化量字段）→ 走正常比对。"""
+        state = {"growth": {"records": [{"指标": 0.55}]}}
+        claim = Claim(
+            claim_type="numerical",
+            source_type="data",
+            field_ref="growth.records.0.指标",
+            stated_value=0.6,
+            interpretation="环比改善 0.6 个百分点",
+        )
+        (r,) = verify_claims([claim], state)
+        assert r.bucket in (None, "value_mismatch")  # 正常路径，非契约错误
+        assert r.bucket != "claim_contract_error"

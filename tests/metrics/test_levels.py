@@ -1,5 +1,7 @@
 """toolize-price-levels Task 1.1/3.3：价位预算工具 + 派生值表 测试（TDD 先行）。"""
 
+import math
+
 import pandas as pd
 import pytest
 
@@ -75,6 +77,65 @@ class TestCalcDerivedSeries:
         assert d["chg_20d"] is None
         assert d["chg_60d"] is None
         assert d["chg_5d"] is not None
+
+    def test_ma_spread_fields(self):
+        # trend=1.0：收盘 100→179；MA5 末值=177.0，MA20=169.5，MA60=149.5
+        # 精确断言（非 approx）：钉死 round 2 位契约，删除 round 或换舍入模式即红
+        d = calc_derived_series(_kline(80, base=100.0, trend=1.0))
+        assert d["ma_spread_5_20_pct"] == 4.42
+        assert d["ma_spread_20_60_pct"] == 13.38
+        assert d["close_vs_ma20_pct"] == 5.60
+        assert d["close_vs_ma60_pct"] == 19.73
+
+    def test_ma_spreads_match_technical_ma(self):
+        # 与 calc_technical 的均线口径必须同源（同一份 _calc_ma）
+        from finance_agent.metrics.technical import calc_technical
+
+        k = _kline(80, base=100.0, trend=1.0)
+        d = calc_derived_series(k)
+        ma = calc_technical(k)["MA"]
+        ma5, ma20 = ma["5"][-1], ma["20"][-1]
+        assert d["ma_spread_5_20_pct"] == pytest.approx((ma5 - ma20) / ma20 * 100, abs=0.01)
+
+    def test_ma60_spreads_none_when_short(self):
+        d = calc_derived_series(_kline(30))
+        assert d["ma_spread_20_60_pct"] is None
+        assert d["close_vs_ma60_pct"] is None
+        assert d["ma_spread_5_20_pct"] is not None
+
+    def test_ma_spreads_none_kline(self):
+        d = calc_derived_series(None)
+        assert d["ma_spread_5_20_pct"] is None
+        assert d["close_vs_ma60_pct"] is None
+
+    def test_ma_spreads_none_when_denominator_zero(self):
+        # 全零收盘：均线恒为 0，分母为 0 → 四项 None（不得抛除零异常 / 不得伪造数值）
+        d = calc_derived_series(_kline(80, base=0.0, trend=0.0))
+        assert d["ma_spread_5_20_pct"] is None
+        assert d["ma_spread_20_60_pct"] is None
+        assert d["close_vs_ma20_pct"] is None
+        assert d["close_vs_ma60_pct"] is None
+
+    def test_ma60_computable_at_exact_window(self):
+        # n == 60 恰在下界内：MA60 可算（区别于 n=30 的缺失分支）
+        d = calc_derived_series(_kline(60))
+        assert d["ma_spread_20_60_pct"] is not None
+
+    def test_ma_spreads_empty_dataframe(self):
+        # 空表（非 None）：走同一缺失分支，四键齐全且为 None
+        d = calc_derived_series(pd.DataFrame())
+        assert d["ma_spread_5_20_pct"] is None
+        assert d["ma_spread_20_60_pct"] is None
+        assert d["close_vs_ma20_pct"] is None
+        assert d["close_vs_ma60_pct"] is None
+
+    def test_ma_spread_negative_zero_normalized(self):
+        # 差幅为极小负值（round 2 后归零）：不得返回 -0.0（context JSON 会渲染 "-0.0"）
+        k = _kline(25)
+        k.loc[k.index[-1], "收盘"] = 99.99
+        d = calc_derived_series(k)
+        assert d["ma_spread_5_20_pct"] == 0.0
+        assert math.copysign(1.0, d["ma_spread_5_20_pct"]) > 0
 
 
 class TestSearchStockSnapshotContract:

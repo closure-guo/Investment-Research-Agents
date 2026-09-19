@@ -76,6 +76,10 @@ class AnalysisState(TypedDict, total=False):
     benchmark_kline: pd.DataFrame  # 沪深 300 K 线
     technical_indicators: dict  # calc_technical() 输出
     risk_metrics: dict  # calc_risk() 输出
+    derived_series: dict  # calc_derived_series() 输出（toolize-price-levels；此前未声明被图丢弃）
+    # price_levels 同族同病：compute 写入但从未声明 → 图合并静默丢弃，validate 恒走
+    # 「price_levels 不可用，跳过校验」分支（参考带 band 校验与二次失败修正从未生效）
+    price_levels: dict  # calc_price_levels() 输出
     macro_indicators: dict  # CPI/PMI/M2/LPR
     news_list: list[dict]  # 新闻列表
     announcements: list[dict]  # 公司公告列表（add-analyst-data-coverage）
@@ -88,10 +92,16 @@ class AnalysisState(TypedDict, total=False):
 
     # Layer II: Researcher Team（Bull/Bear 辩论）
     debate_history: Annotated[list[dict], add]
+    # 论点锚点校验记录（add-debate-argument-anchors）：辩手/风控两层辩论按论点追加，
+    # 由 debate_anchors.check_argument_anchors 产出（fail-open，不参与路由）
+    debate_anchor_checks: Annotated[list[dict], add]
     focus_summary: str  # 研究聚焦摘要（report 节点无条件生成，judge report_conclusion 直取源）
     research_manager_conclusion: str  # 评级前置拼装（RM 结构化输出的人读渲染）
     research_manager_rating: str | None  # 看多/看空/中性（战绩结算与 judge 变量直取）
     research_manager_confidence: float | None
+    # RM 结构化输出解析失败降级标记（research_manager 写入；此前未声明被图合并
+    # 静默丢弃，incident 027 同族补声明）
+    parse_degraded: bool
 
     # Layer III: Trader
     trader_plan: dict  # TradeDecision 序列化
@@ -137,14 +147,19 @@ class AnalysisState(TypedDict, total=False):
     citation_coverage_warn: bool  # 警告线：coverage < 0.90
     citation_unverifiable_text: int  # 跟踪：文本 claim UNVERIFIABLE（分型排除，不进阻断分母）
     citation_unverifiable_unregistered: int  # 跟踪：未注册/空值 UNVERIFIABLE
+    citation_unverifiable_comparative_delta: int  # 跟踪：比较型差值申报（非三枚举 stated_value）
     citation_verifier_normalized: int  # 归一后由 FAIL 转 PASS 的计数（unit/percent/echo）
     auto_claims: int  # 阶段 4 自动合成 claim 数
     citation_retry_feedback: dict[str, list[dict]]  # 每分析师失败明细（重试上下文注入）
     citation_fail_buckets: dict[str, int]  # 桶计数（value_mismatch/path_unresolvable/...）
     citation_coverage_gap: bool  # 覆盖率缺口（重试准入路由读取；incident 027 补声明）
     value_mismatch_repaired: (
-        int  # 数值失配修复数（analyst_true_fail 口径组件；incident 027 补声明）
+        int  # 数值失配修复数（deprecated all_passed 口径，保留一轮跨口径对照；incident 029）
     )
+    value_mismatch_repaired_claims: (
+        int  # 按 claim 修复记账：重校验后目标 claim PASS 即计（incident 029 处置）
+    )
+    payout_ratio_corrected: bool  # 赔率自检：reasoning 自报赔率与代码计算冲突已原位修正
     citation_coverage: float  # 正文数字普查覆盖率（0-1，监控不进路由）
 
     # ── URL 信源溯源（Kimi 风格引用）──

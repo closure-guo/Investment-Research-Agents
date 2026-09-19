@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from finance_agent.debate_anchors import anchor_stats, check_argument_anchors
+from finance_agent.langfuse_tracing import update_current_span
 from finance_agent.models import DebateMessage
 from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint
 from finance_agent.prompts.loader import load_prompt_with_meta
@@ -32,7 +34,12 @@ def bull_debater(state: dict) -> dict:
     )
     msg = DebateMessage.model_validate(data)
 
-    return {"debate_history": [msg]}
+    # 论点锚点校验（add-debate-argument-anchors）：只落通道与 span stats，
+    # fail-open 不改路由；resolved 仅表示锚存在，不代表锚支持论点
+    checks = check_argument_anchors(msg, state)
+    update_current_span(metadata={"anchor_stats": anchor_stats(checks)})
+
+    return {"debate_history": [msg], "debate_anchor_checks": checks}
 
 
 def bear_debater(state: dict) -> dict:
@@ -54,7 +61,12 @@ def bear_debater(state: dict) -> dict:
     )
     msg = DebateMessage.model_validate(data)
 
-    return {"debate_history": [msg]}
+    # 论点锚点校验（add-debate-argument-anchors）：只落通道与 span stats，
+    # fail-open 不改路由；resolved 仅表示锚存在，不代表锚支持论点
+    checks = check_argument_anchors(msg, state)
+    update_current_span(metadata={"anchor_stats": anchor_stats(checks)})
+
+    return {"debate_history": [msg], "debate_anchor_checks": checks}
 
 
 def _build_debate_context(state: dict) -> str:
@@ -92,7 +104,8 @@ def _build_debate_context(state: dict) -> str:
             arg_line = ""
             if args:
                 numbered = " ".join(
-                    f"{'①②③④⑤⑥⑦⑧⑨⑩'[i] if i < 10 else i + 1}.{a}" for i, a in enumerate(args)
+                    f"{'①②③④⑤⑥⑦⑧⑨⑩'[i] if i < 10 else i + 1}.{a.text if hasattr(a, 'text') else a}"
+                    for i, a in enumerate(args)
                 )
                 arg_line = f"R{rnd} 论点: {numbered}\n"
             history_lines.append(f"{arg_line}{role}(R{rnd}): {content}")

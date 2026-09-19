@@ -17,6 +17,7 @@ import pytest
 
 from finance_agent import session_store
 from finance_agent.pipeline_runner import PipelineRunner
+from finance_agent.stream_registry import registry as stream_registry_instance
 
 
 def _sse(d: dict) -> str:
@@ -72,6 +73,47 @@ async def test_pipeline_bridge_publishes_to_journal(tmp_path, monkeypatch):
     assert "node_start" in event_types
     assert "node_complete" in event_types
     # 终态事件（done）由 finally 块发布
+    assert "done" in event_types
+
+
+@pytest.mark.asyncio
+async def test_done_flag_not_set_before_terminal_event_published(tmp_path, monkeypatch):
+    """不变量：`is_running` 转 False 之前，终态 done SHALL 已落库。
+
+    回归（CI 实测 flaky：`test_pipeline_bridge_publishes_to_journal` 报
+    'done' not in [...]）：finally 里曾先置 `state.done=True` 再发布 done 事件，
+    读到「已不在运行」后立即读 journal 会偶发看不到终态。用慢发布把窗口放大成
+    确定性复现——修复后本用例与既有用例都应恒过。
+    """
+    _setup_db(tmp_path, monkeypatch)
+    sid = session_store.create_session(stock_code="600519", stock_name="茅台", status="running")
+
+    orig_publish = stream_registry_instance.publish
+
+    async def slow_publish(session_id, event):
+        if event.get("type") == "done":
+            await asyncio.sleep(0.2)  # 放大「发布尚未落库」窗口
+        return await orig_publish(session_id, event)
+
+    monkeypatch.setattr(stream_registry_instance, "publish", slow_publish)
+
+    loop = asyncio.get_event_loop()
+    PipelineRunner.start(
+        sid,
+        _fake_events,
+        {"layerTree": [], "currentNodeId": "", "progress": 0.0, "updatedAt": 0},
+        loop=loop,
+    )
+
+    deadline = time.time() + 10
+    while PipelineRunner.is_running(sid) and time.time() < deadline:
+        await asyncio.sleep(0.05)
+    assert not PipelineRunner.is_running(sid)
+
+    # 立即读取（不轮询）：done 置位若早于终态落库，这里必然缺失
+    event_types = [
+        json.loads(e["event_json"]).get("type") for e in session_store.list_session_events(sid)
+    ]
     assert "done" in event_types
 
 

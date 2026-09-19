@@ -304,6 +304,8 @@ class TestStateChannelsDeclared:
             "price_level_corrected",
             "price_level_correction_reason",
             "derived_metrics",
+            "derived_series",  # ground-comparative-delta-claims：compute 写入但从未声明
+            "price_levels",  # 同族：compute 写入但从未声明（band 校验/参考带修正恒不可达）
         ):
             assert key in channels, f"AnalysisState 缺少声明: {key}"
 
@@ -313,3 +315,65 @@ class TestStateChannelsDeclared:
         channels = set(build_5layer_graph().builder.channels)
         for key in ("citation_coverage_gap", "value_mismatch_repaired"):
             assert key in channels, f"AnalysisState 缺少声明: {key}"
+
+    def test_graph_channels_declare_debate_anchor_keys(self):
+        from finance_agent.graph import build_5layer_graph
+
+        channels = set(build_5layer_graph().builder.channels)
+        assert "debate_anchor_checks" in channels, "AnalysisState 缺少声明: debate_anchor_checks"
+
+    def test_graph_channels_declare_research_manager_keys(self):
+        """research_manager 解析失败降级写入 parse_degraded——未声明则被图静默丢弃。"""
+        from finance_agent.graph import build_5layer_graph
+
+        channels = set(build_5layer_graph().builder.channels)
+        assert "parse_degraded" in channels, "AnalysisState 缺少声明: parse_degraded"
+
+
+class TestPayoutRatioSelfCheck:
+    """赔率自检（eval-driven-contract-fixes 任务 6，derived-risk-metrics delta）：
+    reasoning 自报赔率与代码计算冲突 → 原位修正 + telemetry；容差内不改；派生缺失跳过。"""
+
+    def test_mismatched_ratio_is_corrected_in_place(self):
+        from finance_agent.nodes.validate import check_and_fix_stated_ratio
+
+        reasoning = "维持买入，赔率约1.7:1属正常区间但不放大预期。"
+        fixed, corrected = check_and_fix_stated_ratio(reasoning, 1.24)
+        assert corrected is True
+        assert "赔率约1.24:1" in fixed and "1.7:1" not in fixed
+        assert "维持买入" in fixed  # 其余文字不动
+
+    def test_within_tolerance_untouched(self):
+        from finance_agent.nodes.validate import check_and_fix_stated_ratio
+
+        fixed, corrected = check_and_fix_stated_ratio("赔率约1.9:1，可执行。", 1.90)
+        assert corrected is False
+        assert fixed == "赔率约1.9:1，可执行。"
+
+    def test_missing_derived_skips(self):
+        from finance_agent.nodes.validate import check_and_fix_stated_ratio
+
+        fixed, corrected = check_and_fix_stated_ratio("赔率约1.7:1", None)
+        assert corrected is False and fixed == "赔率约1.7:1"
+
+    def test_no_ratio_claim_untouched(self):
+        from finance_agent.nodes.validate import check_and_fix_stated_ratio
+
+        fixed, corrected = check_and_fix_stated_ratio("维持观望。", 1.24)
+        assert corrected is False and fixed == "维持观望。"
+
+    def test_sixty_case_601899_adjudicated_fixture(self):
+        """终裁案例夹具：601899 终稿（1.7:1 vs 派生 1.24）。"""
+        from finance_agent.nodes.validate import check_and_fix_stated_ratio
+
+        reasoning = "目标位34.5维持不变，赔率约1.7:1属正常区间但不放大预期。"
+        fixed, corrected = check_and_fix_stated_ratio(reasoning, 1.24)
+        assert corrected and "1.24:1" in fixed
+
+    def test_wired_into_trader_and_risk_judge_outputs(self):
+        """接线验证：trader / risk_judge（final_trade_decision 写入方）产出路径挂自检。"""
+        from finance_agent.nodes import risk as risk_mod
+        from finance_agent.nodes import trader as trader_mod
+
+        assert hasattr(trader_mod, "_apply_payout_self_check")
+        assert hasattr(risk_mod, "_apply_payout_self_check")

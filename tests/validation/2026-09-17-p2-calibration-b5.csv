@@ -1,0 +1,5 @@
+﻿unit_id,ticker,展示顺序,机器票型(3票),机器判定(胜方),人工判定(与机器一致?是/否),备注(B5 口径待重设计，本表可暂缓)
+600519::b5,600519,analysts → full,full｜full｜full,full,,
+002594::b5,002594,full → analysts,full｜full｜full,full,,
+601398::b5,601398,full → analysts,full｜full｜full,full,,
+600887::b5,600887,analysts → full,full｜full｜full,full,,

@@ -100,6 +100,55 @@ class TestFailBuckets:
         assert r.status == "FAIL"
         assert r.bucket == "value_mismatch"
 
+    def test_comparative_numeric_delta_unverifiable_with_gap(self):
+        """非枚举 stated_value（差值数字）→ UNVERIFIABLE + 独立桶 + 覆盖缺口。"""
+        state = {"profitability_metrics": {"ROE": {"2024": 28.0, "2023": 25.0}}}
+        claim = Claim(
+            claim_type="comparative",
+            source_type="data",
+            field_ref="profitability_metrics.ROE.2024",
+            stated_value=2.3,
+            interpretation="2024 年 ROE 较 2023 年低约 2.3",
+            field_ref_b="profitability_metrics.ROE.2023",
+            stated_value_b=25.0,
+        )
+        (r,) = verify_claims([claim], state)
+        assert r.status == "UNVERIFIABLE"
+        assert r.bucket == "comparative_delta_unregistered"
+        assert r.coverage_gap is True
+
+    def test_comparative_delta_not_recomputed(self):
+        """差值再离谱也不判 FAIL（本变更不新增验证语义）——仍是 UNVERIFIABLE。"""
+        state = {"profitability_metrics": {"ROE": {"2024": 28.0, "2023": 25.0}}}
+        claim = Claim(
+            claim_type="comparative",
+            source_type="data",
+            field_ref="profitability_metrics.ROE.2024",
+            stated_value=999.0,
+            interpretation="x",
+            field_ref_b="profitability_metrics.ROE.2023",
+            stated_value_b=25.0,
+        )
+        (r,) = verify_claims([claim], state)
+        assert r.status == "UNVERIFIABLE"
+        assert r.bucket == "comparative_delta_unregistered"
+
+    def test_comparative_enum_path_unchanged(self):
+        """三枚举路径行为不变：方向正确 PASS。"""
+        state = {"profitability_metrics": {"ROE": {"2024": 28.0, "2023": 25.0}}}
+        claim = Claim(
+            claim_type="comparative",
+            source_type="data",
+            field_ref="profitability_metrics.ROE.2024",
+            stated_value="greater_than",
+            interpretation="2024 年 ROE 高于 2023 年",
+            field_ref_b="profitability_metrics.ROE.2023",
+            stated_value_b=25.0,
+        )
+        (r,) = verify_claims([claim], state)
+        assert r.status == "PASS"
+        assert r.bucket is None
+
     def test_event_not_found_is_unverifiable_text(self):
         claim = Claim(
             claim_type="temporal",

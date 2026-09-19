@@ -27,6 +27,14 @@ JUDGE_LABEL = {
     "consistency": "一致",
 }
 
+# citation 四桶人读标签（G7/⑦）：桶名域 = evals.causal_ablation.escape.VERIFIER_BUCKETS
+CITATION_LABEL = {
+    "blocked": "阻断",
+    "analyst_true_fail": "分析师真错",
+    "surgical_repaired": "单点修复",
+    "verifier_normalized": "校验器归一",
+}
+
 
 def _median(values: list[float]) -> float | None:
     return round(statistics.median(values), 4) if values else None
@@ -36,16 +44,25 @@ def _pct(v: float | None, digits: int = 1) -> str:
     return "—" if v is None else f"{v * 100:.{digits}f}%"
 
 
-def main() -> None:
-    data = json.loads(RESUME.read_text(encoding="utf-8"))
-    runs: list[dict] = data["runs"]
+def _citation_bucket_parts(layer: dict) -> list[str]:
+    """层内 citation 四桶增量行（G7/⑦）：缺席的桶不产行（旧记录不伪造 0）。"""
+    parts: list[str] = []
+    for bucket, label in CITATION_LABEL.items():
+        entry = layer.get(f"citation_{bucket}")
+        if not entry:
+            continue
+        lo, hi = entry["ci"]
+        parts.append(f"{label} Δ{entry['diff_mean']} CI[{lo},{hi}]")
+    return parts
+
+
+def render_report(agg: dict, runs: list[dict]) -> list[str]:
+    """渲染人读版报告主体（纯函数、零 IO，可对合成 agg 直接测试；G7/⑦）。
+
+    citation 腿的层增量结论只认四桶（`citation_<bucket>`）；标量 `citation_pass_rate`
+    块自 G2 起不再带 CI/结论，仅作监控行并显式标注「不入层增量结论」。
+    """
     n = len(runs)
-    print(f"resume.json runs = {n}")
-    if n < 90:
-        raise SystemExit(f"实验未完成: 期望 90 条,当前 {n} 条。完成后再跑本脚本。")
-
-    agg = aggregate_results(runs)
-
     # 变体级:成本 + coverage 中位
     variant_stats: dict[str, dict] = {}
     for v in _VARIANTS:
@@ -82,11 +99,6 @@ def main() -> None:
         "| 变体 | citation_pass | coverage 中位 | judge 中位（rel/辩论/grounding/一致） | token 成本（调用次数） | 增量效果 vs 上一层（95% CI） |"
     )
     lines.append("|---|---|---|---|---|---|")
-    layer_text = {
-        "analysts": "基线",
-        "plus_debate": None,
-        "full": None,
-    }
     for v in _VARIANTS:
         vs = agg["variants"][v]
         jm = vs["judge_medians"]
@@ -103,12 +115,8 @@ def main() -> None:
                 key = f"judge_{d}"
                 if key in layer:
                     ci = layer[key]["ci"]
-                    parts.append(
-                        f"{JUDGE_LABEL[d]} Δ{layer[key]['diff_median']} CI[{ci[0]},{ci[1]}]"
-                    )
-            cpr = layer.get("citation_pass_rate", {})
-            if "ci" in cpr:
-                parts.append(f"citation_pass ΔCI[{cpr['ci'][0]},{cpr['ci'][1]}]")
+                    parts.append(f"{JUDGE_LABEL[d]} Δ{layer[key]['diff_mean']} CI[{ci[0]},{ci[1]}]")
+            parts += _citation_bucket_parts(layer)
             inc = "；".join(parts) if parts else "—"
         lines.append(
             f"| {v} | {_pct(vs['citation_pass_rate'])} | {_pct(st['coverage_median'], 2)} | {jstr} | {cost} | {inc} |"
@@ -124,12 +132,27 @@ def main() -> None:
             if key in layer:
                 it = layer[key]
                 lines.append(
-                    f"- {d}: 点估计 Δ{it['diff_median']}, 95% CI [{it['ci'][0]}, {it['ci'][1]}] → {it['conclusion']}"
+                    f"- {d}: 点估计 Δ{it['diff_mean']}, 95% CI [{it['ci'][0]}, {it['ci'][1]}] → {it['conclusion']}"
                 )
-        cpr = layer.get("citation_pass_rate", {})
-        if "ci" in cpr:
+        for bucket, label in CITATION_LABEL.items():
+            entry = layer.get(f"citation_{bucket}")
+            if not entry:
+                continue
+            # 方向元数据（G7/⑥）随条目落盘；旧产物无该键时不冒充「无方向」
+            direction = (
+                f"（lower_is_better={entry['lower_is_better']}）"
+                if "lower_is_better" in entry
+                else ""
+            )
             lines.append(
-                f"- citation_pass 率: {_pct(cpr['prev'])} → {_pct(cpr['current'])}, ΔCI [{cpr['ci'][0]}, {cpr['ci'][1]}] → {cpr['conclusion']}"
+                f"- citation_{bucket}（{label}）: 点估计 Δ{entry['diff_mean']}, "
+                f"95% CI [{entry['ci'][0]}, {entry['ci'][1]}] → {entry['conclusion']}{direction}"
+            )
+        cpr = layer.get("citation_pass_rate", {})
+        if cpr:
+            lines.append(
+                f"- citation_pass 率: {_pct(cpr.get('prev'))} → {_pct(cpr.get('current'))}"
+                "（不入层增量结论）"
             )
         lines.append("")
 
@@ -152,6 +175,19 @@ def main() -> None:
         "- pilot 层增量结论（judge 维度）因 #109/#111/#112 伪影全线挂起，本报告为修复后 n=10 权威版，"
         "不再与 pilot 做数字对比；citation_pass 口径同 pilot（契约噪声问题见 #105 归因，仍存在，解读时注意）。"
     )
+    return lines
+
+
+def main() -> None:
+    data = json.loads(RESUME.read_text(encoding="utf-8"))
+    runs: list[dict] = data["runs"]
+    n = len(runs)
+    print(f"resume.json runs = {n}")
+    if n < 90:
+        raise SystemExit(f"实验未完成: 期望 90 条,当前 {n} 条。完成后再跑本脚本。")
+
+    agg = aggregate_results(runs)
+    lines = render_report(agg, runs)
 
     out = OUT_DIR / f"ablation-90-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
     out.write_text("\n".join(lines), encoding="utf-8")

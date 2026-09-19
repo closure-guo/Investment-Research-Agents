@@ -1,0 +1,5 @@
+﻿unit_id,ticker,预填·胜者,机器理由,两臂报告位置,你已标(full/through_trader/tie)
+000001::b5,000001,full,未记录（装置缺陷：三票理由未落盘，已修 1d46758，下批起带出）；复核请直接比两臂报告,tests/validation/2026-09-18-b5-calibration-reports/000001.through_trader.md（可直接打开比对） vs tests/validation/2026-09-18-b5-calibration-reports/000001.full.md（可直接打开比对）,
+601318::b5,601318,full,未记录（装置缺陷：三票理由未落盘，已修 1d46758，下批起带出）；复核请直接比两臂报告,tests/validation/2026-09-18-b5-calibration-reports/601318.through_trader.md（可直接打开比对） vs tests/validation/2026-09-18-b5-calibration-reports/601318.full.md（可直接打开比对）,
+601398::b5,601398,full,未记录（装置缺陷：三票理由未落盘，已修 1d46758，下批起带出）；复核请直接比两臂报告,tests/validation/2026-09-18-b5-calibration-reports/601398.through_trader.md（可直接打开比对） vs tests/validation/2026-09-18-b5-calibration-reports/601398.full.md（可直接打开比对）,
+000333::b5,000333,full,未记录（装置缺陷：三票理由未落盘，已修 1d46758，下批起带出）；复核请直接比两臂报告,tests/validation/2026-09-18-b5-calibration-reports/000333.through_trader.md（可直接打开比对） vs tests/validation/2026-09-18-b5-calibration-reports/000333.full.md（可直接打开比对）,

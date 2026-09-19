@@ -120,6 +120,29 @@ def supplement_anomaly_claims(
     return out
 
 
+def _unverifiable_class_counts(results: list[CitationResult]) -> dict[str, int]:
+    """UNVERIFIABLE 三类拆报计数（文本 / 未注册 / 比较型差值）——报告与 trace 共用同一口径。"""
+    return {
+        "text": sum(
+            1
+            for r in results
+            if r.status == "UNVERIFIABLE"
+            and (r.claim.claim_type in ("entity", "regulatory") or r.claim.source_type == "event")
+        ),
+        "unregistered": sum(
+            1
+            for r in results
+            if r.status == "UNVERIFIABLE"
+            and r.claim.claim_type not in ("entity", "regulatory")
+            and r.claim.source_type != "event"
+            and r.bucket != "comparative_delta_unregistered"
+        ),
+        "comparative_delta": sum(
+            1 for r in results if r.bucket == "comparative_delta_unregistered"
+        ),
+    }
+
+
 def verify_citations(state: dict) -> dict:
     """从 analyst_reports 提取所有 Claim，批量校验（按分析师归属聚合）。
 
@@ -195,6 +218,9 @@ def verify_citations(state: dict) -> dict:
     # value_mismatch_repaired 遥测；同处重校验仍 FAIL 不二次修复；修复轮与全量
     # 重试共享 iteration_count/停滞降级语义（成功率按重校验后 0.0 记入 fail_rates）。
     value_mismatch_repaired = 0
+    # incident 029 处置（任务 3）：按 claim 记账——重校验后目标 claim PASS 即计，
+    # 不受同分析师无关 FAIL 拦截；旧 all_passed 口径保留一轮（deprecated 跨口径对照）。
+    value_mismatch_repaired_claims = 0
     _repair_records: list[dict] = []
     if fail_buckets.get("value_mismatch", 0):
         for agent, rs in per_agent.items():
@@ -228,6 +254,12 @@ def verify_citations(state: dict) -> dict:
             reports[agent] = _with_claims(reports[agent], claims_by_agent[agent])
             re_results = verify_claims(_extract_claims(reports[agent]), state)
             re_report = CitationReport.from_results(re_results)
+            _re_by_identity = {id(x.claim): x for x in re_results}
+            for _r0 in vm:
+                _upd = replaced.get(id(_r0.claim), _r0.claim)
+                _rr = _re_by_identity.get(id(_upd))
+                if _rr is not None and _rr.status == "PASS":
+                    value_mismatch_repaired_claims += 1
             if re_report.all_passed:
                 value_mismatch_repaired += len(records)
                 _repair_records.extend(rec for rec in records if isinstance(rec, dict))
@@ -392,6 +424,8 @@ def verify_citations(state: dict) -> dict:
             level="WARNING",
         )
 
+    counts = _unverifiable_class_counts(results)
+
     return {
         "citation_report": report.model_dump(),
         "citation_pass": report.all_passed,
@@ -407,28 +441,20 @@ def verify_citations(state: dict) -> dict:
         "citation_coverage_gap": citation_coverage_gap,
         # 阶段 5 门禁三层分置 + 指标拆报（incident 026）
         "citation_blocked": report.failed > 0,
-        # 分析师真错数 = 残余 FAIL + 单点修复已用真值回填的数（修复会把真错藏进 PASS）
-        "citation_analyst_true_fail": report.failed + int(value_mismatch_repaired or 0),
+        # 分析师真错数 = 残余 FAIL + 单点修复已用真值回填的数（修复会把真错藏进 PASS）；
+        # 计数用按 claim 新口径（incident 029：旧 all_passed 口径漏计已修 claim）
+        "citation_analyst_true_fail": report.failed + int(value_mismatch_repaired_claims or 0),
         "citation_coverage_warn": coverage.coverage < 0.90,
-        "citation_unverifiable_text": sum(
-            1
-            for r in results
-            if r.status == "UNVERIFIABLE"
-            and (r.claim.claim_type in ("entity", "regulatory") or r.claim.source_type == "event")
-        ),
-        "citation_unverifiable_unregistered": sum(
-            1
-            for r in results
-            if r.status == "UNVERIFIABLE"
-            and r.claim.claim_type not in ("entity", "regulatory")
-            and r.claim.source_type != "event"
-        ),
+        "citation_unverifiable_text": counts["text"],
+        "citation_unverifiable_unregistered": counts["unregistered"],
+        "citation_unverifiable_comparative_delta": counts["comparative_delta"],
         "citation_verifier_normalized": sum(
             1 for r in results if r.status == "PASS" and r.unit_normalized is not None
         ),
         "auto_claims": len(auto_claims),
         # surgical-citation-repair：单点修复遥测 + 修复后正文回填（供渲染/下游）
         "value_mismatch_repaired": value_mismatch_repaired,
+        "value_mismatch_repaired_claims": value_mismatch_repaired_claims,
         "analyst_reports": reports,
     }
 
@@ -490,11 +516,17 @@ def _report_to_langfuse(
             metadata={"all_passed": report.all_passed, "fail_count": fail_count, "total": total},
         )
         ratio = (report.unverifiable / total) if total else 0.0
+        counts = _unverifiable_class_counts(report.results)
         client.score_current_trace(
             name="citation_unverifiable_ratio",
             value=round(ratio, 4),
             data_type="NUMERIC",
             comment=f"UNVERIFIABLE {report.unverifiable}/{total}; coverage_gaps={report.coverage_gaps}",
+            metadata={
+                "unverifiable_text": counts["text"],
+                "unverifiable_unregistered": counts["unregistered"],
+                "unverifiable_comparative_delta": counts["comparative_delta"],
+            },
         )
         # citation_coverage（harden-citation-semantic-coverage）：NUMERIC 0-1，
         # 只监控不进路由；< 0.8 告警（span WARNING + 日志）

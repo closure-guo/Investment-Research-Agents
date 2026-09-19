@@ -17,10 +17,12 @@ from evals.run import (
 
 
 class TestEvaluatorAssembly:
-    def test_thirteen_evaluators(self):
-        """4 确定性 + 4 judge + 阶段 5 拆报 5 项（blocked/真错数/归一计数/文本与未注册 UNVERIFIABLE）。"""
+    def test_sixteen_evaluators(self):
+        """4 确定性 + 4 judge + 阶段 5 拆报 6 项 + 单点修复计数 1 项
+        （blocked/真错数/归一计数/文本与未注册 UNVERIFIABLE/comparative 差值 1 项/修复回填数）
+        + 论点锚点覆盖率 1 项（add-debate-argument-anchors，零 LLM）。"""
         evals = all_evaluators()
-        assert len(evals) == 13
+        assert len(evals) == 16
         names = {e.__name__ for e in evals}
         assert {
             "eval_citation_blocked",
@@ -28,6 +30,9 @@ class TestEvaluatorAssembly:
             "eval_citation_verifier_normalized",
             "eval_citation_unverifiable_text",
             "eval_citation_unverifiable_unregistered",
+            "eval_citation_unverifiable_comparative_delta",
+            "eval_citation_surgical_repaired",
+            "eval_argument_anchor_coverage",
         } <= names
 
     def test_deterministic_evaluator_shape(self):
@@ -230,3 +235,85 @@ class TestCitationMetricEvaluators:
         assert lo <= 0.875 <= hi
         assert _citation_ci([0.8, 0.9, 1.0, 0.7]) == (lo, hi)  # seed 固定可复现
         assert _citation_ci([]) == (0.0, 0.0)
+
+    def test_anchor_coverage_evaluator_reads_output(self):
+        """论点锚点覆盖率经 output 键透传为 Score；拆项随 comment 落库
+        （spec Scenario：comment 含 unanchored_inference=2 / unresolved=1 /
+        missing_required=0 / unspecified=1）；无数据（quick/旧 trace）→ None。"""
+        ev = {e.__name__: e for e in all_evaluators()}["eval_argument_anchor_coverage"]
+        result = ev(
+            input={"query": "q", "mode": "deep"},
+            output={
+                "argument_anchor_coverage": 0.6667,
+                "argument_anchor_coverage_detail": {
+                    "total": 12,
+                    "anchored": 8,
+                    "unanchored_inference": 2,
+                    "unresolved": 1,
+                    "missing_required": 0,
+                    "unspecified": 1,
+                },
+            },
+            expected_output={},
+            metadata={},
+        )
+        assert (getattr(result, "name", None) or result["name"]) == "argument_anchor_coverage"
+        assert float(getattr(result, "value", None) or result["value"]) == 0.6667
+        comment = getattr(result, "comment", None) or result["comment"]
+        assert (
+            "unanchored_inference=2 / unresolved=1 / missing_required=0 / unspecified=1" in comment
+        )
+        assert ev(input={}, output={"mode": "quick"}, expected_output={}, metadata={}) is None
+
+
+class TestDebateCapEvidenceInComment:
+    """debate_quality v6：封顶/枚举缺失证据随分数 comment 落库（可审计）。"""
+
+    def _call(self, judge_result: dict):
+        from evals.run import all_evaluators
+
+        evals = {e.__name__: e for e in all_evaluators()}
+        return evals["eval_debate_quality"](
+            input={"query": "q", "mode": "deep"},
+            output={
+                "report": "r",
+                "ticker": "600519",
+                "judge_vars": {"debate_history": "【bull】论点: x"},
+                "mode": "deep",
+            },
+            expected_output={},
+            metadata={},
+        )
+
+    @patch("evals.run.run_judge")
+    def test_cap_applied_marked_in_comment(self, mock_judge):
+        mock_judge.return_value = {
+            "name": "debate_quality",
+            "score": 4,
+            "reason": "交锋充分",
+            "confidence": 0.9,
+            "points": [],
+            "qualitative_points": 2,
+            "cap_applied": True,
+            "enumeration_missing": False,
+        }
+        result = self._call(mock_judge.return_value)
+        comment = getattr(result, "comment", None) or result["comment"]
+        assert "[cap=qualitative×2]" in comment
+        assert "[conf=0.90]" in comment
+
+    @patch("evals.run.run_judge")
+    def test_enumeration_missing_marked_in_comment(self, mock_judge):
+        mock_judge.return_value = {
+            "name": "debate_quality",
+            "score": 5,
+            "reason": "交锋充分",
+            "confidence": None,
+            "points": [],
+            "qualitative_points": 0,
+            "cap_applied": False,
+            "enumeration_missing": True,
+        }
+        result = self._call(mock_judge.return_value)
+        comment = getattr(result, "comment", None) or result["comment"]
+        assert "[enum-missing]" in comment

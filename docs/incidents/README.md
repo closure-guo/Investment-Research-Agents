@@ -36,6 +36,9 @@
 | 025  | 2026-09-07 | [opencode zen/go 网关强制 x-opencode-session 头 — 离线 judge 链路全挂约两周](025-opencode-session-header-20260907.md) | 已修复   |
 | 026  | 2026-09-11 | [citation 门禁把校验器解析缺陷记成分析师引用错误并自动重跑分析师 — 39 FAIL 抽样无一真错、重试 100% 打在误报桶](026-citation-gate-misattribution-20260911.md) | 阶段 0–5 已实施，r4 验证通过，终裁待 owner |
 | 027  | 2026-09-12 | [ClickHouse 26.6 新分析器在 scores 查询形状(FINAL+JOIN+ORDER+LIMIT)上必然崩溃 — Scores 页 internal error 三周，公共 API 不受影响](027-clickhouse-analyzer-scores-page-20260912.md) | 已修复（enable_analyzer=0 + 镜像固定，UI 待 owner 确认） |
+| 028  | 2026-09-16 | [重算路由由 claim_type 自声明决定 — LLM 把自算值标 numerical 即可跳过重算（消融设施发现的第一个机制存在性缺口）](028-recompute-routing-claim-type-20260916.md) | 已修复（harden-recompute-routing 已归档；冻结重放 0/5→2/5，零新增误报） |
+| 029  | 2026-09-17 | [单点修复的收益在遥测里不可见——记账要「该分析师全 PASS」，改对也不计入](029-surgical-repair-accounting-scope-20260917.md) | 已登记（处置候选待 owner；A4 补测发现，改对 20/20 vs 记账 4/22） |
+| 030  | 2026-09-17 | [材料快照白名单漂移——compute 输出键丢 6/14，同一处第二次丢测量面](030-materials-snapshot-whitelist-drift-20260917.md) | 已修复（排除式 + 完整性守卫 + 回填 115 键 + 摘要回真） |
 
 ---
 

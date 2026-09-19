@@ -26,7 +26,7 @@ from finance_agent.metrics.efficiency import calc_efficiency
 from finance_agent.metrics.profitability import calc_profitability
 from finance_agent.metrics.risk import calc_risk
 from finance_agent.metrics.solvency import calc_solvency
-from finance_agent.metrics.technical import calc_technical
+from finance_agent.metrics.technical import calc_derived_series, calc_technical
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -86,6 +86,8 @@ class CitationResult(BaseModel):
     # 超容差，定向重试）；path_unresolvable=路径/事件不可解析；semantic_*=术语/期次
     # 张冠李戴；internal_inconsistency=stated 与 interpretation 两张皮/方向矛盾；
     # direction_mismatch=已申报方向与真值符号冲突（ehr-style-claim-direction）。
+    # comparative_delta_unregistered=比较型非三枚举差值申报的 UNVERIFIABLE 显式降级
+    # （ground-comparative-delta-claims，非 FAIL 桶，独立计覆盖缺口）。
     bucket: (
         Literal[
             "value_mismatch",
@@ -94,6 +96,11 @@ class CitationResult(BaseModel):
             "semantic_period_mismatch",
             "internal_inconsistency",
             "direction_mismatch",
+            # 比较型差值申报（非三枚举 stated_value）：显式降级，独立桶计缺口
+            "comparative_delta_unregistered",
+            # 值槽类型错填（eval-driven-contract-fixes 任务 2）：变化量入水平值槽，
+            # claim 契约病——不算分析师幻觉、不触发修复（600276 A4 自然腿终裁）
+            "claim_contract_error",
         ]
         | None
     ) = None
@@ -167,6 +174,23 @@ def _resolve_column_alias(col_name: str, columns: Any) -> str | None:
     return None
 
 
+def _disambiguate_column(col_name: str, columns: Any) -> str | None:
+    """同义列消歧（eval-driven-contract-fixes 任务 1）。
+
+    canonical 等价的多列并存时取**最长列名**（官方科目全名，如「归属于母公司的净利润」
+    对「归母净利润」）——杜绝短名列精确命中后静默取错值（601318 A4 自然腿终裁：两列
+    数值 1347.78 亿 vs 235.23 亿，校验器取短名列产假 FAIL）。未注册 canonical 的列名
+    维持精确匹配语义；无任何匹配返回 None（上层按不可验证进 blocked 桶，不错值）。"""
+    cols = [str(c) for c in columns]
+    if col_name in cols:
+        canonical = canonical_metric(col_name)
+        if canonical is None:
+            return col_name
+        matches = [c for c in cols if canonical_metric(c) == canonical]
+        return max(matches, key=len) if matches else col_name
+    return _resolve_column_alias(col_name, columns)
+
+
 def _resolve_field_ref(
     field_ref: str, state: dict, claim_period: str | None = None
 ) -> object | None:
@@ -199,11 +223,10 @@ def _resolve_field_ref(
         elif _is_dataframe(current):
             if i + 1 < len(parts):
                 col_name = parts[i + 1]
-                if col_name not in current.columns:
-                    col = _resolve_column_alias(col_name, current.columns)
-                    if col is None:
-                        return None
-                    col_name = col
+                col = _disambiguate_column(col_name, current.columns)
+                if col is None:
+                    return None
+                col_name = col
                 mask = _dataframe_row_mask(current, part)
                 if mask is None:
                     return None
@@ -211,8 +234,8 @@ def _resolve_field_ref(
                 i += 2
                 continue
             # 路径止于列名（分析师省略行键）：取最新一行（与负索引「最新一期」
-            # 约定一致），列名同样走别名回退（r4-1 实测缺口）
-            col = _resolve_column_alias(part, current.columns)
+            # 约定一致），列名同样走消歧（同义列并存时官方全名优先）
+            col = _disambiguate_column(part, current.columns)
             if col is None:
                 return None
             value: object = current.iloc[-1][col]
@@ -294,6 +317,8 @@ _COMPUTATIONAL_RECALC: dict[str, Callable[[dict], object]] = {
     # 阶段 2（incident 026）：快照派生字段用同一份 compute 代码重算（r2 约 23 条恒 UNVERIFIABLE）
     "garp_result": lambda s: _recompute_snapshot(s, "garp_result"),
     "anomalies": lambda s: _recompute_snapshot(s, "anomalies"),
+    # ground-comparative-delta-claims：派生值以同一份 calc_derived_series 重算
+    "derived_series": lambda s: calc_derived_series(s["kline"]),
 }
 
 
@@ -306,6 +331,11 @@ def _recompute_snapshot(state: dict, key: str) -> object:
     if value is None:
         raise KeyError(key)
     return value
+
+
+def _recomputable_root(claim: Claim) -> bool:
+    """claim 的 field_ref 根是否在重算注册表内（路由判据；两级判定与 `_verify_computational` 同源）。"""
+    return claim.field_ref.split(".")[0] in _COMPUTATIONAL_RECALC
 
 
 def _verify_computational(claim: Claim, state: dict) -> CitationResult:
@@ -321,7 +351,8 @@ def _verify_computational(claim: Claim, state: dict) -> CitationResult:
     try:
         recalculated = recalc_fn(state)
     except (KeyError, TypeError):
-        return CitationResult(status="UNVERIFIABLE", claim=claim)
+        # 重算输入不可得（state 缺原始报表等）→ 覆盖缺口（调用方据此决定是否降级直读）
+        return CitationResult(status="UNVERIFIABLE", claim=claim, coverage_gap=True)
 
     # 从重算结果中按 sub_path 取值（dict 键 + list 序号，与 _resolve_field_ref 语义一致）
     current: object = recalculated
@@ -386,30 +417,135 @@ def _verify_computational(claim: Claim, state: dict) -> CitationResult:
             delta=None,
             bucket="path_unresolvable",
         )
-    delta = abs(ground_truth - stated)
+    # 数值分支统一走共用比对（含方向对齐/候选归一/相对容差——口径不得复制）
+    return _compare_numeric_claim(claim, stated, ground_truth)
 
-    # fix(percent-unit)：同 _verify_numerical——重算指标多为小数比率
-    # （dupont 费率 0.118 = 11.8%），LLM 以百分比申报，归一 100 倍口径
-    # 更贴近时采用（2026-09-08 trace 04b872ae 实测误报）。
-    OTHER_SCALE = 100.0
-    if ground_truth != 0 and stated != 0:
-        normalized = min(
-            abs(ground_truth - stated / OTHER_SCALE),
-            abs(ground_truth / OTHER_SCALE - stated),
-        )
-        if normalized < delta:
-            delta = normalized
 
-    # 相对容差 0.5%（FinGround 标准）
-    passed = delta < ABS_TOL if ground_truth == 0 else delta / abs(ground_truth) < REL_TOL
+_PUNCT_CHARS = (
+    "，。；、：:;,()（）[]【】—_·.%％" + '"' + chr(0x2018) + chr(0x2019) + chr(0x201C) + chr(0x201D)
+)
+_TEXT_STRIP_RE = re.compile("[" + re.escape(_PUNCT_CHARS) + r"\s" + "]")
 
-    return CitationResult(
-        status="PASS" if passed else "FAIL",
-        claim=claim,
-        ground_truth=ground_truth,
-        delta=delta,
-        bucket=None if passed else "value_mismatch",
+
+def _norm_text(text: object) -> str:
+    """文本回声归一：去空白/标点/百分号，小写。"""
+    return _TEXT_STRIP_RE.sub("", str(text or "")).lower()
+
+
+def _looks_numeric(text: str) -> bool:
+    try:
+        float(str(text).replace(",", ""))
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+_SIGNED_ROOTS = frozenset({"growth_rates", "quarterly_trend", "derived_series"})
+_SIGNED_NAME_KEYWORDS = ("同比", "环比", "增速", "变动", "变化", "涨跌", "差额")
+
+
+def _is_signed_claim(claim: Claim) -> bool:
+    """阶段 1（incident 026）：direction 只对「有符号量」参与符号比对——
+    增长率/同比环比/变动幅度为有符号量；PMI/比率/价格等恒正水平量的
+    negative 申报是「低于阈值」的字面误读（r2 5/5 direction_mismatch 皆此因），
+    记覆盖缺口提示而非 FAIL。"""
+    root = claim.field_ref.split(".")[0]
+    if root in _SIGNED_ROOTS:
+        return True
+    name = claim.metric_name or ""
+    return any(k in name for k in _SIGNED_NAME_KEYWORDS)
+
+
+def _align_signed_effective(
+    claim: Claim, stated: float, ground_truth: float
+) -> tuple[float, CitationResult | None, bool]:
+    """direction 申报与真值符号的对齐（ehr-style-claim-direction 单一实现）。
+
+    返回 (eff, direction_fail, direction_misapplied)：
+    - eff：sign(stated)×direction 对齐后的有效值（未申报/flat/非有符号量 → 原值）
+    - direction_fail：有符号量上符号冲突（eff 非零且与真值异号）→ 预构造
+      direction_mismatch FAIL，调用方直接返回
+    - direction_misapplied：非有符号量上申报 positive/negative 的字面误读 →
+      覆盖缺口标记（调用方决定是否计入）
+
+    数值/计算型两条校验路径共用，避免同一语义两份实现。
+    """
+    declared_sign: int | None = None
+    if claim.direction == "negative":
+        declared_sign = -1
+    elif claim.direction == "positive":
+        declared_sign = 1
+    # 阶段 1：非有符号量上的 negative/positive 申报是「低于/高于阈值」的字面误读
+    # ——不比符号，记覆盖缺口提示（歧义降级而非 FAIL）
+    signed = _is_signed_claim(claim)
+    direction_misapplied = declared_sign is not None and declared_sign != 0 and not signed
+    # 阶段 1 r4 残余：stated 已带符号且与 direction 同向（-10.40 + negative）——
+    # 数值本身即事实，不翻号（否则双重否定判 direction_mismatch 误报）
+    double_signed = (
+        declared_sign is not None
+        and signed
+        and ((declared_sign == -1 and stated < 0) or (declared_sign == 1 and stated > 0))
     )
+    eff = (
+        stated * declared_sign
+        if (declared_sign is not None and signed and not double_signed)
+        else stated
+    )
+    eff_sign = 1 if eff > 0 else (-1 if eff < 0 else 0)
+    gt_sign = 1 if ground_truth > 0 else (-1 if ground_truth < 0 else 0)
+    if (
+        signed
+        and declared_sign is not None
+        and eff_sign != 0
+        and gt_sign != 0
+        and eff_sign != gt_sign
+    ):
+        return (
+            eff,
+            CitationResult(
+                status="FAIL",
+                claim=claim,
+                ground_truth=ground_truth,
+                delta=abs(ground_truth - eff),
+                bucket="direction_mismatch",
+            ),
+            direction_misapplied,
+        )
+    return eff, None, direction_misapplied
+
+
+_MAG_SCALES: tuple[tuple[str, float], ...] = (("万", 1e4), ("亿", 1e8))
+_UNIT_TOKEN_RE = re.compile(r"(-?\d[\d,]*(?:\.\d+)?)\s*(亿|万)")
+
+
+def _unit_from_interpretation(claim: Claim) -> str | None:
+    """从 interpretation 中找与 stated_value 面值相同的 token 的紧邻单位词（亿/万）。"""
+    try:
+        face = abs(float(claim.stated_value))
+    except (TypeError, ValueError):
+        return None
+    for m in _UNIT_TOKEN_RE.finditer(claim.interpretation or ""):
+        token_val = abs(float(m.group(1).replace(",", "")))
+        if abs(token_val - face) < 1e-9:
+            return m.group(2)
+    return None
+
+
+# 值槽类型错填（eval-driven-contract-fixes 任务 2）：interpretation 声明数值为
+# 环比/同比变化量（…个百分点）而 field_ref 真值为水平值 → claim 契约错，非分析师幻觉
+_DELTA_SLOT_RE = re.compile(r"(环比|同比)[^。；]{0,16}个百分点")
+
+
+def _is_delta_in_level_slot(interpretation: str | None, gt_float: float, stated: float) -> bool:
+    """双信号判据：①变化量措辞（环比/同比…个百分点）②与真值量级差 >10 倍。
+
+    单一信号不判——环比措辞配变化量字段（量级一致）是合法 claim；量级差但无
+    变化量措辞走既有 percent/亿/万 归一候选。依据：600276 A4 自然腿终裁
+    （PMI 环比 0.6 填进水平值槽 49.8，正文算术正确，修复回路定位落空是正确行为）。"""
+    if not _DELTA_SLOT_RE.search(str(interpretation or "")):
+        return False
+    s, g = abs(float(stated)), abs(gt_float)
+    return s > 0 and g > 0 and (g / s > 10 or s / g > 10)
 
 
 _PUNCT_CHARS = (
@@ -490,49 +626,31 @@ def _verify_numerical(claim: Claim, state: dict) -> CitationResult:
             delta=None,
             bucket="path_unresolvable",
         )
-    delta = abs(gt_float - sv_float)  # raw 候选；容差在尾部按各候选参照系判定
-
-    # ehr-style-claim-direction：已申报方向 → 先按 sign(stated)×direction 与
-    # 真值符号对齐（「下滑 10.05%」↔ gt=-10.05 用 eff=-10.05 比对），符号冲突
-    # 直接 FAIL + direction_mismatch 桶；符号一致后走既有容差（值级偏差仍归
-    # value_mismatch）。flat/None 无数值方向语义 → 原值比对。
-    declared_sign: int | None = None
-    if claim.direction == "negative":
-        declared_sign = -1
-    elif claim.direction == "positive":
-        declared_sign = 1
-    # 阶段 1：非有符号量上的 negative/positive 申报是「低于/高于阈值」的字面误读
-    # ——不比符号，记覆盖缺口提示（歧义降级而非 FAIL）
-    signed = _is_signed_claim(claim)
-    direction_misapplied = declared_sign is not None and declared_sign != 0 and not signed
-    # 阶段 1 r4 残余：stated 已带符号且与 direction 同向（-10.40 + negative）——
-    # 数值本身即事实，不翻号（否则双重否定判 direction_mismatch 误报）
-    double_signed = (
-        declared_sign is not None
-        and signed
-        and ((declared_sign == -1 and sv_float < 0) or (declared_sign == 1 and sv_float > 0))
-    )
-    eff = (
-        sv_float * declared_sign
-        if (declared_sign is not None and signed and not double_signed)
-        else sv_float
-    )
-    eff_sign = 1 if eff > 0 else (-1 if eff < 0 else 0)
-    gt_sign = 1 if gt_float > 0 else (-1 if gt_float < 0 else 0)
-    if (
-        signed
-        and declared_sign is not None
-        and eff_sign != 0
-        and gt_sign != 0
-        and eff_sign != gt_sign
-    ):
+    if _is_delta_in_level_slot(claim.interpretation, gt_float, sv_float):
         return CitationResult(
             status="FAIL",
             claim=claim,
             ground_truth=gt_float,
-            delta=abs(gt_float - eff),
-            bucket="direction_mismatch",
+            delta=None,
+            bucket="claim_contract_error",
         )
+    # ehr-style-claim-direction：已申报方向 → 先按 sign(stated)×direction 与
+    # 真值符号对齐（「下滑 10.05%」↔ gt=-10.05 用 eff=-10.05 比对），符号冲突
+    # 直接 FAIL + direction_mismatch 桶；符号一致后走既有容差（值级偏差仍归
+    # value_mismatch）。flat/None 无数值方向语义 → 原值比对。
+    return _compare_numeric_claim(claim, sv_float, gt_float)
+
+
+def _compare_numeric_claim(claim: Claim, stated: float, gt_float: float) -> CitationResult:
+    """数值型/计算型的**共用**比对：方向对齐 → 候选归一（percent/万/亿）→ 相对容差。
+
+    `harden-recompute-routing`：计算型此前自带一套简化比对（只有 ×100 归一），
+    与数值型不一致 → 同一 claim 换个标签就换一套容差语义。两条路径统一到此实现
+    （口径不得复制），数值型与计算型只在**真值来源**上不同（直读 vs 重算）。
+    """
+    eff, direction_fail, direction_misapplied = _align_signed_effective(claim, stated, gt_float)
+    if direction_fail is not None:
+        return direction_fail
     # 候选统一按「各自参照系」判相对容差（阶段 1，incident 026）：
     #   raw      → 参照 gt
     #   percent  → 参照 gt 或 gt/100（各算各的；修注入演练暴露的缺陷——超大真值的
@@ -607,7 +725,15 @@ def _verify_comparative(claim: Claim, state: dict) -> CitationResult:
     elif direction == "equal_to":
         passed = delta < 0.01
     else:
-        return CitationResult(status="UNVERIFIABLE", claim=claim)
+        # 差值数字填入 stated_value（「MA5 较 MA20 低约 2.3%」的 2.3）：非三枚举
+        # → 显式降级。不重算差值、不判 PASS/FAIL（ground-comparative-delta-claims
+        # 明确推迟的「路线 2」）；独立桶 + 覆盖缺口使问题规模可见。
+        return CitationResult(
+            status="UNVERIFIABLE",
+            claim=claim,
+            bucket="comparative_delta_unregistered",
+            coverage_gap=True,
+        )
 
     # D3：基期值申报与校验（comparative 双端建档）。基期真值 b 取自 field_ref_b；
     # stated_value_b 缺失（裸奔）或与真值超容差 → FAIL。
@@ -650,12 +776,9 @@ def _verify_comparative(claim: Claim, state: dict) -> CitationResult:
     )
 
 
-def _verify_textual(claim: Claim, state: dict) -> CitationResult:
-    """文本 claim 回声匹配：归一后子串命中 news_list / key_events / field_ref 解析文本。
-
-    未命中判 UNVERIFIABLE(text)——文本 claim 的语义忠实性由 decision_grounding
-    judge（rubric v6 逐条核对 claim 与 source）与人工盲标承担，确定性门禁不越权。
-    """
+def collect_text_sources(state: dict) -> list[str]:
+    """回声源集合（归一前原文）：news/key_events/公告/研报/解禁/大宗——文本 claim 与
+    辩论 event 锚点共用同一集合（单一实现，勿复制）。"""
     sources: list[str] = []
     news = state.get("news_list") or []
     if isinstance(news, list):
@@ -680,6 +803,16 @@ def _verify_textual(claim: Claim, state: dict) -> CitationResult:
                 for f in fields
                 if i.get(f)
             ]
+    return sources
+
+
+def _verify_textual(claim: Claim, state: dict) -> CitationResult:
+    """文本 claim 回声匹配：归一后子串命中 news_list / key_events / field_ref 解析文本。
+
+    未命中判 UNVERIFIABLE(text)——文本 claim 的语义忠实性由 decision_grounding
+    judge（rubric v6 逐条核对 claim 与 source）与人工盲标承担，确定性门禁不越权。
+    """
+    sources = collect_text_sources(state)
     resolved = _resolve_field_ref(claim.field_ref, state)
     if isinstance(resolved, str):
         sources.append(resolved)
@@ -1004,7 +1137,21 @@ def verify_claims(claims: list[Claim], state: dict) -> list[CitationResult]:
         elif claim.source_type == "event":
             results.append(_verify_event(claim, state))
         elif claim.claim_type == "numerical":
-            results.append(_verify_data_claim(claim, state, _verify_numerical))
+            # harden-recompute-routing：校验深度不得由被校验对象的自我声明决定——
+            # field_ref 命中重算注册表根时**无视 claim_type** 一律走重算路径
+            # （否则 LLM 把自算值标成 numerical 即可跳过重算，自算错误逃逸；
+            #  P1 冻结批实证：5/5 载体 claim 标 numerical → 从被污染 state 取真值 → 恒 PASS）。
+            if _recomputable_root(claim):
+                verdict = _verify_data_claim(claim, state, _verify_computational)
+                if verdict.status == "UNVERIFIABLE" and verdict.coverage_gap:
+                    # 重算输入不可得 → 退回直读比对，但**保留覆盖缺口标记**（降级可见，
+                    # 不静默；state 齐备时重算恒优先——生产 state 恒含原始报表）
+                    verdict = _verify_data_claim(claim, state, _verify_numerical).model_copy(
+                        update={"coverage_gap": True}
+                    )
+            else:
+                verdict = _verify_data_claim(claim, state, _verify_numerical)
+            results.append(verdict)
         elif claim.claim_type == "computational":
             results.append(_verify_data_claim(claim, state, _verify_computational))
         elif claim.claim_type == "comparative":

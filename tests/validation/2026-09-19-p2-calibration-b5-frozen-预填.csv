@@ -1,0 +1,5 @@
+﻿unit_id,ticker,预填·胜者,机器理由,两臂报告位置,你已标(full/through_trader_frozen/tie)
+601012::b5,601012,full,报告A给出了明确的仓位定性、硬性止损与量化右侧触发条件，决策可执行性显著高于B的观望结论。,tests/validation/2026-09-19-b5-frozen-calibration-reports/601012.through_trader_frozen.md vs 601012.full.md（可直接打开，分析师章节两臂逐字相同）,
+600276::b5,600276,full,A提供了明确的仓位上限、条件化买卖价位与时间止损，决策可执行性显著强于B的泛泛观望。,tests/validation/2026-09-19-b5-frozen-calibration-reports/600276.through_trader_frozen.md vs 600276.full.md（可直接打开，分析师章节两臂逐字相同）,
+002027::b5,002027,full,报告A给出了明确可执行的入场/止损/目标价与仓位，并完整交代多空辩论与风控边界，决策辅助价值更高。,tests/validation/2026-09-19-b5-frozen-calibration-reports/002027.through_trader_frozen.md vs 002027.full.md（可直接打开，分析师章节两臂逐字相同）,
+601888::b5,601888,through_trader_frozen,报告A给出明确的卖出方向、入场/止损/目标价和仓位，决策可执行性更强；报告B仅观望且缺乏具体价位参数。,tests/validation/2026-09-19-b5-frozen-calibration-reports/601888.through_trader_frozen.md vs 601888.full.md（可直接打开，分析师章节两臂逐字相同）,

@@ -382,7 +382,7 @@ def _build_technical_context(state: dict) -> str:
         if derived:
             derived_view = {k: (v if v is not None else "数据不足") for k, v in derived.items()}
             sections.append(
-                "常用派生值（工具预生成，直接引用；field_ref 前缀 derived.）:\n"
+                "常用派生值（工具预生成，直接引用；field_ref 前缀 derived_series.）:\n"
                 f"{json.dumps(derived_view, ensure_ascii=False)}"
             )
 

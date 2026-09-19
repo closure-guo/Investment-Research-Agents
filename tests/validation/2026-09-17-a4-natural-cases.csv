@@ -1,0 +1,3 @@
+﻿unit_id,ticker,agent,claim_index,stated_value,ground_truth,on_status,on_bucket,rewrote_text,reverify_all_pass,sentence,human_verdict(真错误?/误报?/待查)
+601318::a4::natural:4,601318,fundamental,3,134778000000.0,23523000000.0,FAIL,value_mismatch,False,False,,误报
+600276::a4::natural:17,600276,macro,4,0.6,49.8,FAIL,value_mismatch,False,False,此外，8月 PMI 环比回升 0.6 个百分点，若后续回到 50 上方，市场风险偏好回升或对防御板块形成一定资金分流压力，需持续跟踪。,误报

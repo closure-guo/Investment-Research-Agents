@@ -1,0 +1,53 @@
+{"trace_id": "2a4e083d55881a5866cef65be82f1230", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告紧扣查询意图，提供了昨日收盘、今日盘中说明、消息面及基本面分析，并提示数据标注错误，完全切题且信息准确。"}
+{"trace_id": "2fd1ee6d78103a655f15a78cd77cd221", "dimension": "consistency", "judge_score": 3.0, "judge_reason": "各层结论方向一致（中性/watch/批准），但Fund Manager的批准理由与Risk Judge的watch裁决存在未显式调和的张力，且最终报告结论未提及watch触发条件，属于已显式说明但执行层面存在未完全对齐的不一致。"}
+{"trace_id": "2fd1ee6d78103a655f15a78cd77cd221", "dimension": "debate_quality", "judge_score": 4.0, "judge_reason": "双方围绕技术、宏观、情绪、基本面四大维度逐条交锋，引用具体数据（毛利率、ROE、负增长、PMI等）支撑论点，但个别论据（如资金回流、历史可比性）仍显空泛，未完全闭环。"}
+{"trace_id": "2fd1ee6d78103a655f15a78cd77cd221", "dimension": "decision_grounding", "judge_score": 4.0, "judge_reason": "evidence_refs 中每条 claim 均能在对应 source 中找到出处，且 reasoning 的主要论据（重定价周期、多空不对称、布林带收窄、资产质量支撑）均能在 evidence_refs 中找到对应项，仅个别细节如 beta 0.06 在前文中无直接出处，但整体论据支撑充分。"}
+{"trace_id": "2fd1ee6d78103a655f15a78cd77cd221", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告全面覆盖贵州茅台投资价值的多维度分析，紧扣查询意图，内容专业且结论明确。"}
+{"trace_id": "43aaa1ea499a46662b811eecd3afaf56", "dimension": "consistency", "judge_score": 3.0, "judge_reason": "各层结论方向一致（中性/观望/批准），但Fund Manager的批准理由与Risk Judge的watch+空仓信号存在未显式调和的冲突，且最终报告结论直接复制了Fund Manager理由，未体现Risk Judge的条件单机制和现金流跟踪框架。"}
+{"trace_id": "43aaa1ea499a46662b811eecd3afaf56", "dimension": "debate_quality", "judge_score": 4.0, "judge_reason": "双方围绕现金流、直销化、业绩下滑等核心分歧展开实质交锋，引用具体数据并逐条回应，但个别论点如技术面解读仍偏立场化。"}
+{"trace_id": "43aaa1ea499a46662b811eecd3afaf56", "dimension": "decision_grounding", "judge_score": 4.0, "judge_reason": "evidence_refs 中所有 claim 均能在对应 source 中找到出处，reasoning 的主要论据（现金流分歧、踏空风险对冲、仓位信号修正）均有引用支撑，仅个别细节如‘历史最大回撤23.07%、波动率22.26%’未在 evidence_refs 中列出，但属于补充性数据，不影响整体论据完整性。"}
+{"trace_id": "43aaa1ea499a46662b811eecd3afaf56", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告紧扣贵州茅台现金流健康度及经营性现金流核心，数据详实、多空分析完整，并给出明确裁决指标，完全切题。"}
+{"trace_id": "4f58faf7e9037459a80f57439d92ac31", "dimension": "consistency", "judge_score": 4.0, "judge_reason": "各层结论方向一致（中性偏多/轻仓买入），但Fund Manager最终决策仅基于风控指标批准，未明确复述Risk Judge的轻仓分批及止损规则，存在表述差异但不影响方向。"}
+{"trace_id": "4f58faf7e9037459a80f57439d92ac31", "dimension": "debate_quality", "judge_score": 4.0, "judge_reason": "双方围绕技术回踩、利润转正质量、LPR影响及机构减持等核心论点逐条交锋，并引用具体数据与逻辑反驳，仅个别论据（如筹码转移）缺乏数据支撑，整体交锋实质且证据较充分。"}
+{"trace_id": "4f58faf7e9037459a80f57439d92ac31", "dimension": "decision_grounding", "judge_score": 4.0, "judge_reason": "交易决策的evidence_refs各条均能在对应source中找到出处，reasoning主要论据与引用一致，但'机构减持30余家'在sentiment中仅表述为'舆情数据缺失'，实际来源于辩论结论而非sentiment，属source标注轻微错位，故扣1分。"}
+{"trace_id": "4f58faf7e9037459a80f57439d92ac31", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告全面覆盖平安银行财务、估值、风险及投资建议，紧扣投资价值分析主题，无无关内容。"}
+{"trace_id": "65b36120559a1888c334a6446a35cb63", "dimension": "report_relevance", "judge_score": 3.0, "judge_reason": "报告未提供今日实时行情，仅给出昨日收盘和近期动态，偏离用户对“今天”的查询意图。"}
+{"trace_id": "68672034ab811f4e16e8d35ae06e1693", "dimension": "consistency", "judge_score": 2.0, "judge_reason": "Fund Manager批准执行与Risk Judge观望裁决存在未说明的结论冲突，且最终报告结论未体现风险警告。"}
+{"trace_id": "68672034ab811f4e16e8d35ae06e1693", "dimension": "debate_quality", "judge_score": 5.0, "judge_reason": "双方逐条回应对方论点，引用具体数据（均线、MACD、LPR、M2、现金流比率、PMI等）进行交锋，证据充分，实质辩论程度高。"}
+{"trace_id": "68672034ab811f4e16e8d35ae06e1693", "dimension": "decision_grounding", "judge_score": 3.0, "judge_reason": "evidence_refs大部分有前文支撑，但reasoning中保守方历史类比、中立方技术矛盾等论据未在evidence_refs中对应，存在部分论据缺失。"}
+{"trace_id": "68672034ab811f4e16e8d35ae06e1693", "dimension": "report_relevance", "judge_score": 4.0, "judge_reason": "报告紧扣经营性现金流展开分析，但包含较多非直接相关的风控和决策内容，略有冗余。"}
+{"trace_id": "805dfcaaffd1ed5db2388d864210c4f8", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告紧扣查询，直接回答银行股估值是否偏贵，并给出具体数据、历史分位、多角度分析和风险提示，完全切题。"}
+{"trace_id": "81a133c2b05e73783ce020eec1317825", "dimension": "consistency", "judge_score": 2.0, "judge_reason": "分析师技术面偏空、研究经理看空、风险法官hold，但基金经理以风险可控为由批准执行，未回应风险法官的看空逻辑，且最终报告结论与分析师章节方向存在未说明的冲突。"}
+{"trace_id": "81a133c2b05e73783ce020eec1317825", "dimension": "debate_quality", "judge_score": 4.0, "judge_reason": "双方逐条回应对方核心论点并引用具体数据（如净利润-20%、PMI、KDJ、LPR等），交锋实质且证据较充分，但个别论点如‘价格战终局’仍偏叙事性，未完全数据化。"}
+{"trace_id": "81a133c2b05e73783ce020eec1317825", "dimension": "decision_grounding", "judge_score": 4.0, "judge_reason": "交易决策的evidence_refs中各项论据均能在对应来源（technical/macro/fundamental/sentiment/debate_bear/research_manager）中找到明确出处，数值与方向一致，reasoning主要论据均有引用支撑，仅个别细节如VaR95值未在引用中直接体现，但整体论据链完整。"}
+{"trace_id": "81a133c2b05e73783ce020eec1317825", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告全面覆盖比亚迪基本面、财务指标、量化风控及投资建议，紧扣投资价值分析主题，无无关内容。"}
+{"trace_id": "846fe7b08837ef940a9d955841013f48", "dimension": "consistency", "judge_score": 1.0, "judge_reason": "Risk Judge裁决为watch（零仓位观望），而Fund Manager最终决策为approve（批准建仓），两者方向直接相悖，且最终报告结论章节未说明推翻风控裁决的理由，构成明显自相矛盾。"}
+{"trace_id": "846fe7b08837ef940a9d955841013f48", "dimension": "debate_quality", "judge_score": 4.0, "judge_reason": "双方围绕技术面超卖、基本面评分、宏观利率传导等核心分歧逐条交锋，并引用具体数据（如44分、PMI、MACD）支撑论点，但个别论断如‘历史金叉规律’和‘折旧负担’缺乏直接数据佐证，略有空泛。"}
+{"trace_id": "846fe7b08837ef940a9d955841013f48", "dimension": "decision_grounding", "judge_score": 4.0, "judge_reason": "交易决策的evidence_refs逐条均能在对应source中找到出处，reasoning中主要论据（零轴下金叉为下跌中继、PMI连续两期跌破荣枯线、舆情缺失、健康度44分、磨底期扫损成本等）均被evidence_refs覆盖，仅个别细节如'单日超5%放量异动'和'60.1%波动率'在前文中无直接数值支撑，但属合理推断，不影响整体一致性。"}
+{"trace_id": "846fe7b08837ef940a9d955841013f48", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告全面覆盖中芯国际的财务、行业、估值、风险等投资价值核心维度，紧扣查询意图，无显著偏离。"}
+{"trace_id": "8bf29bed046a6def1dac751c35f55aad", "dimension": "consistency", "judge_score": 2.0, "judge_reason": "Fund Manager批准执行与Risk Judge维持观望的裁决直接冲突，且未显式说明推翻理由，最终报告也未提及该分歧。"}
+{"trace_id": "8bf29bed046a6def1dac751c35f55aad", "dimension": "debate_quality", "judge_score": 5.0, "judge_reason": "双方逐条回应对方论点，引用具体数据与事实，交锋实质且证据充分。"}
+{"trace_id": "8bf29bed046a6def1dac751c35f55aad", "dimension": "decision_grounding", "judge_score": 5.0, "judge_reason": "所有evidence_refs的claim均能在对应source中找到明确出处，且语义一致，reasoning主要论据也均有引用支撑。"}
+{"trace_id": "8bf29bed046a6def1dac751c35f55aad", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告全面围绕美的集团投资价值展开，涵盖财务指标、风险分析、基金经理决策等，紧扣查询意图。"}
+{"trace_id": "a2bb8d3403d1addaaa1042bd5644102f", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告紧扣银行股估值贵不贵的核心问题，从绝对水平、历史位置、基本面及风险多维度直接回应，完全切题。"}
+{"trace_id": "acb176079482d87b8e08a36de0cc50f7", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告紧扣查询，对比了两家公司的基本面、核心逻辑和适用投资者，切题且信息充分。"}
+{"trace_id": "b0025f8ee2a0939cbfd49d2d1a88f240", "dimension": "consistency", "judge_score": 4.0, "judge_reason": "各层结论均指向不买入/谨慎，Fund Manager的reject与Risk Judge的watch方向一致但更严格，且理由已显式说明，无静默推翻。"}
+{"trace_id": "b0025f8ee2a0939cbfd49d2d1a88f240", "dimension": "debate_quality", "judge_score": 5.0, "judge_reason": "双方逐条回应对方论点，并引用技术指标、宏观数据、财务评分和资金面等具体证据，交锋充分且针对性强。"}
+{"trace_id": "b0025f8ee2a0939cbfd49d2d1a88f240", "dimension": "decision_grounding", "judge_score": 5.0, "judge_reason": "所有evidence_refs均能在对应来源中找到明确出处，reasoning主要论据与引用一致，无张冠李戴或方向失当。"}
+{"trace_id": "b0025f8ee2a0939cbfd49d2d1a88f240", "dimension": "report_relevance", "judge_score": 4.0, "judge_reason": "报告整体围绕中芯国际投资价值展开，包含财务指标、风险分析等核心内容，但夹杂了部分无关的决策流程和框架讨论，略有偏离。"}
+{"trace_id": "d1d94110946bd630ddc724f94bface3e", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告紧扣用户对比比亚迪与特斯拉投资价值的查询，从数据、逻辑、风险到结论均直接回应，无无关内容。"}
+{"trace_id": "d3094239ceab4c703426404389141402", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告紧扣‘茅台现在能买吗’的查询意图，从估值、业绩、多空因素到投资定位给出完整分析，完全切题。"}
+{"trace_id": "d3a30a2731c601101309a0cabdd8180a", "dimension": "consistency", "judge_score": 3.0, "judge_reason": "各层结论方向一致（中性偏多/轻仓买入/审批通过），但Risk Judge下调置信度并附加止损纪律，而Fund Manager未明确采纳该纪律要求，存在未完全对齐的显式说明差异。"}
+{"trace_id": "d3a30a2731c601101309a0cabdd8180a", "dimension": "debate_quality", "judge_score": 4.0, "judge_reason": "双方逐条回应并引用具体数据（如ROE、FCF、RSI、PMI等），交锋实质且证据较充分，但个别论点仍依赖定性表述，未完全达到满分标准。"}
+{"trace_id": "d3a30a2731c601101309a0cabdd8180a", "dimension": "decision_grounding", "judge_score": 4.0, "judge_reason": "evidence_refs中各项claim均能在对应source中找到出处，且reasoning主要论据与引用一致，但入场价/止损/目标价三null为共识性硬伤，决策执行细节缺乏前文支撑。"}
+{"trace_id": "d3a30a2731c601101309a0cabdd8180a", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告全面覆盖财务、行业、估值、风险及决策建议，紧扣宁德时代投资价值分析主题，无无关内容。"}
+{"trace_id": "d8f0fdad37ad9878cc02c2ccc866bbaa", "dimension": "consistency", "judge_score": 4.0, "judge_reason": "各层结论方向一致（中性/观望/批准），Fund Manager与Risk Judge裁决相符，但最终报告结论仅引用风控数据而省略了Risk Judge的观望立场及解除条件，存在表述简化但未改变方向。"}
+{"trace_id": "d8f0fdad37ad9878cc02c2ccc866bbaa", "dimension": "debate_quality", "judge_score": 4.0, "judge_reason": "双方围绕技术、息差、健康度等核心分歧展开多轮实质回应，引用具体数据与逻辑链条，但个别论点如AI估值仍显空泛。"}
+{"trace_id": "d8f0fdad37ad9878cc02c2ccc866bbaa", "dimension": "decision_grounding", "judge_score": 4.0, "judge_reason": "主要论据均能在对应source中找到出处，且数值与方向一致；但'VaR_95仅1.73%、波动率17.4%'及'beta负相关被辩论推翻'等细节在evidence_refs中未明确列出，属个别细节无直接引用支撑。"}
+{"trace_id": "d8f0fdad37ad9878cc02c2ccc866bbaa", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告全面围绕招商银行投资价值展开，涵盖财务、估值、风险及决策，完全切合查询意图。"}
+{"trace_id": "dfdb62e21ab6fc060934e20a2aa46f82", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告紧扣‘茅台现在能买吗’的查询意图，从估值、基本面、机构观点和风险等多维度给出明确分析，并区分长短期视角提供操作建议，完全切题。"}
+{"trace_id": "f6a692644b87b83bf64e725b40dc657d", "dimension": "consistency", "judge_score": 4.0, "judge_reason": "各层结论方向一致（中性偏多、观望等待右侧信号），Fund Manager批准与Risk Judge的watch+light条件化行动一致，但最终报告结论仅强调长期配置价值，未明确提及短期谨慎和右侧信号触发条件，存在个别表述差异但不影响整体方向。"}
+{"trace_id": "f6a692644b87b83bf64e725b40dc657d", "dimension": "debate_quality", "judge_score": 4.0, "judge_reason": "双方围绕技术面、宏观、负债和资金面展开逐点反驳，并引用具体数据与报告措辞，交锋实质且证据较充分，但个别论点如负债结构仍依赖推断而非直接证据。"}
+{"trace_id": "f6a692644b87b83bf64e725b40dc657d", "dimension": "decision_grounding", "judge_score": 4.0, "judge_reason": "evidence_refs 中每条 claim 均能在对应 source 中找到出处，数值与方向一致，reasoning 的主要论据（右侧信号、时间窗、止损缺失、回撤风险）也均被 evidence_refs 覆盖，仅个别细节如'右侧确认成本3-5%缺乏数据支撑'的表述在来源中未直接量化，属轻微瑕疵。"}
+{"trace_id": "f6a692644b87b83bf64e725b40dc657d", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告全面覆盖财务指标、趋势分析、多空观点及投资决策，紧扣美的集团投资价值评估的查询意图。"}
+{"trace_id": "f84c29f669ae1f4ece1bf57c9fbb53c8", "dimension": "report_relevance", "judge_score": 5.0, "judge_reason": "报告全面涵盖股价、业绩、回购、风险等，紧扣用户对美的集团近况的查询，无偏离内容。"}

@@ -239,6 +239,57 @@ class TestUnverifiableRatioScore:
         assert captured["citation_unverifiable_ratio"]["value"] == 0.5
         assert captured["citation_pass"]["value"] == 1.0
 
+    def test_ratio_metadata_carries_three_class_counts(self, monkeypatch):
+        """spec「UNVERIFIABLE 占比监控」：三类拆报计数随 trace 元数据上报，
+        与报告 state 同口径（同一 helper）。"""
+        from finance_agent.nodes import citation_node
+
+        captured = {}
+
+        class _Client:
+            def score_current_trace(self, **kwargs):
+                captured[kwargs["name"]] = kwargs
+
+            def update_current_span(self, **kwargs):
+                pass
+
+        monkeypatch.setattr(citation_node, "get_langfuse", lambda: _Client())
+        claims = [
+            {  # 文本类：entity 不注册
+                "claim_type": "entity",
+                "source_type": "data",
+                "field_ref": "news_list.9.title",
+                "stated_value": "不存在的新闻",
+                "interpretation": "x",
+            },
+            {  # 比较型差值：非三枚举 stated_value
+                "claim_type": "comparative",
+                "source_type": "data",
+                "field_ref": "profitability_metrics.ROE.2024",
+                "stated_value": 2.3,
+                "interpretation": "2024 年 ROE 较 2023 年低约 2.3",
+                "field_ref_b": "profitability_metrics.ROE.2023",
+                "stated_value_b": 25.0,
+            },
+            {  # 未注册：非文本非差值
+                "claim_type": "numerical",
+                "source_type": "llm_inference",
+                "field_ref": "x",
+                "stated_value": 1.0,
+                "interpretation": "",
+            },
+        ]
+        state = {"profitability_metrics": {"ROE": {"2024": 28.0, "2023": 25.0}}}
+        out = self._run_node(claims, state)
+        meta = captured["citation_unverifiable_ratio"]["metadata"]
+        assert meta["unverifiable_text"] == 1
+        assert meta["unverifiable_unregistered"] == 1
+        assert meta["unverifiable_comparative_delta"] == 1
+        # 报告 state 键与 trace 元数据同口径（同一 helper 产出）
+        assert out["citation_unverifiable_text"] == 1
+        assert out["citation_unverifiable_unregistered"] == 1
+        assert out["citation_unverifiable_comparative_delta"] == 1
+
     def test_zero_claims_ratio_is_zero(self, monkeypatch):
         from finance_agent.nodes import citation_node
 
@@ -943,6 +994,41 @@ class TestSurgicalRepair:
         md2 = rpt.markdown if hasattr(rpt, "markdown") else rpt["markdown"]
         assert "38.0%" in md2 and "99.0%" not in md2
 
+    def test_per_claim_accounting_when_unrelated_fail_blocks_all_passed(self, monkeypatch):
+        """incident 029 处置（任务 3）：修复改对了目标 claim，但同分析师另有无关 FAIL
+        （path_unresolvable，all_passed=False）——目标 claim 仍须计入
+        value_mismatch_repaired_claims；旧 all_passed 口径字段保持 0（deprecated 对照）。"""
+        md = "2023 年资产负债率为 99.0%，杠杆水平异常偏高。"
+        unrelated = Claim(
+            claim_type="numerical",
+            source_type="data",
+            field_ref="solvency_metrics.不存在的指标.2023",
+            stated_value=1.0,
+            interpretation="无关指标（制造非 value_mismatch 的残余 FAIL）",
+        )
+
+        def fake_repair(markdown, failures, llm_config=None):
+            return markdown.replace("99.0%", "38.0%"), [
+                {
+                    "agent": "fundamental",
+                    "field_ref": "x",
+                    "ground_truth": 38.0,
+                    "repaired": True,
+                    "updated_claim": self._bad(stated=38.0).model_copy(
+                        update={"interpretation": "2023 年资产负债率为 38.0%，杠杆水平异常偏高。"}
+                    ),
+                }
+            ]
+
+        monkeypatch.setattr(citation_node, "repair_claims", fake_repair)
+        out = verify_citations(self._state([self._bad(), unrelated], md))
+        # 新口径：目标 claim 修好即计（不被无关 FAIL 拦截）
+        assert out["value_mismatch_repaired_claims"] == 1
+        # 旧口径（deprecated）：all_passed=False → 0
+        assert out["value_mismatch_repaired"] == 0
+        # 行为不变：仍有残余 FAIL → 该分析师照走全量定向重试
+        assert "fundamental" in out["citation_retry_targets"]
+
     def test_dense_fail_falls_back_to_full_retry(self, monkeypatch):
         claims = [self._bad(99.0 + i) for i in range(4)]
         md = "资产负债率 99.0%、99.1%、99.2%、99.3% 均异常。"
@@ -1223,6 +1309,27 @@ class TestGateLayers:
         assert out["citation_unverifiable_text"] == 1
         assert out["citation_unverifiable_unregistered"] == 0
         assert out["citation_verifier_normalized"] == 0
+
+    def test_comparative_delta_counted_and_split_from_unregistered(self):
+        """非枚举差值：独立计数，且不再计入 unregistered（拆报三类不重叠）。"""
+        claim = Claim(
+            claim_type="comparative",
+            source_type="data",
+            field_ref="profitability_metrics.ROE.2024",
+            stated_value=2.3,
+            interpretation="2024 年 ROE 较 2023 年低约 2.3",
+            field_ref_b="profitability_metrics.ROE.2023",
+            stated_value_b=25.0,
+        )
+        report = _report("fundamental", [claim], "ROE 较上年下滑 2.3")
+        state = {
+            "analyst_reports": {"fundamental": report},
+            "profitability_metrics": {"ROE": {"2024": 28.0, "2023": 25.0}},
+        }
+        out = verify_citations(state)
+        assert out["citation_unverifiable_comparative_delta"] == 1
+        assert out["citation_unverifiable_unregistered"] == 0
+        assert out["citation_blocked"] is False
 
     def test_normalized_count_counts_unit_fix(self):
         from finance_agent.citation import Claim as NumericClaim

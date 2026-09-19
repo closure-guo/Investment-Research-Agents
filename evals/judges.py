@@ -47,6 +47,25 @@ _JSON_TAIL = (
     "支撑判断时 MUST 降低置信度(如 <0.5),依据完整充分才给高置信度。"
 )
 
+# debate_quality 专用输出尾（v6）：结构化枚举字段 + 程序封顶语义说明。
+# round10 预登记 fallback：prompt 内强制枚举（v5）实测到顶——8 行离线重判准确率
+# 2/8 → 6/8，但仍漏判宁德、招行回归（LLM 自我枚举随机）。v6 改为 judge 只负责
+# 如实标注类型，封顶由 run_judge 按 points 执行（代码承担判据，不依赖 LLM 自律）。
+_DEBATE_POINTS_TAIL = (
+    '只输出 JSON: {"score": <1-5>, "confidence": <0-1>,'
+    ' "points": [{"header": "<论点标头原文>", "type": "data" | "qualitative"}],'
+    ' "reason": "<一句话理由>"}\n'
+    "不以篇幅长短论优劣。\n"
+    "points 语义（v6 必填）：逐条列出双方每一轮的「论点:」标头行原文与类型——\n"
+    "  type=data：该论点有数据或事实出处；\n"
+    "  type=qualitative：纯定性——无数据、无事实出处的断言（含「历史上……」类无样本\n"
+    "  经验论断、「护城河」「周期位置」「率先受益」类表态）。\n"
+    "封顶由程序按 points 执行：存在任一 qualitative 时分数会被压到 ≤4，你无须自行扣分；\n"
+    "请如实标注类型，不得为控分误标，也不得漏列标头行。\n"
+    "置信度语义: confidence 是你对本次评分依据充分性的把握;输入材料缺失、截断或不足以"
+    "支撑判断时 MUST 降低置信度(如 <0.5),依据完整充分才给高置信度。"
+)
+
 # rubric 版本（变更递增，校准门禁按版本重校准；decision_grounding：
 # v1 初版 → v2 evidence_refs 结构化核对 → v3 interpretation 语义核对 →
 # v6 补风控指标+风险辩论进材料（round5 校准）→ v7 来源归属三层判法 +
@@ -63,6 +82,9 @@ _JSON_TAIL = (
 # v5（round10）：加强制枚举动作——评分前 MUST 逐条列出论点标头并标注
 # 「数据/事实」或「纯定性」，任一纯定性即封顶 4（round9 审计：v4 判例在
 # 4 分档生效但 5 分档仍漏判 ≥3 行，照搬 dg v7 逐条强制核对的有效模式）；
+# v6（round10 预登记 fallback）：v5 强制枚举离线重判 8 行（准确率 2/8 → 6/8）
+# 仍有漏判（宁德）与回归（招行）——LLM 自我枚举随机不可依赖；输出契约加
+# `points` 结构化枚举字段，封顶改由 run_judge 按枚举结果执行（代码承担判据）。
 # decision_grounding v8（round9）：归属层判例——round8 代裁实测 judge 对
 # 「同一评判在多来源出现」判定偏机械（比亚迪 ref7 归 debate_bear 被误扣，
 # 该评判 bear R2 与 RM 结论均有原话）；
@@ -70,7 +92,7 @@ _JSON_TAIL = (
 # 使残缺输入上的幻觉可从低置信暴露），评分档位语义未变）
 RUBRIC_VERSIONS: dict[str, int] = {
     "report_relevance": 3,
-    "debate_quality": 5,
+    "debate_quality": 6,
     "decision_grounding": 8,
     "consistency": 4,
 }
@@ -113,7 +135,7 @@ RUBRICS: dict[str, str] = {
 1 = 单方输出或内容空洞,无实质辩论
 回应覆盖率（交锋覆盖 4/4）是形式指标：全回应但答非所问、避重就轻，不算实质交锋。
 """
-    + _JSON_TAIL,
+    + _DEBATE_POINTS_TAIL,
     "decision_grounding": (
         """你是投资决策依据评审专家。
 【分析师结论】{{analyst_reports}}
@@ -258,15 +280,90 @@ def _input_missing(dimension: str, variables: dict[str, str]) -> str | None:
     return None
 
 
+_POINT_TYPES = ("data", "qualitative")
+
+
+def _normalize_points(raw: object) -> list[dict] | None:
+    """debate_quality 枚举字段归一化；缺失/非法返回 None（调用方标 enumeration_missing）。
+
+    非法 = 非非空 list / 元素非 dict / `type` 不在 `{data, qualitative}` / `header` 为空。
+    任何非法一律按「未提供枚举」处理：不猜、不部分采信（部分采信会让缺失样本混入封顶判定）。
+    """
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        ptype = str(item.get("type", "")).strip().lower()
+        header = str(item.get("header", "")).strip()
+        if ptype not in _POINT_TYPES or not header:
+            return None
+        out.append({"header": header, "type": ptype})
+    return out
+
+
+def run_judge_mean(dimension: str, variables: dict[str, str], *, repeats: int = 3) -> dict:
+    """K 次重复判分取均值（消融判分协议；round11 实测单次调用 5/4 双峰翻转 ~46%）。
+
+    实测（宁德 04baff5c，同材料同 rubric，n=13 次调用）：4 分 7 次 / 5 分 6 次——
+    调用级方差 σ≈0.5，与消融待测的层级增量（0.25–0.5 量级）同阶，单次调用不足以
+    支撑层间比较。**取均值而非中位**：双峰分布的 p→0.5 时中位不降翻转概率（P(中位=5)
+    仍 ≈0.5），均值才是无偏且方差除以 K 的估计量；`scores` / `score_spread` 一并
+    返回使噪声保持可见（不静默平均掉）。
+
+    口径：None（解析失败/输入缺失）不计入均值但计入 `judge_failures`；全部 None →
+    score=None（沿实验既有失败率口径）；遥测字段（封顶/纯定性/枚举缺失）取**最低分
+    那次**调用的枚举——最保守的一次观测（若任一次找到纯定性标头，封顶证据不丢）。
+    """
+    results = [run_judge(dimension, variables) for _ in range(max(1, int(repeats)))]
+    scores = [r.get("score") for r in results]
+    valid = [int(s) for s in scores if s is not None]
+    if not valid:
+        base = dict(results[0])
+        base.update(
+            {
+                "score": None,
+                "scores": scores,
+                "score_spread": None,
+                "judge_repeats": len(results),
+                "judge_failures": len(results),
+            }
+        )
+        return base
+    mean = round(sum(valid) / len(valid), 3)
+    base = min(
+        (r for r in results if r.get("score") is not None),
+        key=lambda r: (r.get("score"), r.get("qualitative_points") or 0),
+    )
+    out = dict(base)
+    out.update(
+        {
+            "score": mean,
+            "scores": scores,
+            "score_spread": max(valid) - min(valid),
+            "judge_repeats": len(results),
+            "judge_failures": len(results) - len(valid),
+        }
+    )
+    return out
+
+
 def run_judge(dimension: str, variables: dict[str, str]) -> dict:
     """跑一个 Judge 维度;解析失败重试一次,仍失败 score=None。
 
     输入合同：维度关键变量缺失 → score=None + reason="input_missing"
     （不调 LLM、不评分），保证评估结果不被空输入污染。
 
+    debate_quality v6：解析后按 `points` 枚举**由代码**执行封顶——存在任一
+    `type="qualitative"` 时分数压至 `min(score, 4)`（round10 实测 LLM 自我枚举
+    随机，判据不能挂在它的自觉上）。枚举缺失/非法时分数不变（fail-open）但标记
+    `enumeration_missing`，供校准与代裁识别「机制未生效」的行。
+
     Returns: {"name", "score": int 1-5 | None, "reason": str,
               "confidence": float 0-1 | None}——confidence 缺失/非法时为 None
-    （旧格式容错，不阻塞评分）。
+    （旧格式容错，不阻塞评分）；debate_quality 额外含 points / qualitative_points /
+    cap_applied / enumeration_missing（其余维度结果形状不变）。
     """
     missing = _input_missing(dimension, variables)
     if missing is not None:
@@ -287,11 +384,25 @@ def run_judge(dimension: str, variables: dict[str, str]) -> dict:
             raw_conf = data.get("confidence")
             if isinstance(raw_conf, (int, float)) and 0 <= float(raw_conf) <= 1:
                 confidence = float(raw_conf)
+            extra: dict = {}
+            if dimension == "debate_quality":
+                points = _normalize_points(data.get("points"))
+                qualitative = sum(1 for p in points if p["type"] == "qualitative") if points else 0
+                cap_applied = bool(points) and qualitative > 0 and score > 4
+                if cap_applied:
+                    score = 4
+                extra = {
+                    "points": points or [],
+                    "qualitative_points": qualitative,
+                    "cap_applied": cap_applied,
+                    "enumeration_missing": points is None,
+                }
             return {
                 "name": dimension,
                 "score": score,
                 "reason": str(data.get("reason", "")),
                 "confidence": confidence,
+                **extra,
             }
         except Exception:  # noqa: S112 -- 故意静默重试;解析失败已通过最终 judge_parse_failed 记录
             continue

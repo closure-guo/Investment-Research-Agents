@@ -53,6 +53,8 @@ class TestDerivedSeriesInjection:
         assert "常用派生值" in ctx
         assert "chg_5d" in ctx
         assert "数据不足" in ctx  # None 项如实标注
+        assert "derived_series." in ctx  # 前缀必须等于真实 state 键（否则 claim 不可解析）
+        assert "前缀 derived." not in ctx  # 旧前缀不得回归（此 ctx 才有派生值段）
 
     def test_no_derived_no_section(self):
         ctx = _build_technical_context({"technical_indicators": {}})

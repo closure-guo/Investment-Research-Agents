@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import cast
 
 from finance_agent.metrics.validate import validate_financials
@@ -61,6 +62,50 @@ def _is_missing_price(v: object) -> bool:
         return float(v) <= 0  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return True
+
+
+_RATIO_KEYWORDS = ("赔率", "盈亏比")
+_RATIO_WINDOW = 40  # 关键词后扫描窗口（字符）
+_RATIO_TOL = 0.10  # 相对容差：四舍五入级差异不修正
+
+
+def check_and_fix_stated_ratio(reasoning: str, derived_ratio: float | None) -> tuple[str, bool]:
+    """赔率自检（eval-driven-contract-fixes 任务 6）：reasoning 自报赔率与代码计算冲突时
+    原位替换为代码值（确定性字符串替换，无 LLM）；容差内 / 派生缺失 / 无赔率表述 → 原样。
+
+    证据：601899 终稿「赔率约1.7:1」vs 派生 1.24；000333 初稿「约2.6:1」vs 派生 2.00。"""
+    if derived_ratio is None or derived_ratio <= 0 or not reasoning:
+        return reasoning, False
+    fixed = reasoning
+    corrected = False
+    for kw in _RATIO_KEYWORDS:
+        start = 0
+        while True:
+            i = fixed.find(kw, start)
+            if i < 0:
+                break
+            window = fixed[i : i + len(kw) + _RATIO_WINDOW]
+            m = re.search(r"(\d+(?:\.\d+)?)\s*[:：]\s*1", window)
+            if not m:
+                start = i + len(kw)
+                continue
+            stated = float(m.group(1))
+            if stated > 0 and abs(stated - derived_ratio) / derived_ratio > _RATIO_TOL:
+                new_window = window[: m.start(1)] + f"{derived_ratio:.2f}" + window[m.end(1) :]
+                fixed = fixed[:i] + new_window + fixed[i + len(window) :]
+                corrected = True
+                start = i + len(new_window)
+            else:
+                start = i + m.end(1)
+    return fixed, corrected
+
+
+def apply_payout_self_check(
+    reasoning: str, action: object, entry: object, stop: object, target: object
+) -> tuple[str, bool]:
+    """自算派生赔率并对 reasoning 做原位修正（trader / risk_judge 产出路径共用）。"""
+    derived = _compute_derived_metrics(str(action or ""), entry, stop, target)
+    return check_and_fix_stated_ratio(reasoning, derived.get("risk_reward_ratio"))
 
 
 def validate_trade_prices(state: dict) -> dict:

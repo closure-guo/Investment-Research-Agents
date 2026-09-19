@@ -24,7 +24,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
-from evals.extract import extract_judge_vars
+from evals.extract import anchor_coverage, extract_judge_vars
 from finance_agent.agent_factory import build_agent
 from finance_agent.graph import build_5layer_graph
 from finance_agent.langfuse_tracing import get_callback_handler
@@ -69,6 +69,9 @@ def _run_deep(inp: dict) -> dict:
     handler = get_callback_handler()
     config: RunnableConfig | None = {"callbacks": [handler]} if handler else None
     state = graph.invoke(initial_state, config=config)
+    # add-debate-argument-anchors：论点锚点覆盖率（零 LLM）+ 拆项进实验输出；
+    # 无论点（quick/旧 trace）→ None，不计入均值
+    anchor = anchor_coverage(state.get("debate_anchor_checks") or [])
     return {
         "report": state.get("final_report"),
         "ticker": inp["stock_code"],
@@ -110,6 +113,25 @@ def _run_deep(inp: dict) -> dict:
             float(state["citation_unverifiable_unregistered"])
             if state.get("citation_unverifiable_unregistered") is not None
             else None
+        ),
+        "citation_unverifiable_comparative_delta": (
+            float(state["citation_unverifiable_comparative_delta"])
+            if state.get("citation_unverifiable_comparative_delta") is not None
+            else None
+        ),
+        # surgical-citation-repair：单点修复成功回填数（观测修复触发/成功率）。
+        # 注意与 analyst_true_fail 的关系——修复数已计入真错口径，此处单独计数
+        # 只为让「修复有没有在干活」可观测，两者不可互相替代。
+        "citation_surgical_repaired": (
+            float(state["value_mismatch_repaired"])
+            if state.get("value_mismatch_repaired") is not None
+            else None
+        ),
+        # add-debate-argument-anchors：锚点覆盖率 + 拆项（detail 去 value——
+        # value 已单独成键，拆项只留分桶计数供归因）
+        "argument_anchor_coverage": anchor["value"] if anchor else None,
+        "argument_anchor_coverage_detail": (
+            {k: v for k, v in anchor.items() if k != "value"} if anchor else None
         ),
     }
 

@@ -477,15 +477,17 @@ class PipelineRunner:
                     session_store.update_pipeline_timelines(session_id, nodeTimelines)
                 except Exception:  # noqa: S110 -- 补写失败不阻断终态发布
                     logger.warning("管线时序补写失败 session=%s", session_id)
-            if state is not None:
-                state.done = True
-            # loop 存在且未发终态时发布 done（正常完成）
+            # 顺序不变量：先发布终态 done 并等其落库，再置 state.done（is_running=False）
+            # ——反过来会让外部看到「已不在运行」时 journal 里还没有 done（CI 实测
+            # flaky；回归用例 test_done_flag_not_set_before_terminal_event_published）
             if loop is not None and not terminalPublished:
                 _flush_pending()
                 asyncio.run_coroutine_threadsafe(
                     stream_registry.publish(session_id, {"type": "done", "session_id": session_id}),
                     loop,
                 ).result(timeout=5)
+            if state is not None:
+                state.done = True
 
     @staticmethod
     def _parse_event(sse_str: str) -> dict | None:

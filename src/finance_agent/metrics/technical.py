@@ -9,6 +9,21 @@ from __future__ import annotations
 import pandas as pd
 
 
+def _calc_ma(close: pd.Series) -> dict[str, list[float | None]]:
+    """简单移动平均（5/10/20/60）；数据不足该周期全 None。
+
+    calc_technical 与 calc_derived_series 共用此实现——均线口径只允许一份。
+    """
+    ma_result: dict[str, list[float | None]] = {}
+    for period in (5, 10, 20, 60):
+        if len(close) >= period:
+            ma = close.rolling(window=period).mean()
+            ma_result[str(period)] = [None if pd.isna(v) else float(v) for v in ma]
+        else:
+            ma_result[str(period)] = [None] * len(close)
+    return ma_result
+
+
 def calc_technical(kline: pd.DataFrame) -> dict[str, dict[str, list[float | None]]]:
     """计算全部技术指标。
 
@@ -25,15 +40,8 @@ def calc_technical(kline: pd.DataFrame) -> dict[str, dict[str, list[float | None
     close = kline["收盘"]
     result: dict[str, dict[str, list[float | None]]] = {}
 
-    # ── MA（简单移动平均）──
-    ma_result: dict[str, list[float | None]] = {}
-    for period in (5, 10, 20, 60):
-        if len(close) >= period:
-            ma = close.rolling(window=period).mean()
-            ma_result[str(period)] = [None if pd.isna(v) else float(v) for v in ma]
-        else:
-            ma_result[str(period)] = [None] * len(close)
-    result["MA"] = ma_result
+    # ── MA（简单移动平均；与 calc_derived_series 共用 _calc_ma，口径唯一）──
+    result["MA"] = _calc_ma(close)
 
     # ── MACD（指数移动平均收敛发散）──
     # DIF = EMA12 - EMA26, DEA = EMA9(DIF), histogram = 2*(DIF-DEA)
@@ -95,20 +103,38 @@ def calc_technical(kline: pd.DataFrame) -> dict[str, dict[str, list[float | None
     return result
 
 
+def _pct_spread(a: float | None, b: float | None) -> float | None:
+    """(a − b) / b × 100（%）；任一缺失或 b 为 0 → None。
+
+    round 后归零的极小负值归一为 +0.0，避免 context JSON 渲染成 "-0.0"。
+    """
+    if a is None or b is None or b == 0:
+        return None
+    spread = round((a - b) / b * 100, 2)
+    return 0.0 if spread == 0 else spread
+
+
 def calc_derived_series(
     kline: pd.DataFrame,
     windows: tuple[int, ...] = (5, 20, 60),
     long_window: int = 250,
 ) -> dict:
-    """常用派生值预生成（toolize-price-levels）：区间涨跌幅 + 距高低点回撤/反弹。
+    """常用派生值预生成（toolize-price-levels）：区间涨跌幅 + 距高低点回撤/反弹 + 均线差幅。
 
-    工具算好供 LLM 直接引用（field_ref: derived.*），避免 LLM 对序列心算。
+    单位约定（有意混用，spec 规定）：chg_*d / drawdown_from_high_250d /
+    rebound_from_low_250d 为小数比率（round 4 位）；ma_spread_*_pct /
+    close_vs_ma*_pct 为百分比（round 2 位）。
+    工具算好供 LLM 直接引用（field_ref: derived_series.*），避免 LLM 对序列心算。
     数据不足的派生项值为 None（如实标注缺失，不伪造）。kline 缺失时全 None。
     """
     if kline is None or len(kline) == 0:
         keys = [f"chg_{w}d" for w in windows] + [
             "drawdown_from_high_250d",
             "rebound_from_low_250d",
+            "ma_spread_5_20_pct",
+            "ma_spread_20_60_pct",
+            "close_vs_ma20_pct",
+            "close_vs_ma60_pct",
         ]
         return dict.fromkeys(keys)
     close = kline["收盘"].astype(float)
@@ -133,4 +159,13 @@ def calc_derived_series(
         result["rebound_from_low_250d"] = round(last / low - 1, 4)
     else:
         result["rebound_from_low_250d"] = None
+
+    # 均线差幅（ground-comparative-delta-claims）：MA/收盘两个水平量的相对差（%），
+    # 正 = 前者高于后者；复用 _calc_ma 同一口径，缺失/分母为 0 → None 如实标缺
+    ma = _calc_ma(close)
+    ma_last = {w: (ma[str(w)][-1] if ma[str(w)] else None) for w in (5, 20, 60)}
+    result["ma_spread_5_20_pct"] = _pct_spread(ma_last[5], ma_last[20])
+    result["ma_spread_20_60_pct"] = _pct_spread(ma_last[20], ma_last[60])
+    result["close_vs_ma20_pct"] = _pct_spread(last, ma_last[20])
+    result["close_vs_ma60_pct"] = _pct_spread(last, ma_last[60])
     return result

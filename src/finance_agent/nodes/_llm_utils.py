@@ -86,7 +86,9 @@ def _stub_pipeline_answer(node_name: str) -> str:
                 "role": role,
                 "round": 1,
                 "content": f"STUB {role} 方论点（测试数据）",
-                "key_arguments": [f"STUB 论据：{role} 方观点成立"],
+                "key_arguments": [
+                    {"text": f"STUB 论据：{role} 方观点成立", "kind": "inference", "anchors": []}
+                ],
             },
             ensure_ascii=False,
         )

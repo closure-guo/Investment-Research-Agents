@@ -8,6 +8,7 @@ judge 调用已迁移至 gateway 统一入口（purpose="judge"），mock 目标
 import os
 from unittest.mock import patch
 
+import pytest
 from evals.judges import JUDGE_ENV, RUBRIC_VERSIONS, RUBRICS, _judge_model, run_judge
 
 _GATEWAY = "finance_agent.llm.gateway.complete_text"
@@ -259,8 +260,8 @@ class TestDecisionGroundingRubricV3:
     def test_other_rubrics_version_pinned(self):
         assert RUBRIC_VERSIONS["report_relevance"] == 3  # v3 = confidence 契约 + 口径必读
         assert (
-            RUBRIC_VERSIONS["debate_quality"] == 5
-        )  # v5 = 强制枚举论点标头（round9 审计：v4 判例 5 分档仍漏判）
+            RUBRIC_VERSIONS["debate_quality"] == 6
+        )  # v6 = points 结构化枚举 + 程序封顶（v5 强制枚举 round10 实测仍漏判）
         assert RUBRIC_VERSIONS["consistency"] == 4  # v4 = approve 语义(v2) + Trader 方案节(v4)
         assert RUBRIC_VERSIONS["decision_grounding"] == 8  # v8 = 三层判法(v7) + 多来源归属判例
 
@@ -291,3 +292,159 @@ class TestDecisionGroundingRubricV3:
         consistency_rubric = RUBRICS["consistency"]
         assert "【Trader 方案】{{trader_plan}}" in consistency_rubric
         assert "静默推翻" in consistency_rubric
+
+
+class TestDebateEnumerationCap:
+    """debate_quality v6：结构化枚举 + 程序封顶（round10 预登记 fallback）。
+
+    round10 实测（8 行离线重判）：prompt 内强制枚举把准确率 2/8 提到 6/8，但仍
+    漏判宁德、招行回归——LLM 自我枚举随机，不可依赖。v6 把判据搬到代码：judge
+    只需如实列出 `points`（每条论点标头 + data/qualitative），封顶由 `run_judge`
+    按枚举结果执行，与 LLM 是否自觉扣分无关。
+    """
+
+    _QUALITATIVE_JSON = (
+        '{"score": 5, "confidence": 0.9, "reason": "交锋充分",'
+        ' "points": [{"header": "营收同比 +12%", "type": "data"},'
+        ' {"header": "周期位置有利", "type": "qualitative"}]}'
+    )
+    _ALL_DATA_JSON = (
+        '{"score": 5, "confidence": 0.9, "reason": "交锋充分",'
+        ' "points": [{"header": "营收同比 +12%", "type": "data"},'
+        ' {"header": "毛利率 45.2%", "type": "data"}]}'
+    )
+
+    @patch(_GATEWAY)
+    def test_qualitative_point_caps_score_to_4(self, mock_llm):
+        mock_llm.return_value = _mock_completion(self._QUALITATIVE_JSON)
+        result = run_judge("debate_quality", {"debate_history": "【bull】论点: 周期位置有利"})
+        assert result["score"] == 4, "纯定性论点必须被程序封顶到 4（不依赖 LLM 自律）"
+        assert result["cap_applied"] is True
+        assert result["qualitative_points"] == 1
+        assert result["enumeration_missing"] is False
+
+    @patch(_GATEWAY)
+    def test_all_data_points_keep_5(self, mock_llm):
+        mock_llm.return_value = _mock_completion(self._ALL_DATA_JSON)
+        result = run_judge("debate_quality", {"debate_history": "【bull】论点: 营收同比 +12%"})
+        assert result["score"] == 5
+        assert result["cap_applied"] is False
+        assert result["qualitative_points"] == 0
+
+    @patch(_GATEWAY)
+    def test_cap_does_not_push_below_4(self, mock_llm):
+        mock_llm.return_value = _mock_completion(
+            '{"score": 3, "reason": "多为立场声明",'
+            ' "points": [{"header": "护城河深厚", "type": "qualitative"}]}'
+        )
+        result = run_judge("debate_quality", {"debate_history": "【bull】论点: 护城河深厚"})
+        assert result["score"] == 3, "封顶为 min(score, 4)，不得把 3 再往下压"
+
+    @patch(_GATEWAY)
+    def test_missing_enumeration_fails_open_but_flagged(self, mock_llm):
+        """枚举缺失（旧格式/模型未遵契约）→ 分数不变但标记，供代裁识别机制未生效行。"""
+        mock_llm.return_value = _mock_completion('{"score": 5, "reason": "交锋充分"}')
+        result = run_judge("debate_quality", {"debate_history": "【bull】论点: 营收同比 +12%"})
+        assert result["score"] == 5
+        assert result["enumeration_missing"] is True
+        assert result["cap_applied"] is False
+
+    @patch(_GATEWAY)
+    def test_malformed_points_treated_as_missing(self, mock_llm):
+        # 类型非法（非 list / 缺 type / type 取值不在枚举内）→ 一律按缺失处理，不崩
+        mock_llm.return_value = _mock_completion(
+            '{"score": 5, "reason": "r", "points": "not-a-list"}'
+        )
+        result = run_judge("debate_quality", {"debate_history": "【bull】论点: x"})
+        assert result["score"] == 5
+        assert result["enumeration_missing"] is True
+
+    @patch(_GATEWAY)
+    def test_non_debate_dimensions_result_shape_unchanged(self, mock_llm):
+        """非 debate 维度不得新增键（既有精确断言契约不变）。"""
+        mock_llm.return_value = _mock_completion('{"score": 4, "reason": "基本切题"}')
+        result = run_judge("report_relevance", {"query": "q", "report": "r"})
+        assert set(result.keys()) == {"name", "score", "reason", "confidence"}
+
+    def test_debate_rubric_v6_requires_points_contract(self):
+        rubric = RUBRICS["debate_quality"]
+        assert RUBRIC_VERSIONS["debate_quality"] == 6
+        assert '"points"' in rubric, "v6 输出契约须含结构化枚举字段 points"
+        assert "qualitative" in rubric and "data" in rubric
+        assert "程序" in rubric or "代码" in rubric, "须写明封顶由程序执行，不依赖 LLM 自律"
+
+    @patch(_GATEWAY)
+    def test_cap_evidence_persisted_in_result(self, mock_llm):
+        # 封顶证据随结果返回（落库由 eval adapter / 消融 run 记录承担）
+        mock_llm.return_value = _mock_completion(self._QUALITATIVE_JSON)
+        result = run_judge("debate_quality", {"debate_history": "【bull】论点: 周期位置有利"})
+        assert result["points"][1]["type"] == "qualitative"
+        assert result["points"][1]["header"] == "周期位置有利"
+
+
+class TestRunJudgeMean:
+    """消融判分协议：K 次重复取均值（round11 实测单次调用在 5/4 边界双峰翻转 ~46%）。
+
+    同材料同 rubric 调用级方差实测（宁德 04baff5c，n=13 次调用）：4 分 7 次 /
+    5 分 6 次，σ≈0.5——与消融待测层级增量（0.25-0.5）同阶。取**均值**而非中位：
+    双峰 p→0.5 时中位不降翻转概率，均值无偏且方差除以 K；每次分数与极差一并
+    记录（噪声保持可见，不静默平均掉）。
+    """
+
+    def _results(self, scores: list[int | None]):
+        return [
+            {
+                "name": "debate_quality",
+                "score": s,
+                "reason": f"r{s}",
+                "confidence": 0.8,
+                "points": [],
+                "qualitative_points": 1 if s == 4 else 0,
+                "cap_applied": False,
+                "enumeration_missing": False,
+            }
+            for s in scores
+        ]
+
+    def test_mean_of_repeats(self):
+        from evals.judges import run_judge_mean
+
+        with patch("evals.judges.run_judge", side_effect=self._results([5, 4, 4])):
+            result = run_judge_mean("debate_quality", {"debate_history": "x"}, repeats=3)
+        assert result["score"] == pytest.approx(4.333), "[5,4,4] 的均值（双峰下比中位更有效降方差）"
+        assert result["judge_repeats"] == 3
+        assert result["scores"] == [5, 4, 4]
+        assert result["score_spread"] == 1
+
+    def test_telemetry_from_lowest_call(self):
+        """遥测取最低分那次的枚举（最保守观测）——任一次找到纯定性标头则封顶证据不丢。"""
+        from evals.judges import run_judge_mean
+
+        with patch("evals.judges.run_judge", side_effect=self._results([5, 4, 4])):
+            result = run_judge_mean("debate_quality", {"debate_history": "x"}, repeats=3)
+        assert result["qualitative_points"] == 1, "最低分（4）那次找到了纯定性论点"
+        assert result["points"] == []
+
+    def test_none_calls_ignored_but_counted(self):
+        from evals.judges import run_judge_mean
+
+        with patch("evals.judges.run_judge", side_effect=self._results([None, 4, 5, None])):
+            result = run_judge_mean("debate_quality", {"debate_history": "x"}, repeats=4)
+        assert result["score"] == pytest.approx(4.5)  # mean([4, 5])
+        assert result["judge_failures"] == 2
+
+    def test_all_failed_returns_none(self):
+        from evals.judges import run_judge_mean
+
+        with patch("evals.judges.run_judge", side_effect=self._results([None, None])):
+            result = run_judge_mean("debate_quality", {"debate_history": "x"}, repeats=2)
+        assert result["score"] is None
+        assert result["judge_failures"] == 2
+
+    def test_repeats_1_matches_single_call(self):
+        from evals.judges import run_judge_mean
+
+        with patch("evals.judges.run_judge", side_effect=self._results([5])):
+            result = run_judge_mean("report_relevance", {"query": "q", "report": "r"}, repeats=1)
+        assert result["score"] == 5
+        assert result["score_spread"] == 0

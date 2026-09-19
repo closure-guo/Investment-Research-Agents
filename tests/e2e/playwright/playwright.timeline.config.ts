@@ -44,7 +44,11 @@ export default defineConfig({
   expect: { timeout: 5_000 },
   fullyParallel: false,
   workers: 1,
-  retries: 0,
+  // 本套件含深度管线（stub 每节点 1.5s）与大量「运行中/切换中」时序断言，
+  // 冷启动与慢 runner 下历史多次单点抖动致红（已修根因：FM stub 契约、视图默认、
+  // 指针/列表时序假设）。retries=1 只吸收抖动——确定性回归两次都会失败，仍被发现；
+  // 与默认 config 的 CI 口径一致（playwright.config.ts: retries: CI ? 1 : 0）
+  retries: 1,
   reporter: [['list'], ['html', { open: 'never' }]],
 
   use: {

@@ -42,6 +42,14 @@ TBD - created by archiving change improve-analyst-throughput. Update Purpose aft
 
 - **WHEN** 重试启用且目标分析师重跑后 markdown 哈希与重跑前一致
 - **THEN** 系统 SHALL 立即放行渲染并在 trace 留下可判读标记（`citation_retry_no_progress`），SHALL NOT 等待失败率停滞判定
+
+- **WHEN** 拟将某失败桶加入 `CITATION_RETRY_ADMITTED_BUCKETS`
+- **THEN** SHALL 先存在该桶逐条人工终裁记录（incidents 或 tests/validation）确认桶内为真错误，方可加入
+
+#### Scenario: 重写无进展立即停
+
+- **WHEN** 重试启用且目标分析师重跑后 markdown 哈希与重跑前一致
+- **THEN** 系统 SHALL 立即放行渲染并在 trace 留下可判读标记（`citation_retry_no_progress`），SHALL NOT 等待失败率停滞判定
 ### Requirement: 定向重试反馈携带 direction 申报提示
 
 校验失败触发的定向重试反馈（value_mismatch / direction_mismatch 桶）与 coverage 打回（coverage_gap）SHALL 在反馈条目中携带 direction 申报提示：未申报 direction 的覆盖缺口 SHALL 提示「补登记时同步申报 direction」；direction_mismatch 的重试反馈 SHALL 携带校验器解析的真值符号，分析师 SHALL 据此修正 stated_value 与 direction 的组合而非仅改数值。
@@ -60,6 +68,8 @@ TBD - created by archiving change improve-analyst-throughput. Update Purpose aft
 
 value_mismatch 触发定向重试前，系统 SHALL 先评估单点修复适用性：同一分析师同一轮的 value_mismatch FAIL 数 < 3 时，SHALL 采用单点修复——将每处出错句（含所在章节局部上下文，窗口 SHALL 不少于出错句前后各一段）、对应 ground_truth 与申报格式示例，交一次轻量 LLM 调用做叙事一致性改写，改写结果回填正文 markdown。value_mismatch FAIL 数 ≥ 3 或修复调用失败时，SHALL 回退现有目标分析师全量定向重试路径（不重试单点修复失败处）。单点修复 SHALL NOT 改变重试轮数上限 3、停滞降级（本轮失败率 ≥ 上轮 × 80% 提前放行）与轻微失败直判放行的既有语义；单点修复轮次与全量重试轮次共享 iteration_count 计数。
 
+**修复记账（incident 029 处置，2026-09-18）**：修复收益 SHALL 按**单条 claim** 记账——重校验后该 claim 数值与 ground_truth 一致即计入 `value_mismatch_repaired_claims`（分子 = 修好的 claim 条数，分母 = 进入修复的 claim 条数），SHALL NOT 以「同分析师名下全部 claim 通过（all_passed）」为记账前置。既有按分析师口径的 `value_mismatch_repaired` 字段保留为 deprecated（跨口径比较须标注切点），新读数以 per-claim 口径为准。
+
 #### Scenario: 稀疏失败走单点修复
 
 - **WHEN** 某分析师本轮 1 条 claim 判 value_mismatch（如 1/46）
@@ -74,6 +84,11 @@ value_mismatch 触发定向重试前，系统 SHALL 先评估单点修复适用�
 
 - **WHEN** 连续两轮失败率 35% → 31%（≥ 35% × 80%）
 - **THEN** 即使本轮适用单点修复，系统 SHALL 仍按停滞降级提前放行渲染
+
+#### Scenario: 同分析师另有未修 FAIL 不遮蔽已修 claim
+
+- **WHEN** 单点修复使 claim A 数值改对（重校验一致），但同分析师名下另有无关 claim B 仍 FAIL（all_passed=False）
+- **THEN** claim A SHALL 计入 `value_mismatch_repaired_claims`；SHALL NOT 因 all_passed=False 而漏记
 
 ### Requirement: 修复调用预算记账
 
