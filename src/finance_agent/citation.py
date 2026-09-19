@@ -548,58 +548,6 @@ def _is_delta_in_level_slot(interpretation: str | None, gt_float: float, stated:
     return s > 0 and g > 0 and (g / s > 10 or s / g > 10)
 
 
-_PUNCT_CHARS = (
-    "，。；、：:;,()（）[]【】—_·.%％" + '"' + chr(0x2018) + chr(0x2019) + chr(0x201C) + chr(0x201D)
-)
-_TEXT_STRIP_RE = re.compile("[" + re.escape(_PUNCT_CHARS) + r"\s" + "]")
-
-
-def _norm_text(text: object) -> str:
-    """文本回声归一：去空白/标点/百分号，小写。"""
-    return _TEXT_STRIP_RE.sub("", str(text or "")).lower()
-
-
-def _looks_numeric(text: str) -> bool:
-    try:
-        float(str(text).replace(",", ""))
-        return True
-    except (TypeError, ValueError):
-        return False
-
-
-_SIGNED_ROOTS = frozenset({"growth_rates", "quarterly_trend"})
-_SIGNED_NAME_KEYWORDS = ("同比", "环比", "增速", "变动", "变化", "涨跌", "差额")
-
-
-def _is_signed_claim(claim: Claim) -> bool:
-    """阶段 1（incident 026）：direction 只对「有符号量」参与符号比对——
-    增长率/同比环比/变动幅度为有符号量；PMI/比率/价格等恒正水平量的
-    negative 申报是「低于阈值」的字面误读（r2 5/5 direction_mismatch 皆此因），
-    记覆盖缺口提示而非 FAIL。"""
-    root = claim.field_ref.split(".")[0]
-    if root in _SIGNED_ROOTS:
-        return True
-    name = claim.metric_name or ""
-    return any(k in name for k in _SIGNED_NAME_KEYWORDS)
-
-
-_MAG_SCALES: tuple[tuple[str, float], ...] = (("万", 1e4), ("亿", 1e8))
-_UNIT_TOKEN_RE = re.compile(r"(-?\d[\d,]*(?:\.\d+)?)\s*(亿|万)")
-
-
-def _unit_from_interpretation(claim: Claim) -> str | None:
-    """从 interpretation 中找与 stated_value 面值相同的 token 的紧邻单位词（亿/万）。"""
-    try:
-        face = abs(float(claim.stated_value))
-    except (TypeError, ValueError):
-        return None
-    for m in _UNIT_TOKEN_RE.finditer(claim.interpretation or ""):
-        token_val = abs(float(m.group(1).replace(",", "")))
-        if abs(token_val - face) < 1e-9:
-            return m.group(2)
-    return None
-
-
 def _verify_numerical(claim: Claim, state: dict) -> CitationResult:
     """数值型 claim：直接读 state 字段，绝对容差 0.01 比对。
 
