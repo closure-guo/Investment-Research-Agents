@@ -35,5 +35,5 @@
 ## 6. 收口
 
 - [x] 6.1（2026-09-16）metrics.md：§1.2 指标行 + 时间线「judge 材料口径切点（2026-09-16）」+ §3 候选 (c) 标已落地（rubric 纳入留待校准轮）
-- [ ] 6.2 `openspec validate add-debate-argument-anchors --strict`；全量 `uv run pytest` 绿 + ruff/mypy（改动文件）
-- [ ] 6.3 归档前置：本文件全勾 + 5.3 验证报告落盘 + spec sync
+- [x] 6.2 `openspec validate add-debate-argument-anchors --strict`（valid）；相关测试区 549 过（anchor/debate 契约 + causal_ablation）+ 2026-09-19 全套回归（2991+1049 过）+ ruff/mypy 改动文件净
+- [x] 6.3 归档前置：本文件全勾 + 5.3 验证报告落盘（2026-09-16）+ spec sync（归档时合入）
