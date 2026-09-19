@@ -678,3 +678,37 @@ bear_debater 单节点（新提示词），与旧 grounding 扫描（bg-v1）对
 观望）。17:3 的 McNemar 式解读与 MDE（44pp）不在一个分辨率级——点估计 0.85 差异显著
 超越门槛，仍待 4 对人工校准（`2026-09-19-p2-calibration-b5-frozen.csv` + 预填 + 报告直链
 `2026-09-19-b5-frozen-calibration-reports/`）。
+
+
+### 19.10 B5 外科手术对照臂：共享层全冻结下的纯层增量 full 20:0（2026-09-19，判定 60 次）
+
+**由来**：owner 对冻结重跑版（§19.9）追问「都存在的章节不是应该共用吗」——再次命中设计
+残缺：冻结重跑只冻结了分析师层，多空辩论/研究经理/Trader 仍各臂独立采样（残余混淆）。
+
+**外科手术方案（零 LLM 构建）**：取 full 同一次 run 的 state，pop 风控/FM 族键后调
+generate_report 重新渲染（决策段回退 trader_plan，report.py:361）——分析师/辩论/研究经理/
+Trader/导语全部 byte 级共享，差异 = 风控辩论章节 + FM 章节的消失及决策段修正回退。
+配套小改（TDD）：`generate_report` 渲染幂等——state 已有非空 focus_summary 时复用不重烧
+（导语冻结用；首跑行为零变化）；`_build_focus_summary` 是 quick LLM 调用，此前「generate_report
+零 LLM」的表述不实（frozen 重跑 llm_calls 实为 7/标的，更正）。
+脚本 `p2_b5_surgical_arm.py`（第四关自检：共享层同一体验证 20/20 过，曾逮住 chart_data/
+focus_summary 两个渲染键误入豁免名单外的疏漏）。
+
+**纯层增量读数（provisional，待校准门控）**：**full 20 : full_no_riskfm 0 : tie 0**，
+零解析失败，A 位先出示 9:11。机器理由（本批落盘）全为内容驱动：仓位降至 light + MA60
+退出纪律 / 触发条件与置信度调整 / 最终审批与决策闭环——即风控层的决策打磨在每一对里
+都被评审识别。
+
+**三层读数对照（同题不同控）**：
+
+| 对照臂 | 共享层 | 读数 | 解释 |
+|---|---|---|---|
+| through_trader（§19.7） | 无 | 19:1 | 上游采样噪声 + 层差异混杂 |
+| through_trader_frozen（§19.9） | 分析师 | 17:3 | 残余下游采样噪声（3 对 frozen 胜 = trader 采样差，非辩论功劳） |
+| full_no_riskfm（本节） | 全部 | **20:0** | 纯层增量：风控辩论+FM 的决策打磨无一对被评审判为负贡献 |
+
+**判定**：B5 终读 = **外科手术版 20:0（provisional）**；§19.7/§19.9 两版降级为方法学对照
+（记录噪声如何随共享程度收敛：19:1 → 17:3 → 20:0）。校准 4 对
+（`2026-09-19-p2-calibration-b5-surgical.csv` + 预填 + 报告直链）待人工；一致率 ≥0.80 后
+B1/B2/B5 三腿全部转正。**方法学沉淀**：层增量归因一律用外科手术式对照（同 run 产物摘层
+重渲染），独立采样臂只作稳健性旁证——已按 owner 原则写入 BACKLOG 纪律。

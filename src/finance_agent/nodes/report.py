@@ -283,8 +283,12 @@ def generate_report(state: dict) -> dict:
         seq += 1
         return f"## {_cn_num(seq)}、{label}\n"
 
-    # ── 研究聚焦摘要（无条件生成——judge 变量 focus_summary 的数据源，D3）──
-    summary = _build_focus_summary(state, focus, focus_tags)
+    # ── 研究聚焦摘要（judge 变量 focus_summary 的数据源，D3）──
+    # 渲染幂等（2026-09-19）：state 已有非空摘要时复用（重渲染不重烧；评估外科手术臂
+    # 据此冻结导语），无预置值时照旧生成——首跑行为零变化
+    summary = str(state.get("focus_summary") or "").strip() or _build_focus_summary(
+        state, focus, focus_tags
+    )
     if summary:
         sections.append(f"## 研究聚焦\n\n{summary}\n")
     # ── 图表：按 focus 排序，分重点/完整两组 ──

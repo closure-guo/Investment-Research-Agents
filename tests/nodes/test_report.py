@@ -106,6 +106,38 @@ class TestGenerateReport:
         result = generate_report(state)
         assert result.get("focus_summary"), "focus 为空也应有聚焦摘要（fallback）"
 
+    def test_focus_summary_reused_when_present(self, monkeypatch):
+        """渲染幂等（2026-09-19）：state 已有非空 focus_summary 时复用、不重烧 LLM——
+        评估外科手术臂据此冻结导语（共享层 byte 一致），首跑行为零变化。"""
+        from finance_agent.nodes import report as report_mod
+
+        calls = []
+
+        def fake_build(state, focus, tags):
+            calls.append(1)
+            return "新采样的导语"
+
+        monkeypatch.setattr(report_mod, "_build_focus_summary", fake_build)
+        state = {
+            "stock_name": "贵州茅台",
+            "stock_code": "600519",
+            "focus_summary": "既有导语（冻结值）",
+            "research_manager_conclusion": "中性。",
+        }
+        out = report_mod.generate_report(state)
+        assert calls == [], "已有非空 focus_summary 不应重算"
+        assert out["focus_summary"] == "既有导语（冻结值）"
+        assert "既有导语（冻结值）" in out["final_report"]
+
+    def test_focus_summary_still_generated_when_absent(self, monkeypatch):
+        """无预置值时行为不变（首跑语义零变化）。"""
+        from finance_agent.nodes import report as report_mod
+
+        monkeypatch.setattr(report_mod, "_build_focus_summary", lambda s, f, tags: "新采样导语")
+        state = {"stock_name": "贵州茅台", "stock_code": "600519"}
+        out = report_mod.generate_report(state)
+        assert out["focus_summary"] == "新采样导语"
+
     def test_focus_summary_from_llm_landed_in_state(self):
         """D3：LLM 生成的聚焦摘要 SHALL 写入 state["focus_summary"]（judge 变量直取源）。"""
         from finance_agent.nodes import report as report_mod
