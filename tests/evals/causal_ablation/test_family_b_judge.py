@@ -307,3 +307,70 @@ class TestPromptV2Archived:
         )
         assert judged[0]["judge_new_risk_point"] is None
         assert judged[0]["rubric"] == "b1-v1"
+
+
+class TestB5ConclusionJudging:
+    """B5c 结论级盲评（预登记 §10，b5c-v1）：六准则 + 双防硬排除 + tie 语义 + decisive_criterion。"""
+
+    def test_prompt_carries_six_criteria_and_anti_bias_rules(self):
+        prompt = fj.b5_conclusion_prompt("600000", "甲指令", "乙指令")
+        for token in ("方向自洽", "置信度校准", "可执行性", "风险边界", "可证伪性", "内部无矛盾"):
+            assert token in prompt, f"缺准则：{token}"
+        assert "谨慎不加分" in prompt and "决断不加分" in prompt  # 双防
+        assert "tie" in prompt and "篇幅" in prompt
+        assert "甲指令" in prompt and "乙指令" in prompt and "600000" in prompt
+        assert '"decisive_criterion"' in prompt
+
+    def test_run_conclusion_maps_position_and_carries_criteria(self):
+        payload = {
+            "winner": "A",
+            "decisive_criterion": "2 置信度校准",
+            "reason": "甲置信度与理由匹配，乙70%配均衡证据",
+        }
+
+        def fn(prompt: str) -> str:
+            assert "甲指令" in prompt  # 材料就位
+            return json.dumps(payload, ensure_ascii=False)
+
+        rows = fj.run_b5_conclusion(
+            [
+                {
+                    "unit_id": "600000::b5c",
+                    "pair_key": "600000",
+                    "ticker": "600000",
+                    "instruction_a": "甲指令",
+                    "instruction_b": "乙指令",
+                }
+            ],
+            llm_fn=fn,
+            votes=2,
+        )
+        r = rows[0]
+        assert r["judge_reason"] == payload["reason"]
+        assert r["vote_reasons"] == [payload["reason"]] * 2
+        assert r["decisive_criteria"] == ["2 置信度校准"] * 2
+        assert r["rubric"] == fj.B5C_RUBRIC
+        # 位置映射：A 票映射回逻辑臂 instruction_a/b（runner 内 pairwise_assign 决定展示序）
+        assert r["verdict"] in ("a", "b")
+
+    def test_tie_vote_recorded(self):
+        def fn(prompt: str) -> str:
+            return json.dumps(
+                {"winner": "tie", "decisive_criterion": None, "reason": "等价"}, ensure_ascii=False
+            )
+
+        rows = fj.run_b5_conclusion(
+            [
+                {
+                    "unit_id": "x::b5c",
+                    "pair_key": "x",
+                    "ticker": "x",
+                    "instruction_a": "同",
+                    "instruction_b": "同",
+                }
+            ],
+            llm_fn=fn,
+            votes=1,
+        )
+        assert rows[0]["verdict"] == "tie"
+        assert rows[0]["decisive_criteria"] == [None]

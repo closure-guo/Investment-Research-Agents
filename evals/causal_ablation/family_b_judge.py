@@ -25,6 +25,8 @@ B1_PER_TICKER = 4
 B2_PER_TICKER = 4
 B5_VOTES = 3
 
+B5C_RUBRIC = "b5c-v1"
+
 # rubric 版本（校准门控绑定）。默认 = v1（2026-09-18 过门：B1 吸收 0.875 / B2 0.906）。
 # v2（通道分账+双问+顶撞判例）2026-09-18 校准样本验证**未过门**：B1 吸收 0.825 / B1 新增 0.750 /
 # B2 0.690（顶撞判例判松 + 通道规则判严 + 双变量同动无法归因）——模板归档为 _*_TEMPLATE_V2，
@@ -212,6 +214,100 @@ _B5_TEMPLATE = """你是投资报告评审。两份报告基于**同一份数据
 
 def b5_prompt(report_a: str, report_b: str) -> str:
     return _B5_TEMPLATE.format(report_a=report_a, report_b=report_b)
+
+
+# ── B5c：结论级盲评（预登记 §10，b5c-v1）——只比最终交易指令的内生质量 ──
+
+_B5C_TEMPLATE = """你是交易指令质量评审。同一分析系统对同一股票（{ticker}）产出两份最终交易指令
+（A/B 展示顺序随机）。一份经额外复核环节修改，一份为原始草案——你不需要知道哪份是哪份。
+
+【逐条检查六准则】
+1 方向自洽：动作（买入/卖出/持有/观望）与自述多空证据权重一致（理由明说均衡却单边或高置信 = 不自洽）
+2 置信度校准：置信度数字与理由的确定性语言匹配（"证据均衡"配 70% = 校准差）
+3 可执行性：具体参数（价位/仓位/时限）或明确的再评估触发条件（"观望等待好转" = 差）
+4 风险边界：止损/退出/仓位上限是否交代，且与自述风险一致（自述回撤大却无退出 = 差）
+5 可证伪性：写明什么情况说明这份指令错了
+6 内部无矛盾：方向/置信度/触发条件/理由之间互不打架
+
+【硬性排除——违反即无效评分】
+- 谨慎不加分：更保守的方向/更低的置信度本身不是优点，除非其理由证明了保守的必要性；激进方案论证自洽同样胜
+- 决断不加分：买卖不优于观望；观望论证充分同样胜
+- 篇幅、文风、流畅度不计分
+- 对流程环节的提及（辩论/审批/复核字样）不是质量证据，忽略之
+
+【裁决】六准则实质等价 → 判 tie（不得凭文风微差强分高下）；否则选整体质量更高的一份。
+
+指令 A：
+{instruction_a}
+
+指令 B：
+{instruction_b}
+
+只输出 JSON: {{"winner": "A"|"B"|"tie", "decisive_criterion": "<起决定作用的准则号+短名，如'2 置信度校准'；tie 为 null>", "reason": "<必须引用两份指令的具体字段值作证据，≤120字>"}}"""
+
+
+def b5_conclusion_prompt(ticker: str, instruction_a: str, instruction_b: str) -> str:
+    return _B5C_TEMPLATE.format(
+        ticker=ticker, instruction_a=instruction_a, instruction_b=instruction_b
+    )
+
+
+def run_b5_conclusion(
+    pairs: Sequence[dict], *, llm_fn: JudgeFn | None = None, votes: int = B5_VOTES
+) -> list[dict]:
+    """结论级盲评：`pair` = {unit_id, pair_key, ticker, instruction_a, instruction_b}。
+
+    位置随机化（pairwise_assign 按 pair_key 确定性）后展示，票面 A/B 映射回逻辑臂 a/b。"""
+    fn = llm_fn or default_judge_fn()
+    out: list[dict] = []
+    for pair in pairs:
+        first, second = pairwise_assign("a", "b", pair_key=str(pair.get("pair_key") or ""))
+        display = {
+            "a": str(pair.get("instruction_a") or ""),
+            "b": str(pair.get("instruction_b") or ""),
+        }
+        raw_votes: list[str] = []
+        vote_reasons: list[str | None] = []
+        decisive: list[str | None] = []
+        for _ in range(votes):
+            parsed = _ask_json(
+                b5_conclusion_prompt(
+                    str(pair.get("ticker") or ""), display[first], display[second]
+                ),
+                fn,
+            )
+            if parsed is None:
+                continue
+            winner = str(parsed.get("winner") or "").strip().lower()
+            if winner in ("a", "b"):
+                picked = first if winner == "a" else second
+            elif "tie" in winner:
+                picked = "tie"
+            else:
+                continue
+            raw_votes.append(picked)
+            vote_reasons.append(parsed.get("reason"))
+            decisive.append(parsed.get("decisive_criterion"))
+        verdict = majority_verdict(raw_votes)
+        out.append(
+            {
+                "unit_id": pair.get("unit_id"),
+                "pair_key": pair.get("pair_key"),
+                "ticker": pair.get("ticker"),
+                "position_first": first,
+                "votes": raw_votes,
+                "vote_reasons": vote_reasons,
+                "decisive_criteria": decisive,
+                "judge_reason": next(
+                    (r for v, r in zip(raw_votes, vote_reasons, strict=False) if v == verdict), None
+                ),
+                "verdict": verdict,
+                "votes_requested": votes,
+                "judge_parse_failed": len(raw_votes) < votes,
+                "rubric": B5C_RUBRIC,
+            }
+        )
+    return out
 
 
 # ── 跑判定 ──
