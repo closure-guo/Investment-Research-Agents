@@ -328,16 +328,22 @@ def run_b5_pairwise(
             str(pair.get("report_b_id") or "B"): str(pair.get("report_b") or ""),
         }
         raw_votes: list[str] = []
+        vote_reasons: list[str | None] = []  # 与 raw_votes 对齐（校准材料自证可读）
         for _ in range(votes):
             parsed = _ask_json(b5_prompt(reports[first], reports[second]), fn)
             if parsed is None:
                 continue
             winner = str(parsed.get("winner") or "").strip().upper()[:1]
+            picked: str | None = None
             if winner in ("A", "B"):
                 # 位置映射回真实臂：A=先展示的那份
-                raw_votes.append(first if winner == "A" else second)
+                picked = first if winner == "A" else second
             elif "TIE" in str(parsed.get("winner") or "").upper():
-                raw_votes.append("tie")
+                picked = "tie"
+            if picked is not None:
+                raw_votes.append(picked)
+                vote_reasons.append(parsed.get("reason"))
+        verdict = majority_verdict(raw_votes)
         out.append(
             {
                 # 保留调用方给的 unit_id（判定缓存按它回读；此前丢掉导致结果匹配不上）
@@ -347,7 +353,12 @@ def run_b5_pairwise(
                 "position_first": first,
                 "position_second": second,
                 "votes": raw_votes,
-                "verdict": majority_verdict(raw_votes),
+                "vote_reasons": vote_reasons,
+                # 多数派第一票的理由（多数决的依据须可追溯）
+                "judge_reason": next(
+                    (r for v, r in zip(raw_votes, vote_reasons, strict=False) if v == verdict), None
+                ),
+                "verdict": verdict,
                 "votes_requested": votes,
                 "judge_parse_failed": len(raw_votes) < votes,
             }

@@ -120,6 +120,57 @@ class TestB5Pairwise:
         assert out[0]["judge_parse_failed"] is True  # 少一票如实记
         assert out[0]["verdict"] == "tie"
 
+    def test_vote_reasons_and_majority_reason_are_carried(self):
+        """B5 装置缺陷修复（2026-09-18）：三票理由落盘——vote_reasons 与 votes 对齐，
+        judge_reason = 多数派第一票的理由；缺失时 None。校准材料须自证可读。"""
+        payload = {"winner": "A", "reason": "报告A的依据可核对"}
+
+        def fn(prompt: str) -> str:
+            return json.dumps(payload, ensure_ascii=False)
+
+        rows = fj.run_b5_pairwise(
+            [
+                {
+                    "unit_id": "600000::b5",
+                    "pair_key": "600000",
+                    "ticker": "600000",
+                    "report_a_id": "through_trader",
+                    "report_b_id": "full",
+                    "report_a": "AA",
+                    "report_b": "BB",
+                }
+            ],
+            llm_fn=fn,
+            votes=2,
+        )
+        row = rows[0]
+        first, _ = fj.pairwise_assign("through_trader", "full", pair_key="600000")
+        assert row["verdict"] == first  # 评审答 A = 先展示的那份
+        assert row["vote_reasons"] == ["报告A的依据可核对", "报告A的依据可核对"]
+        assert row["judge_reason"] == "报告A的依据可核对"
+
+    def test_missing_reason_is_none_not_crash(self):
+        def fn(prompt: str) -> str:
+            return json.dumps({"winner": "A"}, ensure_ascii=False)
+
+        rows = fj.run_b5_pairwise(
+            [
+                {
+                    "unit_id": "600000::b5",
+                    "pair_key": "600000",
+                    "ticker": "600000",
+                    "report_a_id": "through_trader",
+                    "report_b_id": "full",
+                    "report_a": "AA",
+                    "report_b": "BB",
+                }
+            ],
+            llm_fn=fn,
+            votes=1,
+        )
+        assert rows[0]["vote_reasons"] == [None]
+        assert rows[0]["judge_reason"] is None
+
     def test_unit_id_is_preserved_for_caching(self):
         """判定结果要能按 unit_id 回读缓存（丢掉 id 会让已花的判定调用匹配不上）。"""
         out = fj.run_b5_pairwise(
