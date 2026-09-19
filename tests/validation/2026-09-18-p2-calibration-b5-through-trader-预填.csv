@@ -1,0 +1,5 @@
+﻿unit_id,ticker,预填·胜者,机器理由,两臂报告位置,你已标(full/through_trader/tie)
+000001::b5,000001,full,,reports/ablation/p2/materials/000001.through_trader.json vs .full.json（state.final_report）,
+601318::b5,601318,full,,reports/ablation/p2/materials/601318.through_trader.json vs .full.json（state.final_report）,
+601398::b5,601398,full,,reports/ablation/p2/materials/601398.through_trader.json vs .full.json（state.final_report）,
+000333::b5,000333,full,,reports/ablation/p2/materials/000333.through_trader.json vs .full.json（state.final_report）,

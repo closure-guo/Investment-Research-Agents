@@ -622,3 +622,28 @@ TDD 全程）：
 验收夹具：601318/600276 终裁案例即测试夹具（TestSynonymColumnDisambiguation /
 TestClaimContractError）；全套受影响测试区（citation 族 + causal_ablation + debate prompts）
 全绿；全套回归跑批中。
+
+
+### 19.8 bear 提示词 A/B 验证：无源率 0.125 → 0.012（2026-09-18，20 次调用）
+
+**设计**：同一批输入（缓存材料的 4 份分析师摘要、debate_history 清空 = r1 条件）只重跑
+bear_debater 单节点（新提示词），与旧 grounding 扫描（bg-v1）对照——两侧唯一差异 = 提示词
+版本。脚本 `p2_bear_prompt_ab.py`（按标的断点续跑，缓存 judged-bgpab-v2.jsonl）。
+
+**结果**：
+
+| | data 论点 | 无源 | 无源率 |
+|---|---|---|---|
+| 旧提示词（bg-v1 终裁） | 64 | 8 | **0.125** |
+| 新提示词（A/B） | 85 | 1 | **0.012** |
+
+- 8 条旧无源断言（机构资金撤离/资金流出/股息利差等）**全部消失**——反例判例直接命中
+- 唯一新无源：600887「短期上行动能不足」（锚点挂 technical 两条，边缘表述，待人工复核是否维持）
+- data 论点量 64→85：逐断言锚定没有抑制辩手标注（会锚了反而敢标），推断被正确分流
+  （旧 r1 kind 分布 data 64/event 14/inference 23 作基线）
+- **判定**：任务 4 处置**有效**，进入常规观测（下轮全量材料跑批的 grounding 复扫照做）
+
+**deploy 状态更正**：ed2bc75 提交信息称「已发布 production」**不实**——deploy_prompts 被
+预检拦截（要求先 `sync_prompts.py --once` 收编），且本环境 Langfuse 离线（localhost:3000
+拒绝连接，全会话 span export 失败同因）。本地 git 提示词（权威源）已就绪、运行时回退本地
+已验证（A/B 即证）；**待 Langfuse 在线后执行 sync + deploy 两步**，此为遗留动作项。
