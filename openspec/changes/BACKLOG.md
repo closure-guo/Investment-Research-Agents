@@ -37,14 +37,14 @@
 - `add-debate-argument-anchors` —— 论点结构化锚点 + 零 LLM 校验 + `argument_anchor_coverage`；验证报告 `tests/validation/2026-09-16-add-debate-argument-anchors-validation.md`
 - `ground-comparative-delta-claims` —— 比较型差值计数 + `derived_series`/`price_levels` 通路修复 + 均线差幅；验证报告 `tests/validation/2026-09-15-ground-comparative-delta-claims-validation.md`
 - `update-ablation-driver-parity-and-report-status` —— 消融口径正名/驱动接回/报告状态契约
-## 评估补强（后续批次，2026-09-15 登记，尚未立项）
+## 评估补强（后续批次，2026-09-15 登记；2026-09-20 盘点更新）
 
 > 与 `update-ablation-driver-parity-and-report-status` 互补：该 delta 修「已有结论的可信度管理」，本批修「新结论的产出机制」。
 
-1. **结论注册表 + superseded 状态机**：把报告 `status` 契约（本 delta 已立）扩到 `docs/evals/` 全库（9 份日期报告 + 台账 + 模板），索引页渲染状态徽章 + 状态迁移校验。需先盘清全库每份报告的真实状态。
-2. **跑批入口唯一化**：`ablation_pilot.py` 改薄壳——只做续跑/记账，判分与过滤全调库侧。本 delta 只把维度过滤拉回库侧；整体瘦身牵动计量、材料落盘、断点续跑三块。
-3. **阳性对照进消融跑批**：每轮消融带一个已知劣化变体（关 `verify_citations`），测不出差异则本轮阴性结果作废——防「评估系统失灵导致的假阴性」被当成架构结论。
-4. **v2 消融框架**（已立项：`revamp-ablation-v2-causal-claims`，GATED 段已完成、待 owner 复核）：因果主张登记 + 注入法 + 单元级判定。与幻觉率度量 v1（`evals/hallucination/`，目前只覆盖数值型 claim）互补——注入法能覆盖文本/事件型这一最薄防线。
+1. **结论注册表 + superseded 状态机**（未立项）：把报告 `status` 契约扩到 `docs/evals/` 全库（日期报告 + 台账 + 模板），索引页渲染状态徽章 + 状态迁移校验。需先盘清全库每份报告的真实状态。
+2. **跑批入口唯一化**（未立项）：`ablation_pilot.py` 改薄壳——只做续跑/记账，判分与过滤全调库侧。整体瘦身牵动计量、材料落盘、断点续跑三块。
+3. ~~**阳性对照进消融跑批**~~ **已随 v2 框架落地（2026-09-20 盘点确认）**：`pilot_runner._positive_control` + McNemar 精确检验 + 「阳性对照失灵作废本轮阴性」契约（`negative_results_status`）+ 预登记门禁引用，见 `evals/causal_ablation/pilot_runner.py` 与 spec causal-ablation「预登记与阳性对照」。
+4. ~~**v2 消融框架**~~ **已完成并归档（2026-09-19，`revamp-ablation-v2-causal-claims`）**：因果主张登记 + 注入法 + 单元级判定 + 校准门控三腿转正；主规范 `openspec/specs/causal-ablation/` 9 条 requirement。与幻觉率度量 v1（`evals/hallucination/`）互补——注入法覆盖文本/事件型防线。
 
 ## 遗留待人工/待资源（2026-09-14 更新）
 

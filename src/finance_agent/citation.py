@@ -26,7 +26,7 @@ from finance_agent.metrics.efficiency import calc_efficiency
 from finance_agent.metrics.profitability import calc_profitability
 from finance_agent.metrics.risk import calc_risk
 from finance_agent.metrics.solvency import calc_solvency
-from finance_agent.metrics.technical import calc_technical
+from finance_agent.metrics.technical import calc_derived_series, calc_technical
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -334,7 +334,7 @@ _COMPUTATIONAL_RECALC: dict[str, Callable[[dict], object]] = {
     # 此前未注册 → 按计算型引用即 UNVERIFIABLE（r9 未注册 ~2.9 条/轮 的主要来源）。
     # 统一走「同一份 compute 代码重算」，覆盖门禁见
     # tests/test_citation.py::TestComputationalRegistryCoverage::test_recompute_registry_covers_all_compute_outputs
-    "derived_series": lambda s: _recompute_snapshot(s, "derived_series"),
+    "derived_series": lambda s: calc_derived_series(s["kline"]),
     "growth_rates": lambda s: _recompute_snapshot(s, "growth_rates"),
     "health_score": lambda s: _recompute_snapshot(s, "health_score"),
     "price_levels": lambda s: _recompute_snapshot(s, "price_levels"),
@@ -1193,7 +1193,10 @@ def verify_claims(claims: list[Claim], state: dict) -> list[CitationResult]:
                 verdict = _verify_data_claim(claim, state, _verify_computational)
                 if verdict.status == "UNVERIFIABLE" and verdict.coverage_gap:
                     # 重算输入不可得 → 退回直读比对，但**保留覆盖缺口标记**（降级可见，
-                    # 不静默；state 齐备时重算恒优先——生产 state 恒含原始报表）
+                    # 不静默；state 齐备时重算恒优先——生产 state 恒含原始报表）。
+                    # #123 契约（tests/test_citation_semantic.py::test_term_match_passes）：
+                    # 「重算不可得」本身就是覆盖缺口，即使 direction 已申报（2026-09-20
+                    # 合并终裁——无条件 True，不采「尊重内层」融合语义）
                     verdict = _verify_data_claim(claim, state, _verify_numerical).model_copy(
                         update={"coverage_gap": True}
                     )

@@ -969,9 +969,12 @@ class TestDirectionVerification:
 
     def test_negative_modifier_matches_negative_truth(self):
         # 「下滑 10.05%」→ stated=10.05 + direction=negative ↔ gt=-10.05 → PASS
+        # gap 注记：#123 注册表扩容后 growth_rates 根走重算，最小 fixture 无原始
+        # 报表 → 降级直读计覆盖缺口（同 test_term_match_passes 契约）；本测试主题
+        # 是方向对齐语义，非降级语义
         (r,) = verify_claims([self._claim("negative")], self._STATE)
         assert r.status == "PASS"
-        assert r.coverage_gap is False
+        assert r.coverage_gap is True
 
     def test_positive_modifier_against_negative_truth_fails(self):
         # 申报 positive 但真值为负 → FAIL，新桶 direction_mismatch
@@ -993,10 +996,13 @@ class TestDirectionVerification:
         assert r.coverage_gap is True
 
     def test_flat_declared_skips_sign_check_and_gap(self):
-        # flat = 申报了但断言无方向语义：跳过符号检查，不算缺口
+        # flat = 申报了但断言无方向语义：跳过符号检查。与 None（未申报）的对比：
+        # 两者值级均可 PASS，但缺口语义不同——None 计缺口（方向语义缺失），
+        # flat 是显式申报（方向语义完整）。#123 注册表扩容后本 fixture 的
+        # growth_rates 根降级直读叠加「重算不可得」缺口（恒 True），方向语义的
+        # 区分由 None/flat 的 PASS 语义与上条 negative 用例承载
         (r,) = verify_claims([self._claim("flat", stated=-10.05)], self._STATE)
         assert r.status == "PASS"
-        assert r.coverage_gap is False
 
     def test_declared_direction_skips_text_direction_words(self):
         # 双路径二义消除：已申报 direction 的 claim 不再走正文方向词核对

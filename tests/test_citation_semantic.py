@@ -209,8 +209,10 @@ class TestSemanticPeriodCheck:
     def test_quarterly_index_period_resolved_from_quarters(self):
         """quarterly_trend 括号形式（quarters 降序：idx 1 = 次近季）→ 期次比对。
 
-        quarters = ["2025Q4", "2025Q3"]：yoy[1] 锚定 2025Q3。申报 2025Q3 → PASS
-        且无覆盖缺口；申报 2025Q4（idx 0 的期次，张冠李戴）→ FAIL。
+        quarters = ["2025Q4", "2025Q3"]：yoy[1] 锚定 2025Q3。申报 2025Q3 → PASS；
+        申报 2025Q4（idx 0 的期次，张冠李戴）→ FAIL。gap 注记：#123 注册表扩容后
+        quarterly_trend 根走重算，最小 fixture 无原始报表 → 降级计覆盖缺口
+        （test_term_match_passes 同一契约）；本测试主题是期次解析。
         """
         state = {"quarterly_trend": {"quarters": ["2025Q4", "2025Q3"], "yoy": [1.0, 2.0]}}
         base = {
@@ -225,7 +227,7 @@ class TestSemanticPeriodCheck:
         bad = Claim(**base, interpretation="2025Q4 同比 2.0%", period="2025Q4")
         r_ok, r_bad = verify_claims([ok, bad], state)
         assert r_ok.status == "PASS"
-        assert r_ok.coverage_gap is False
+        assert r_ok.coverage_gap is True
         assert r_bad.status == "FAIL"
         assert r_bad.bucket == "semantic_period_mismatch"
 
@@ -329,7 +331,9 @@ class TestTermCheckOutOfVocab:
         )
         (r,) = verify_claims([claim], state)
         assert r.status == "PASS"
-        assert r.coverage_gap is False
+        # #123 扩容后 quarterly_trend 根降级直读计缺口（fixture 无原始报表）；
+        # 本测试主题是别名映射（net_profit → 归母净利润词条）
+        assert r.coverage_gap is True
 
     def test_yoy_natural_alias(self):
         """quarterly_trend.yoy 自然申报名（净利润同比增速/归母净利润同比）→ 词表命中。"""
@@ -346,4 +350,5 @@ class TestTermCheckOutOfVocab:
         )
         (r,) = verify_claims([claim], state)
         assert r.status == "PASS"
-        assert r.coverage_gap is False
+        # #123 扩容后 quarterly_trend 根降级直读计缺口；主题是自然申报名词条命中
+        assert r.coverage_gap is True

@@ -137,6 +137,27 @@ def _make_product(*, reports: dict | None = None, snapshot: dict | None = None) 
     }
 
 
+def _reports_without_claim_targets() -> dict:
+    """共享夹具剔除「根在重算注册表」的 claim，供默认靶点/回落路径测试使用。
+
+    #123 注册表扩容后 growth_rates 成为合法 value_error 靶点（claim picked 优先于
+    默认派生值形态），共享夹具的 growth claim 会抢占靶点；过滤条件与
+    `claim_value_targets` 同源，对后续注册表扩容稳健。
+    """
+    from finance_agent import citation as citation_mod
+
+    reports = _analyst_reports()
+    for agent in reports:
+        claims = reports[agent].get("claims") or []
+        reports[agent]["claims"] = [
+            claim
+            for claim in claims
+            if str(claim.get("field_ref") or "").split(".")[0]
+            not in citation_mod._COMPUTATIONAL_RECALC
+        ]
+    return reports
+
+
 def _case(pollution_type: str, *, payload: dict | None = None) -> InjectionCase:
     from evals.causal_ablation.injection import _POLLUTION_ROUTING
 
@@ -1267,7 +1288,7 @@ class TestRealRun:
 
         snapshot = _snapshot()
         snapshot["derived_series"] = {"chg_5d": 0.02, "chg_20d": 0.05}
-        product = _make_product(snapshot=snapshot)
+        product = _make_product(reports=_reports_without_claim_targets(), snapshot=snapshot)
         case = pr.build_pilot_cases(product, instances=1, pollution_types=["value_error"])[0]
         _, unit = pr.run_real_case(product, case, graph_runner=fake_runner)
         assert unit["injection"]["applied"] is True
@@ -1321,7 +1342,7 @@ class TestRealRun:
         snapshot["kline"] = kline
         snapshot["derived_series"] = {"chg_5d": 0.02}
         snapshot["technical_indicators"] = {}
-        product = _make_product(snapshot=snapshot)
+        product = _make_product(reports=_reports_without_claim_targets(), snapshot=snapshot)
         case = pr.build_pilot_cases(product, instances=1, pollution_types=["value_error"])[0]
         _, unit = pr.run_real_case(product, case, graph_runner=fake_runner)
         assert unit["status"] == pr.STATUS_OK
@@ -1334,7 +1355,7 @@ class TestRealRun:
             income = snapshot["income_statement"]
             return {"final_report": f"营业总收入 {float(income['营业总收入'].max())} 元"}
 
-        product = _make_product()
+        product = _make_product(reports=_reports_without_claim_targets())
         case = pr.build_pilot_cases(product, instances=1, pollution_types=["value_error"])[0]
         _, unit = pr.run_real_case(product, case, graph_runner=fake_runner)
         assert unit["injection"]["applied"] is True
