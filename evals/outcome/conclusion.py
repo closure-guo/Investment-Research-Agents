@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from evals.outcome.caliber import MIN_SETTLED_FOR_WINRATE
+
 LEGAL_FORMS: tuple[str, ...] = ("positive", "negative", "inconclusive")
 _BARE_NO_SUPPORT = "未获统计支持"
 
@@ -28,7 +30,15 @@ def conclude_outcome(
     n: int,
     unit: str = "可执行决策",
 ) -> OutcomeConclusion:
-    """ci = 均值超额收益 95% 置信区间；跨 0 → 分辨率不足（须带 MDE）。"""
+    """ci = 均值超额收益 95% 置信区间；跨 0 → 分辨率不足（须带 MDE）。
+
+    前置：n < MIN_SETTLED_FOR_WINRATE 时抛 ValueError（样本不足，不得产出结论句）。
+    """
+    if n < MIN_SETTLED_FOR_WINRATE:
+        raise ValueError(
+            f"settled 样本 {n} < {MIN_SETTLED_FOR_WINRATE}（metrics.md §1.8④ 红线）："
+            "只可报样本数与「样本积累中」，不得产出结论句"
+        )
     lo, hi = ci
     if lo > 0:
         sentence = (

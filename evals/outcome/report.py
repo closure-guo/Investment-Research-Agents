@@ -8,7 +8,7 @@ from evals.causal_ablation.report_status import parse_status
 
 
 def assert_outcome_report(text: str, *, root: Path | None = None) -> tuple[str, str | None]:
-    """校验报告 status 头；superseded-by 指针在 root 给定时须真实存在（仓库根相对路径）。"""
+    """校验报告 status 头；superseded-by 指针在给定 root 时按 root 相对解析并须真实存在。"""
     status, target = parse_status(text)
     if status == "superseded-by":
         if not target:
