@@ -4,18 +4,18 @@
 
 ### Requirement: 决策落库
 
-每个产出的观点 SHALL 写入 `predictions` 表（取代原 `decision_log`）：不再只记 approve，**reject、hold/watch、neutral 方向的观点同样落库**（全量记录）。记录 SHALL 含观点快照（rationale_snapshot，写入后冻结）、direction（action 映射：buy→long、sell→short、hold/watch→neutral）、confidence、entry_price（**标准化入场价**，见下）、horizon_days（显式写入，默认取配置项 `OUTCOME_DEFAULT_HORIZON_DAYS`，默认值 20 交易日）、source_type（backtest/live）、权威 created_at（服务端生成）。
+每个产出的观点 SHALL 写入 `predictions` 表（取代原 `decision_log`）：不再只记 approve，**reject、hold/watch、neutral 方向的观点同样落库**（全量记录）。记录 SHALL 含观点快照（rationale_snapshot，写入后冻结）、direction（action 映射：buy→long、sell→short、hold/watch→neutral）、confidence、entry_price（**参考价**：决策时点实时价或最近收盘，注明口径，供展示与盯市）、horizon_days（显式写入，默认取配置项 `OUTCOME_DEFAULT_HORIZON_DAYS`，默认值 20 交易日）、source_type（backtest/live）、权威 created_at（服务端生成）。参考价不可得时 SHALL 存档并记 WARN，状态保持 open（判定不依赖参考价）。
 
-entry_price SHALL 采用标准化口径：**决策日收盘价**；决策产出时间在当日收盘后的，取**次一交易日收盘价**。TradeDecision 申报的 entry_price / stop_loss / target_price SHALL NOT 直接作为结算入场价，SHALL 随观点快照冻结写入 rationale_snapshot（供审计与申报偏差观察）。
+**结算入场价与参考价分离**：结算任务 SHALL 按标准化口径从行情派生 `settle_entry_price`——**决策归属日（created_at 所在日）收盘价**；决策产出时间在当日收盘后的取**次一交易日收盘价**；决策归属日非交易日的取其后首个交易日收盘价。派生值随判定结果落库（判定产出，写入后冻结可审计）；`raw_return` / `excess_return` SHALL 基于 `settle_entry_price` 计算，SHALL NOT 基于参考价。TradeDecision 申报的 entry_price / stop_loss / target_price SHALL 随观点快照冻结写入 rationale_snapshot（供审计），SHALL NOT 参与任何结算计算。
 
 写入 SHALL NOT 阻断业务管线（旁路失败仅日志，不影响报告产出）。
-(Previously: entry_price 为「参考价，注明口径」——实现取实时 quote 优先、K 线最新收盘兜底；horizon_days 不写入，全落表默认 252；申报价不参与落库。)
+(Previously: entry_price 为「参考价，注明口径」——实现取实时 quote 优先、K 线最新收盘兜底；horizon_days 不写入，全落表默认 252；申报价不参与落库；判定收益基于参考价计算（与回测腿入场口径不可比）。)
 
 #### Scenario: 决策产出即落库
 
 - **WHEN** Fund Manager 产出任一观点（`TradeDecision` 并写入 state）
 - **THEN** 系统 SHALL 同步向 `predictions` 插入一条记录
-- **AND** 记录含 langfuse_trace_id / created_at（服务端权威）/ ticker / direction / entry_price（决策日收盘标准化口径）/ horizon_days（显式写入，默认 20）/ confidence / source_type 等
+- **AND** 记录含 langfuse_trace_id / created_at（服务端权威）/ ticker / direction / entry_price（参考价口径）/ horizon_days（显式写入，默认 20）/ confidence / source_type 等
 - **AND** 观点保持 open 直至判定结算
 
 #### Scenario: 全量观点落库（含 reject）
@@ -30,14 +30,15 @@ entry_price SHALL 采用标准化口径：**决策日收盘价**；决策产出�
 - **GIVEN** 某 buy 观点申报了 entry_price / stop_loss / target_price
 - **WHEN** 观点落库
 - **THEN** 三个申报价 SHALL 冻结写入 rationale_snapshot，可审计读取
-- **AND** 结算入场价 SHALL 使用标准化口径（决策日收盘），SHALL NOT 使用申报 entry_price
+- **AND** 结算入场价 SHALL 由行情派生（`settle_entry_price`，见下），SHALL NOT 使用申报 entry_price 或参考价
 
-#### Scenario: 收盘后决策的入场价
+#### Scenario: 结算入场价由行情派生
 
-- **GIVEN** 某观点的 created_at 在决策日收盘之后
-- **WHEN** 观点落库
-- **THEN** entry_price SHALL 取次一交易日收盘价
-- **AND** 次一交易日收盘不可得时 SHALL 按「无可靠入场价」处理（存档不计分 + WARN）
+- **GIVEN** 某观点判定任务执行时行情可得
+- **WHEN** 结算
+- **THEN** `settle_entry_price` SHALL 取决策归属日收盘价（created_at 在归属日收盘后 → 次一交易日收盘；归属日非交易日 → 其后首个交易日收盘）
+- **AND** `raw_return` / `excess_return` SHALL 基于 `settle_entry_price` 与 horizon 终点价计算
+- **AND** 判定前该列 SHALL 为 NULL（参考价仍正常展示与盯市）
 
 #### Scenario: 落库失败不阻断业务
 
@@ -52,12 +53,12 @@ entry_price SHALL 采用标准化口径：**决策日收盘价**；决策产出�
 - **THEN** `langfuse_trace_id` SHALL 指向产生该观点的 Langfuse trace
 - **AND** 后续可反向联查
 
-#### Scenario: 无可靠入场价存档不计分
+#### Scenario: 参考价不可得存档不阻断
 
-- **GIVEN** 某观点决策日（或次一交易日）收盘价不可得（K 线缺失）
+- **GIVEN** 某观点参考价不可得（quote 与 K 线均无）
 - **WHEN** 落库
-- **THEN** SHALL 存档但不进入战绩统计（缺可判定要素）
-- **AND** SHALL 记 WARN 日志
+- **THEN** SHALL 存档并记 WARN，状态保持 open（判定不依赖参考价，结算时由行情派生 `settle_entry_price`）
+- **AND** 判定时行情仍不可得（长期无数据）SHALL 按 unresolvable 处理
 
 ### Requirement: 事后行情追踪
 
