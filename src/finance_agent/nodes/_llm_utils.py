@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
@@ -397,6 +400,71 @@ def _request_config_dict(llm_config: Any, api_key: str | None) -> dict | None:
     return cfg
 
 
+# ── Δ3 Task 3：usage 收集器（contextvar，默认 noop）——cohort 记账真值来源 ──
+#
+# cohort 记账需要「一次 deep 分析的 token 真值」（spec：非估算）。provider usage
+# 经 gateway._canonical_usage 挂在 CanonicalEvent.usage（键 prompt_tokens/
+# completion_tokens/total_tokens），但本模块的流式消费循环此前只处理
+# reasoning/text/error，usage 被丢弃。runner 用 ``with usage_collector() as acc:``
+# 包裹一次 deep 分析，本上下文内所有 call_llm_streaming 的 finished 事件把
+# provider usage 汇入 acc。
+# 默认（未激活）行为与加收集器之前完全一致：contextvar 默认 None，
+# 消费循环仅多一次 get()。
+
+
+@dataclass
+class UsageAccumulator:
+    """provider usage 累加器（真值，非估算）。"""
+
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def add(self, usage: dict | None) -> None:
+        """汇入一次 LLM 调用。
+
+        usage 为 ``CanonicalEvent.usage``（dict | None）。None 或空 dict 只计
+        ``calls``（provider 未返回计数时保持 calls 真值、tokens 记 0）；
+        缺 ``total_tokens`` 时按 prompt+completion 兜底（镜像 gateway
+        ``_canonical_usage`` 的键名语义）。
+        """
+        self.calls += 1
+        if not usage:
+            return
+        prompt = int(usage.get("prompt_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or 0)
+        total = usage.get("total_tokens")
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.total_tokens += int(total) if total is not None else prompt + completion
+
+
+_usage_acc: contextvars.ContextVar[UsageAccumulator | None] = contextvars.ContextVar(
+    "llm_usage_acc", default=None
+)
+
+
+@contextlib.contextmanager
+def usage_collector() -> Iterator[UsageAccumulator]:
+    """激活后，本上下文内所有 LLM 调用的 provider usage 汇入累加器（默认 noop）。
+
+    用法（runner 包裹一次 deep 分析）::
+
+        with usage_collector() as acc:
+            run_pipeline(...)
+        record(acc.calls, acc.total_tokens)
+
+    嵌套时内层独立记账（内层退出后外层恢复收集）；退出上下文后事件不再累加。
+    """
+    acc = UsageAccumulator()
+    token = _usage_acc.set(acc)
+    try:
+        yield acc
+    finally:
+        _usage_acc.reset(token)
+
+
 def call_llm_streaming(
     prompt: str,
     system: str = "",
@@ -518,6 +586,12 @@ def call_llm_streaming(
             # 截断续写的翻倍剩余配额）。不能在调用处裸拼 **_call_base, **escalate——
             # 两处同键（max_tokens）会抛 TypeError，须先经 dict display 合并。
             for ev in complete_stream(attempt_messages, **{**_call_base, **escalate}):
+                # Δ3 Task 3：usage 收集（仅激活时非 None；未激活零行为变化）。
+                # 只认 finished 事件（tool_call 与 finished 携带同一份 usage，
+                # 双认会重复计数）；error 路径无 finished → 失败尝试不计 calls。
+                acc = _usage_acc.get()
+                if acc is not None and ev.kind == "finished":
+                    acc.add(getattr(ev, "usage", None))
                 if ev.kind == "reasoning" and writer:
                     writer({"type": "thinking", "node": node_name, "token": ev.reasoning})
                 elif ev.kind == "text":
