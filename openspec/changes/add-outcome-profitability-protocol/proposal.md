@@ -13,7 +13,7 @@
   - 红线：settled 可执行样本 <10 SHALL NOT 报任何胜率类结论（track-record 展示门槛泛化为评估纪律）
   - 泄漏控制声明：回测腿读数须带泄漏探针披露；未过「干净窗口」判定的批次只能标「通路验证」
 - 首个 outcome 预登记文档（沿用 `evals/ablation/preregister/` 门禁字段格式）：主指标 / MDE / 决策阈值 / 样本量依据 / 停止规则 / 成本分型 / 泄漏控制
-- 收口纪律工具化（Step 3）：健康检查（结算成功率 / 行情缺失率 / 污染护栏 / integrity_check 通过）→ 异常行人工终裁 → **两句式结论**（显著方向 + CI ｜ 分辨率不足 + MDE 与扩样方向；裸「未获统计支持」非法）→ 报告生命周期 status 头 → `metrics.md` §2 时间线 + `runs.jsonl` 追加
+- 收口纪律工具化（Step 3）：健康检查（结算成功率 / 不可判定率（unresolvable/settleable，与结算成功率互补、同一分母）/ 污染护栏 / integrity_check 通过）→ 异常行人工终裁 → **两句式结论**（显著方向 + CI ｜ 分辨率不足 + MDE 与扩样方向；裸「未获统计支持」非法）→ 报告生命周期 status 头 → `metrics.md` §2 时间线 + `runs.jsonl` 追加
 - 双腿互证口径：forward 与 backtest 两腿 SHALL 同一预登记口径（同结算窗口 / 基准 / 入场价口径 / 胜率定义），读数并列报告；分歧超阈值先归因（泄漏 / regime 漂移 / 执行差异）后结论
 - 边界（显式不做）：不作层间归因（B6 维持 suspended）；不动 Trader 决策姿态（#134 产品裁决解耦）；不改任何结算行为（行为变更在 `update-decision-settlement-contract`）
 

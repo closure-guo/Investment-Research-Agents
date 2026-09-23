@@ -33,7 +33,7 @@
 
 ### Requirement: Outcome 读数收口纪律
 
-outcome 读数批次的收口 SHALL 依序执行：① 健康检查（结算成功率 / 行情缺失率 / 污染护栏——测试库隔离与 integrity_check 通过 / 记账完整率）；② 异常行（结算失败、行情缺口、口径存疑）逐条人工终裁，未终裁行 SHALL 单列 pending 计数，SHALL NOT 静默剔除或计入；③ 结论 SHALL 为两句式之一——**显著方向**（效应量 + CI）或**分辨率不足**（MDE + 扩样方向），裸「未获统计支持」SHALL NOT 出现；④ 收口报告 SHALL 带生命周期 status 头（`active` 或 `superseded-by: <路径>`，指针须可解析）；⑤ `metrics.md` §2 时间线追加一行 + `runs.jsonl` 追加机器可读摘要。低胜率读数 SHALL 先分桶归因（数据缺口 / 结算缺陷 / watch 语义误读 / 模型真错误）并逐条人工终裁，之后才允许进入任何处置（改 prompt / 判定 agent 缺陷 / 写进报告结论）。
+outcome 读数批次的收口 SHALL 依序执行：① 健康检查（结算成功率 / 不可判定率（unresolvable/settleable，与结算成功率互补、同一分母）/ 污染护栏——测试库隔离与 integrity_check 通过 / 记账完整率）；② 异常行（结算失败、行情缺口、口径存疑）逐条人工终裁，未终裁行 SHALL 单列 pending 计数，SHALL NOT 静默剔除或计入；③ 结论 SHALL 为两句式之一——**显著方向**（效应量 + CI）或**分辨率不足**（MDE + 扩样方向），裸「未获统计支持」SHALL NOT 出现；④ 收口报告 SHALL 带生命周期 status 头（`active` 或 `superseded-by: <路径>`，指针须可解析）；⑤ `metrics.md` §2 时间线追加一行 + `runs.jsonl` 追加机器可读摘要。低胜率读数 SHALL 先分桶归因（数据缺口 / 结算缺陷 / watch 语义误读 / 模型真错误）并逐条人工终裁，之后才允许进入任何处置（改 prompt / 判定 agent 缺陷 / 写进报告结论）。
 
 #### Scenario: 收口顺序完整性
 
@@ -55,7 +55,7 @@ outcome 读数批次的收口 SHALL 依序执行：① 健康检查（结算成�
 
 #### Scenario: 异常行不静默消失
 
-- **WHEN** 批次中存在结算失败或行情缺失的决策行
+- **WHEN** 批次中存在结算失败或不可判定的决策行
 - **THEN** 该行 SHALL 计入 pending/unresolvable 并在报告中披露数量与原因
 - **AND** SHALL NOT 从分母静默剔除后当作无异常
 

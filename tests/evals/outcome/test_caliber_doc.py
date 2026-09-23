@@ -24,13 +24,18 @@ def test_section_1_8_registered_with_core_caliber():
         "1.4008",
         "0.2802",
         "runs.jsonl",
-        # ③⑤⑥ 三行锚点（终审 I3）：辅助观测窗 / 两项健康阈值 / 泄漏阈值与通路验证定位
+        # ③⑤⑥ 三行锚点（终审 I1）：辅助观测窗 / 两项健康阈值 / 泄漏阈值与通路验证定位
         "T+5",
         "0.90",
         "0.10",
         "0.60",
         "通路验证",
         "记账完整率",
+        # ① 人口与推断锁死句锚点（终审 I2）：三态人口 / 标的簇 bootstrap / 基准覆盖即失效
+        "三态",
+        "bootstrap",
+        "B=10,000",
+        "BENCHMARK_CODE",
     ):
         assert anchor in sec, f"§1.8 缺口径锚点: {anchor}"
 

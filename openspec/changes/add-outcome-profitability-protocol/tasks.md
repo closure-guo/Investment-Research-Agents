@@ -13,7 +13,7 @@
 
 ## 3. 收口纪律工具化
 
-- [x] 3.1 outcome 健康检查脚本：结算成功率 / 行情缺失率 / 污染护栏（测试库隔离 + integrity_check 通过）/ 记账完整率，输出机器可读结果
+- [x] 3.1 outcome 健康检查脚本：结算成功率 / 不可判定率（unresolvable/settleable，与结算成功率互补、同一分母）/ 污染护栏（测试库隔离 + integrity_check 通过）/ 记账完整率，输出机器可读结果
 - [x] 3.2 两句式结论校验：复用/扩展 `causal_ablation/conclusion.py` 机制——显著句式须带 CI、分辨率不足句式须带 MDE、裸「未获统计支持」判非法 + 单测
 - [x] 3.3 收口报告生命周期 status 头接线（复用 `causal_ablation/report_status.py` 校验与 `docs/evals/README.md` 索引渲染）+ 单测
 

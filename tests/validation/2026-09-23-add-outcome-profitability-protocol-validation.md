@@ -17,7 +17,7 @@
 
 | # | Scenario | 落点 | 证据（测试名 / 命令） | 通过 |
 |---|---|---|---|---|
-| 1 | 首个正式批收口时口径与预登记齐备 | `docs/evals/metrics.md` §1.8 全表①–⑦（L94–108）+ §2 切点行（L132）；预登记 `evals/ablation/preregister/2026-09-23-outcome-forward-and-backtest.md` §0 门禁字段 7 项（L8–14） | `test_caliber_doc.py::test_section_1_8_registered_with_core_caliber`（§1.8 在 §2 之前 + 7 个口径锚点落在小节内）；`::test_timeline_has_outcome_switchpoint`（切点行钉死 delta 名 + 标「未跑批」）；`test_preregister.py::TestOutcomeGate::test_real_outcome_preregister_document_valid`（真实文档 `valid=True`，字段集合 == `OUTCOME_REQUIRED_FIELDS`） | ✅ 前置齐备（正式批未开跑；本 delta 不产读数） |
+| 1 | 首个正式批收口时口径与预登记齐备 | `docs/evals/metrics.md` §1.8 全表①–⑦（L94–108）+ §2 切点行（L132）；预登记 `evals/ablation/preregister/2026-09-23-outcome-forward-and-backtest.md` §0 门禁字段 7 项（L8–14） | `test_caliber_doc.py::test_section_1_8_registered_with_core_caliber`（§1.8 在 §2 之前 + 13 个口径锚点落在小节内）；`::test_timeline_has_outcome_switchpoint`（切点行钉死 delta 名 + 标「未跑批」）；`test_preregister.py::TestOutcomeGate::test_real_outcome_preregister_document_valid`（真实文档 `valid=True`，字段集合 == `OUTCOME_REQUIRED_FIELDS`） | ✅ 前置齐备（正式批未开跑；本 delta 不产读数） |
 | 2 | 样本不足不报胜率 | `metrics.md` §1.8④（L103 红线）；`evals/outcome/caliber.py::MIN_SETTLED_FOR_WINRATE=10`（L13）；`evals/outcome/conclusion.py::conclude_outcome` 前置校验（L37–41 抛 `ValueError`） | `test_caliber.py::test_caliber_values_pinned`；`test_conclusion.py::TestConclude::test_below_red_line_raises`（`n=3` → `match="红线"`） | ✅ |
 | 3 | 无预登记批次只能标通路验证 | `evals/causal_ablation/preregister.py::OUTCOME_REQUIRED_FIELDS`（L19–27 门禁字段）；`metrics.md` §1.8⑥（L105「深历史批次永久定位通路验证」）；预登记 §5（L56 深历史永久通路验证） | `test_preregister.py::TestOutcomeGate::test_outcome_missing_leakage_field_reported`（删「泄漏控制」行 → `valid=False` 且 issues 指名）；`::test_assert_preregistered_passes_required_fields_through`（不传 `required_fields` → `MissingPreregistrationError`）；`TestOutcomeLookup::test_name_contains_isolates_outcome_docs` | ✅ 门禁解析/断言就位；读数腿接线属 Δ3/Δ4 |
 | 4 | 回避指标不进主结论 | `metrics.md` §1.8②（L101「neutral … SHALL NOT 进主结论」）；预登记 §1「辅助人口」行（L24「独立字段、不进主结论」） | 文档断言：口径条目字面钉死 + 预登记门禁字段齐备（同上 `test_real_outcome_preregister_document_valid`）；运行期主结论段人口过滤属 Δ2（`avoidance_status` 独立字段，不混入 `resolved_*`） | ✅ 口径已钉死 |
@@ -26,7 +26,7 @@
 
 | # | Scenario | 落点 | 证据（测试名 / 命令） | 通过 |
 |---|---|---|---|---|
-| 5 | 收口顺序完整性 | `metrics.md` §1.8⑤（L104 五步链）；预登记 §3 收口流程①–⑤（L38）；`evals/outcome/health.py::collect_outcome_health`（L29）、`conclusion.py::conclude_outcome`（L26）、`report.py::assert_outcome_report`（L10） | `test_health.py`（11 项：结算成功率/不可判定率/integrity/告警/过滤/CLI 退出码）、`test_conclusion.py`（9 项）、`test_report.py`（5 项）全绿 | ✅ |
+| 5 | 收口顺序完整性 | `metrics.md` §1.8⑤（L104 五步链）；预登记 §3 收口流程①–⑤（L38）；`evals/outcome/health.py::collect_outcome_health`（L30）、`conclusion.py::conclude_outcome`（L26）、`report.py::assert_outcome_report`（L10） | `test_health.py`（11 项：结算成功率/不可判定率/integrity/告警/过滤/CLI 退出码）、`test_conclusion.py`（9 项）、`test_report.py`（5 项）全绿 | ✅ |
 | 6 | 结论句合法性校验 | `conclusion.py::assert_outcome_sentence_legal`（L62–70）+ `conclude_outcome` 三式（L43–59） | `test_conclusion.py::TestSentenceLegality::test_bare_no_support_illegal`、`::test_significant_with_ci_but_bare_no_support_illegal`、`::test_significant_without_ci_illegal`、`::test_inconclusive_without_mde_illegal`；`TestConclude::test_forms_are_legal_set` | ✅ |
 | 7 | 低胜率先归因后处置 | `metrics.md` §1.8⑤（L104「异常行人工终裁（对照表落 `tests/validation/`）」）；`conclusion.py` 负向句强制带归因措辞（L49–54「处置前须先分桶归因」） | `test_conclusion.py::TestConclude::test_negative_when_ci_upper_below_zero`（`assert "归因" in c.sentence` + 句法合法） | ✅ 口径 + 句式机器强制；分桶归因执行在读数腿 |
 | 8 | 异常行不静默消失 | `health.py`：`unresolvable` 独立计数与 `unresolvable_rate`（L66–69）、重复指纹告警（`health.py:102-105` 告警文本处）、`entry_price_missing`/`bookkeeping_completeness`（L70–75、L118）；`metrics.md` §1.8⑤ | `test_health.py::TestHealth::test_unresolvable_majority_fails_unresolvable`、`::test_warnings_for_trace_missing_and_duplicate_hash`、`::test_empty_db_no_rates_and_not_passed`（空库报 `None` 不报 0%）、`TestCli::test_cli_exit_one_when_failed` | ✅ |
@@ -63,7 +63,7 @@ outcome 侧用例分布（`--collect-only` 计数）：`test_caliber.py` 2 / `te
 1. 健康检查括注补阈值语义：`记账完整率` → `记账完整率——读数不设阈值`（与 `health.py` 实现一致：`checks` 仅含 `settlement_success` / `unresolvable` / `integrity` 三项判据，`bookkeeping_completeness` 只读不判）；
 2. 同格补口径披露：「integrity 为全库扫描（不受 source_type/since 过滤），其余读数按过滤口径（`integrity_scope` 字段随报告披露）」——与 `health.py::collect_outcome_health` 的 `integrity_scope="whole-db"` 及 `test_health.py::TestHealth::test_all_resolved_passes` 的断言一致。
 
-**终审修复轮追加（2026-09-23，同报告，见下）**：
+**终审修复轮追加（2026-09-23）**：
 3. §1.8⑤ 第二项阈值由「行情缺失率」正名为「**不可判定率（unresolvable/settleable，与结算成功率互补、同一分母）≤0.10**」——代码跟随重命名：`market_missing_rate` → `unresolvable_rate`、`checks["market_missing"]` → `checks["unresolvable"]`、`MAX_MARKET_MISSING_RATE` → `MAX_UNRESOLVABLE_RATE`（`health.py`），测试同步改名 `test_unresolvable_majority_fails_unresolvable`；
 4. §1.8① 补人口与推断锁死：均值人口 = long/short 全部已判定观点（三态，排除 unresolvable）、CI 按标的簇 bootstrap（B=10,000）、胜率描述性/结论句由均值 CI 驱动、`BENCHMARK_CODE` 被环境覆盖则本口径失效须重新预登记。
 
@@ -78,7 +78,7 @@ outcome 侧用例分布（`--collect-only` 计数）：`test_caliber.py` 2 / `te
 
 - 无。机器项（pytest 543 / ruff / mypy / openspec validate --strict）全部通过；未发现需修补的代码缺陷。
 - 说明（非本 delta 异常）：全量 `uv run pytest` 的 1 例失败为 `tests/evals/test_hallucination_live.py::test_hallucination_live_report`（`@live` 标记，CI 以 `-m "not live"` 排除，依赖本地 `data/sessions.db` 数据）——非本 delta 引入，详见机器验证表末行。
-- **遗留待裁决（如实列出，未处置）**：预登记文档 `evals/ablation/preregister/2026-09-23-outcome-forward-and-backtest.md` 的 L12（停止规则①）与 L38（§3 收口流程①）仍用旧词「行情缺失率」，与 §1.8⑤ 正名后的「不可判定率」及代码键 `unresolvable_rate` 不一致。**本轮未改**：① 修复轮明确限定改动范围（不含预登记文档）；② §2 切点行（L132）自带锁定规则「首个读数之前 §1.8 与预登记不得再改（改须走 §1 修订 + 新预登记版本 + 新切点行）」——本轮的 §1.8①/⑤ 修订是否触发「新预登记版本 + 新切点行」属 owner 裁决项。门禁解析不受影响（`停止规则` 字段只查非空，不查内容）。
+- **遗留项收口记录（2026-09-23 复审查 A–C 项）**：预登记文档 L12（停止规则①）与 L38（§3 收口流程①）的旧词「行情缺失率」**已正名为「不可判定率」**，§1 红线措辞同步对齐 §1.8④ 完整表述；§2 切点行（L132）**已加同日实施期修订注记**（预数据口径澄清：未跑批、无任何读数、无数据依赖选择之前完成，预登记措辞对齐、门禁字段无实质变更），故**不触发新预登记版本 + 新切点行**。门禁解析未受影响（`停止规则` 字段只查非空，不查内容）。Delta 工件（`specs/evaluation/spec.md` L36/L58、`tasks.md` L16、`proposal.md` L16）同词已对齐，防误名 sync 进主规范库。
 - 说明（非异常）：Scenario 9–11 的运行期强制点按 `proposal.md` L34 声明的依赖顺序落在 Δ3/Δ4，本 delta 只承担口径与门禁落点——该分工为计划设计，不是缺口。
 
 ## 结论

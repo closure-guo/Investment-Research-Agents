@@ -1,4 +1,4 @@
-"""outcome 健康检查（spec evaluation「Outcome 读数收口纪律」第①步）：只读、四检查 + 两告警。"""
+"""outcome 健康检查（spec evaluation「Outcome 读数收口纪律」第①步）：只读、三主检查 + 两告警。"""
 
 import json
 import sqlite3
