@@ -19,12 +19,19 @@
 `unknown_industry`，使抽样结果可离线复核。缺 `market_cap` 的标的**剔除出池**
 （绝不置 0、绝不判 small）；行业缺失记 `未知` 并计数披露。
 
+**池快照与离线重建(审查收口)**：上游成分/行情随快照波动会使「同 seed 重跑复现同一
+成分清单」不成立（首轮 `pool_size=298` vs 次轮 `296`）。故生成时把**富化后的整池**
+（含缺值行）落旁车文件 `data/cohort/universe-<version>.pool.json`，登记文件记
+`pool_ref`（文件名）与 `pool_hash`（池内容 sha256 前 12 位，对行序不敏感）。
+`build_universe(..., pool=<快照>)` 即**不联网重建**：抽样只由池内容 + seed 决定。
+
 **版本期内换池被拒**：`write_universe` 校验「文件名版本 = 内容 version = 既有文件
 version」，不一致直接拒绝（`force` 亦然）。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -38,7 +45,17 @@ logger = logging.getLogger(__name__)
 
 REQUIRED_KEYS = ("version", "effective_date", "seed", "strata", "constituents")
 CONSTITUENT_KEYS = ("ticker", "name", "industry", "market_cap_bucket")
-META_KEYS = ("pool_size", "cut_points", "excluded", "unknown_industry", "sources")
+META_KEYS = (
+    "pool_size",
+    "cut_points",
+    "excluded",
+    "unknown_industry",
+    "sources",
+    "pool_ref",
+    "pool_hash",
+)
+# build_universe 返回的瞬态键（整池行，供脚本落旁车快照）；不入登记文件
+POOL_KEY = "pool"
 
 STRATA_BY = "market_cap(quota)+industry(dedup)"
 BUCKETS = ("large", "mid", "small")
@@ -125,10 +142,13 @@ def write_universe(data: dict[str, Any], path: str | Path, *, force: bool = Fals
     校验（`force` 亦然）：文件名版本 = 内容 version = 既有文件 version。
     默认拒绝覆盖既有文件（版本生效期内标的池不得变更）；`force=True` 仅允许
     **同版本重生成**，换池必须另起 version。
+
+    防御性剔除瞬态键 `POOL_KEY`（整池行只落旁车快照 `pool_ref`，不写进登记文件）。
     """
     out = Path(path)
-    _require_keys(data, REQUIRED_KEYS, "universe 登记数据")
-    version = str(data["version"])
+    payload = {k: v for k, v in data.items() if k != POOL_KEY}
+    _require_keys(payload, REQUIRED_KEYS, "universe 登记数据")
+    version = str(payload["version"])
 
     expected = _version_from_filename(out)
     if expected is not None and expected != version:
@@ -149,7 +169,7 @@ def write_universe(data: dict[str, Any], path: str | Path, *, force: bool = Fals
             )
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return out
 
 
@@ -261,53 +281,35 @@ def build_universe(
     n: int = 10,
     seed: int = 42,
     client: Any | None = None,
+    pool: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """沪深300 成分 → 逐只富化(行业/市值,带缓存) → 市值配额分层抽样 n 只 → dict。
 
     富化对**整池**执行一次（分位切点需全池），结果连同池来源/切点写入登记文件；
     运行时不再抓取。缺 `market_cap` 的标的剔除出池并计数（不置 0、不判 small）。
+
+    `pool` 传入时**不联网**：直接用给定池（`pool_snapshot` 落盘的旁车文件内容）抽样，
+    使「按种子重跑脚本复现同一成分清单」不依赖上游快照波动。
+
+    返回 dict 除登记文件内容外，另含**瞬态键 `pool`**（富化后的整池行，供脚本落旁车
+    快照）；`write_universe` 会剔除该键，登记文件不会写入整池。
     """
-    if client is None:
-        from finance_agent.data.akshare_client import AKShareClient
+    if pool is not None:
+        # 离线重建：池内容即真相，不触网
+        rows_all = _canonical_pool(pool)
+        sources = {dim: ["snapshot"] for dim in SOURCE_DIMENSIONS}
+    else:
+        if client is None:
+            from finance_agent.data.akshare_client import AKShareClient
 
-        client = AKShareClient()
+            client = AKShareClient()
+        rows_all = _enrich_pool(client)
+        sources = _collect_sources(client)
 
-    raw = client.fetch_index_constituents()
-    if not raw:
-        raise ValueError("指数成分列表为空，无法构建 universe（成分信源不可用）")
-
-    industry_cache: dict[str, str] = {}
-    cap_cache: dict[str, float | None] = {}
-    rows: list[dict[str, Any]] = []
-    excluded_missing_cap = 0
-    unknown_industry = 0
-    for item in raw:
-        ticker = str(item["ticker"])
-        if ticker not in industry_cache:
-            info = client.fetch_industry(ticker) or {}
-            industry_cache[ticker] = str(info.get("industry") or UNKNOWN_INDUSTRY)
-        if ticker not in cap_cache:
-            quote = client.fetch_stock_quote(ticker) or {}
-            cap_cache[ticker] = _as_float(quote.get("market_cap"))
-
-        industry = industry_cache[ticker]
-        if industry == UNKNOWN_INDUSTRY:
-            unknown_industry += 1
-        cap = cap_cache[ticker]
-        if cap is None:
-            # I3：缺市值 → 剔除出池（绝不置 0 参与分位、绝不判 small）
-            excluded_missing_cap += 1
-            logger.warning("市值缺失，剔除出池（不参与分位与抽样）: %s", ticker)
-            continue
-        rows.append(
-            {
-                "ticker": ticker,
-                "name": str(item.get("name") or ""),
-                "industry": industry,
-                "market_cap": cap,
-            }
-        )
-
+    excluded_missing_cap = sum(1 for r in rows_all if r["market_cap"] is None)
+    unknown_industry = sum(1 for r in rows_all if r["industry"] == UNKNOWN_INDUSTRY)
+    # 复制：bucket 标注不得回写到 rows_all（旁车快照行只含 ticker/name/industry/market_cap）
+    rows = [dict(r) for r in rows_all if r["market_cap"] is not None]
     if not rows:
         raise ValueError("剔除缺市值标的后池为空，无法抽样")
 
@@ -323,11 +325,13 @@ def build_universe(
         "effective_date": date.today().isoformat(),
         "seed": seed,
         "strata": {"by": STRATA_BY, "n": n, "quota": quota},
+        "pool_ref": pool_ref(version),
+        "pool_hash": pool_hash(rows_all),
         "pool_size": len(rows),
         "cut_points": {"low": low, "high": high},
         "excluded": {"missing_market_cap": excluded_missing_cap},
         "unknown_industry": unknown_industry,
-        "sources": _collect_sources(client),
+        "sources": sources,
         "constituents": [
             {
                 "ticker": r["ticker"],
@@ -338,4 +342,70 @@ def build_universe(
             }
             for r in picked
         ],
+        POOL_KEY: rows_all,
     }
+
+
+def pool_ref(version: str) -> str:
+    """池旁车快照的约定文件名（与登记文件同目录）。"""
+    return f"universe-{version}.pool.json"
+
+
+def pool_hash(pool: list[dict[str, Any]]) -> str:
+    """整池内容 hash（sha256 前 12 位）。对行序不敏感、对任一字段变化敏感。"""
+    canonical = json.dumps(
+        _canonical_pool(pool), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def _canonical_pool(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """归一化池行（字段齐备 + 按 ticker 排序）→ 抽样与 hash 与入参行序无关。"""
+    rows = [
+        {
+            "ticker": str(item["ticker"]),
+            "name": str(item.get("name") or ""),
+            "industry": str(item.get("industry") or UNKNOWN_INDUSTRY),
+            "market_cap": _as_float(item.get("market_cap")),
+        }
+        for item in pool
+    ]
+    rows.sort(key=lambda r: r["ticker"])
+    return rows
+
+
+def _enrich_pool(client: Any) -> list[dict[str, Any]]:
+    """逐只富化整池（每 ticker 的行业/市值只取一次，缓存字典）。
+
+    返回**全部**富化行（含 `market_cap is None` 的缺值行）——缺值行不入抽样池，
+    但必须留在快照里，否则离线重建无法复现 `excluded` 计数。
+    """
+    raw = client.fetch_index_constituents()
+    if not raw:
+        raise ValueError("指数成分列表为空，无法构建 universe（成分信源不可用）")
+
+    industry_cache: dict[str, str] = {}
+    cap_cache: dict[str, float | None] = {}
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        ticker = str(item["ticker"])
+        if ticker not in industry_cache:
+            info = client.fetch_industry(ticker) or {}
+            industry_cache[ticker] = str(info.get("industry") or UNKNOWN_INDUSTRY)
+        if ticker not in cap_cache:
+            quote = client.fetch_stock_quote(ticker) or {}
+            cap_cache[ticker] = _as_float(quote.get("market_cap"))
+
+        industry = industry_cache[ticker]
+        cap = cap_cache[ticker]
+        if cap is None:
+            logger.warning("市值缺失，剔除出池（不参与分位与抽样）: %s", ticker)
+        rows.append(
+            {
+                "ticker": ticker,
+                "name": str(item.get("name") or ""),
+                "industry": industry,
+                "market_cap": cap,
+            }
+        )
+    return _canonical_pool(rows)

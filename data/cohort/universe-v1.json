@@ -11,6 +11,8 @@
       "small": 3
     }
   },
+  "pool_ref": "universe-v1.pool.json",
+  "pool_hash": "9ec46b765a87",
   "pool_size": 296,
   "cut_points": {
     "low": 782.6733333333333,

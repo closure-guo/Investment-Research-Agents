@@ -1,0 +1,1802 @@
+[
+  {
+    "ticker": "000001",
+    "name": "平安银行",
+    "industry": "综合性银行",
+    "market_cap": 2251.09
+  },
+  {
+    "ticker": "000002",
+    "name": "万科A",
+    "industry": "住宅地产开发和管理",
+    "market_cap": 467.68
+  },
+  {
+    "ticker": "000063",
+    "name": "中兴通讯",
+    "industry": "通信设备",
+    "market_cap": 1544.13
+  },
+  {
+    "ticker": "000100",
+    "name": "TCL科技",
+    "industry": "视听器材",
+    "market_cap": 1081.96
+  },
+  {
+    "ticker": "000157",
+    "name": "中联重科",
+    "industry": "建筑工程与运输机械",
+    "market_cap": 527.56
+  },
+  {
+    "ticker": "000166",
+    "name": "申万宏源",
+    "industry": "证券Ⅲ",
+    "market_cap": 1119.29
+  },
+  {
+    "ticker": "000301",
+    "name": "东方盛虹",
+    "industry": "房地产",
+    "market_cap": null
+  },
+  {
+    "ticker": "000333",
+    "name": "美的集团",
+    "industry": "空调",
+    "market_cap": 6292.23
+  },
+  {
+    "ticker": "000338",
+    "name": "潍柴动力",
+    "industry": "发动机与涡轮机",
+    "market_cap": 2236.95
+  },
+  {
+    "ticker": "000408",
+    "name": "藏格矿业",
+    "industry": "有色金属",
+    "market_cap": 1158.64
+  },
+  {
+    "ticker": "000425",
+    "name": "徐工机械",
+    "industry": "建筑工程与运输机械",
+    "market_cap": 846.72
+  },
+  {
+    "ticker": "000538",
+    "name": "云南白药",
+    "industry": "中药",
+    "market_cap": 916.4
+  },
+  {
+    "ticker": "000568",
+    "name": "泸州老窖",
+    "industry": "白酒",
+    "market_cap": 1061.39
+  },
+  {
+    "ticker": "000596",
+    "name": "古井贡酒",
+    "industry": "白酒",
+    "market_cap": 511.68
+  },
+  {
+    "ticker": "000617",
+    "name": "中油资本",
+    "industry": "内燃机",
+    "market_cap": 853.34
+  },
+  {
+    "ticker": "000625",
+    "name": "长安汽车",
+    "industry": "轿车",
+    "market_cap": 705.8
+  },
+  {
+    "ticker": "000630",
+    "name": "铜陵有色",
+    "industry": "基本金属",
+    "market_cap": 820.66
+  },
+  {
+    "ticker": "000651",
+    "name": "格力电器",
+    "industry": "白色家电",
+    "market_cap": 2148.7
+  },
+  {
+    "ticker": "000657",
+    "name": "中钨高新",
+    "industry": "钨",
+    "market_cap": 1348.01
+  },
+  {
+    "ticker": "000708",
+    "name": "中信特钢",
+    "industry": "钢铁",
+    "market_cap": 654.11
+  },
+  {
+    "ticker": "000725",
+    "name": "京东方A",
+    "industry": "光电子器件",
+    "market_cap": 2230.07
+  },
+  {
+    "ticker": "000768",
+    "name": "中航西飞",
+    "industry": "航空装备Ⅲ",
+    "market_cap": 631.48
+  },
+  {
+    "ticker": "000776",
+    "name": "广发证券",
+    "industry": "非银行金融",
+    "market_cap": 1629.92
+  },
+  {
+    "ticker": "000792",
+    "name": "盐湖股份",
+    "industry": "化肥",
+    "market_cap": 1295.38
+  },
+  {
+    "ticker": "000807",
+    "name": "云铝股份",
+    "industry": "基本金属",
+    "market_cap": 921.78
+  },
+  {
+    "ticker": "000858",
+    "name": "五 粮 液",
+    "industry": "白酒",
+    "market_cap": 2730.32
+  },
+  {
+    "ticker": "000895",
+    "name": "双汇发展",
+    "industry": "肉制品",
+    "market_cap": 808.31
+  },
+  {
+    "ticker": "000938",
+    "name": "紫光股份",
+    "industry": "电脑存储与外围设备",
+    "market_cap": 962.7
+  },
+  {
+    "ticker": "000963",
+    "name": "华东医药",
+    "industry": "批发和零售贸易",
+    "market_cap": 464.74
+  },
+  {
+    "ticker": "000975",
+    "name": "山金国际",
+    "industry": "房地产开发",
+    "market_cap": 673.17
+  },
+  {
+    "ticker": "000977",
+    "name": "浪潮信息",
+    "industry": "电脑硬件",
+    "market_cap": 1046.58
+  },
+  {
+    "ticker": "000988",
+    "name": "华工科技",
+    "industry": "其他电子",
+    "market_cap": 1066.44
+  },
+  {
+    "ticker": "000999",
+    "name": "华润三九",
+    "industry": "中药",
+    "market_cap": 395.42
+  },
+  {
+    "ticker": "001280",
+    "name": "中国铀业",
+    "industry": "未知",
+    "market_cap": 1301.3
+  },
+  {
+    "ticker": "001391",
+    "name": "国货航",
+    "industry": "未知",
+    "market_cap": 470.04
+  },
+  {
+    "ticker": "001965",
+    "name": "招商公路",
+    "industry": "高速公路",
+    "market_cap": 670.0
+  },
+  {
+    "ticker": "001979",
+    "name": "招商蛇口",
+    "industry": "房地产",
+    "market_cap": 653.66
+  },
+  {
+    "ticker": "002001",
+    "name": "新和成",
+    "industry": "医药生物",
+    "market_cap": 809.54
+  },
+  {
+    "ticker": "002027",
+    "name": "分众传媒",
+    "industry": "广告",
+    "market_cap": 686.0
+  },
+  {
+    "ticker": "002028",
+    "name": "思源电气",
+    "industry": "电网自动化",
+    "market_cap": 1006.08
+  },
+  {
+    "ticker": "002049",
+    "name": "紫光国微",
+    "industry": "集成电路",
+    "market_cap": 517.49
+  },
+  {
+    "ticker": "002050",
+    "name": "三花智控",
+    "industry": "家电零部件",
+    "market_cap": 1514.46
+  },
+  {
+    "ticker": "002074",
+    "name": "国轩高科",
+    "industry": "输变电设备",
+    "market_cap": 495.06
+  },
+  {
+    "ticker": "002142",
+    "name": "宁波银行",
+    "industry": "区域性银行",
+    "market_cap": 2292.77
+  },
+  {
+    "ticker": "002179",
+    "name": "中航光电",
+    "industry": "电子零部件制造",
+    "market_cap": 730.26
+  },
+  {
+    "ticker": "002202",
+    "name": "金风科技",
+    "industry": "风电设备",
+    "market_cap": 752.88
+  },
+  {
+    "ticker": "002230",
+    "name": "科大讯飞",
+    "industry": "软件开发",
+    "market_cap": 930.09
+  },
+  {
+    "ticker": "002236",
+    "name": "大华股份",
+    "industry": "电子系统组装",
+    "market_cap": 518.18
+  },
+  {
+    "ticker": "002241",
+    "name": "歌尔股份",
+    "industry": "电子系统组装",
+    "market_cap": 869.95
+  },
+  {
+    "ticker": "002304",
+    "name": "洋河股份",
+    "industry": "白酒",
+    "market_cap": 572.9
+  },
+  {
+    "ticker": "002311",
+    "name": "海大集团",
+    "industry": "畜牧产品",
+    "market_cap": 686.67
+  },
+  {
+    "ticker": "002352",
+    "name": "顺丰控股",
+    "industry": "有色金属",
+    "market_cap": 1576.98
+  },
+  {
+    "ticker": "002353",
+    "name": "杰瑞股份",
+    "industry": "石油化工",
+    "market_cap": 1196.27
+  },
+  {
+    "ticker": "002371",
+    "name": "北方华创",
+    "industry": "电子",
+    "market_cap": 4848.69
+  },
+  {
+    "ticker": "002384",
+    "name": "东山精密",
+    "industry": "基础化工",
+    "market_cap": 3535.0
+  },
+  {
+    "ticker": "002415",
+    "name": "海康威视",
+    "industry": "计算机",
+    "market_cap": 3034.49
+  },
+  {
+    "ticker": "002422",
+    "name": "科伦药业",
+    "industry": "化学制剂",
+    "market_cap": 663.36
+  },
+  {
+    "ticker": "002460",
+    "name": "赣锋锂业",
+    "industry": "有色金属",
+    "market_cap": 954.62
+  },
+  {
+    "ticker": "002463",
+    "name": "沪电股份",
+    "industry": "电子",
+    "market_cap": 2465.11
+  },
+  {
+    "ticker": "002466",
+    "name": "天齐锂业",
+    "industry": "石油化工",
+    "market_cap": 726.7
+  },
+  {
+    "ticker": "002475",
+    "name": "立讯精密",
+    "industry": "电子",
+    "market_cap": 4208.39
+  },
+  {
+    "ticker": "002493",
+    "name": "荣盛石化",
+    "industry": "基础化工",
+    "market_cap": 1353.57
+  },
+  {
+    "ticker": "002532",
+    "name": "天山铝业",
+    "industry": "机械",
+    "market_cap": 574.43
+  },
+  {
+    "ticker": "002558",
+    "name": "巨人网络",
+    "industry": "社会服务业",
+    "market_cap": 448.53
+  },
+  {
+    "ticker": "002594",
+    "name": "比亚迪",
+    "industry": "汽车和汽车零部件",
+    "market_cap": 7827.11
+  },
+  {
+    "ticker": "002600",
+    "name": "领益智造",
+    "industry": "电子",
+    "market_cap": 1004.48
+  },
+  {
+    "ticker": "002602",
+    "name": "世纪华通",
+    "industry": "汽车和汽车零部件",
+    "market_cap": 1056.96
+  },
+  {
+    "ticker": "002625",
+    "name": "光启技术",
+    "industry": "汽车和汽车零部件",
+    "market_cap": 572.47
+  },
+  {
+    "ticker": "002648",
+    "name": "卫星化学",
+    "industry": "基础化工",
+    "market_cap": 903.47
+  },
+  {
+    "ticker": "002709",
+    "name": "天赐材料",
+    "industry": "基础化工",
+    "market_cap": 669.46
+  },
+  {
+    "ticker": "002714",
+    "name": "牧原股份",
+    "industry": "农林牧渔",
+    "market_cap": 2390.02
+  },
+  {
+    "ticker": "002736",
+    "name": "国信证券",
+    "industry": "证券Ⅲ",
+    "market_cap": 1022.13
+  },
+  {
+    "ticker": "002837",
+    "name": "英维克",
+    "industry": "其他专用设备",
+    "market_cap": 783.28
+  },
+  {
+    "ticker": "002916",
+    "name": "深南电路",
+    "industry": "印制电路板",
+    "market_cap": 2825.27
+  },
+  {
+    "ticker": "002920",
+    "name": "德赛西威",
+    "industry": "汽车和汽车零部件",
+    "market_cap": 498.4
+  },
+  {
+    "ticker": "002938",
+    "name": "鹏鼎控股",
+    "industry": "印制电路板",
+    "market_cap": 2043.84
+  },
+  {
+    "ticker": "003816",
+    "name": "中国广核",
+    "industry": "新能源发电",
+    "market_cap": 2110.85
+  },
+  {
+    "ticker": "300014",
+    "name": "亿纬锂能",
+    "industry": "电子设备与仪器",
+    "market_cap": 1087.3
+  },
+  {
+    "ticker": "300015",
+    "name": "爱尔眼科",
+    "industry": "医疗保健机构与服务",
+    "market_cap": 744.9
+  },
+  {
+    "ticker": "300033",
+    "name": "同花顺",
+    "industry": "软件开发及服务",
+    "market_cap": 1570.31
+  },
+  {
+    "ticker": "300059",
+    "name": "东方财富",
+    "industry": "传播与文化",
+    "market_cap": 2950.84
+  },
+  {
+    "ticker": "300122",
+    "name": "智飞生物",
+    "industry": "医药生物",
+    "market_cap": 321.73
+  },
+  {
+    "ticker": "300124",
+    "name": "汇川技术",
+    "industry": "机械",
+    "market_cap": 1428.6
+  },
+  {
+    "ticker": "300251",
+    "name": "光线传媒",
+    "industry": "传播与文化",
+    "market_cap": 324.16
+  },
+  {
+    "ticker": "300274",
+    "name": "阳光电源",
+    "industry": "电力设备与新能源",
+    "market_cap": 1800.17
+  },
+  {
+    "ticker": "300308",
+    "name": "中际旭创",
+    "industry": "机械",
+    "market_cap": 10866.22
+  },
+  {
+    "ticker": "300316",
+    "name": "晶盛机电",
+    "industry": "机械",
+    "market_cap": 553.93
+  },
+  {
+    "ticker": "300394",
+    "name": "天孚通信",
+    "industry": "计算机",
+    "market_cap": 3004.13
+  },
+  {
+    "ticker": "300408",
+    "name": "三环集团",
+    "industry": "被动元件",
+    "market_cap": 2603.72
+  },
+  {
+    "ticker": "300413",
+    "name": "芒果超媒",
+    "industry": "批发和零售贸易",
+    "market_cap": 361.61
+  },
+  {
+    "ticker": "300418",
+    "name": "昆仑万维",
+    "industry": "计算机",
+    "market_cap": 551.02
+  },
+  {
+    "ticker": "300433",
+    "name": "蓝思科技",
+    "industry": "计算机",
+    "market_cap": 1796.88
+  },
+  {
+    "ticker": "300442",
+    "name": "润泽科技",
+    "industry": "印刷包装机械",
+    "market_cap": 1095.23
+  },
+  {
+    "ticker": "300450",
+    "name": "先导智能",
+    "industry": "机械",
+    "market_cap": 542.62
+  },
+  {
+    "ticker": "300476",
+    "name": "胜宏科技",
+    "industry": "印制电路板",
+    "market_cap": null
+  },
+  {
+    "ticker": "300498",
+    "name": "温氏股份",
+    "industry": "农林牧渔",
+    "market_cap": 984.12
+  },
+  {
+    "ticker": "300502",
+    "name": "新易盛",
+    "industry": "通信",
+    "market_cap": 6293.05
+  },
+  {
+    "ticker": "300628",
+    "name": "亿联网络",
+    "industry": "计算机",
+    "market_cap": 526.02
+  },
+  {
+    "ticker": "300661",
+    "name": "圣邦股份",
+    "industry": "计算机",
+    "market_cap": 839.65
+  },
+  {
+    "ticker": "300750",
+    "name": "宁德时代",
+    "industry": "储能设备",
+    "market_cap": 13927.99
+  },
+  {
+    "ticker": "300760",
+    "name": "迈瑞医疗",
+    "industry": "医疗器械",
+    "market_cap": 1883.86
+  },
+  {
+    "ticker": "300803",
+    "name": "指南针",
+    "industry": "软件开发",
+    "market_cap": 520.74
+  },
+  {
+    "ticker": "300832",
+    "name": "新产业",
+    "industry": "医疗器械",
+    "market_cap": 384.37
+  },
+  {
+    "ticker": "300866",
+    "name": "安克创新",
+    "industry": "其他电子",
+    "market_cap": 734.14
+  },
+  {
+    "ticker": "300896",
+    "name": "爱美客",
+    "industry": "医疗器械",
+    "market_cap": 282.83
+  },
+  {
+    "ticker": "300999",
+    "name": "金龙鱼",
+    "industry": "粮油加工",
+    "market_cap": 1347.81
+  },
+  {
+    "ticker": "301165",
+    "name": "锐捷网络",
+    "industry": "软件开发",
+    "market_cap": 1271.33
+  },
+  {
+    "ticker": "301236",
+    "name": "软通动力",
+    "industry": "IT服务Ⅲ",
+    "market_cap": 382.92
+  },
+  {
+    "ticker": "301269",
+    "name": "华大九天",
+    "industry": "软件开发",
+    "market_cap": 489.25
+  },
+  {
+    "ticker": "301308",
+    "name": "江波龙",
+    "industry": "未知",
+    "market_cap": 1590.42
+  },
+  {
+    "ticker": "302132",
+    "name": "中航成飞",
+    "industry": "电子",
+    "market_cap": 1588.29
+  },
+  {
+    "ticker": "600000",
+    "name": "浦发银行",
+    "industry": "综合性银行",
+    "market_cap": 2990.86
+  },
+  {
+    "ticker": "600009",
+    "name": "上海机场",
+    "industry": "机场服务",
+    "market_cap": 566.09
+  },
+  {
+    "ticker": "600010",
+    "name": "包钢股份",
+    "industry": "钢铁",
+    "market_cap": 958.79
+  },
+  {
+    "ticker": "600011",
+    "name": "华能国际",
+    "industry": "电力公用事业",
+    "market_cap": 1061.19
+  },
+  {
+    "ticker": "600015",
+    "name": "华夏银行",
+    "industry": "综合性银行",
+    "market_cap": 991.5
+  },
+  {
+    "ticker": "600016",
+    "name": "民生银行",
+    "industry": "股份制银行",
+    "market_cap": 1519.25
+  },
+  {
+    "ticker": "600018",
+    "name": "上港集团",
+    "industry": "港口服务",
+    "market_cap": 1252.46
+  },
+  {
+    "ticker": "600019",
+    "name": "宝钢股份",
+    "industry": "钢铁",
+    "market_cap": 1252.47
+  },
+  {
+    "ticker": "600023",
+    "name": "浙能电力",
+    "industry": "火力发电",
+    "market_cap": 681.16
+  },
+  {
+    "ticker": "600025",
+    "name": "华能水电",
+    "industry": "水力发电",
+    "market_cap": 1788.59
+  },
+  {
+    "ticker": "600026",
+    "name": "中远海能",
+    "industry": "水上运输",
+    "market_cap": 1153.33
+  },
+  {
+    "ticker": "600027",
+    "name": "华电国际",
+    "industry": "电力公用事业",
+    "market_cap": 557.37
+  },
+  {
+    "ticker": "600028",
+    "name": "中国石化",
+    "industry": "综合性石油天然气企业",
+    "market_cap": 6385.8
+  },
+  {
+    "ticker": "600029",
+    "name": "南方航空",
+    "industry": "航空运输",
+    "market_cap": 900.61
+  },
+  {
+    "ticker": "600030",
+    "name": "中信证券",
+    "industry": "证券",
+    "market_cap": 4185.74
+  },
+  {
+    "ticker": "600031",
+    "name": "三一重工",
+    "industry": "建筑工程与运输机械",
+    "market_cap": 1610.05
+  },
+  {
+    "ticker": "600036",
+    "name": "招商银行",
+    "industry": "股份制银行",
+    "market_cap": 10239.26
+  },
+  {
+    "ticker": "600039",
+    "name": "四川路桥",
+    "industry": "基础建设",
+    "market_cap": 753.04
+  },
+  {
+    "ticker": "600048",
+    "name": "保利发展",
+    "industry": "住宅地产开发和管理",
+    "market_cap": 675.13
+  },
+  {
+    "ticker": "600050",
+    "name": "中国联通",
+    "industry": "电信运营",
+    "market_cap": 1303.73
+  },
+  {
+    "ticker": "600061",
+    "name": "国投资本",
+    "industry": "非银行金融",
+    "market_cap": 402.83
+  },
+  {
+    "ticker": "600066",
+    "name": "宇通客车",
+    "industry": "商用车",
+    "market_cap": 559.02
+  },
+  {
+    "ticker": "600085",
+    "name": "同仁堂",
+    "industry": "中药",
+    "market_cap": 323.8
+  },
+  {
+    "ticker": "600089",
+    "name": "特变电工",
+    "industry": "高压设备",
+    "market_cap": 914.05
+  },
+  {
+    "ticker": "600104",
+    "name": "上汽集团",
+    "industry": "轿车",
+    "market_cap": 1249.54
+  },
+  {
+    "ticker": "600111",
+    "name": "北方稀土",
+    "industry": "稀土",
+    "market_cap": 1352.76
+  },
+  {
+    "ticker": "600115",
+    "name": "中国东航",
+    "industry": "航空运输",
+    "market_cap": 764.24
+  },
+  {
+    "ticker": "600118",
+    "name": "中国卫星",
+    "industry": "航天装备Ⅲ",
+    "market_cap": 682.53
+  },
+  {
+    "ticker": "600150",
+    "name": "中国船舶",
+    "industry": "建筑工程与运输机械",
+    "market_cap": 2904.14
+  },
+  {
+    "ticker": "600160",
+    "name": "巨化股份",
+    "industry": "氟化工",
+    "market_cap": 946.26
+  },
+  {
+    "ticker": "600176",
+    "name": "中国巨石",
+    "industry": "玻纤",
+    "market_cap": 1826.23
+  },
+  {
+    "ticker": "600183",
+    "name": "生益科技",
+    "industry": "nan",
+    "market_cap": 3487.08
+  },
+  {
+    "ticker": "600188",
+    "name": "兖矿能源",
+    "industry": "煤炭开采",
+    "market_cap": null
+  },
+  {
+    "ticker": "600196",
+    "name": "复星医药",
+    "industry": "化学制剂",
+    "market_cap": 617.67
+  },
+  {
+    "ticker": "600219",
+    "name": "南山铝业",
+    "industry": "铝",
+    "market_cap": 538.59
+  },
+  {
+    "ticker": "600221",
+    "name": "海航控股",
+    "industry": "航空运输",
+    "market_cap": 535.87
+  },
+  {
+    "ticker": "600233",
+    "name": "圆通速递",
+    "industry": "男装",
+    "market_cap": 611.04
+  },
+  {
+    "ticker": "600276",
+    "name": "恒瑞医药",
+    "industry": "化学制剂",
+    "market_cap": 3025.24
+  },
+  {
+    "ticker": "600309",
+    "name": "万华化学",
+    "industry": "聚氨酯",
+    "market_cap": 2241.42
+  },
+  {
+    "ticker": "600346",
+    "name": "恒力石化",
+    "industry": "合成纤维",
+    "market_cap": 1188.2
+  },
+  {
+    "ticker": "600362",
+    "name": "江西铜业",
+    "industry": "基本金属",
+    "market_cap": 1542.65
+  },
+  {
+    "ticker": "600372",
+    "name": "中航机载",
+    "industry": "航空装备Ⅲ",
+    "market_cap": 553.09
+  },
+  {
+    "ticker": "600406",
+    "name": "国电南瑞",
+    "industry": "电网自动化",
+    "market_cap": 1797.51
+  },
+  {
+    "ticker": "600415",
+    "name": "小商品城",
+    "industry": "专业市场",
+    "market_cap": 592.77
+  },
+  {
+    "ticker": "600426",
+    "name": "华鲁恒升",
+    "industry": "化肥",
+    "market_cap": 560.44
+  },
+  {
+    "ticker": "600436",
+    "name": "片仔癀",
+    "industry": "中药",
+    "market_cap": 724.58
+  },
+  {
+    "ticker": "600438",
+    "name": "通威股份",
+    "industry": "nan",
+    "market_cap": 521.33
+  },
+  {
+    "ticker": "600460",
+    "name": "士兰微",
+    "industry": "LED",
+    "market_cap": 560.29
+  },
+  {
+    "ticker": "600482",
+    "name": "中国动力",
+    "industry": "nan",
+    "market_cap": 787.76
+  },
+  {
+    "ticker": "600489",
+    "name": "中金黄金",
+    "industry": "贵金属",
+    "market_cap": 1134.27
+  },
+  {
+    "ticker": "600515",
+    "name": "海南机场",
+    "industry": "多业态零售",
+    "market_cap": 311.91
+  },
+  {
+    "ticker": "600519",
+    "name": "贵州茅台",
+    "industry": "未知",
+    "market_cap": 15641.52
+  },
+  {
+    "ticker": "600522",
+    "name": "中天科技",
+    "industry": "通信设备",
+    "market_cap": 1221.15
+  },
+  {
+    "ticker": "600547",
+    "name": "山东黄金",
+    "industry": "贵金属",
+    "market_cap": 1425.85
+  },
+  {
+    "ticker": "600549",
+    "name": "厦门钨业",
+    "industry": "钨",
+    "market_cap": 773.31
+  },
+  {
+    "ticker": "600570",
+    "name": "恒生电子",
+    "industry": "软件开发",
+    "market_cap": 382.52
+  },
+  {
+    "ticker": "600584",
+    "name": "长电科技",
+    "industry": "集成电路",
+    "market_cap": 1285.16
+  },
+  {
+    "ticker": "600585",
+    "name": "海螺水泥",
+    "industry": "建筑材料",
+    "market_cap": 912.93
+  },
+  {
+    "ticker": "600588",
+    "name": "用友网络",
+    "industry": "软件开发",
+    "market_cap": 324.61
+  },
+  {
+    "ticker": "600600",
+    "name": "青岛啤酒",
+    "industry": "啤酒",
+    "market_cap": 688.37
+  },
+  {
+    "ticker": "600660",
+    "name": "福耀玻璃",
+    "industry": "汽车零配件",
+    "market_cap": 1404.04
+  },
+  {
+    "ticker": "600674",
+    "name": "川投能源",
+    "industry": "水力发电",
+    "market_cap": 782.37
+  },
+  {
+    "ticker": "600690",
+    "name": "海尔智家",
+    "industry": "冰箱",
+    "market_cap": 1879.22
+  },
+  {
+    "ticker": "600741",
+    "name": "华域汽车",
+    "industry": "汽车零部件",
+    "market_cap": 467.23
+  },
+  {
+    "ticker": "600760",
+    "name": "中航沈飞",
+    "industry": "航空航天设备",
+    "market_cap": 1249.64
+  },
+  {
+    "ticker": "600795",
+    "name": "国电电力",
+    "industry": "电力公用事业",
+    "market_cap": 913.18
+  },
+  {
+    "ticker": "600803",
+    "name": "新奥股份",
+    "industry": "农药",
+    "market_cap": 575.09
+  },
+  {
+    "ticker": "600809",
+    "name": "山西汾酒",
+    "industry": "白酒",
+    "market_cap": 1391.13
+  },
+  {
+    "ticker": "600845",
+    "name": "宝信软件",
+    "industry": "IT服务",
+    "market_cap": 524.14
+  },
+  {
+    "ticker": "600875",
+    "name": "东方电气",
+    "industry": "综合电力设备商",
+    "market_cap": 823.44
+  },
+  {
+    "ticker": "600886",
+    "name": "国投电力",
+    "industry": "水力发电",
+    "market_cap": 1166.25
+  },
+  {
+    "ticker": "600887",
+    "name": "伊利股份",
+    "industry": "乳品",
+    "market_cap": 1702.79
+  },
+  {
+    "ticker": "600893",
+    "name": "航发动力",
+    "industry": "航空装备Ⅲ",
+    "market_cap": 1054.51
+  },
+  {
+    "ticker": "600900",
+    "name": "长江电力",
+    "industry": "电力公用事业",
+    "market_cap": 6870.68
+  },
+  {
+    "ticker": "600905",
+    "name": "三峡能源",
+    "industry": "新能源发电",
+    "market_cap": 1040.59
+  },
+  {
+    "ticker": "600918",
+    "name": "中泰证券",
+    "industry": "证券Ⅲ",
+    "market_cap": 436.3
+  },
+  {
+    "ticker": "600919",
+    "name": "江苏银行",
+    "industry": "银行",
+    "market_cap": 2215.0
+  },
+  {
+    "ticker": "600926",
+    "name": "杭州银行",
+    "industry": "银行",
+    "market_cap": 1242.48
+  },
+  {
+    "ticker": "600930",
+    "name": "华电新能",
+    "industry": "未知",
+    "market_cap": 1626.86
+  },
+  {
+    "ticker": "600938",
+    "name": "中国海油",
+    "industry": "综合性石油与天然气企业",
+    "market_cap": 15347.42
+  },
+  {
+    "ticker": "600941",
+    "name": "中国移动",
+    "industry": "综合电信业务",
+    "market_cap": 20910.06
+  },
+  {
+    "ticker": "600958",
+    "name": "东方证券",
+    "industry": "证券Ⅲ",
+    "market_cap": 758.75
+  },
+  {
+    "ticker": "600989",
+    "name": "宝丰能源",
+    "industry": "焦炭加工",
+    "market_cap": 1655.87
+  },
+  {
+    "ticker": "600999",
+    "name": "招商证券",
+    "industry": "证券",
+    "market_cap": 1550.59
+  },
+  {
+    "ticker": "601006",
+    "name": "大秦铁路",
+    "industry": "nan",
+    "market_cap": 931.57
+  },
+  {
+    "ticker": "601009",
+    "name": "南京银行",
+    "industry": "股份制银行",
+    "market_cap": 1450.25
+  },
+  {
+    "ticker": "601012",
+    "name": "隆基绿能",
+    "industry": "未知",
+    "market_cap": 864.66
+  },
+  {
+    "ticker": "601018",
+    "name": "宁波港",
+    "industry": "交通运输仓储",
+    "market_cap": 661.45
+  },
+  {
+    "ticker": "601021",
+    "name": "春秋航空",
+    "industry": "交通运输仓储",
+    "market_cap": 410.31
+  },
+  {
+    "ticker": "601058",
+    "name": "赛轮轮胎",
+    "industry": "基础化工",
+    "market_cap": 457.7
+  },
+  {
+    "ticker": "601059",
+    "name": "信达证券",
+    "industry": "证券",
+    "market_cap": 504.61
+  },
+  {
+    "ticker": "601066",
+    "name": "中信建投",
+    "industry": "证券Ⅲ",
+    "market_cap": 1836.01
+  },
+  {
+    "ticker": "601077",
+    "name": "渝农商行",
+    "industry": "综合性银行",
+    "market_cap": 742.75
+  },
+  {
+    "ticker": "601088",
+    "name": "中国神华",
+    "industry": "煤炭开采",
+    "market_cap": 10239.58
+  },
+  {
+    "ticker": "601100",
+    "name": "恒立液压",
+    "industry": "机械",
+    "market_cap": 1228.19
+  },
+  {
+    "ticker": "601111",
+    "name": "中国国航",
+    "industry": "航空运输",
+    "market_cap": 1221.36
+  },
+  {
+    "ticker": "601117",
+    "name": "中国化学",
+    "industry": "其他专业工程",
+    "market_cap": 437.16
+  },
+  {
+    "ticker": "601127",
+    "name": "赛力斯",
+    "industry": "汽车和汽车零部件",
+    "market_cap": 822.22
+  },
+  {
+    "ticker": "601136",
+    "name": "首创证券",
+    "industry": "未知",
+    "market_cap": 396.88
+  },
+  {
+    "ticker": "601138",
+    "name": "工业富联",
+    "industry": "电子制造",
+    "market_cap": 12497.81
+  },
+  {
+    "ticker": "601166",
+    "name": "兴业银行",
+    "industry": "综合性银行",
+    "market_cap": 3781.8
+  },
+  {
+    "ticker": "601169",
+    "name": "北京银行",
+    "industry": "区域性银行",
+    "market_cap": 1156.52
+  },
+  {
+    "ticker": "601186",
+    "name": "中国铁建",
+    "industry": "基础建设",
+    "market_cap": 818.85
+  },
+  {
+    "ticker": "601211",
+    "name": "国泰海通",
+    "industry": "证券Ⅲ",
+    "market_cap": 3106.57
+  },
+  {
+    "ticker": "601225",
+    "name": "陕西煤业",
+    "industry": "煤炭开采",
+    "market_cap": 2489.68
+  },
+  {
+    "ticker": "601229",
+    "name": "上海银行",
+    "industry": "银行",
+    "market_cap": 1345.6
+  },
+  {
+    "ticker": "601238",
+    "name": "广汽集团",
+    "industry": "汽车和汽车零部件",
+    "market_cap": 519.03
+  },
+  {
+    "ticker": "601288",
+    "name": "农业银行",
+    "industry": "银行",
+    "market_cap": 23903.84
+  },
+  {
+    "ticker": "601318",
+    "name": "中国平安",
+    "industry": "保险",
+    "market_cap": 9754.59
+  },
+  {
+    "ticker": "601319",
+    "name": "中国人保",
+    "industry": "多元化保险",
+    "market_cap": 3568.88
+  },
+  {
+    "ticker": "601328",
+    "name": "交通银行",
+    "industry": "国有银行",
+    "market_cap": 6644.96
+  },
+  {
+    "ticker": "601336",
+    "name": "新华保险",
+    "industry": "非银行金融",
+    "market_cap": 1805.59
+  },
+  {
+    "ticker": "601360",
+    "name": "三六零",
+    "industry": "机械",
+    "market_cap": 632.06
+  },
+  {
+    "ticker": "601377",
+    "name": "兴业证券",
+    "industry": "非银行金融",
+    "market_cap": 511.25
+  },
+  {
+    "ticker": "601390",
+    "name": "中国中铁",
+    "industry": "基础建设",
+    "market_cap": 1052.39
+  },
+  {
+    "ticker": "601398",
+    "name": "工商银行",
+    "industry": "国有银行",
+    "market_cap": 28833.27
+  },
+  {
+    "ticker": "601456",
+    "name": "国联民生",
+    "industry": "证券Ⅲ",
+    "market_cap": 491.37
+  },
+  {
+    "ticker": "601600",
+    "name": "中国铝业",
+    "industry": "基本金属",
+    "market_cap": 1564.51
+  },
+  {
+    "ticker": "601601",
+    "name": "中国太保",
+    "industry": "保险",
+    "market_cap": 3040.99
+  },
+  {
+    "ticker": "601607",
+    "name": "上海医药",
+    "industry": "药品零售",
+    "market_cap": 595.56
+  },
+  {
+    "ticker": "601618",
+    "name": "中国中冶",
+    "industry": "专业工程",
+    "market_cap": 527.64
+  },
+  {
+    "ticker": "601628",
+    "name": "中国人寿",
+    "industry": "保险",
+    "market_cap": 10910.18
+  },
+  {
+    "ticker": "601633",
+    "name": "长城汽车",
+    "industry": "汽车和汽车零部件",
+    "market_cap": 1210.42
+  },
+  {
+    "ticker": "601658",
+    "name": "邮储银行",
+    "industry": "银行",
+    "market_cap": 6389.06
+  },
+  {
+    "ticker": "601668",
+    "name": "中国建筑",
+    "industry": "房屋建设",
+    "market_cap": 1768.51
+  },
+  {
+    "ticker": "601669",
+    "name": "中国电建",
+    "industry": "建筑和工程",
+    "market_cap": 790.68
+  },
+  {
+    "ticker": "601688",
+    "name": "华泰证券",
+    "industry": "非银行金融",
+    "market_cap": 1656.43
+  },
+  {
+    "ticker": "601689",
+    "name": "拓普集团",
+    "industry": "汽车和汽车零部件",
+    "market_cap": 797.49
+  },
+  {
+    "ticker": "601698",
+    "name": "中国卫通",
+    "industry": "航天装备Ⅲ",
+    "market_cap": 995.69
+  },
+  {
+    "ticker": "601727",
+    "name": "上海电气",
+    "industry": "综合电力设备商",
+    "market_cap": 1033.42
+  },
+  {
+    "ticker": "601728",
+    "name": "中国电信",
+    "industry": "综合电信业务",
+    "market_cap": 5581.94
+  },
+  {
+    "ticker": "601766",
+    "name": "中国中车",
+    "industry": "轨交设备Ⅲ",
+    "market_cap": 1698.97
+  },
+  {
+    "ticker": "601788",
+    "name": "光大证券",
+    "industry": "证券",
+    "market_cap": 643.67
+  },
+  {
+    "ticker": "601800",
+    "name": "中国交建",
+    "industry": "建筑和工程",
+    "market_cap": 950.13
+  },
+  {
+    "ticker": "601816",
+    "name": "京沪高铁",
+    "industry": "铁路运输",
+    "market_cap": 2304.4
+  },
+  {
+    "ticker": "601818",
+    "name": "光大银行",
+    "industry": "银行",
+    "market_cap": 1772.57
+  },
+  {
+    "ticker": "601825",
+    "name": "沪农商行",
+    "industry": "银行",
+    "market_cap": 856.43
+  },
+  {
+    "ticker": "601838",
+    "name": "成都银行",
+    "industry": "银行",
+    "market_cap": 798.95
+  },
+  {
+    "ticker": "601857",
+    "name": "中国石油",
+    "industry": "综合性石油天然气企业",
+    "market_cap": 19601.55
+  },
+  {
+    "ticker": "601868",
+    "name": "中国能建",
+    "industry": "nan",
+    "market_cap": 1066.19
+  },
+  {
+    "ticker": "601872",
+    "name": "招商轮船",
+    "industry": "水上运输",
+    "market_cap": 1677.89
+  },
+  {
+    "ticker": "601877",
+    "name": "正泰电器",
+    "industry": "机械",
+    "market_cap": 541.11
+  },
+  {
+    "ticker": "601878",
+    "name": "浙商证券",
+    "industry": "证券Ⅲ",
+    "market_cap": 414.5
+  },
+  {
+    "ticker": "601881",
+    "name": "中国银河",
+    "industry": "证券Ⅲ",
+    "market_cap": 1321.97
+  },
+  {
+    "ticker": "601888",
+    "name": "中国中免",
+    "industry": "旅游",
+    "market_cap": 1084.4
+  },
+  {
+    "ticker": "601898",
+    "name": "中煤能源",
+    "industry": "煤炭开采",
+    "market_cap": 1845.61
+  },
+  {
+    "ticker": "601899",
+    "name": "紫金矿业",
+    "industry": "贵金属",
+    "market_cap": 8352.14
+  },
+  {
+    "ticker": "601901",
+    "name": "方正证券",
+    "industry": "非银行金融",
+    "market_cap": 565.55
+  },
+  {
+    "ticker": "601916",
+    "name": "浙商银行",
+    "industry": "银行",
+    "market_cap": 785.49
+  },
+  {
+    "ticker": "601919",
+    "name": "中远海控",
+    "industry": "水上运输",
+    "market_cap": 2497.86
+  },
+  {
+    "ticker": "601939",
+    "name": "建设银行",
+    "industry": "国有银行",
+    "market_cap": 28331.32
+  },
+  {
+    "ticker": "601985",
+    "name": "中国核电",
+    "industry": "电力、煤气及水等公用事业",
+    "market_cap": 1820.27
+  },
+  {
+    "ticker": "601988",
+    "name": "中国银行",
+    "industry": "国有银行",
+    "market_cap": 21201.58
+  },
+  {
+    "ticker": "601995",
+    "name": "中金公司",
+    "industry": "证券Ⅲ",
+    "market_cap": 1576.1
+  },
+  {
+    "ticker": "601998",
+    "name": "中信银行",
+    "industry": "国有银行",
+    "market_cap": 5035.89
+  },
+  {
+    "ticker": "603019",
+    "name": "中科曙光",
+    "industry": "计算机",
+    "market_cap": 1221.7
+  },
+  {
+    "ticker": "603259",
+    "name": "药明康德",
+    "industry": "生物制品",
+    "market_cap": 5095.09
+  },
+  {
+    "ticker": "603260",
+    "name": "合盛硅业",
+    "industry": "基础化工",
+    "market_cap": 388.95
+  },
+  {
+    "ticker": "603288",
+    "name": "海天味业",
+    "industry": "食品饮料",
+    "market_cap": 2005.15
+  },
+  {
+    "ticker": "603296",
+    "name": "华勤技术",
+    "industry": "计算机设备",
+    "market_cap": 1210.98
+  },
+  {
+    "ticker": "603369",
+    "name": "今世缘",
+    "industry": "食品饮料",
+    "market_cap": 339.88
+  },
+  {
+    "ticker": "603392",
+    "name": "万泰生物",
+    "industry": "医疗器械",
+    "market_cap": 340.5
+  },
+  {
+    "ticker": "603501",
+    "name": "豪威集团",
+    "industry": "电子",
+    "market_cap": 1041.08
+  },
+  {
+    "ticker": "603799",
+    "name": "华友钴业",
+    "industry": "有色金属",
+    "market_cap": 684.89
+  },
+  {
+    "ticker": "603893",
+    "name": "瑞芯微",
+    "industry": "集成电路",
+    "market_cap": 943.65
+  },
+  {
+    "ticker": "603986",
+    "name": "兆易创新",
+    "industry": "计算机",
+    "market_cap": 2806.87
+  },
+  {
+    "ticker": "603993",
+    "name": "洛阳钼业",
+    "industry": "有色金属",
+    "market_cap": 3778.24
+  },
+  {
+    "ticker": "605117",
+    "name": "德业股份",
+    "industry": "家电零部件",
+    "market_cap": null
+  },
+  {
+    "ticker": "605499",
+    "name": "东鹏饮料",
+    "industry": "软饮料",
+    "market_cap": 840.29
+  },
+  {
+    "ticker": "688008",
+    "name": "澜起科技",
+    "industry": "集成电路",
+    "market_cap": 2726.32
+  },
+  {
+    "ticker": "688009",
+    "name": "中国通号",
+    "industry": "通信技术服务",
+    "market_cap": 493.49
+  },
+  {
+    "ticker": "688012",
+    "name": "中微公司",
+    "industry": "其它专用机械",
+    "market_cap": 3346.22
+  },
+  {
+    "ticker": "688036",
+    "name": "传音控股",
+    "industry": "电子系统组装",
+    "market_cap": 640.63
+  },
+  {
+    "ticker": "688041",
+    "name": "海光信息",
+    "industry": "未知",
+    "market_cap": 5849.43
+  },
+  {
+    "ticker": "688047",
+    "name": "龙芯中科",
+    "industry": "集成电路",
+    "market_cap": 424.46
+  },
+  {
+    "ticker": "688072",
+    "name": "拓荆科技",
+    "industry": "其它专用机械",
+    "market_cap": 2133.74
+  },
+  {
+    "ticker": "688082",
+    "name": "盛美上海",
+    "industry": "半导体材料",
+    "market_cap": 1413.73
+  },
+  {
+    "ticker": "688111",
+    "name": "金山办公",
+    "industry": "软件开发",
+    "market_cap": 1051.45
+  },
+  {
+    "ticker": "688126",
+    "name": "沪硅产业",
+    "industry": "半导体材料",
+    "market_cap": 822.29
+  },
+  {
+    "ticker": "688183",
+    "name": "生益电子",
+    "industry": "印制电路板",
+    "market_cap": 1023.71
+  },
+  {
+    "ticker": "688223",
+    "name": "晶科能源",
+    "industry": "光伏设备",
+    "market_cap": 394.23
+  },
+  {
+    "ticker": "688256",
+    "name": "寒武纪",
+    "industry": "集成电路",
+    "market_cap": 6936.76
+  },
+  {
+    "ticker": "688271",
+    "name": "联影医疗",
+    "industry": "未知",
+    "market_cap": 842.29
+  },
+  {
+    "ticker": "688303",
+    "name": "大全能源",
+    "industry": "光伏设备",
+    "market_cap": 346.52
+  },
+  {
+    "ticker": "688396",
+    "name": "华润微",
+    "industry": "集成电路",
+    "market_cap": 813.0
+  },
+  {
+    "ticker": "688472",
+    "name": "阿特斯",
+    "industry": "光伏设备",
+    "market_cap": 310.76
+  },
+  {
+    "ticker": "688506",
+    "name": "百利天恒",
+    "industry": "未知",
+    "market_cap": 1025.08
+  },
+  {
+    "ticker": "688521",
+    "name": "芯原股份",
+    "industry": "集成电路",
+    "market_cap": 1105.47
+  },
+  {
+    "ticker": "688981",
+    "name": "中芯国际",
+    "industry": "半导体产品",
+    "market_cap": 10393.73
+  }
+]

@@ -13,10 +13,13 @@ import json
 import pytest
 
 from finance_agent.outcome.cohort.universe import (
+    POOL_KEY,
     Constituent,
     Universe,
     build_universe,
     load_universe,
+    pool_hash,
+    pool_ref,
     write_universe,
 )
 
@@ -412,3 +415,115 @@ class TestWriteUniverse:
         with pytest.raises(ValueError, match="v1"):
             write_universe(v2, path, force=True)
         assert load_universe(path).version == "v1"  # 原文件未被改写
+
+
+class TestPoolSnapshot:
+    """池快照持久化 + 离线重建：闭合同 seed 复现（Δ3T2 收口）。"""
+
+    def test_registry_records_pool_ref_and_hash(self):
+        data = build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH))
+
+        assert data["pool_ref"] == "universe-v1.pool.json"
+        assert pool_ref("v2") == "universe-v2.pool.json"
+        assert data["pool_hash"] == pool_hash(data[POOL_KEY])
+
+    def test_snapshot_is_json_serializable_and_keeps_missing_cap_rows(self):
+        """快照须含**全部**富化行（缺值行留在快照里），否则离线重建复现不了 excluded。"""
+        pool_in = [*_THREE_EACH, ("000999", "行业X", None)]
+        data = build_universe("v1", n=4, seed=42, client=StubClient(pool_in))
+
+        rows = json.loads(json.dumps(data[POOL_KEY], ensure_ascii=False))
+        assert len(rows) == 10
+        assert [r["ticker"] for r in rows] == sorted(r["ticker"] for r in rows)
+        assert {r["ticker"] for r in rows if r["market_cap"] is None} == {"000999"}
+
+    def test_snapshot_rows_have_canonical_keys_only(self):
+        """快照行形状 = {ticker,name,industry,market_cap}；抽样标注不得回写（审查指定）。"""
+        data = build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH))
+
+        for row in data[POOL_KEY]:
+            assert set(row) == {"ticker", "name", "industry", "market_cap"}
+
+    def test_rebuild_from_pool_snapshot_is_identical(self):
+        """核心：池快照 + 同 seed 重建 → 与登记文件逐字一致（唯一差异为来源留痕）。"""
+        original = build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH))
+
+        rebuilt = build_universe("v1", n=4, seed=42, pool=original[POOL_KEY])
+
+        assert rebuilt["constituents"] == original["constituents"]  # 逐字
+        differing = {k for k in original if original[k] != rebuilt.get(k)}
+        assert differing <= {"sources"}, differing
+        assert rebuilt["sources"] == dict.fromkeys(
+            ("constituents", "industry", "market_cap"), ["snapshot"]
+        )
+
+    def test_rebuild_reproduces_excluded_and_pool_size(self):
+        pool_in = [*_THREE_EACH, ("000999", "行业X", None)]
+        original = build_universe("v1", n=4, seed=42, client=StubClient(pool_in))
+
+        rebuilt = build_universe(
+            "v1", n=4, seed=42, pool=json.loads(json.dumps(original[POOL_KEY]))
+        )
+
+        assert rebuilt["excluded"] == {"missing_market_cap": 1} == original["excluded"]
+        assert rebuilt["pool_size"] == original["pool_size"]
+        assert rebuilt["pool_hash"] == original["pool_hash"]
+
+    def test_rebuild_after_sidecar_file_roundtrip_is_identical(self, tmp_path):
+        """脚本路径等价：快照落盘 → 读回 → 重建，成分清单逐字一致。"""
+        original = build_universe("v1", n=6, seed=42, client=StubClient(_BASELINE_POOL))
+        sidecar = tmp_path / pool_ref("v1")
+        sidecar.write_text(
+            json.dumps(original[POOL_KEY], ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+
+        rebuilt = build_universe(
+            "v1", n=6, seed=42, pool=json.loads(sidecar.read_text(encoding="utf-8"))
+        )
+
+        assert rebuilt["constituents"] == original["constituents"]
+
+    def test_pool_param_skips_enrichment(self):
+        """传入 pool 时零联网：client 的富化方法不得被调用。"""
+        stub = StubClient(_THREE_EACH)
+        pool = build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH))[POOL_KEY]
+
+        data = build_universe("v1", n=4, seed=42, client=stub, pool=pool)
+
+        assert stub.industry_calls == [] and stub.quote_calls == []
+        assert len(data["constituents"]) == 4
+
+    def test_pool_hash_is_row_order_insensitive(self):
+        pool = build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH))[POOL_KEY]
+
+        assert pool_hash(pool) == pool_hash(list(reversed(pool)))
+
+    def test_pool_hash_changes_when_any_row_changes(self):
+        pool = build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH))[POOL_KEY]
+        baseline = pool_hash(pool)
+        assert len(baseline) == 12 and baseline == baseline.lower()
+
+        for field, value in (
+            ("market_cap", pool[0]["market_cap"] + 1.0),
+            ("industry", "改过的行业"),
+            ("name", "改过的名字"),
+            ("ticker", "999999"),
+        ):
+            edited = [dict(r) for r in pool]
+            edited[0][field] = value
+            assert pool_hash(edited) != baseline, f"{field} 变化未反映在 pool_hash"
+
+        assert pool_hash(pool[:-1]) != baseline  # 少一行亦变
+
+    def test_rebuilt_registry_writes_without_sidecar_rows(self, tmp_path):
+        """重建结果写盘：登记文件不含整池（瞬态键被剔除），pool_ref/pool_hash 保留。"""
+        original = build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH))
+        path = tmp_path / "universe-v1.json"
+
+        write_universe(original, path)
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert POOL_KEY not in raw
+        assert raw["pool_ref"] == "universe-v1.pool.json"
+        assert raw["pool_hash"] == original["pool_hash"]
+        assert load_universe(path).meta["pool_hash"] == original["pool_hash"]
