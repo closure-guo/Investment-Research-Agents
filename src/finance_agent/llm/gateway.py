@@ -765,7 +765,16 @@ def complete_stream(
             if isinstance(item, BaseException):
                 raise item
             chunk = item
-            choice = chunk.choices[0]
+            # usage 帧（OpenAI 兼容端点 include_usage）：choices 为空，必须先取
+            # usage 再跳过——镜像异步主循环的 `if not choices: continue` 护栏。
+            # 否则 choices[0] 抛 IndexError → normalize_exception 归一为 error
+            # 事件，整次调用失败（Δ3T3 审查实测）。
+            if getattr(chunk, "usage", None):
+                _last_usage = chunk.usage
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            choice = choices[0]
             delta = choice.delta
             finish = getattr(choice, "finish_reason", None) or finish
             if delta and hasattr(delta, "reasoning_content") and delta.reasoning_content:
@@ -777,8 +786,6 @@ def complete_stream(
                 _answer += ct
                 saw_text = True
                 yield CanonicalEvent(kind="text", text=ct)
-            if getattr(chunk, "usage", None):
-                _last_usage = chunk.usage
         _finalize_observation(
             _gen, _answer, _reasoning, _last_usage, metadata=(trace or {}).get("metadata")
         )
@@ -805,7 +812,14 @@ def complete_stream(
                 stream2 = raw_stream(**resume_kwargs)
                 _finish = None
                 for chunk2 in stream2:
-                    choice2 = chunk2.choices[0]
+                    # 续写段 usage 累积（镜像异步续写循环 `last_usage = chunk2.usage`）：
+                    # finished 事件报告的是**最终**一段 provider usage。
+                    if getattr(chunk2, "usage", None):
+                        _last_usage = chunk2.usage
+                    choices2 = getattr(chunk2, "choices", None) or []
+                    if not choices2:
+                        continue
+                    choice2 = choices2[0]
                     d2 = choice2.delta
                     if (
                         getattr(choice2, "finish_reason", None)
@@ -883,7 +897,9 @@ def complete_stream(
                 kind="error", finish_reason=type(exc).__name__, raw={"error": str(exc)}
             )
             return
-        yield CanonicalEvent(kind="finished", finish_reason=finish)
+        yield CanonicalEvent(
+            kind="finished", finish_reason=finish, usage=_canonical_usage(_last_usage)
+        )
     except Exception as exc:  # noqa: BLE001
         _finalize_observation(
             _gen, _answer, _reasoning, _last_usage, metadata=(trace or {}).get("metadata")

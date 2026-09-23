@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import json
+import logging
 import os
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from pydantic import ValidationError
 
 if TYPE_CHECKING:
     from finance_agent.llm.gateway import FallbackAttempt
+
+logger = logging.getLogger(__name__)
 
 # ── 管线确定性 stub（agent-turn-box-display delta task 5.5）──
 #
@@ -422,22 +425,33 @@ class UsageAccumulator:
     total_tokens: int = 0
 
     def add(self, usage: dict | None) -> None:
-        """汇入一次 LLM 调用。
+        """汇入一次 LLM 调用（对 None / 空 / 缺键 / 畸形值全部安全，绝不抛）。
 
-        usage 为 ``CanonicalEvent.usage``（dict | None）。None 或空 dict 只计
-        ``calls``（provider 未返回计数时保持 calls 真值、tokens 记 0）；
-        缺 ``total_tokens`` 时按 prompt+completion 兜底（镜像 gateway
-        ``_canonical_usage`` 的键名语义）。
+        usage 为 ``CanonicalEvent.usage``（dict | None）。None、空 dict 或形态
+        违约（非 dict）只计 ``calls``（provider 未返回计数时保持 calls 真值、
+        tokens 记 0，**不估算填充**）；计数项不可解析为整数时该项记 0；
+        ``total_tokens`` 缺失/为 0 时按 prompt+completion 兜底——与
+        gateway ``_canonical_usage`` 的 ``int(total or (p + c))`` 逐字同语义。
+
+        记账是旁路观测：任何畸形输入都不得抛出而中断业务节点（调用点位于
+        只捕 LLM 错误的 try 内）。
         """
         self.calls += 1
-        if not usage:
+        if not isinstance(usage, dict) or not usage:
             return
-        prompt = int(usage.get("prompt_tokens") or 0)
-        completion = int(usage.get("completion_tokens") or 0)
-        total = usage.get("total_tokens")
+        prompt = _coerce_int(usage.get("prompt_tokens"))
+        completion = _coerce_int(usage.get("completion_tokens"))
         self.prompt_tokens += prompt
         self.completion_tokens += completion
-        self.total_tokens += int(total) if total is not None else prompt + completion
+        self.total_tokens += _coerce_int(usage.get("total_tokens")) or (prompt + completion)
+
+
+def _coerce_int(value: Any) -> int:
+    """usage 计数 → int；None / 畸形值（非数值字符串、容器、对象）记 0。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 _usage_acc: contextvars.ContextVar[UsageAccumulator | None] = contextvars.ContextVar(
@@ -456,6 +470,20 @@ def usage_collector() -> Iterator[UsageAccumulator]:
         record(acc.calls, acc.total_tokens)
 
     嵌套时内层独立记账（内层退出后外层恢复收集）；退出上下文后事件不再累加。
+
+    **同线程/同上下文约束（重要）**：累加器经 ``contextvars`` 传递，只在
+    「创建本上下文的那条执行流」内可见。必须在同一线程内消费被包裹的调用：
+
+    - 同线程直接迭代同步生成器 → 生效（deep 管线 ``graph.stream`` 同步路径属此类）
+    - ``asyncio.create_task`` / ``asyncio.to_thread`` → 生效（二者复制当前上下文）
+    - ``loop.run_in_executor`` / 自起 ``threading.Thread`` → **不生效**，且是
+      **静默**失效（``_usage_acc.get()`` 返回 None，收集结果为 0 calls / 0 tokens，
+      不报错）。注意 ``api._stream_from_sync``（``api.py:360``）与
+      ``PipelineRunner.start`` 走的正是 executor/后台线程路径——调用方若经这两处
+      执行，须自行在同一上下文内激活收集器，或显式把累加器对象传入线程。
+
+    另：``TESTING=1`` 时 ``call_llm_streaming`` 走确定性 stub 分支，不产生任何
+    ``CanonicalEvent``，故收集结果恒为 0（stub 非真实调用，语义正确）。
     """
     acc = UsageAccumulator()
     token = _usage_acc.set(acc)
@@ -591,7 +619,12 @@ def call_llm_streaming(
                 # 双认会重复计数）；error 路径无 finished → 失败尝试不计 calls。
                 acc = _usage_acc.get()
                 if acc is not None and ev.kind == "finished":
-                    acc.add(getattr(ev, "usage", None))
+                    # 记账是旁路观测：调用点位于只捕 OutputTruncatedError/LLMError
+                    # 的 try 内，任何记账异常都不得中断原本正常的节点。
+                    try:
+                        acc.add(getattr(ev, "usage", None))
+                    except Exception:  # noqa: BLE001 -- 观测旁路，失败仅 WARN
+                        logger.warning("usage 记账失败（已忽略，不影响本次分析）", exc_info=True)
                 if ev.kind == "reasoning" and writer:
                     writer({"type": "thinking", "node": node_name, "token": ev.reasoning})
                 elif ev.kind == "text":

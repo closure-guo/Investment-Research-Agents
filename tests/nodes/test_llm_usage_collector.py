@@ -243,3 +243,96 @@ class TestErrorPathsDoNotBreakCollection:
 
         assert acc.calls == 0
         assert _llm_utils._usage_acc.get() is None, "异常退出后 contextvar 必须复位"
+
+
+class TestNoDoubleCounting:
+    """gateway tool_calls 分支先发 tool_call 再发 finished，两者携带同一份 usage。"""
+
+    def test_tool_call_then_finished_same_usage_counted_once(self):
+        from finance_agent.nodes._llm_utils import call_llm_streaming, usage_collector
+
+        usage = {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+        stream = _fake_stream(
+            CanonicalEvent(kind="tool_call", tool_call={"calls": []}, usage=usage),
+            CanonicalEvent(kind="finished", finish_reason="tool_calls", usage=usage),
+        )
+        with patch(_STREAM, side_effect=stream), usage_collector() as acc:
+            call_llm_streaming("p", node_name="trader")
+
+        assert acc.calls == 1, "tool_call + finished 携带同一份 usage，只能计一次"
+        assert acc.total_tokens == 10, "重复计数会把 tokens 翻倍"
+
+
+class TestMalformedUsageIsNonFatal:
+    """记账异常绝不允许中断原本正常的节点（调用点在只捕 LLM 错误的 try 内）。"""
+
+    def test_add_tolerates_malformed_values(self):
+        from finance_agent.nodes._llm_utils import UsageAccumulator
+
+        acc = UsageAccumulator()
+        acc.add({"prompt_tokens": "abc", "completion_tokens": None, "total_tokens": "12"})
+        acc.add({"prompt_tokens": object(), "completion_tokens": [1], "total_tokens": {}})
+        acc.add("not-a-dict")  # 形态违约：仍只计 calls
+        assert acc.calls == 3
+        assert acc.prompt_tokens == 0
+        assert acc.completion_tokens == 0
+        assert acc.total_tokens == 12, "可解析的字符串计数保留；不可解析记 0"
+
+    def test_malformed_usage_does_not_break_call(self):
+        from finance_agent.nodes._llm_utils import call_llm_streaming, usage_collector
+
+        stream = _fake_stream(
+            CanonicalEvent(kind="text", text="答"),
+            _finished({"prompt_tokens": object(), "completion_tokens": "x"}),
+        )
+        with patch(_STREAM, side_effect=stream), usage_collector() as acc:
+            assert call_llm_streaming("p", node_name="trader") == "答"
+
+        assert acc.calls == 1
+
+
+class TestRealGatewayPathFeedsCollector:
+    """端到端锚点（Δ3T3 审查）：deep 管线真实调用链必须把 usage 送到收集器。
+
+    不经 gateway 打桩——patch 的是最底层 adapter `raw_stream`，让**同步
+    complete_stream 真实执行**；原先 `finished` 不挂 usage 时本用例 tokens 为 0
+    （cohort 记账恒 0 / 预算熔断永不触发的根因）。
+    """
+
+    def test_sync_stream_usage_reaches_collector(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from finance_agent.nodes._llm_utils import call_llm_streaming, usage_collector
+
+        def real_shape_stream(**kwargs):  # noqa: ARG001
+            delta = SimpleNamespace(reasoning_content="思考", content="正文")
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(delta=delta, finish_reason=None)], usage=None
+            )
+            yield SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(prompt_tokens=100, completion_tokens=40, total_tokens=140),
+            )
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(reasoning_content=None, content=None),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            )
+
+        monkeypatch.setattr(
+            "finance_agent.llm.adapters.litellm_adapter.raw_stream", real_shape_stream
+        )
+        with usage_collector() as acc:
+            answer = call_llm_streaming(
+                "p",
+                node_name="trader",
+                llm_config={"model": "openai/glm-5.3", "baseUrl": "https://x/v1", "apiKey": "k"},
+            )
+
+        assert answer == "正文"
+        assert acc.calls == 1
+        assert acc.total_tokens == 140, "同步 complete_stream 必须把 provider usage 挂到 finished"
