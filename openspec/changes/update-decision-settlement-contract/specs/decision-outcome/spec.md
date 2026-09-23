@@ -4,7 +4,7 @@
 
 ### Requirement: 决策落库
 
-每个产出的观点 SHALL 写入 `predictions` 表（取代原 `decision_log`）：不再只记 approve，**reject、hold/watch、neutral 方向的观点同样落库**（全量记录）。记录 SHALL 含观点快照（rationale_snapshot，写入后冻结）、direction（action 映射：buy→long、sell→short、hold/watch→neutral）、confidence、entry_price（**参考价**：决策时点实时价或最近收盘，注明口径，供展示与盯市）、horizon_days（显式写入，默认取配置项 `OUTCOME_DEFAULT_HORIZON_DAYS`，默认值 20 交易日）、source_type（backtest/live）、权威 created_at（服务端生成）。参考价不可得时 SHALL 存档并记 WARN，状态保持 open（判定不依赖参考价）。
+每个产出的观点 SHALL 写入 `predictions` 表（取代原 `decision_log`）：不再只记 approve，**reject、hold/watch、neutral 方向的观点同样落库**（全量记录）。记录 SHALL 含观点快照（rationale_snapshot，写入后冻结）、direction（action 映射：buy→long、sell→short、hold/watch→neutral）、confidence、entry_price（**参考价**：决策时点实时价或最近收盘，注明口径，供展示与盯市）、horizon_days（显式写入，默认取配置项 `OUTCOME_DEFAULT_HORIZON_DAYS`，默认值 20 交易日）、source_type（backtest/live）、权威 created_at（服务端生成）。参考价不可得时 SHALL 存档并记 WARN，状态保持 open（判定不依赖参考价）。neutral 观点判定后 `status` SHALL 落终态 `avoidance`（细粒度结果在 `avoidance_status`），离开 open 池。
 
 **结算入场价与参考价分离**：结算任务 SHALL 按标准化口径从行情派生 `settle_entry_price`——**决策归属日（created_at 所在日）收盘价**；决策产出时间在当日收盘后的取**次一交易日收盘价**；决策归属日非交易日的取其后首个交易日收盘价。派生值随判定结果落库（判定产出，写入后冻结可审计）；`raw_return` / `excess_return` SHALL 基于 `settle_entry_price` 计算，SHALL NOT 基于参考价。TradeDecision 申报的 entry_price / stop_loss / target_price SHALL 随观点快照冻结写入 rationale_snapshot（供审计），SHALL NOT 参与任何结算计算。
 
@@ -141,7 +141,7 @@
 - **GIVEN** 某 neutral 观点（watch/hold）完成回避判定
 - **WHEN** 判定任务处理
 - **THEN** SHALL NOT 上报 decision_hit / decision_return / decision_excess Score
-- **AND** 回避判定结果 SHALL 仅写 `avoidance_status` 字段
+- **AND** neutral 观点回避判定 SHALL 写 `avoidance_status` 与终态 `status="avoidance"`，并随判定落 `settle_entry_price` / `exit_price` / `raw_return` / `excess_return` / `resolved_at`；SHALL NOT 上报 decision_* Score
 
 #### Scenario: 基准超额
 

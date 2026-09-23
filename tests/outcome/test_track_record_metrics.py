@@ -9,6 +9,7 @@ import math
 import pandas as pd
 import pytest
 
+from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS
 from finance_agent.outcome.track_record.marking import (
     mark_open_predictions,
     run_daily_marking,
@@ -272,7 +273,7 @@ class TestMarking:
 
 class TestEquityCurve:
     def test_points_built_and_persisted(self, db, fake_client):
-        _insert(db, created_at="2026-06-01T10:00:00")
+        _insert(db, created_at="2026-06-01T10:00:00", horizon_days=DEFAULT_HORIZON_DAYS)
         result = run_daily_marking(client=fake_client, db_path=db)
         assert result["marked"] == 3
         assert result["equity_points"] == 3
@@ -301,6 +302,34 @@ class TestEquityCurve:
         # 双线首点归一 1.0；末点基准 = 3150/3100（自首个盯市日起）
         assert points[0]["benchmark_nav"] == pytest.approx(1.0)
         assert math.isclose(points[-1]["benchmark_nav"], 3150.0 / 3100.0, abs_tol=1e-6)
+
+
+class TestMetricsSnapshotCaliber:
+    """日批快照头条口径按 horizon_days=DEFAULT_HORIZON_DAYS 过滤（跨切点不混算）。"""
+
+    def test_legacy_252_row_excluded_from_snapshot(self, db, fake_client):
+        # 252 存量行（切点前口径）不得进快照读数
+        _insert(db, created_at="2026-06-01T10:00:00", horizon_days=252)
+        run_daily_marking(client=fake_client, db_path=db)
+        latest = get_latest_metrics(db_path=db)
+        assert latest is not None
+        assert latest["sample_size"] == 0
+        assert latest["settled"] == 0
+        assert latest["win_rate"] is None
+
+    def test_default_horizon_row_enters_snapshot(self, db, fake_client):
+        # 同库混存：仅默认窗口（20）行进入快照读数
+        _insert(db, created_at="2026-06-01T10:00:00", horizon_days=DEFAULT_HORIZON_DAYS)
+        _insert(
+            db,
+            created_at="2026-06-01T10:00:00",
+            symbol="000001.SZ",
+            horizon_days=252,
+        )
+        run_daily_marking(client=fake_client, db_path=db)
+        latest = get_latest_metrics(db_path=db)
+        assert latest is not None
+        assert latest["sample_size"] == 1
 
 
 class TestSchedulerJobs:

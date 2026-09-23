@@ -195,13 +195,18 @@ def build_equity_curve_points(db_path: Any = None) -> list[dict[str, Any]]:
 
 
 def compute_metrics_snapshot(db_path: Any = None) -> dict[str, Any]:
-    """聚合 predictions 统计 + 组合指标 → agent_metrics_daily 行内容。"""
+    """聚合 predictions 统计 + 组合指标 → agent_metrics_daily 行内容。
+
+    头条口径按 `horizon_days=DEFAULT_HORIZON_DAYS` 过滤（与 overview 同口径），
+    避免日批快照把跨切点的 252 存量行混入同一读数（口径切点分段，metrics.md §1.8）。
+    """
+    from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS
     from finance_agent.outcome.track_record.model import (
         list_daily_marks,
         prediction_stats,
     )
 
-    stats = prediction_stats(source_type=None, db_path=db_path)
+    stats = prediction_stats(source_type=None, db_path=db_path, horizon_days=DEFAULT_HORIZON_DAYS)
     pm = compute_metrics_from_marks(list_daily_marks(db_path=db_path))
     return {
         "sample_size": stats["total"],
