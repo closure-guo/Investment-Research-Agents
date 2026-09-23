@@ -101,7 +101,7 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 | ② 人口划分 | 主结论仅基于可执行决策（long/short）；neutral（watch/hold）以**回避正确率** = avoidance_win/(avoidance_win+avoidance_loss) 作辅助指标，SHALL NOT 进主结论（实现见 delta `update-decision-settlement-contract`） |
 | ③ 辅助观测 | T+5 / T+10 窗口由 daily_marks 派生，只观测不判定；不参与胜率与结论句；派生例程与口径同 §1.5 的均值差纪律（点估计给口径、非点估计不冒充） |
 | ④ 红线 | settled 可执行样本 <10：SHALL NOT 报任何胜率 / 平均超额 / 赚钱能力措辞，只报样本数与「样本积累中」（与 track-record 基础统计展示门槛一致，泛化为评估纪律） |
-| ⑤ 收口纪律 | 健康检查（结算成功率 ≥0.90 / 行情缺失率 ≤0.10 / integrity 零不一致 / 记账完整率）→ 异常行人工终裁（对照表落 `tests/validation/`）→ 两句式结论（显著方向带 CI ｜ 分辨率不足带 MDE；裸「未获统计支持」非法）→ 收口报告带生命周期字段（字面格式见 §1.7④；本文档不复现该字面标记）→ 本表 §2 时间线追加 + `runs.jsonl` 追加（`type: outcome-forward` / `type: outcome-backtest`） |
+| ⑤ 收口纪律 | 健康检查（结算成功率 ≥0.90 / 行情缺失率 ≤0.10 / integrity 零不一致 / 记账完整率——读数不设阈值）→ 异常行人工终裁（对照表落 `tests/validation/`）→ 两句式结论（显著方向带 CI ｜ 分辨率不足带 MDE；裸「未获统计支持」非法）→ 收口报告带生命周期字段（字面格式见 §1.7④；本文档不复现该字面标记）→ 本表 §2 时间线追加 + `runs.jsonl` 追加（`type: outcome-forward` / `type: outcome-backtest`）。integrity 为全库扫描（不受 source_type/since 过滤），其余读数按过滤口径（`integrity_scope` 字段随报告披露） |
 | ⑥ 泄漏控制 | forward 腿为金标准（零泄漏假设）；回测腿须过干净窗口判定 + 泄漏探针披露（默认阈值 0.60，实现见 delta `add-backtest-leakage-controls`）；深历史批次永久定位通路验证；两腿分歧先归因（口径见 `evaluation`「Forward 与回测双腿互证」） |
 | ⑦ MDE 换算 | 胜率（单样本 vs 50%，α=0.05 / power=0.8）：MDE = 1.4008/√n；均值超额（σ 假设 10pp）：MDE = 0.2802/√n。n=30 → 胜率 25.6pp / 均值 5.1pp；n=100 → 14.0pp / 2.8pp。推断单元按标的聚类，ICC 折算有效 n 随读数披露（同 §1.7 推断单元纪律） |
 
