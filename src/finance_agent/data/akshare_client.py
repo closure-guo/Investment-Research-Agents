@@ -32,6 +32,12 @@ _AK_TIMEOUT = 15  # 单次 AKShare 调用超时秒数
 _AK_MAX_RETRIES = 3  # 通用 AKShare 调用重试次数（应对 RemoteDisconnected 限频）
 _AK_RETRY_DELAY = 1.5  # 重试退避秒数
 
+# 结算/回测取数的复权口径（delta add-backtest-leakage-controls）。
+# 前复权（qfq，fetch_kline 默认）随最新除权事件整体重算历史价，回填历史时点会引入
+# 未来信息（as-of 不保真）；后复权（hfq）历史价 = 当时真实成交价，故结算与回测
+# 统一显式传 hfq。管线分析输入（nodes/fetch.py）保持默认 qfq 不动。
+SETTLEMENT_ADJUST = "hfq"
+
 
 def _call_ak(func, *args, **kwargs):
     """带超时 + 重试的 AKShare 调用包装。
@@ -455,10 +461,16 @@ class AKShareClient:
             # 网络异常或 AKShare 接口变更时不阻塞主流程
             return None
 
-    def fetch_kline(self, stock_code: str, days: int = 250) -> pd.DataFrame:
-        """拉取个股日 K 线（前复权），返回最近 N 个交易日。
+    def fetch_kline(self, stock_code: str, days: int = 250, *, adjust: str = "qfq") -> pd.DataFrame:
+        """拉取个股日 K 线，返回最近 N 个交易日。
 
-        优先使用 stock_zh_a_hist（东方财富），失败时回退 stock_zh_a_daily（新浪）。
+        `adjust`：复权口径，透传三源（东财/新浪/腾讯）。
+        - 默认 ``"qfq"``（前复权）= 管线分析输入口径，向后兼容不变。
+        - 结算/回测路径显式传 ``SETTLEMENT_ADJUST``（后复权 hfq）——as-of 保真：
+          后复权历史价 = 当时真实成交价，前复权会随最新除权事件重算历史价而引入未来信息。
+
+        优先使用 stock_zh_a_hist（东方财富），失败时回退 stock_zh_a_daily（新浪），
+        再回退 stock_zh_a_hist_tx（腾讯）。
         返回统一中文列名：日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额, 换手率
         """
         from datetime import datetime, timedelta
@@ -473,7 +485,7 @@ class AKShareClient:
             period="daily",
             start_date=start_date,
             end_date=end_date,
-            adjust="qfq",
+            adjust=adjust,
         )
         if df is not None and not df.empty:
             df = df.sort_values("日期").reset_index(drop=True)
@@ -482,7 +494,7 @@ class AKShareClient:
         # ── 方案2: 新浪 stock_zh_a_daily（回退，仅 1 次重试） ──
         logger.info("东财K线拉取失败，尝试新浪源: %s", stock_code)
         sina_symbol = self._to_sina_symbol(stock_code)
-        df = _call_ak(ak.stock_zh_a_daily, symbol=sina_symbol, adjust="qfq")
+        df = _call_ak(ak.stock_zh_a_daily, symbol=sina_symbol, adjust=adjust)
         if df is not None and not df.empty:
             rename_map = {
                 "date": "日期",
@@ -500,7 +512,7 @@ class AKShareClient:
 
         # ── 方案3: 腾讯 stock_zh_a_hist_tx（二级回退，独立链路） ──
         logger.info("新浪K线拉取失败，尝试腾讯源: %s", stock_code)
-        df = _call_ak(ak.stock_zh_a_hist_tx, symbol=sina_symbol, adjust="qfq")
+        df = _call_ak(ak.stock_zh_a_hist_tx, symbol=sina_symbol, adjust=adjust)
         if df is not None and not df.empty:
             rename_map = {
                 "date": "日期",

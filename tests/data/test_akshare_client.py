@@ -344,6 +344,86 @@ class TestFetchKlineTencentFallback:
         assert result.empty
 
 
+class TestFetchKlineAdjustCaliber:
+    """复权口径（delta add-backtest-leakage-controls）：
+
+    默认仍前复权（管线输入口径，向后兼容硬约束）；结算/回测路径显式传后复权（hfq，
+    as-of 保真：后复权历史价 = 当时真实成交价）。本类钉死三源透传契约。
+    """
+
+    @staticmethod
+    def _em_df():
+        return pd.DataFrame(
+            {"日期": ["2026-08-03", "2026-08-02", "2026-08-01"], "收盘": [4540.0, 4530.0, 4510.0]}
+        )
+
+    @staticmethod
+    def _sina_df():
+        return pd.DataFrame(
+            {
+                "date": ["2026-08-01", "2026-08-02", "2026-08-03"],
+                "open": [4500.0, 4520.0, 4530.0],
+                "high": [4520.0, 4540.0, 4550.0],
+                "low": [4490.0, 4510.0, 4520.0],
+                "close": [4510.0, 4530.0, 4540.0],
+                "volume": [100.0, 110.0, 120.0],
+                "amount": [1e8, 1.1e8, 1.2e8],
+                "turnover": [0.01, 0.011, 0.012],
+            }
+        )
+
+    @staticmethod
+    def _tx_df():
+        return pd.DataFrame(
+            {
+                "date": ["2026-08-01", "2026-08-02", "2026-08-03"],
+                "open": [4500.0, 4520.0, 4530.0],
+                "high": [4520.0, 4540.0, 4550.0],
+                "low": [4490.0, 4510.0, 4520.0],
+                "close": [4510.0, 4530.0, 4540.0],
+                "volume": [100.0, 110.0, 120.0],
+                "amount": [1e8, 1.1e8, 1.2e8],
+                "turnover": [0.01, 0.011, 0.012],
+            }
+        )
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_fetch_kline_default_adjust_is_qfq(self, mock_ak, client, monkeypatch):
+        """不传 adjust → 东财 kwargs 收到 qfq（默认参数 = 管线输入口径）。"""
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_MAX_RETRIES", 1)
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_RETRY_DELAY", 0)
+        mock_ak.stock_zh_a_hist.return_value = self._em_df()
+        client.fetch_kline("600519", days=2)
+        _, kwargs = mock_ak.stock_zh_a_hist.call_args
+        assert kwargs.get("adjust") == "qfq"
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_fetch_kline_hfq_passthrough_all_sources(self, mock_ak, client, monkeypatch):
+        """显式 adjust="hfq" → 东财/新浪/腾讯三源 kwargs 均收到 hfq（逐级回退均透传）。"""
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_MAX_RETRIES", 1)
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_RETRY_DELAY", 0)
+
+        # 方案1 东财
+        mock_ak.stock_zh_a_hist.return_value = self._em_df()
+        client.fetch_kline("600519", days=2, adjust="hfq")
+        _, em_kwargs = mock_ak.stock_zh_a_hist.call_args
+        assert em_kwargs.get("adjust") == "hfq"
+
+        # 方案2 新浪（东财空 → 回退）
+        mock_ak.stock_zh_a_hist.return_value = pd.DataFrame()
+        mock_ak.stock_zh_a_daily.return_value = self._sina_df()
+        client.fetch_kline("600519", days=2, adjust="hfq")
+        _, sina_kwargs = mock_ak.stock_zh_a_daily.call_args
+        assert sina_kwargs.get("adjust") == "hfq"
+
+        # 方案3 腾讯（东财+新浪均空 → 二级回退）
+        mock_ak.stock_zh_a_daily.return_value = pd.DataFrame()
+        mock_ak.stock_zh_a_hist_tx.return_value = self._tx_df()
+        client.fetch_kline("600519", days=2, adjust="hfq")
+        _, tx_kwargs = mock_ak.stock_zh_a_hist_tx.call_args
+        assert tx_kwargs.get("adjust") == "hfq"
+
+
 class TestDataGapLogging:
     """数据未正确拉取时必须有日志报错（可观测性：静默降级 = 隐性数据缺失）。
 

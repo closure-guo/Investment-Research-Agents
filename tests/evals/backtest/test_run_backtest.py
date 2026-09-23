@@ -362,6 +362,39 @@ class TestRunBacktest:
         assert json.loads(json.dumps(report, ensure_ascii=False))["n_sample"] == 3
 
 
+class TestFetchCaliber:
+    """delta add-backtest-leakage-controls：回测取数显式后复权（hfq）。
+
+    run_backtest 的结算/基线都基于全量 K 线，须 as-of 保真；管线输入（nodes/fetch）
+    保持 qfq。此处钉死 main() 对个股 K 线显式传 hfq（指数无复权概念，不传）。
+    """
+
+    def test_main_fetches_klines_with_hfq(self, monkeypatch, tmp_path):
+        import sys
+
+        import evals.backtest.run_backtest as rb
+
+        calls: list[tuple[str, str]] = []
+
+        class FakeClient:
+            def fetch_index_kline(self, code, days=None):
+                return _kline([100.0] * 5)
+
+            def fetch_kline(self, code, days=None, *, adjust="qfq"):
+                calls.append((code, adjust))
+                return _kline([100.0] * 5)
+
+        monkeypatch.setattr("finance_agent.data.akshare_client.AKShareClient", FakeClient)
+        monkeypatch.setattr(rb, "stratified_sample", lambda ik, codes, per_regime: [])
+        monkeypatch.setattr(rb, "run_backtest", lambda *a, **k: {"ok": True})
+        monkeypatch.chdir(tmp_path)  # 报告写盘落在 tmp（不污染仓库）
+        monkeypatch.setattr(sys, "argv", ["run_backtest.py", "--codes", "600000", "600001"])
+
+        rb.main()
+
+        assert calls == [("600000", "hfq"), ("600001", "hfq")]
+
+
 class TestBaselineHorizonAlignment:
     """refine: 基线按系统相同持有窗口切片（原 1500 日全窗口 vs 单笔持有期不可比）。"""
 

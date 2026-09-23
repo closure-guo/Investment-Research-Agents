@@ -16,6 +16,7 @@ from typing import Any
 
 import pandas as pd
 
+from finance_agent.data.akshare_client import SETTLEMENT_ADJUST
 from finance_agent.outcome.track_record.model import (
     init_track_record_tables,
     insert_daily_mark,
@@ -94,7 +95,9 @@ def mark_open_predictions(
             result["skipped"] += 1
             continue
         try:
-            kline = client.fetch_kline(_code(p["symbol"]), days=kline_days)
+            kline = client.fetch_kline(
+                _code(p["symbol"]), days=kline_days, adjust=SETTLEMENT_ADJUST
+            )
             if kline is None or kline.empty:
                 result["skipped"] += 1
                 continue

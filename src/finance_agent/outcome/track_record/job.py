@@ -21,6 +21,7 @@ from typing import Any
 
 import pandas as pd
 
+from finance_agent.data.akshare_client import SETTLEMENT_ADJUST
 from finance_agent.outcome.track_record.judgment import (
     AVOIDANCE_STATUSES,
     DEFAULT_NEUTRAL_BAND,
@@ -152,7 +153,9 @@ def settle_open_predictions(
                 new = group[-1]
                 if should_supersede(old, new):
                     try:
-                        kline = client.fetch_kline(_code(sym), days=kline_days)
+                        kline = client.fetch_kline(
+                            _code(sym), days=kline_days, adjust=SETTLEMENT_ADJUST
+                        )
                         if kline is not None and not kline.empty:
                             kline = _normalize_dates(kline)
                         exit_price = (
@@ -216,7 +219,9 @@ def settle_open_predictions(
     remaining = list_predictions(status="open", db_path=db_path)
     for p in remaining:
         try:
-            kline = client.fetch_kline(_code(p["symbol"]), days=kline_days)
+            kline = client.fetch_kline(
+                _code(p["symbol"]), days=kline_days, adjust=SETTLEMENT_ADJUST
+            )
             if kline is not None and not kline.empty:
                 kline = _normalize_dates(kline)
             created = str(p["created_at"])[:10]

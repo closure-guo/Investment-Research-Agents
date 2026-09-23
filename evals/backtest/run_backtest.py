@@ -26,6 +26,7 @@ from evals.backtest.replay import replay_with_consistency
 from evals.backtest.sampling import stratified_sample
 from evals.backtest.significance import block_length_sensitivity, validate_sanity
 from evals.stats import paired_block_bootstrap_diff
+from finance_agent.data.akshare_client import SETTLEMENT_ADJUST
 from finance_agent.outcome.settle import BENCHMARK_CODE
 
 CONSISTENCY_FLOOR = 2 / 3
@@ -235,7 +236,9 @@ def main() -> None:
     client = AKShareClient()
     index_kline = client.fetch_index_kline(BENCHMARK_CODE, days=1500)
     sample = stratified_sample(index_kline, args.codes, per_regime=args.per_regime)
-    klines = {code: client.fetch_kline(code, days=1500) for code in args.codes}
+    klines = {
+        code: client.fetch_kline(code, days=1500, adjust=SETTLEMENT_ADJUST) for code in args.codes
+    }
     report = run_backtest(
         sample,
         klines,

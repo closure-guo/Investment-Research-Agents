@@ -44,8 +44,10 @@ class _StubClient:
     def __init__(self, klines, benchmark=None):
         self.klines = klines
         self.benchmark = benchmark
+        self.kline_adjusts: list[str] = []
 
-    def fetch_kline(self, code, days=None):
+    def fetch_kline(self, code, days=None, *, adjust="qfq"):
+        self.kline_adjusts.append(adjust)
         return self.klines.get(code)
 
     def fetch_index_kline(self, code, days=None):
@@ -113,6 +115,21 @@ def test_settle_horizon_win(tmp_path):
     row = list_predictions(db_path=db)[0]
     assert row["status"] == "resolved_win"
     assert row["prediction_id"] == pid
+
+
+def test_settlement_job_requests_hfq(tmp_path):
+    """结算路径取数必须显式后复权（hfq）：as-of 保真，与管线 qfq 输入口径分离。
+
+    delta add-backtest-leakage-controls：结算/回测统一 hfq；管线（nodes/fetch）保持 qfq。
+    """
+    db = _db(tmp_path)
+    _insert(db)
+    client = _StubClient(
+        {"600519": _kline([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 115])}
+    )
+    settle_open_predictions(client=client, db_path=db)
+    assert client.kline_adjusts  # 确有取数
+    assert set(client.kline_adjusts) == {"hfq"}
 
 
 def test_settle_skips_not_enough_rows(tmp_path):

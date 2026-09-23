@@ -13,6 +13,7 @@ from typing import Any
 
 import pandas as pd
 
+from finance_agent.data.akshare_client import SETTLEMENT_ADJUST
 from finance_agent.outcome import store
 from finance_agent.outcome.settle import (
     BENCHMARK_CODE,
@@ -121,7 +122,7 @@ def settle_open_decisions(
 
     for decision in open_decisions:
         try:
-            kline = client.fetch_kline(decision["ticker"], days=days)
+            kline = client.fetch_kline(decision["ticker"], days=days, adjust=SETTLEMENT_ADJUST)
             decision_date = str(decision["timestamp"])[:10]
             if kline is not None and not kline.empty:
                 kline = _normalize_dates(kline)

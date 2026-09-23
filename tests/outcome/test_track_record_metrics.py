@@ -206,8 +206,10 @@ class FakeClient:
     def __init__(self, klines, bench):
         self._k = klines
         self._b = bench
+        self.kline_adjusts: list[str] = []
 
-    def fetch_kline(self, code, days=280):
+    def fetch_kline(self, code, days=280, *, adjust="qfq"):
+        self.kline_adjusts.append(adjust)
         return self._k.get(code)
 
     def fetch_index_kline(self, code, days=280):
@@ -246,6 +248,13 @@ class TestMarking:
         # 超额 = 股票收益 - 基准收益（基准基期 = entry 日 06-01 收盘 3000；落库 6 位小数）
         assert m["cum_excess"] == pytest.approx(0.01 - (3100.0 / 3000.0 - 1.0), abs=1e-6)
 
+    def test_marking_requests_hfq(self, db, fake_client):
+        """盯市取数同样显式后复权（hfq）：与结算路径同口径（as-of 保真）。"""
+        _insert(db, created_at="2026-06-01T10:00:00")
+        mark_open_predictions(client=fake_client, db_path=db)
+        assert fake_client.kline_adjusts  # 确有取数
+        assert set(fake_client.kline_adjusts) == {"hfq"}
+
     def test_no_entry_price_skipped(self, db, fake_client):
         _insert(db, entry_price=None, created_at="2026-06-01T10:00:00")
         result = mark_open_predictions(client=fake_client, db_path=db)
@@ -254,7 +263,7 @@ class TestMarking:
 
     def test_kline_error_isolated(self, db):
         class Boom:
-            def fetch_kline(self, code, days=280):
+            def fetch_kline(self, code, days=280, *, adjust="qfq"):
                 raise RuntimeError("网络失败")
 
             def fetch_index_kline(self, code, days=280):
