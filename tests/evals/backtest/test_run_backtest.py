@@ -720,9 +720,14 @@ class TestTask3ReviewClosures:
         assert aggregate["downgraded"] is True
         assert aggregate["direction_hit_rate"] == 0.9  # 最差（触发降级）读数
         assert aggregate["probe_window"] == ["2023-01-05", "2023-06-01"]
+        # 审查②：per_window 每项带它**自己**的窗口，不是把全部窗口塞进每行
+        per_window = aggregate["per_window"]
+        assert [item["probe_window"] for item in per_window] == [["2023-01-05"], ["2023-06-01"]]
+        assert [item["direction_hit_rate"] for item in per_window] == [0.3, 0.9]
+        assert [item["state"] for item in per_window] == ["measurable", "downgraded"]
 
     def test_batch_probe_any_unmeasurable_wins(self, monkeypatch):
-        """D2：任一窗口不可测 → 汇总态 unmeasurable（读数 None，按通路验证处理）。"""
+        """D2/审查⑥：任一窗口不可测 → 汇总态 unmeasurable，三率一并置 None（保留 unknown_ratio）。"""
         import evals.backtest.run_backtest as rb
 
         def fake_probe(codes, decision_date, *, window_days=20, client=None):
@@ -734,6 +739,25 @@ class TestTask3ReviewClosures:
         aggregate = rb.run_batch_probe(["600000"], ["2023-01-05", "2023-06-01"])
         assert aggregate["state"] == "unmeasurable"
         assert aggregate["direction_hit_rate"] is None
+        # 「不可测」却带子读数会误读 → 三率一并置空
+        assert aggregate["magnitude_hit_rate"] is None
+        assert aggregate["event_hit_rate"] is None
+        assert aggregate["unknown_ratio"] is not None  # 未知占比正是不可测的证据，保留
+
+    def test_batch_probe_counts_none_entries(self, monkeypatch):
+        """审查⑥：None 探针条目计数披露（probes_missing），不静默丢弃。"""
+        import evals.backtest.run_backtest as rb
+
+        def fake_probe(codes, decision_date, *, window_days=20, client=None):
+            if str(decision_date) == "2023-06-01":
+                return None
+            return _probe(rate=0.3)
+
+        monkeypatch.setattr(rb, "run_leakage_probe", fake_probe)
+        aggregate = rb.run_batch_probe(["600000"], ["2023-01-05", "2023-06-01"])
+        assert aggregate["probes_missing"] == 1
+        assert aggregate["state"] == "measurable"
+        assert [item["probe_window"] for item in aggregate["per_window"]] == [["2023-01-05"]]
 
     def test_batch_probe_empty_dates_returns_none(self):
         import evals.backtest.run_backtest as rb
@@ -749,6 +773,23 @@ class TestTask3ReviewClosures:
             probe={**_probe(rate=0.3), "probe_window": ["2023-01-05", "2023-06-01"]},
         )
         assert disclosure["leakage_probe"]["probe_window"] == ["2023-01-05", "2023-06-01"]
+
+    def test_disclosures_carry_per_window_readings(self, monkeypatch):
+        """审查①：per_window 逐窗口读数进入报告披露段（JSON 可见，不只算不披露）。"""
+        import evals.backtest.run_backtest as rb
+        from evals.backtest.report import build_disclosures
+
+        def fake_probe(codes, decision_date, *, window_days=20, client=None):
+            if str(decision_date) == "2023-06-01":
+                return _probe(rate=0.9, downgraded=True)
+            return _probe(rate=0.3)
+
+        monkeypatch.setattr(rb, "run_leakage_probe", fake_probe)
+        aggregate = rb.run_batch_probe(["600000"], ["2023-01-05", "2023-06-01"])
+        disclosure = build_disclosures(batch_kind="formal", probe=aggregate)
+        per_window = disclosure["leakage_probe"]["per_window"]
+        assert per_window is not None
+        assert [item["probe_window"] for item in per_window] == [["2023-01-05"], ["2023-06-01"]]
 
     def test_empty_decision_dates_clean_window_fails(self):
         """D3：空样本 → passed False（消除真空真）。"""

@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import pytest
-from evals.backtest.report import render_backtest_report_md
+from evals.backtest.report import build_conclusion, render_backtest_report_md
 from evals.outcome.report import assert_outcome_report
 
 
@@ -119,6 +119,8 @@ class TestProbeStates:
     def test_missing_probe_renders_not_executed(self):
         text = _render(leakage_probe=None)
         assert "未执行（无探针读数）" in text
+        # 审查③：无探针时不得出现自相矛盾的「probe_window：未提供（…仅覆盖该窗口）」句。
+        assert "仅覆盖该窗口" not in text
 
     def test_probe_section_discloses_unknown_ratio_and_window(self):
         text = _render(
@@ -129,6 +131,41 @@ class TestProbeStates:
         assert "unknown_ratio" in text
         assert "12.5%" in text
         assert "2023-01-05" in text and "2023-06-01" in text
+
+    def test_per_window_readings_rendered_as_table(self):
+        """审查①：逐窗口读数进入 md（每项带自己的窗口），汇总不掩盖单窗口异常。"""
+        probe = _probe("downgraded", rate=0.9, downgraded=True, window=["2023-01-05", "2023-06-01"])
+        probe["per_window"] = [
+            {
+                "probe_window": ["2023-01-05"],
+                "state": "measurable",
+                "direction_hit_rate": 0.3,
+                "probe_n": 10,
+                "unknown_ratio": 0.0,
+                "downgraded": False,
+            },
+            {
+                "probe_window": ["2023-06-01"],
+                "state": "downgraded",
+                "direction_hit_rate": 0.9,
+                "probe_n": 10,
+                "unknown_ratio": 0.2,
+                "downgraded": True,
+            },
+        ]
+        text = _render(leakage_probe=probe)
+        assert "逐窗口读数" in text
+        assert "聚合规则：不可测 > 超阈 > 可测" in text
+        # 逐窗口行的窗口与其自身读数并存（不是把全部窗口塞进每行）
+        assert "| 2023-01-05 |" in text
+        assert "| 2023-06-01 |" in text
+
+    def test_probes_missing_count_disclosed(self):
+        probe = _probe("measurable", rate=0.3, downgraded=False, window=["2023-01-05"])
+        probe["probes_missing"] = 2
+        text = _render(leakage_probe=probe)
+        assert "未返回读数的窗口条目" in text
+        assert "2 条" in text
 
 
 class TestCleanWindowAndRegime:
@@ -171,9 +208,23 @@ class TestPerfTableAndConclusion:
         assert "CR" in text and "ARR" in text and "Sharpe" in text and "MDD" in text
 
     def test_conclusion_verbatim(self):
-        sentence = "通路验证定位（batch_kind=pathway）：本批不产出 skill / 赚钱能力结论句"
-        text = _render(conclusion=sentence)
-        assert sentence in text
+        """审查⑤：与 `build_conclusion(...)` 的真实输出相等（不再用硬编码句只钉透传）。"""
+        expected = build_conclusion(
+            "显著优于基线",
+            batch_kind="pathway",
+        )
+        text = _render(conclusion=expected)
+        assert f"## 5. 结论\n\n{expected}\n" in text
+
+    def test_conclusion_is_the_verbatim_build_conclusion_output(self):
+        expected = build_conclusion(
+            "无显著差异",
+            batch_kind="formal",
+            clean_window={"passed": True, "reason": "ok"},
+            probe={"direction_hit_rate": None, "downgraded": False},
+        )
+        assert "通路验证" in expected  # 前置：确实走了非透传分支
+        assert f"## 5. 结论\n\n{expected}\n" in _render(conclusion=expected)
 
     def test_missing_conclusion_rendered_not_provided(self):
         text = _render(conclusion=None)

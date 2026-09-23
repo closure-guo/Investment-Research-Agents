@@ -338,10 +338,13 @@ def run_batch_probe(
     windows = sorted({str(d)[:10] for d in decision_dates if str(d).strip()})
     if not windows:
         return None
-    probes = [
-        run_leakage_probe(codes, window, window_days=window_days, client=client)
-        for window in windows
-    ]
+    probes: list[dict[str, Any] | None] = []
+    for window in windows:
+        result = run_leakage_probe(codes, window, window_days=window_days, client=client)
+        # 审查②：每项带上**它自己**的窗口，供 aggregate_probes 的 per_window 逐窗口披露。
+        if result is not None:
+            result = {**result, "probe_window": [window]}
+        probes.append(result)
     return aggregate_probes(probes, windows=windows)
 
 

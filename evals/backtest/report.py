@@ -160,6 +160,8 @@ def _probe_disclosure(probe: dict[str, Any] | None) -> dict[str, Any]:
             "threshold": None,
             "downgraded": False,
             "probe_window": None,
+            "per_window": None,
+            "probes_missing": None,
         }
     # 显式 state 优先（`aggregate_probes` 的最差态汇总）；否则按读数三态推导。
     state = probe.get("state") or probe_state(probe)
@@ -175,6 +177,10 @@ def _probe_disclosure(probe: dict[str, Any] | None) -> dict[str, Any]:
         "downgraded": bool(probe.get("downgraded")),
         # 探针窗口（D2）：批内 distinct 决策日各探一次时列出全部窗口；单窗口批亦列。
         "probe_window": list(probe.get("probe_window") or []) or None,
+        # 逐窗口读数（审查①）：汇总不掩盖单窗口异常——每项带**它自己**的窗口。
+        "per_window": list(probe.get("per_window") or []) or None,
+        # 未返回读数的窗口条目数（审查⑥）：None 条目计数披露，不静默丢弃。
+        "probes_missing": probe.get("probes_missing"),
     }
 
 
@@ -193,9 +199,11 @@ def aggregate_probes(
     - 否则任一窗口超阈（`downgraded`）→ `downgraded`，读数为触发降级的最差（最大）命中率；
     - 否则 `measurable`，读数为各窗口最大命中率（保守取高）。
 
-    `probe_window` 列出全部被探窗口，`per_window` 保留逐窗口读数，汇总不掩盖单窗口异常。
+    `probe_window` 列出全部被探窗口，`per_window` 保留逐窗口读数（每项带**它自己**的窗口），
+    汇总不掩盖单窗口异常；未返回读数的 `None` 条目计入 `probes_missing`，不静默丢弃。
     成本：探针次数 = distinct 决策日数（≤ regime 数），相对回放 LLM 成本可忽略。
     """
+    probes_missing = sum(1 for p in probes if p is None)
     usable = [p for p in probes if p is not None]
     if not usable:
         return None
@@ -206,34 +214,47 @@ def aggregate_probes(
         p.get("unknown_ratio") for p in usable if isinstance(p.get("unknown_ratio"), (int, float))
     ]
     if any(s == PROBE_UNMEASURABLE for s in states):
+        # 不可测态：三率一并置 None（审查⑥）——「不可测」却带子读数会误导；
+        # unknown_ratio 仍保留（未知占比正是不可测的证据）。
         state = PROBE_UNMEASURABLE
-        rate: float | None = None
+        direction_rate: float | None = None
+        magnitude_rate: float | None = None
+        event_rate: float | None = None
         downgraded = False
     elif any(bool(p.get("downgraded")) for p in usable):
         state = PROBE_DOWNGRADED
-        rate = max(measurable_rates) if measurable_rates else None
+        direction_rate = max(measurable_rates) if measurable_rates else None
+        magnitude_rate = _max_optional(p.get("magnitude_hit_rate") for p in usable)
+        event_rate = _max_optional(p.get("event_hit_rate") for p in usable)
         downgraded = True
     else:
         state = PROBE_MEASURABLE
-        rate = max(measurable_rates) if measurable_rates else None
+        direction_rate = max(measurable_rates) if measurable_rates else None
+        magnitude_rate = _max_optional(p.get("magnitude_hit_rate") for p in usable)
+        event_rate = _max_optional(p.get("event_hit_rate") for p in usable)
         downgraded = False
     windows_list = [str(w)[:10] for w in windows if str(w).strip()]
     return {
         "state": state,
         "probe_n": sum(int(p.get("probe_n") or 0) for p in usable),
         "questions_per_ticker": usable[0].get("questions_per_ticker"),
-        "direction_hit_rate": rate,
-        "magnitude_hit_rate": _max_optional(p.get("magnitude_hit_rate") for p in usable),
-        "event_hit_rate": _max_optional(p.get("event_hit_rate") for p in usable),
+        "direction_hit_rate": direction_rate,
+        "magnitude_hit_rate": magnitude_rate,
+        "event_hit_rate": event_rate,
         "unknown_ratio": max(unknown_ratios) if unknown_ratios else None,
         "threshold": usable[0].get("threshold"),
         "downgraded": downgraded,
         "probe_window": windows_list or None,
+        "probes_missing": probes_missing or None,
         "per_window": [
             {
-                "probe_window": (list(p.get("probe_window") or windows_list) or None),
+                # 每项带它自己的窗口（审查②）：调用方（run_batch_probe）逐窗口注入；
+                # 未标注则 None，不兜底成全部窗口列表（那会把「单窗口读数」冒充成每窗都有）。
+                "probe_window": list(p.get("probe_window") or []) or None,
                 "state": probe_state(p),
                 "direction_hit_rate": p.get("direction_hit_rate"),
+                "magnitude_hit_rate": p.get("magnitude_hit_rate"),
+                "event_hit_rate": p.get("event_hit_rate"),
                 "probe_n": p.get("probe_n"),
                 "unknown_ratio": p.get("unknown_ratio"),
                 "downgraded": bool(p.get("downgraded")),
@@ -393,13 +414,13 @@ def _clean_window_lines(clean_window: dict[str, Any] | None) -> list[str]:
 def _probe_lines(report: dict[str, Any]) -> list[str]:
     raw = report.get("leakage_probe")
     if raw is None:
-        state = PROBE_MISSING
-        probe: dict[str, Any] = {}
-    else:
-        state = raw.get("state") or probe_state(raw)
-        probe = raw
-    window = probe.get("probe_window")
-    window_text = ", ".join(str(w) for w in window) if window else NOT_PROVIDED
+        # 审查③：无探针时不得渲染「probe_window：未提供（…仅覆盖该窗口）」这类自相矛盾句。
+        return [
+            f"- 状态：{PROBE_STATE_TEXT[PROBE_MISSING]}",
+            "- 处置：本批未执行探针，泄漏风险未测——不得以 skill 定位下结论。",
+        ]
+    probe: dict[str, Any] = raw
+    state = probe.get("state") or probe_state(probe)
     lines = [
         f"- 状态：{PROBE_STATE_TEXT.get(state, state)}",
         (
@@ -408,11 +429,38 @@ def _probe_lines(report: dict[str, Any]) -> list[str]:
             f"probe_n={probe.get('probe_n') if probe.get('probe_n') is not None else NOT_PROVIDED}）"
         ),
         f"- 未知占比 unknown_ratio：{_pct(probe.get('unknown_ratio'))}",
-        (
-            f"- 探针窗口 probe_window：{window_text}"
-            "（批内 distinct 决策日各探一次，取最差态汇总；仅覆盖该窗口）"
-        ),
     ]
+    window = probe.get("probe_window")
+    if window:
+        lines.append(
+            f"- 探针窗口 probe_window：{', '.join(str(w) for w in window)}"
+            "（批内 distinct 决策日各探一次，取最差态汇总；仅覆盖该窗口）"
+        )
+    else:
+        lines.append("- 探针窗口 probe_window：未标注（单窗口/未提供）")
+    missing = probe.get("probes_missing")
+    if missing:
+        lines.append(f"- 未返回读数的窗口条目：{missing} 条（计数披露，未静默丢弃）")
+    per_window = probe.get("per_window")
+    if per_window:
+        lines += [
+            "",
+            "逐窗口读数（聚合规则：不可测 > 超阈 > 可测；不可测态三率一并置空）：",
+            "",
+            "| 窗口 | 状态 | direction_hit_rate | probe_n | unknown_ratio |",
+            "|---|---|---|---|---|",
+        ]
+        for item in per_window:
+            item_window = item.get("probe_window")
+            item_window_text = (
+                ", ".join(str(w) for w in item_window) if item_window else NOT_PROVIDED
+            )
+            lines.append(
+                f"| {item_window_text} | {PROBE_STATE_TEXT.get(item.get('state'), item.get('state'))} "
+                f"| {_pct(item.get('direction_hit_rate'))} "
+                f"| {item.get('probe_n') if item.get('probe_n') is not None else NOT_PROVIDED} "
+                f"| {_pct(item.get('unknown_ratio'))} |"
+            )
     if state == PROBE_DOWNGRADED:
         lines.append(
             "- 处置：超阈 → 结论降级为「泄漏污染下的上界证据（真实 skill ≤ 读数）」，"
@@ -470,7 +518,7 @@ def _methodology_lines(report: dict[str, Any]) -> list[str]:
 def render_backtest_report_md(report: dict, *, name: str) -> str:
     """回测报告 dict → md（头部含生命周期 status 头；渲染后自校契约）。
 
-    固定段落顺序：① 干净窗口 ② 泄漏探针（三态 + unknown_ratio + probe_window）
+    固定段落顺序：① 干净窗口 ② 泄漏探针（三态 + unknown_ratio + probe_window + 逐窗口读数）
     ③ regime 覆盖 ④ 绩效表（system + 各基线）⑤ 结论（逐字）⑥ 口径说明。
     缺数据如实写「未提供/不适用」，不静默省略。
 

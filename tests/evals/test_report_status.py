@@ -50,7 +50,11 @@ def report(request: pytest.FixtureRequest) -> Path:
 
 
 class TestAblationReportStatus:
-    @pytest.mark.parametrize("dir_path", _REPORTS_DIRS, ids=lambda p: p.parent.name)
+    @pytest.mark.parametrize(
+        "dir_path",
+        _REPORTS_DIRS,
+        ids=lambda p: f"{p.parent.name}-{p.name}",  # 审查④：两个目录都叫 results → 组合 id
+    )
     def test_reports_directory_not_empty(self, dir_path: Path):
         """防目录改名后本文件静默全绿（契约消失而无人发现）。"""
         assert list(dir_path.glob("*.md")), f"{dir_path} 下应有结果报告"
