@@ -34,7 +34,10 @@ from evals.backtest.data_snapshot import build_snapshot  # noqa: E402
 from evals.backtest.run_backtest import run_backtest  # noqa: E402
 from evals.backtest.sampling import classify_regime  # noqa: E402
 
-from finance_agent.data.akshare_client import AKShareClient  # noqa: E402
+from finance_agent.data.akshare_client import (  # noqa: E402
+    SETTLEMENT_ADJUST,
+    AKShareClient,
+)
 from finance_agent.outcome.settle import BENCHMARK_CODE  # noqa: E402
 
 CODES = ["002412", "600519", "300308"]  # 汉森制药 / 贵州茅台 / 中际旭创（同冒烟三标的）
@@ -221,8 +224,15 @@ def install_index_kline_patch() -> None:
 
     AKShareClient.fetch_benchmark_kline = _fetch_benchmark  # type: ignore[method-assign]
 
-    def _fetch_kline_sina(self: Any, stock_code: str, days: int = 1500) -> pd.DataFrame:
-        df = _retry(ak.stock_zh_a_daily, symbol=self._to_sina_symbol(stock_code), adjust="qfq")
+    def _fetch_kline_sina(
+        self: Any, stock_code: str, days: int = 1500, *, adjust: str = "qfq", **kwargs: Any
+    ) -> pd.DataFrame:
+        df = _retry(
+            ak.stock_zh_a_daily,
+            symbol=self._to_sina_symbol(stock_code),
+            adjust=adjust,
+            **kwargs,
+        )
         if df.empty:
             return df
         return _sina_kline_to_cn(df).tail(days).reset_index(drop=True)
@@ -345,7 +355,7 @@ def main() -> None:
     index_kline = client.fetch_index_kline(BENCHMARK_CODE, days=1500)
     decision_date = find_sideways_decision_date(index_kline, year=2023)
     print(f"2023 震荡段决策日: {decision_date}", flush=True)
-    klines = {code: client.fetch_kline(code, days=1500) for code in CODES}
+    klines = {code: client.fetch_kline(code, days=1500, adjust=SETTLEMENT_ADJUST) for code in CODES}
 
     sample = [{"code": code, "regime": REGIME, "decision_date": decision_date} for code in CODES]
     print(f"样本: {sample}（repeats={REPEATS}）", flush=True)

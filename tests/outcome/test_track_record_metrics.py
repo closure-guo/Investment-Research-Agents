@@ -220,6 +220,21 @@ def _df(dates, closes):
     return pd.DataFrame({"日期": dates, "收盘": [float(c) for c in closes]})
 
 
+class _CaliberAwareClient:
+    """按 `adjust` 返回不同序列（qfq 与参考价同尺度；hfq 为后复权序列）并记录取值。"""
+
+    def __init__(self, qfq, hfq, bench):
+        self._qfq, self._hfq, self._b = qfq, hfq, bench
+        self.adjusts: list[str] = []
+
+    def fetch_kline(self, code, days=280, *, adjust="qfq"):
+        self.adjusts.append(adjust)
+        return self._hfq if adjust == "hfq" else self._qfq
+
+    def fetch_index_kline(self, code, days=280):
+        return self._b
+
+
 @pytest.fixture
 def fake_client():
     klines = {
@@ -248,12 +263,39 @@ class TestMarking:
         # 超额 = 股票收益 - 基准收益（基准基期 = entry 日 06-01 收盘 3000；落库 6 位小数）
         assert m["cum_excess"] == pytest.approx(0.01 - (3100.0 / 3000.0 - 1.0), abs=1e-6)
 
-    def test_marking_requests_hfq(self, db, fake_client):
-        """盯市取数同样显式后复权（hfq）：与结算路径同口径（as-of 保真）。"""
+    def test_marking_uses_reference_price_caliber(self, db, fake_client):
+        """盯市取数用默认 qfq（与存储参考价同尺度），不得传 hfq（口径混用禁令）。
+
+        delta add-backtest-leakage-controls：盯市是近似展示口径，分子必须与
+        `entry_price`（实时 quote 原值 / 管线 qfq 收盘）同尺度；判定才用 hfq。
+        """
         _insert(db, created_at="2026-06-01T10:00:00")
         mark_open_predictions(client=fake_client, db_path=db)
         assert fake_client.kline_adjusts  # 确有取数
-        assert set(fake_client.kline_adjusts) == {"hfq"}
+        assert set(fake_client.kline_adjusts) == {"qfq"}
+
+    def test_dividend_sample_interval_return_differs_by_caliber(self, db):
+        """tasks.md 1.2：分红除权样本的区间收益对照 → 口径选择是载荷的。
+
+        合成一次除息（06-02 每股派 1.00，实际收盘 10.00 → 9.00）：前复权序列锚定最新价
+        而下移历史（06-02=9.00, 06-03=9.50），后复权序列锚定最早价而上移（10.00/10.5556）。
+        同一存储参考价 10.00 下，两口径的区间收益不同——盯市必须用与参考价同尺度的 qfq，
+        否则 `cum_return = hfq(d)/raw(entry) - 1` 整体偏移并传导到净值曲线/指标快照。
+        """
+        _insert(db, entry_price=10.0, created_at="2026-06-01T10:00:00")
+        qfq = _df(["2026-06-02", "2026-06-03"], [9.0, 9.5])  # 前复权（锚最新）
+        hfq = _df(["2026-06-02", "2026-06-03"], [10.0, 10.5556])  # 后复权（锚最早）
+        bench = _df(["2026-06-01", "2026-06-02", "2026-06-03"], [3000.0, 3000.0, 3000.0])
+        client = _CaliberAwareClient(qfq=qfq, hfq=hfq, bench=bench)
+
+        mark_open_predictions(client=client, db_path=db)
+
+        assert set(client.adjusts) == {"qfq"}  # 盯市取的是参考价口径
+        got = [m["cum_return"] for m in list_daily_marks(db_path=db)]
+        assert got == pytest.approx([9.0 / 10.0 - 1.0, 9.5 / 10.0 - 1.0], abs=1e-6)
+        # hfq 口径会给出不同数值（混用即偏移）——证明口径选择载荷
+        hfq_returns = [10.0 / 10.0 - 1.0, 10.5556 / 10.0 - 1.0]
+        assert got != pytest.approx(hfq_returns, abs=1e-6)
 
     def test_no_entry_price_skipped(self, db, fake_client):
         _insert(db, entry_price=None, created_at="2026-06-01T10:00:00")

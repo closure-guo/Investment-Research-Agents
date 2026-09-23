@@ -68,6 +68,25 @@ class TestSettleJob:
         for c in langfuse.create_score.call_args_list:
             assert c.kwargs["trace_id"] == "trace-1"
 
+    def test_settlement_fetches_hfq(self, tmp_path):
+        """旧结算链路取数显式后复权（hfq）：与 track-record 判定口径统一。
+
+        delta add-backtest-leakage-controls：个股结算取数传 hfq；基准（指数）无复权概念不传。
+        """
+        db = tmp_path / "t.db"
+        store.init_decision_log(db)
+        store.insert_decision(_open_decision(), db)
+        client = MagicMock()
+        client.fetch_kline.return_value = _kline_hit_target()
+        client.fetch_index_kline.return_value = _bench()
+
+        settle_open_decisions(client=client, db_path=db, langfuse=MagicMock())
+
+        _, kwargs = client.fetch_kline.call_args
+        assert kwargs.get("adjust") == "hfq"
+        _, bench_kwargs = client.fetch_index_kline.call_args
+        assert "adjust" not in bench_kwargs
+
     def test_idempotent_no_double_settle(self, tmp_path):
         db = tmp_path / "t.db"
         store.init_decision_log(db)

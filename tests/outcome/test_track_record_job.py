@@ -132,6 +132,21 @@ def test_settlement_job_requests_hfq(tmp_path):
     assert set(client.kline_adjusts) == {"hfq"}
 
 
+def test_superseded_path_requests_hfq(tmp_path):
+    """superseded 提前结算路径同样显式 hfq（与 horizon 路径同口径，不混用）。
+
+    delta add-backtest-leakage-controls：若 superseded 路径漏传，记录集会出现 qfq 混入。
+    """
+    db = _db(tmp_path)
+    _insert(db, direction="long", created="2026-09-01T10:00:00")
+    _insert(db, direction="short", created="2026-09-03T10:00:00")  # 反向 → supersede 旧观点
+    client = _StubClient({"600519": _kline([100, 99, 98, 97])})
+    result = settle_open_predictions(client=client, db_path=db)
+    assert result["superseded"] == 1
+    assert client.kline_adjusts  # superseded 与 horizon 两路径均有取数
+    assert set(client.kline_adjusts) == {"hfq"}
+
+
 def test_settle_skips_not_enough_rows(tmp_path):
     db = _db(tmp_path)
     _insert(db)

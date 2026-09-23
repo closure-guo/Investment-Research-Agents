@@ -6,6 +6,12 @@ run_daily_marking：盯市 → 净值曲线入库 → 指标快照入库（幂�
 
 与 settle（16:00）的时序：marking 建议在 settle 之后运行（16:30），先结算
 到期观点再对剩余 open 观点盯市，避免对已结算观点重复盯市。
+
+复权口径（delta add-backtest-leakage-controls）：**盯市口径 = 参考价口径（前复权 qfq，近似）**。
+盯市分子必须与存储的参考价（`entry_price`，实时 quote 原值或管线 qfq 收盘）同尺度，
+故 `fetch_kline` 不传 `adjust`（用默认 qfq）；**判定口径 = 后复权 hfq（精确，
+`settle_entry_price` 由行情派生）**。两者不得混用——若盯市改传 hfq，`cum_return =
+hfq(d)/raw(entry) - 1` 仅在 hfq 基准日成立，且经 `daily_marks` → 净值曲线/指标快照传导失真。
 """
 
 from __future__ import annotations
@@ -16,7 +22,6 @@ from typing import Any
 
 import pandas as pd
 
-from finance_agent.data.akshare_client import SETTLEMENT_ADJUST
 from finance_agent.outcome.track_record.model import (
     init_track_record_tables,
     insert_daily_mark,
@@ -95,9 +100,8 @@ def mark_open_predictions(
             result["skipped"] += 1
             continue
         try:
-            kline = client.fetch_kline(
-                _code(p["symbol"]), days=kline_days, adjust=SETTLEMENT_ADJUST
-            )
+            # 盯市口径 = 参考价口径：不传 adjust（默认 qfq），与存储的 entry_price 同尺度。
+            kline = client.fetch_kline(_code(p["symbol"]), days=kline_days)
             if kline is None or kline.empty:
                 result["skipped"] += 1
                 continue
