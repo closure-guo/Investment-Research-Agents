@@ -91,6 +91,22 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 
 **P2 校准收口（2026-09-18，§19.2）**：B1 一致率 **0.875**（40/40=预填稿全文照录，≥0.80）→ **有条件转正**（owner = 口径共建 + 8 行逐条裁决 + 终版全量照预填，非独立标注，一致率含机器-机器成分；下腿按采样协议 v2 补独立抽查）；B2 **0.906**（32/32，判词 v3）→ **转正**：owner 就全部 4 条分歧行逐条裁决（3 站预填、1 站机器），其余照预填；终读修正率 **0.22** vs 机器 0.125（机器口径偏严经裁决确认）。**B1 字面新增阈值判死**（全区间最佳 0.05 仅 0.65 一致率，预测新增 10 vs 人工 22）→ **「是否新增」并入判定腿，B1 主指标 = 判定腿双问（新增 + 吸收）**，上表「B1 风险点增量率（nli）」自此失效；字面相似度仅留排序/采样辅助。人工终裁（终版=预填稿照录）：新增率 **0.45**（owner 首轮独立判读 0.55——报区间 0.45–0.55）、**新增点吸收率 0.61 vs 回收点 0.91**（决策层偏接旧内容）。judge prompt v2 已试并**阴性收口**（§19.3，160 次调用）：双问+通道分账+顶撞判例一次全上未过门（0.825/0.750/0.690），单变量探针 v2a 证明**新增维度封顶 ~0.75**（边界行固有模糊，人工亦翻案）→ 新增率以人工区间 0.45–0.55 为准，机器新增判定仅作辅助观测（0.75 披露）；吸收/修正继续用 v1（0.875/0.906）。无源增量首证：000858「机构资金持续撤离」= 推断冒充 `kind=data` 且无锚、与上游唯一资金流发现方向相反（grounding 扫描已收口：bg-v1 校准一致率 **1.000**（14/14 终裁），无源断言率 **8/64 = 0.125 转正**——r1 kind=data 论点中每 8 条有 1 条含无源断言，共性为推断冒充数据；8 条清单 owner 终裁确认，bear prompt 处置候选已登记，§19.5）。
 
+### 1.8 Outcome 收益指标（delta `add-outcome-profitability-protocol`，2026-09-23 登记；启用切点见 §2）
+
+「赚钱能力」（outcome 收益）的评估口径。口径变更 SHALL 先改本节再动代码；本节不复制读数，读数在收口报告与 `runs.jsonl`。
+
+| 项 | 口径 |
+|---|---|
+| ① 主指标 | 逐决策 **T+20 交易日相对沪深300（000300.SH）超额收益**：均值（`excess_return`）与胜率（resolved_win/(win+loss)，±2% 中性带，沿用 track-record 判定口径，不另造定义） |
+| ② 人口划分 | 主结论仅基于可执行决策（long/short）；neutral（watch/hold）以**回避正确率** = avoidance_win/(avoidance_win+avoidance_loss) 作辅助指标，SHALL NOT 进主结论（实现见 delta `update-decision-settlement-contract`） |
+| ③ 辅助观测 | T+5 / T+10 窗口由 daily_marks 派生，只观测不判定；不参与胜率与结论句；派生例程与口径同 §1.5 的均值差纪律（点估计给口径、非点估计不冒充） |
+| ④ 红线 | settled 可执行样本 <10：SHALL NOT 报任何胜率 / 平均超额 / 赚钱能力措辞，只报样本数与「样本积累中」（与 track-record 基础统计展示门槛一致，泛化为评估纪律） |
+| ⑤ 收口纪律 | 健康检查（结算成功率 ≥0.90 / 行情缺失率 ≤0.10 / integrity 零不一致 / 记账完整率）→ 异常行人工终裁（对照表落 `tests/validation/`）→ 两句式结论（显著方向带 CI ｜ 分辨率不足带 MDE；裸「未获统计支持」非法）→ 收口报告带生命周期字段（字面格式见 §1.7④；本文档不复现该字面标记）→ 本表 §2 时间线追加 + `runs.jsonl` 追加（`type: outcome-forward` / `type: outcome-backtest`） |
+| ⑥ 泄漏控制 | forward 腿为金标准（零泄漏假设）；回测腿须过干净窗口判定 + 泄漏探针披露（默认阈值 0.60，实现见 delta `add-backtest-leakage-controls`）；深历史批次永久定位通路验证；两腿分歧先归因（口径见 `evaluation`「Forward 与回测双腿互证」） |
+| ⑦ MDE 换算 | 胜率（单样本 vs 50%，α=0.05 / power=0.8）：MDE = 1.4008/√n；均值超额（σ 假设 10pp）：MDE = 0.2802/√n。n=30 → 胜率 25.6pp / 均值 5.1pp；n=100 → 14.0pp / 2.8pp。推断单元按标的聚类，ICC 折算有效 n 随读数披露（同 §1.7 推断单元纪律） |
+
+首个预登记：`evals/ablation/preregister/2026-09-23-outcome-forward-and-backtest.md`（门禁字段：主指标 / MDE / 决策阈值 / 样本量依据 / 停止规则 / 成本分型 / 泄漏控制；解析见 `evals/causal_ablation/preregister.py::OUTCOME_REQUIRED_FIELDS`，与因果消融的差异 = 无 rubric、增成本分型与泄漏控制）。
+
 ---
 
 ## 2. 时间线（每轮一行，收口时追加）
@@ -113,6 +129,7 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 **judge 材料口径切点（2026-09-16，delta `add-debate-argument-anchors`，未跑批）**：debate_quality 的 `debate_history` 材料在收敛骨架行后新增「【锚点覆盖】bull a/b｜bear c/d｜风控 e/f（含拆项）」骨架行，每条论点行加 `[kind 状态]` 前缀（状态取自 `debate_anchor_checks`）。**跨此切点的 debate_quality 分数不可直接比较**；rubric 版本不变（v6），`points` 契约不变。确定性指标 `argument_anchor_coverage`（§1.2）进评估器/实验报告/消融 run 记录（value + 拆项）。首轮真实链路实测（600519 ×2）：覆盖 16.3% / 22.2%，`unresolved`（申报了锚但不可解析）占 51%/44%，`unspecified` 0、`missing_required` 0–1；逐条归因为**路径格式/引导问题**（自造 `fundamental./macro./technical.` 前缀、描述混入锚点、event 整句改写），**无编造**——prompt 迭代候选已登记（见 `tests/validation/2026-09-16-add-debate-argument-anchors-validation.md`）。
 **消融 v2 口径切点（2026-09-16，delta `revamp-ablation-v2-causal-claims`，未跑批）**：① 消融聚合的 citation 腿接入四桶拆报，`citation_pass` 标量退出层增量比较路径（标量仍产出、不再进层增量裁决）；② 驱动薄壳化——`ablation_pilot.py` 的 judge 判分与 `judge_vars` 材料落盘移入库侧，驱动只留续跑/记账/coverage 包装；③ 口径先行登记（§1.7）：因果下游指标准入 + 判定方式 code｜nli｜judge、校准门控 0.80 覆盖全部 nli/judge 指标、逃逸率分母=已终裁单元（未终裁 `rate=None` 不报 0%）、结论两句式 + MDE 强制；④ 结论注册表落地——报告头部生命周期字段 + `docs/evals` 索引（[`README.md`](README.md)）渲染状态；首批注册对象：`evals/ablation/results/pilot.md` 标 `superseded-by` 指向 n10 报告、n10 报告标 `active`，其余存量文档列入索引「未标注生命周期」（未标注 ≠ 作废）。**跨此切点的消融层增量结论须按新口径读**：v1 的 judge 四维层增量与 `citation_pass` 标量读法不再作为层增量裁决依据。
 **决策契约口径切点（2026-09-21，delta `require-watch-hold-rationale`，未跑批）**：watch/hold 决策新增结构化 `inaction_reason`（不行动原因）与 `reeval_triggers`（可观察再评估触发条件）——两侧一次打回回路（trader 侧 `validate_trade_prices` / 终稿侧 `risk_judge`，同价位必填语义）+ 报告结构化渲染（缺失如实标注「未申报」）。prompt 契约同步（trader/risk_judge **v28**，2026-09-21 发布）。**judge 材料经 `_serialize_decision` 自动携带新字段 → B5 可执行性维度（rubric 原句「'观望等待好转' = 差」，`family_b_judge.py:227`）与 consistency 的打分基线可能移动，跨此切点的 B5 pairwise 分数不可直接比较**；action 语义与动作分布不变（契约不改决策倾向，真实产出分布待下轮读数核）。取证背景与真实链路实证（600519 一次产出合格字段、risk_judge 改写非照抄）见 `docs/evals/2026-09-21-决策层全watch取证.md` 与 `tests/validation/2026-09-21-require-watch-hold-rationale-validation.md`。
+**Outcome 收益口径切点（2026-09-23，delta `add-outcome-profitability-protocol`，未跑批）**：outcome 收益指标口径登记 §1.8（主指标 T+20 超额 / 回避辅助 / settled<10 红线 / 收口纪律 / 泄漏控制），首个 outcome 预登记落 `evals/ablation/preregister/2026-09-23-outcome-forward-and-backtest.md`。**本切点只登记口径与纪律，不改任何结算行为**——T+20 结算窗口、回避判定、标准化入场价的落地在 delta `update-decision-settlement-contract`（其切点另行登记）；读数腿（forward cohort / walk-forward 回测）开跑前置 = 两 delta 均已落地，且首个读数之前 §1.8 与预登记不得再改（改须走 §1 修订 + 新预登记版本 + 新切点行）。
 
 ---
 
