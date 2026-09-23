@@ -143,6 +143,42 @@ def test_enabled_env_one_runs(tmp_path, monkeypatch):
     assert runner.calls == ["600519"]
 
 
+# ── 池路径接线：参数 > COHORT_UNIVERSE_PATH env > DEFAULT（Δ3T5 审查 I1） ─────
+
+
+def test_universe_path_from_env_when_param_absent(tmp_path, monkeypatch):
+    """参数缺席时消费 COHORT_UNIVERSE_PATH（此前已声明却无消费点）。"""
+    monkeypatch.setenv("COHORT_ENABLED", "1")
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: None)
+    monkeypatch.setenv("COHORT_UNIVERSE_PATH", str(_universe_file(tmp_path, ["600519"], "v9")))
+    db = tmp_path / "c.db"
+    runner = _make_runner()
+
+    result = run_cohort_batch(trade_date=_DAY, db_path=db, graph_runner=runner)
+
+    assert result["universe_version"] == "v9", "应读 env 指定的池（非默认 v1）"
+    assert runner.calls == ["600519"]
+
+
+def test_universe_path_param_overrides_env(tmp_path, monkeypatch):
+    """显式 universe_path 参数优先于 env（接线优先级不被 env 覆盖）。"""
+    monkeypatch.setenv("COHORT_ENABLED", "1")
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: None)
+    monkeypatch.setenv("COHORT_UNIVERSE_PATH", str(_universe_file(tmp_path, ["111111"], "v9")))
+    db = tmp_path / "c.db"
+    runner = _make_runner()
+
+    result = run_cohort_batch(
+        trade_date=_DAY,
+        universe_path=_universe_file(tmp_path, ["600519"], "v8"),
+        db_path=db,
+        graph_runner=runner,
+    )
+
+    assert result["universe_version"] == "v8"
+    assert runner.calls == ["600519"]
+
+
 # ── 正常：真值记账 ──────────────────────────────────────────────────────────
 
 

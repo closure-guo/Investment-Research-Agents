@@ -445,17 +445,39 @@ class TestPoolSnapshot:
             assert set(row) == {"ticker", "name", "industry", "market_cap"}
 
     def test_rebuild_from_pool_snapshot_is_identical(self):
-        """核心：池快照 + 同 seed 重建 → 与登记文件逐字一致（唯一差异为来源留痕）。"""
+        """核心：池快照 + 同 seed 重建 → 与登记文件逐字一致（唯一差异为披露留痕）。
+
+        重建不变式覆盖 constituents / cut_points / pool_size / excluded / strata；
+        `sources` 与 `unknown_industry` 为**环境相关披露字段**——上游信源瞬时失败
+        指纹跨轮不同、不可由快照反演，故允许二者不同（Δ3T2 审查 Important）。
+        """
         original = build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH))
 
         rebuilt = build_universe("v1", n=4, seed=42, pool=original[POOL_KEY])
 
         assert rebuilt["constituents"] == original["constituents"]  # 逐字
         differing = {k for k in original if original[k] != rebuilt.get(k)}
-        assert differing <= {"sources"}, differing
+        assert differing <= {"sources", "unknown_industry"}, differing
         assert rebuilt["sources"] == dict.fromkeys(
             ("constituents", "industry", "market_cap"), ["snapshot"]
         )
+
+    def test_rebuild_tolerates_env_dependent_disclosure_drift(self):
+        """披露字段跨轮不可复现：登记文件记录的 `unknown_industry` 指纹（cninfo 瞬时
+        失败）与快照可反演值可能不同，但**不得**动摇核心重建不变式。
+
+        构造：登记文件记录的披露值被置为快照无法反演的旧轮指纹（模拟落盘快照重建
+        与既有登记文件跨轮比对），断言差异只落在环境相关披露字段上。
+        """
+        original = build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH))
+        original["unknown_industry"] = 99  # 上一轮信源瞬时失败指纹（快照不可反演）
+
+        rebuilt = build_universe("v1", n=4, seed=42, pool=original[POOL_KEY])
+
+        for key in ("constituents", "cut_points", "pool_size", "excluded", "strata"):
+            assert rebuilt[key] == original[key], f"核心不变式 {key} 被披露字段漂移牵连"
+        differing = {k for k in original if original[k] != rebuilt.get(k)}
+        assert differing <= {"sources", "unknown_industry"}, differing
 
     def test_rebuild_reproduces_excluded_and_pool_size(self):
         pool_in = [*_THREE_EACH, ("000999", "行业X", None)]

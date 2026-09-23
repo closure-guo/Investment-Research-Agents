@@ -34,6 +34,22 @@ logger = logging.getLogger(__name__)
 _MAX_ATTEMPTS = 3
 
 
+def _env_int(name: str, default: int, *, lo: int, hi: int) -> int:
+    """读整型 env:缺省/非数值/越界 → WARN 并回退默认(ops 手滑不得炸 scheduler)。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s 非数值(%r),回退默认 %s", name, raw, default)
+        return default
+    if not lo <= value <= hi:
+        logger.warning("%s 越界(%s),回退默认 %s", name, value, default)
+        return default
+    return value
+
+
 def _with_retry(name: str, fn) -> None:
     """日批统一入口：异常吞掉(旁路铁律)，指数退避重试 3 次。"""
     for attempt in range(_MAX_ATTEMPTS):
@@ -84,9 +100,9 @@ def start_scheduler() -> BackgroundScheduler | None:
     if os.getenv("TESTING") == "1" or os.getenv("DECISION_SETTLE_ENABLED") == "0":
         return None
     # cohort 时段在**此处**读 env（非模块级冻结）：测试与运维改 env 后重新
-    # start_scheduler 即生效，无需重启进程以外的手段。
-    cohort_hour = int(os.getenv("COHORT_HOUR", "18"))
-    cohort_minute = int(os.getenv("COHORT_MINUTE", "0"))
+    # start_scheduler 即生效，无需重启进程以外的手段。非法/越界值回退默认 + WARN。
+    cohort_hour = _env_int("COHORT_HOUR", 18, lo=0, hi=23)
+    cohort_minute = _env_int("COHORT_MINUTE", 0, lo=0, hi=59)
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         _settle_job,

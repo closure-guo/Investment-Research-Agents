@@ -25,6 +25,10 @@
 `pool_ref`（文件名）与 `pool_hash`（池内容 sha256 前 12 位，对行序不敏感）。
 `build_universe(..., pool=<快照>)` 即**不联网重建**：抽样只由池内容 + seed 决定。
 
+离线重建的可复现保证覆盖 `constituents` / `cut_points` / `pool_size` / `excluded` /
+`strata`；`sources` 与 `unknown_industry` 为**环境相关披露字段**（上游信源瞬时
+失败指纹跨轮不同、不可由快照反演），不保证逐字一致。
+
 **版本期内换池被拒**：`write_universe` 校验「文件名版本 = 内容 version = 既有文件
 version」，不一致直接拒绝（`force` 亦然）。
 """

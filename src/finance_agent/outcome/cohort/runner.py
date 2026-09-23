@@ -88,6 +88,9 @@ def run_cohort_batch(
 ) -> dict[str, Any]:
     """探班池内逐标的串行跑 deep 分析；幂等键 (version, ticker, trade_date)。
 
+    池路径解析：``universe_path`` 参数优先，否则 ``COHORT_UNIVERSE_PATH`` 环境变量，
+    最后回退 ``DEFAULT_UNIVERSE_PATH``（``data/cohort/universe-v1.json``）。
+
     ``enabled`` 参数优先，否则 ``COHORT_ENABLED == "1"``（默认关）；关闭时**零调用**
     直接返回。``max_tokens`` 参数优先，否则 ``COHORT_MAX_TOKENS_PER_RUN``
     （默认 2_000_000，非数值时 WARN 回退默认）；累计 ``spent`` 达限或未知 usage
@@ -101,7 +104,9 @@ def run_cohort_batch(
         logger.info("cohort 跑批未启用（COHORT_ENABLED != 1）")
         return _empty_result()
 
-    universe = load_universe(universe_path or DEFAULT_UNIVERSE_PATH)
+    universe = load_universe(
+        universe_path or os.getenv("COHORT_UNIVERSE_PATH") or DEFAULT_UNIVERSE_PATH
+    )
     day = trade_date or datetime.now().strftime("%Y-%m-%d")
     budget = _resolve_budget(max_tokens)
 
