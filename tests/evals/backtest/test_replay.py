@@ -1,9 +1,19 @@
-"""回放与决策一致性测试：mock 编排图，不调 LLM。"""
+"""回放与决策一致性测试：mock 编排图，不调 LLM。
+
+Δ2 Task 6：结算切 track-record 同源判定（`judgment.resolve_prediction`），
+断言 `Resolution` → 下游既有契约键（settle_date/settle_price/decision_return/
+benchmark_return/decision_excess/decision_hit）的映射，以及派生入场价。
+"""
+
+from __future__ import annotations
+
+import json
 
 import evals.backtest.replay as rp
 import pandas as pd
+import pytest
 from evals.backtest.data_snapshot import SnapshotResult
-from evals.backtest.replay import build_decision_record, direction_agreement
+from evals.backtest.replay import direction_agreement
 
 
 def _kline(dates: list[str], closes: list[float]) -> pd.DataFrame:
@@ -18,59 +28,132 @@ def _kline(dates: list[str], closes: list[float]) -> pd.DataFrame:
     )
 
 
-def _fake_orchestration(monkeypatch, captured: dict) -> None:
-    """以桩替换完整编排/compute_metrics/结算，捕获 evaluate_decision 收到的参数。"""
+def _dated_kline(rows: list[tuple[str, float]]) -> pd.DataFrame:
+    """判定只读「日期/收盘」；OHLC 同值仅为形状完整。"""
+    return pd.DataFrame(
+        {
+            "日期": [r[0] for r in rows],
+            "开盘": [r[1] for r in rows],
+            "收盘": [r[1] for r in rows],
+            "最高": [r[1] for r in rows],
+            "最低": [r[1] for r in rows],
+        }
+    )
+
+
+def _stub_graph(monkeypatch, decision: dict) -> None:
+    """以桩替换完整编排/compute_metrics，返回给定 TradeDecision dict。"""
 
     class FakeGraph:
         def invoke(self, state):
-            return {
-                "final_trade_decision": {"action": "buy", "stop_loss": 11.0, "target_price": 14.0},
-                "final_report": "report",
-            }
+            return {"final_trade_decision": decision, "final_report": "report"}
 
     monkeypatch.setattr(rp, "build_variant_graph", lambda variant: FakeGraph())
     monkeypatch.setattr(rp, "compute_metrics", lambda state: {})
 
-    def fake_evaluate(record, kline, benchmark):
-        captured["benchmark"] = benchmark
-        return None
 
-    monkeypatch.setattr(rp, "evaluate_decision", fake_evaluate)
+def _horizon_rows(entry_close: float, exit_close: float) -> list[tuple[str, float]]:
+    """决策日 2026-09-02 + 其后 20 个交易日（hold_days=20，出场日 2026-10-20）。"""
+    return [("2026-09-02", entry_close)] + [(f"2026-10-{d:02d}", exit_close) for d in range(1, 21)]
 
 
-class TestDecisionRecord:
-    def test_record_shape_matches_settle_contract(self):
-        kline_close_on_t = 12.5
-        decision = {
-            "action": "buy",
-            "entry_price": None,
-            "stop_loss": 11.0,
-            "target_price": 14.0,
-            "confidence": 0.7,
-        }
-        record = build_decision_record(
-            decision, entry_price=kline_close_on_t, decision_date="2025-01-14", code="600519"
+class TestSettlementMapping:
+    """同源判定：Resolution → settlement 契约键（Task 6 核心）。"""
+
+    def test_replay_settlement_maps_shared_judgment(self, monkeypatch):
+        _stub_graph(monkeypatch, {"action": "buy", "stop_loss": 10.0, "target_price": 14.0})
+        kline = _dated_kline(_horizon_rows(11.0, 12.1))
+        snap = SnapshotResult(state={"kline": kline}, metadata={"as_of": "2026-09-02"})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+
+        settlement = result["settlement"]
+        # 20 个交易日后 12.1/+10% → resolved_win；无基准 → 超额不可得
+        assert settlement["status"] == "resolved_win"
+        assert settlement["settle_date"] == "2026-10-20"
+        assert settlement["settle_price"] == 12.1
+        assert settlement["hold_days"] == 20
+        assert settlement["decision_return"] == pytest.approx(12.1 / 11.0 - 1.0, abs=1e-6)
+        assert settlement["decision_hit"] is True
+        # 入场基准由 K 线派生（决策日收盘），非存档参考价
+        assert result["entry_price"] == 11.0
+
+    def test_replay_settlement_benchmark_missing_excess_is_none(self, monkeypatch):
+        """基准缺失 → benchmark_return/decision_excess 记 None（不当作 0），与旧 settle 契约一致。"""
+        _stub_graph(monkeypatch, {"action": "buy"})
+        kline = _dated_kline(_horizon_rows(11.0, 12.1))
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+
+        settlement = result["settlement"]
+        assert settlement["benchmark_return"] is None
+        assert settlement["decision_excess"] is None
+
+    def test_replay_settlement_with_flat_benchmark_splits_excess(self, monkeypatch):
+        """平坦基准：benchmark_return ≈ 0，超额 = raw（拆分保留下游两键语义）。"""
+        _stub_graph(monkeypatch, {"action": "buy"})
+        kline = _dated_kline(_horizon_rows(11.0, 12.1))
+        bench = _dated_kline([("2026-09-02", 3000.0), ("2026-10-20", 3000.0)])
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision(
+            "600519", "2026-09-02", snapshot=snap, full_kline=kline, full_benchmark=bench
         )
-        assert record["entry_price"] == 12.5
-        assert record["action"] == "buy"
-        assert record["timestamp"] == "2025-01-14"
-        # 与 outcome.settle.evaluate_decision 契约兼容：直接跑通结算
-        import pandas as pd
 
-        from finance_agent.outcome.settle import evaluate_decision
-
-        kline = pd.DataFrame(
-            {
-                "日期": ["2025-01-15", "2025-01-16"],
-                "开盘": [12.6, 13.8],
-                "收盘": [12.8, 14.2],
-                "最高": [12.9, 14.5],
-                "最低": [12.5, 13.5],
-            }
+        settlement = result["settlement"]
+        assert settlement["benchmark_return"] == 0.0
+        assert settlement["decision_excess"] == pytest.approx(12.1 / 11.0 - 1.0, abs=1e-6)
+        assert settlement["decision_excess"] == pytest.approx(
+            settlement["decision_return"] - settlement["benchmark_return"], abs=1e-9
         )
-        settlement = evaluate_decision(record, kline, None)
-        assert settlement is not None
-        assert settlement.status == "hit_target"
+
+    def test_replay_neutral_action_maps_avoidance(self, monkeypatch):
+        """hold/watch → direction=neutral → 判定结果为 avoidance_*（回避正确）。"""
+        _stub_graph(monkeypatch, {"action": "hold"})
+        kline = _dated_kline(_horizon_rows(11.0, 9.9))
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+
+        assert result["action"] == "hold"
+        assert result["settlement"]["status"] == "avoidance_win"
+        assert result["entry_price"] == 11.0  # 派生入场仍为决策日收盘
+
+    def test_replay_sell_maps_short_direction(self, monkeypatch):
+        """sell → direction=short → 下跌（−10%）符号化为 +10% 收益 → resolved_win。"""
+        _stub_graph(monkeypatch, {"action": "sell"})
+        kline = _dated_kline(_horizon_rows(11.0, 9.9))
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+
+        assert result["settlement"]["status"] == "resolved_win"
+        assert result["settlement"]["decision_return"] == pytest.approx(0.1, abs=1e-6)
+
+
+class TestSettlementKlineCaliber:
+    """口径护栏：结算必须用 hfq 全量 K 线，快照 kline（管线 qfq）不得混用。"""
+
+    def test_snapshot_kline_fallback_raises(self, monkeypatch):
+        _stub_graph(monkeypatch, {"action": "buy"})
+        snapshot_kline = _dated_kline([("2026-09-02", 11.0), ("2026-09-03", 12.0)])
+        snap = SnapshotResult(state={"kline": snapshot_kline}, metadata={})
+        with pytest.raises(ValueError, match="hfq 全量 K 线"):
+            rp.replay_decision("600519", "2026-09-02", snapshot=snap)
+
+    def test_no_kline_channel_returns_no_settlement(self, monkeypatch):
+        """既无全量也无快照 K 线 → 不抛，保持既有「无结算」返回形态。"""
+        _stub_graph(monkeypatch, {"action": "buy"})
+        snap = SnapshotResult(state={}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap)
+        assert result["settlement"] is None
+        assert result["entry_price"] is None
+
+    def test_resolution_none_keeps_no_settlement_shape(self, monkeypatch):
+        """未到 horizon（resolve_prediction → None）→ settlement/entry_price 均 None。"""
+        _stub_graph(monkeypatch, {"action": "buy"})
+        kline = _dated_kline([("2026-09-02", 11.0), ("2026-09-03", 12.0)])
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+        assert result["settlement"] is None
+        assert result["entry_price"] is None
+        assert result["action"] == "buy"
 
 
 class TestConsistency:
@@ -95,16 +178,16 @@ class TestActionFallback:
         monkeypatch.setattr(rp, "build_variant_graph", lambda variant: EmptyDecisionGraph())
         monkeypatch.setattr(rp, "compute_metrics", lambda state: {})
 
-        def fake_evaluate(record, kline, benchmark):
+        def fake_resolve(prediction, kline, benchmark):
             captured["called"] = True
             return None
 
-        monkeypatch.setattr(rp, "evaluate_decision", fake_evaluate)
+        monkeypatch.setattr(rp, "resolve_prediction", fake_resolve)
         snap = SnapshotResult(state={"kline": _kline(["2025-01-14"], [10.5])}, metadata={})
         result = rp.replay_decision("600519", "2025-01-14", snapshot=snap)
         # 口径统一：action 缺失 → "unknown"（不再是 ""）
         assert result["action"] == "unknown"
-        # 无有效 action 不进入结算
+        # 无有效 action 不进入结算（不触碰 K 线口径护栏）
         assert result["settlement"] is None
         assert "called" not in captured
 
@@ -127,19 +210,18 @@ class TestActionFallback:
         monkeypatch.setattr(rp, "build_variant_graph", lambda variant: PydanticDecisionGraph())
         monkeypatch.setattr(rp, "compute_metrics", lambda state: {})
 
-        def fake_evaluate(record, kline, benchmark):
-            captured["record"] = record
+        def fake_resolve(prediction, kline, benchmark):
+            captured["prediction"] = prediction
             return None
 
-        monkeypatch.setattr(rp, "evaluate_decision", fake_evaluate)
+        monkeypatch.setattr(rp, "resolve_prediction", fake_resolve)
         snap = SnapshotResult(state={"kline": _kline(["2025-01-14"], [10.5])}, metadata={})
-        result = rp.replay_decision("600519", "2025-01-14", snapshot=snap)
+        full_kline = _kline(["2025-01-14", "2025-01-15"], [10.5, 10.6])
+        result = rp.replay_decision("600519", "2025-01-14", snapshot=snap, full_kline=full_kline)
         assert result["action"] == "buy"
-        assert captured["record"]["action"] == "buy"
-        assert captured["record"]["stop_loss"] == 11.0
+        assert captured["prediction"]["direction"] == "long"
+        assert captured["prediction"]["created_at"] == "2025-01-14"
         # 返回体必须 JSON 可序列化（pydantic 对象不能原样透传）
-        import json
-
         json.dumps(result, default=str)
 
     def test_consistency_counts_missing_action_as_unknown(self, monkeypatch):
@@ -154,9 +236,33 @@ class TestActionFallback:
 
 
 class TestFullBenchmarkChannel:
+    def _fake_orchestration(self, monkeypatch, captured: dict) -> None:
+        """以桩替换完整编排/compute_metrics/同源判定，捕获 resolve_prediction 参数。"""
+
+        class FakeGraph:
+            def invoke(self, state):
+                return {
+                    "final_trade_decision": {
+                        "action": "buy",
+                        "stop_loss": 11.0,
+                        "target_price": 14.0,
+                    },
+                    "final_report": "report",
+                }
+
+        monkeypatch.setattr(rp, "build_variant_graph", lambda variant: FakeGraph())
+        monkeypatch.setattr(rp, "compute_metrics", lambda state: {})
+
+        def fake_resolve(prediction, kline, benchmark):
+            captured["benchmark"] = benchmark
+            return None
+
+        monkeypatch.setattr(rp, "resolve_prediction", fake_resolve)
+
     def test_replay_decision_settles_against_full_benchmark(self, monkeypatch):
         captured: dict = {}
-        _fake_orchestration(monkeypatch, captured)
+        self._fake_orchestration(monkeypatch, captured)
+        full_kline = _kline(["2025-01-13", "2025-01-14"], [10.0, 10.5])
         truncated_bench = _kline(["2025-01-13"], [3000.0])
         full_bench = _kline(["2025-01-13", "2025-01-20"], [3000.0, 3100.0])
         snap = SnapshotResult(
@@ -166,13 +272,20 @@ class TestFullBenchmarkChannel:
             },
             metadata={},
         )
-        rp.replay_decision("600519", "2025-01-14", snapshot=snap, full_benchmark=full_bench)
+        rp.replay_decision(
+            "600519",
+            "2025-01-14",
+            snapshot=snap,
+            full_kline=full_kline,
+            full_benchmark=full_bench,
+        )
         assert captured["benchmark"] is full_bench
 
     def test_replay_decision_defaults_to_state_benchmark(self, monkeypatch):
         captured: dict = {}
-        _fake_orchestration(monkeypatch, captured)
+        self._fake_orchestration(monkeypatch, captured)
         truncated_bench = _kline(["2025-01-13"], [3000.0])
+        full_kline = _kline(["2025-01-13", "2025-01-14"], [10.0, 10.5])
         snap = SnapshotResult(
             state={
                 "kline": _kline(["2025-01-13", "2025-01-14"], [10.0, 10.5]),
@@ -180,7 +293,7 @@ class TestFullBenchmarkChannel:
             },
             metadata={},
         )
-        rp.replay_decision("600519", "2025-01-14", snapshot=snap)
+        rp.replay_decision("600519", "2025-01-14", snapshot=snap, full_kline=full_kline)
         assert captured["benchmark"] is truncated_bench
 
     def test_replay_with_consistency_passes_full_benchmark_through(self, monkeypatch):
@@ -209,10 +322,10 @@ class TestFirstReplayPassthrough:
 
     def test_consistency_surfaces_first_replay_entry_and_action(self, monkeypatch):
         settlement = {
-            "status": "hit_target",
-            "settle_date": "2025-01-20",
+            "status": "resolved_win",
+            "settle_date": "2026-10-20",
             "settle_price": 14.2,
-            "hold_days": 4,
+            "hold_days": 20,
             "decision_return": 0.352,
             "benchmark_return": None,
             "decision_excess": None,
