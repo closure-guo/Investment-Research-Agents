@@ -6,6 +6,7 @@ neutral 不走 superseded。
 """
 
 import datetime
+import logging
 
 import pandas as pd
 
@@ -59,6 +60,19 @@ class _FakeLangfuse:
 
     def create_score(self, **kwargs):
         self.calls.append(kwargs)
+
+
+def _flaky_langfuse(fail_name: str) -> _FakeLangfuse:
+    """指定 name 的 create_score 抛错、其余正常记录（逐 Score 隔离用例共用）。"""
+    langfuse = _FakeLangfuse()
+
+    def flaky(**kwargs):
+        if kwargs["name"] == fail_name:
+            raise RuntimeError("trace expired")
+        langfuse.calls.append(kwargs)
+
+    langfuse.create_score = flaky  # type: ignore[method-assign]
+    return langfuse
 
 
 def _insert(
@@ -134,7 +148,10 @@ def test_stale_marks_unresolvable(tmp_path):
     )
     result = settle_open_predictions(client=client, db_path=db)
     assert result["unresolvable"] == 1
-    assert list_predictions(db_path=db)[0]["status"] == "unresolvable"
+    row = list_predictions(db_path=db)[0]
+    assert row["status"] == "unresolvable"
+    # 无结算日:写 NULL(原写 created_at[:10] 会让 segments 持仓天数分桶失真)
+    assert row["resolved_at"] is None
 
 
 # ── delta update-decision-settlement-contract Task 4 ──
@@ -236,8 +253,6 @@ def test_scores_reported_for_long_only(tmp_path):
 
 def test_score_failure_does_not_block_settlement(tmp_path, caplog):
     """Score 上报异常仅 WARN:判定仍落库,不中断整批(旁路铁律)。"""
-    import logging
-
     db = _db(tmp_path)
     _insert(db, trace_id="trace-long")
     langfuse = _FakeLangfuse()
@@ -283,3 +298,116 @@ def test_superseded_long_uses_derived_entry(tmp_path):
     assert row["settle_entry_price"] == 100.0  # 派生入场 = 首行收盘
     assert row["resolved_at"] == "2026-09-05"  # 结算日 = 最新行情日
     assert row["status"] == "resolved_loss"  # 100 → 97
+
+
+# ── Δ2T4 质量审查路由：Score 守卫补测 + superseded 上报 + 入场/时间戳对齐 ──
+
+
+def test_scores_skipped_without_trace_id(tmp_path):
+    """缺 langfuse_trace_id → 不上报 Score(trace 不可关联),判定仍落库。"""
+    db = _db(tmp_path)
+    _insert(db, trace_id=None)
+    langfuse = _FakeLangfuse()
+    client = _StubClient(
+        {"600519": _kline([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 115])}
+    )
+    result = settle_open_predictions(client=client, db_path=db, langfuse=langfuse)
+    assert result["settled"] == 1 and result["scores_reported"] == 0
+    assert langfuse.calls == []
+    assert list_predictions(db_path=db)[0]["status"] == "resolved_win"
+
+
+def test_score_partial_failure_reports_others(tmp_path, caplog):
+    """单个 Score 抛错不吞掉其余(逐 Score 隔离):decision_excess 失败仍计 2。"""
+    db = _db(tmp_path)
+    _insert(db, trace_id="trace-long")
+    langfuse = _flaky_langfuse("decision_excess")
+    client = _StubClient(
+        {"600519": _kline([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 115])}
+    )
+    with caplog.at_level(logging.WARNING):
+        result = settle_open_predictions(client=client, db_path=db, langfuse=langfuse)
+    assert result["settled"] == 1 and result["scores_reported"] == 2
+    assert {c["name"] for c in langfuse.calls} == {"decision_hit", "decision_return"}
+    assert list_predictions(db_path=db)[0]["status"] == "resolved_win"
+    assert any("decision_excess" in r.message for r in caplog.records)
+
+
+def test_score_failure_does_not_abort_later_scores(tmp_path):
+    """中间一个 Score 失败不影响其后 Score(整体放弃/提前 return 会红)。
+
+    与上例互补:decision_excess 是末尾项,单独测它无法区分「跳过失败项」与
+    「首个失败即整体放弃」,故此处让中间的 decision_return 失败。
+    """
+    db = _db(tmp_path)
+    _insert(db, trace_id="trace-long")
+    langfuse = _flaky_langfuse("decision_return")
+    client = _StubClient(
+        {"600519": _kline([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 115])}
+    )
+    result = settle_open_predictions(client=client, db_path=db, langfuse=langfuse)
+    assert result["settled"] == 1 and result["scores_reported"] == 2
+    assert {c["name"] for c in langfuse.calls} == {"decision_hit", "decision_excess"}
+
+
+def test_langfuse_none_leg_skips_scores(tmp_path, monkeypatch, caplog):
+    """不带 langfuse kwarg → 走内部 fallback 取 get_langfuse;其为 None 时不上报、不 WARN。
+
+    None 腿必须早退:否则会拿 None 调 create_score,AttributeError 被兜底吞成 WARN。
+    """
+    db = _db(tmp_path)
+    _insert(db, trace_id="trace-long")
+    calls: list[str] = []
+
+    def fake_get_langfuse():
+        calls.append("called")
+        return None
+
+    monkeypatch.setattr("finance_agent.langfuse_tracing.get_langfuse", fake_get_langfuse)
+    client = _StubClient(
+        {"600519": _kline([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 115])}
+    )
+    with caplog.at_level(logging.WARNING):
+        result = settle_open_predictions(client=client, db_path=db)
+    assert calls == ["called"]  # fallback 确实被执行
+    assert result["settled"] == 1 and result["scores_reported"] == 0
+    assert not any("score 上报失败" in r.message for r in caplog.records)
+
+
+def test_superseded_reports_scores(tmp_path):
+    """superseded 提前结算(状态转 resolved_*)同样上报 Score;excess 未知 → 只报 2 个。"""
+    db = _db(tmp_path)
+    old = _insert(db, direction="long", created="2026-09-01T10:00:00", trace_id="trace-old")
+    _insert(db, direction="short", created="2026-09-03T10:00:00")  # 反向 → supersede
+    langfuse = _FakeLangfuse()
+    client = _StubClient({"600519": _kline([100, 99, 98, 97])})
+    result = settle_open_predictions(client=client, db_path=db, langfuse=langfuse)
+    assert result["superseded"] == 1 and result["errors"] == 0
+    assert result["scores_reported"] == 2  # 无同期基准区间 → 不报 decision_excess
+    assert {c["name"] for c in langfuse.calls} == {"decision_hit", "decision_return"}
+    assert {c["trace_id"] for c in langfuse.calls} == {"trace-old"}  # 用旧观点的 trace
+    by_name = {c["name"]: c for c in langfuse.calls}
+    assert by_name["decision_hit"]["data_type"] == "BOOLEAN"
+    assert by_name["decision_hit"]["value"] == 0.0  # 100 → 97
+    assert "settle_price=97" in by_name["decision_return"]["comment"]
+    rows = {r["prediction_id"]: r for r in list_predictions(db_path=db)}
+    assert rows[old]["status"] == "resolved_loss"
+
+
+def test_superseded_zero_entry_skips(tmp_path):
+    """派生入场价 <= 0 → superseded 路径跳过(不写 resolved_neutral + 入场价 0)。"""
+    db = _db(tmp_path)
+    old = _insert(db, direction="long", created="2026-09-01T10:00:00")
+    _insert(db, direction="short", created="2026-09-03T10:00:00")  # 反向 → 本应 supersede
+    langfuse = _FakeLangfuse()
+    client = _StubClient({"600519": _kline([0, 99, 98, 97])})  # 派生入场 = 首行收盘 0
+    result = settle_open_predictions(client=client, db_path=db, langfuse=langfuse)
+    assert result["superseded"] == 0 and result["errors"] == 0
+    # superseded 路径 1 次(旧行 entry<=0)+ horizon 路径 2 次(旧行 entry<=0 判 None、
+    # 新行入场后仅 2 行 < horizon 10)
+    assert result["skipped"] == 3
+    assert result["scores_reported"] == 0
+    row = {r["prediction_id"]: r for r in list_predictions(db_path=db)}[old]
+    assert row["status"] == "open"
+    assert row["settle_entry_price"] is None
+    assert row["resolution_rule"] is None

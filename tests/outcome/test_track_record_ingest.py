@@ -1,7 +1,16 @@
 """add-track-record Task 3:观点全量记录(_persist_decision_log → predictions)。"""
 
+import json
+import logging
+import sqlite3
+
 from finance_agent.api import _persist_decision_log
-from finance_agent.outcome.track_record.model import init_predictions, list_predictions
+from finance_agent.outcome.track_record.ingest import persist_prediction_from_accumulated
+from finance_agent.outcome.track_record.model import (
+    init_predictions,
+    init_track_record_tables,
+    list_predictions,
+)
 
 
 def _db(monkeypatch, tmp_path):
@@ -63,8 +72,6 @@ def test_no_price_still_archives_open_with_warn(monkeypatch, tmp_path, caplog):
 
     delta update-decision-settlement-contract：判定不依赖参考价，结算入场价届时由行情派生。
     """
-    import logging
-
     db = _db(monkeypatch, tmp_path)
     with caplog.at_level(logging.WARNING, logger="finance_agent.track_record.ingest"):
         _persist_decision_log(
@@ -97,11 +104,6 @@ def test_no_decision_skips(monkeypatch, tmp_path):
 
 def test_ingest_writes_horizon_and_declared_prices(tmp_path, monkeypatch):
     """horizon_days 显式 20；申报价位冻结入快照。"""
-    import sqlite3
-
-    from finance_agent.outcome.track_record.ingest import persist_prediction_from_accumulated
-    from finance_agent.outcome.track_record.model import init_track_record_tables
-
     db = tmp_path / "s.db"
     monkeypatch.setenv("SESSIONS_DB_PATH", str(db))
     init_track_record_tables(db)
@@ -122,8 +124,6 @@ def test_ingest_writes_horizon_and_declared_prices(tmp_path, monkeypatch):
     row = conn.execute("SELECT * FROM predictions").fetchone()
     assert row["horizon_days"] == 20
     assert row["status"] == "open"
-    import json
-
     snap = json.loads(row["rationale_snapshot"])
     assert snap["declared_prices"] == {
         "entry_price": 101.5,
@@ -132,13 +132,11 @@ def test_ingest_writes_horizon_and_declared_prices(tmp_path, monkeypatch):
     }
 
 
-def test_ingest_writes_horizon_explicitly(tmp_path, monkeypatch):
+def test_ingest_writes_horizon_explicitly(monkeypatch):
     """horizon_days 由 ingest 显式传入（不依赖表级默认值 20 隐式生效）。
 
     spy 到 insert_prediction 入参：删掉 ingest 的显式写入即红。
     """
-    from finance_agent.outcome.track_record.ingest import persist_prediction_from_accumulated
-
     captured: dict = {}
     monkeypatch.setattr(
         "finance_agent.outcome.track_record.ingest.insert_prediction",
@@ -155,11 +153,6 @@ def test_ingest_writes_horizon_explicitly(tmp_path, monkeypatch):
 
 def test_ingest_reference_price_missing_stays_open(tmp_path, monkeypatch):
     """参考价不可得 → 存档 + 状态 open（判定不依赖参考价）。"""
-    import sqlite3
-
-    from finance_agent.outcome.track_record.ingest import persist_prediction_from_accumulated
-    from finance_agent.outcome.track_record.model import init_track_record_tables
-
     db = tmp_path / "s.db"
     monkeypatch.setenv("SESSIONS_DB_PATH", str(db))
     init_track_record_tables(db)

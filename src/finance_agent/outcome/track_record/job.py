@@ -8,7 +8,8 @@ superseded(同标的新观点方向相反/目标价不同)立即按现价结算�
 delta update-decision-settlement-contract:两路径入场基准均为派生 settle_entry_price
 (judgment.derive_entry,非存档参考价);neutral 判定结果写 avoidance_status、status 落终态
 "avoidance"(不写 resolved_*,也不再留在 open 池);long/short 结算后向 Langfuse 上报
-decision_hit/return/excess(Score 失败仅 WARN)。
+decision_hit/return/excess(superseded 提前结算同样上报,excess 不可得故只报两个;Score
+失败仅 WARN)。unresolvable 无结算日,resolved_at 写 NULL。
 """
 
 from __future__ import annotations
@@ -164,24 +165,43 @@ def settle_open_predictions(
                         if derived is None:
                             result["skipped"] += 1
                             continue
-                        _, entry = derived
+                        entry_date, entry = derived
+                        if entry <= 0:
+                            # 与 horizon 路径对齐:无有效入场基准 → 不判定(不写 0 价入场)
+                            result["skipped"] += 1
+                            continue
+                        exit_date = str(kline.iloc[-1]["日期"])
                         sign = 1.0 if old["direction"] == "long" else -1.0
-                        raw = sign * (exit_price / entry - 1.0) if entry > 0 else 0.0
+                        raw = sign * (exit_price / entry - 1.0)
+                        resolution = Resolution(
+                            status="resolved_win"
+                            if raw > 0
+                            else ("resolved_loss" if raw < 0 else "resolved_neutral"),
+                            entry_date=entry_date,
+                            entry_price=round(entry, 6),
+                            exit_date=exit_date,
+                            exit_price=exit_price,
+                            raw_return=round(raw, 6),
+                            # superseded 为提前结算:无完整同期基准区间,超额不可得
+                            excess_return=None,
+                            hold_days=int((kline["日期"] > entry_date).sum()),
+                            resolution_rule="superseded",
+                        )
                         update_prediction_status(
                             old["prediction_id"],
                             {
-                                "status": "resolved_win"
-                                if raw > 0
-                                else ("resolved_loss" if raw < 0 else "resolved_neutral"),
-                                "exit_price": exit_price,
-                                "raw_return": round(raw, 6),
-                                "resolution_rule": "superseded",
-                                "resolved_at": str(kline.iloc[-1]["日期"]),
-                                "settle_entry_price": entry,
+                                "status": resolution.status,
+                                "exit_price": resolution.exit_price,
+                                "raw_return": resolution.raw_return,
+                                "resolution_rule": resolution.resolution_rule,
+                                "resolved_at": resolution.exit_date,
+                                "settle_entry_price": resolution.entry_price,
                             },
                             db_path,
                         )
                         result["superseded"] += 1
+                        # spec decision-outcome「结算即上报 Score」:状态转 resolved_* 即上报
+                        result["scores_reported"] += _report_scores(langfuse, old, resolution)
                     except Exception as e:  # noqa: BLE001
                         logger.warning("superseded 判定失败 %s: %s", old["prediction_id"], e)
                         result["errors"] += 1
@@ -209,7 +229,8 @@ def settle_open_predictions(
                     {
                         "status": "unresolvable",
                         "resolution_rule": "stale_no_market",
-                        "resolved_at": str(p["created_at"])[:10],
+                        # 无结算日 → NULL(写 created_at 会让持仓天数分桶失真为 0 天)
+                        "resolved_at": None,
                     },
                     db_path,
                 )
