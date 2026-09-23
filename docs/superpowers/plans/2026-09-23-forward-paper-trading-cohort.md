@@ -269,7 +269,7 @@ def run_cohort_batch(
     enabled: bool | None = None,
     graph_runner: Callable[..., Iterator[str]] | None = None,
 ) -> dict[str, Any]:
-    """探班池内逐标的串行跑 deep 分析；幂等键 (version, ticker, trade_date)。"""
+    """遍历标的池内逐标的串行跑 deep 分析；幂等键 (version, ticker, trade_date)。"""
     if enabled is None:
         enabled = os.getenv("COHORT_ENABLED") == "1"
     if not enabled:
