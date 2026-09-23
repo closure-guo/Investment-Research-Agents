@@ -46,7 +46,7 @@ def test_settlement_job_requests_hfq(tmp_path):        # fake client 记录 adju
 
 `fetch_kline`：签名加 `*, adjust: str = "qfq"`，三处（`:450`/`:459`/`:477`）由字面量改为 `adjust=adjust`；docstring 更新（默认前复权；结算/回测传后复权，理由=as-of 保真）。
 调用方显式传参：`track_record/job.py`（`:86`、`:122`、`:68` 基准不传——指数无复权）、`marking.py`（`:97` 及 `:83`）、`outcome/job.py`（`:112`/`:121`，旧链路保留亦可但建议统一）、`evals/backtest/run_backtest.py`（`:221`）。
-`replay.py`：如 `full_kline is None` 且仅剩快照（qfq）兜底 → 抛 `ValueError("回测结算需要 hfq 全量 K 线；快照 kline 为管线输入口径（qfq），不得混用")`（由 run_backtest 恒传全量，测试覆盖该失败路径）。
+`replay.py`：**HFQ 口径护栏已由 Δ2 实现**（`evals/backtest/replay.py:47-59`：`full_kline is None` 且快照 kline 非空 → 抛 `ValueError`，含「hfq 全量 K 线」字样；空帧走优雅无结算）。本任务**不重复实现**——核对护栏语义与本节口径一致（不一致则对齐），并把 `SETTLEMENT_ADJUST` 常量落到 `akshare_client.py` 顶部（与护栏文案呼应）。
 
 - [ ] **Step 4: 绿 + 切点行 + Commit**
 
