@@ -9,7 +9,7 @@
 **结算入场价与参考价分离**：结算任务 SHALL 按标准化口径从行情派生 `settle_entry_price`——**决策归属日（created_at 所在日）收盘价**；决策产出时间在当日收盘后的取**次一交易日收盘价**；决策归属日非交易日的取其后首个交易日收盘价。派生值随判定结果落库（判定产出，写入后冻结可审计）；`raw_return` / `excess_return` SHALL 基于 `settle_entry_price` 计算，SHALL NOT 基于参考价。TradeDecision 申报的 entry_price / stop_loss / target_price SHALL 随观点快照冻结写入 rationale_snapshot（供审计），SHALL NOT 参与任何结算计算。
 
 写入 SHALL NOT 阻断业务管线（旁路失败仅日志，不影响报告产出）。
-(Previously: entry_price 为「参考价，注明口径」——实现取实时 quote 优先、K 线最新收盘兜底；horizon_days 不写入，全落表默认 252；申报价不参与落库；判定收益基于参考价计算（与回测腿入场口径不可比）。)
+(Previously: entry_price 为「参考价，注明口径」——实现取实时 quote 优先、K 线最新收盘兜底；horizon_days 不写入，全落表默认 252；申报价不参与落库；判定收益基于参考价计算（与回测腿入场口径不可比）。另本次收敛 rationale_snapshot 需求——「完整分析原文」不再要求入快照，收敛为「观点摘要字段 + 申报价位」，完整原文改由 `session_id` 关联会话报告。)
 
 #### Scenario: 决策产出即落库
 
@@ -23,7 +23,8 @@
 - **WHEN** Fund Manager 产出任一决策（approve/reject/return）
 - **THEN** 系统 SHALL 同步向 `predictions` 插入一条记录
 - **AND** direction SHALL 由 action 映射（buy→long、sell→short、hold/watch→neutral）
-- **AND** rationale_snapshot SHALL 冻结含当时完整分析原文
+- **AND** rationale_snapshot SHALL 冻结含观点摘要字段（`action`、`fund_manager_decision` 及其 reasoning）与申报价位（如有）
+- **AND** 完整分析原文 SHALL 存于会话报告并可由该观点的 `session_id` 关联（不重复存于快照）
 
 #### Scenario: 申报价冻结入快照且不参与结算
 

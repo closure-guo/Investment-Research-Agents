@@ -54,7 +54,7 @@
 
 | # | Scenario（spec 行号） | 落点 | 证据 | 通过 |
 |---|---|---|---|---|
-| 21 | 观点写入即冻结（L10） | `model.py:66` `_FROZEN_FIELDS`；`model.py:605-611` 冻结守卫抛 `FrozenFieldError` | `test_track_record_model.py::test_frozen_field_update_raises`、`tests/outcome/test_track_record_stage_c.py::TestIntegrity::test_tampered_detected_and_audited` | ✅（完整分析原文 + 引用数据未入快照——**既有缺口**，见下「缺口登记」） |
+| 21 | 观点写入即冻结（L10） | `model.py:66` `_FROZEN_FIELDS`；`model.py:605-611` 冻结守卫抛 `FrozenFieldError`；快照字段 `ingest.py:70-81` | `test_track_record_model.py::test_frozen_field_update_raises`、`tests/outcome/test_track_record_stage_c.py::TestIntegrity::test_tampered_detected_and_audited` | ✅（需求文本经本次收敛至已实现范围——快照含摘要字段 + 申报价位，完整原文存会话报告由 `session_id` 关联；见「需求文本收敛记录」） |
 | 22 | 回测实盘分离（L16） | `model.py` `source_type` 列 + `list_predictions(source_type=...)` | `test_track_record_model.py::test_list_filter_and_pagination`、`tests/evals/outcome/test_health.py::TestHealth::test_source_type_filters`、`tests/test_api_track_record.py::test_overview_source_filter` | ✅ |
 | 23 | 缺要素观点不入统计（L22） | `model.py:57` `PREDICTIONS_STATUSES` + `_prediction_filters`（缺 direction/horizon 行不入 win_rate/excess 人口） | `test_track_record_model.py::test_prediction_stats_horizon_filter`、`::test_win_rate_excludes_neutral_direction_rows` | ✅ |
 | 24 | horizon 默认值显式落库（L28） | `ingest.py:68` `"horizon_days": DEFAULT_HORIZON_DAYS`；DDL 默认亦改 20（`model.py` 迁移） | `test_track_record_ingest.py::test_ingest_writes_horizon_explicitly`、`test_track_record_model.py::test_fresh_db_horizon_days_ddl_default_is_20`、`::test_insert_prediction_default_horizon_matches_config`；离线脚本 ①（horizon_days==20） | ✅ |
@@ -102,7 +102,7 @@
 | `uv run ruff check src/ evals/ tests/ scripts/` | `All checks passed!` | ✅ 零违例 |
 | `uv run ruff format --check src/ tests/ evals/` | `546 files already formatted` | ✅ |
 | `uv run mypy src/finance_agent/outcome/track_record evals/outcome` | `Success: no issues found in 14 source files` | ✅ 零错误（详见「异常记录」） |
-| `uv run python tests/scripts/d2_task7_offline_chain_verify.py` | 34 项核对全 PASS，`结论: PASS（全部核对项通过）`，EXIT=0 | ✅ |
+| `uv run python tests/scripts/d2_task7_offline_chain_verify.py` | 32 项核对全 PASS，`结论: PASS（全部核对项通过）`，EXIT=0 | ✅ |
 | `openspec validate update-decision-settlement-contract --strict` | `Change 'update-decision-settlement-contract' is valid`（EXIT=0） | ✅ |
 
 **@live 例说明**：`tests/evals/test_hallucination_live.py` 不在上述范围命令的收集路径内；单独执行 `uv run pytest tests/evals/test_hallucination_live.py -q` → `1 skipped in 0.03s`（本环境无真实 LLM/Langfuse 链路，标记跳过，**未出现失败**）。故不存在需「排除该例」的失败计数。
@@ -128,9 +128,15 @@
 - 回测 `settlement.decision_return` / `decision_excess` 映射 == 生产 raw/excess
 - short 方向符号自证：+20% 行情 → raw −0.20
 
-## 既有缺口登记（非本 delta 引入，本 delta brief 未要求）
+## 需求文本收敛记录（Δ2T7 审查处方 1）
 
-- **`rationale_snapshot` 未含「完整分析原文 + 引用数据」**：主规范 `openspec/specs/track-record/spec.md:8`（表定义「rationale_snapshot（完整分析原文 + 引用数据快照）」）与 `L13`（Scenario「rationale_snapshot SHALL 含当时完整分析原文与引用数据」）、`openspec/specs/decision-outcome/spec.md:59`（「SHALL 冻结含当时完整分析原文」）要求快照含完整分析原文；现行 `ingest.py:70-81` 仅写 `action` / `fund_manager_decision` / `fund_manager_decision_reasoning` / `declared_prices`，**未含完整分析原文与引用数据**。本 delta 的 brief 只要求「申报价冻结入快照」（已达成），未把「完整分析原文」列为交付项；分析原文另存于 sessions 报告（`sessions` 表 / 会话存档），可经 `langfuse_trace_id` 与 session 关联反查。**登记为已知缺口，建议后续 delta 补齐快照字段**。
+本 delta 的 `specs/track-record/spec.md`（Requirement「观点数据模型」+ Scenario「观点写入即冻结」）与 `specs/decision-outcome/spec.md`（Requirement「决策落库」+ Scenario「全量观点落库（含 reject）」）原写「rationale_snapshot SHALL 含完整分析原文 + 引用数据快照 + 申报价位」，与实现（`ingest.py:70-81` 仅落 `action` / `fund_manager_decision(_reasoning)` / `declared_prices`）不一致；该文本会随 sync 进主规范库。**本次把 delta 需求文本如实收敛到已实现范围**：
+
+- `rationale_snapshot` SHALL 含**观点摘要字段**（`action`、`fund_manager_decision` 及其 reasoning）与申报价位（entry/stop/target）；
+- 完整分析原文 SHALL 存于会话报告并可由该观点的 `session_id` 关联，**不重复存于快照**；
+- 两个 delta 文件的 Requirement `(Previously: …)` 均已补记本次收敛说明。
+
+收敛后无残留未满足的 SHALL，原「`rationale_snapshot` 未含完整分析原文」缺口登记随之作废（另无其他既有缺口）。该改动为纯需求/文档文本收敛，零代码行为变更。
 
 ## Owner 待办（人工核对项，本报告未覆盖）
 
@@ -147,8 +153,8 @@
 
 ## 结论
 
-[x] 全部通过（可进 sync + archive 前置）
+[x] 全部 Scenario 经文本收敛后达成；owner 待办见上（可进 sync + archive 前置）
 
-勾选语义：本 delta 的**验证项**全过（机器项零失败 + 40 Scenario 均有落点与证据 + 离线链路三项通过）。按 `tasks.md` 5.5 的裁定，**sync/archive 待读数腿（Δ3 `add-forward-paper-trading-cohort` / Δ4 `add-backtest-leakage-controls`）落地后统一执行**——本 delta 提供结算契约与判定同源证据，但真实读数（forward cohort / walk-forward 回测）尚未开跑，不随本 delta 单独 archive。
+勾选语义：本 delta 的**验证项**全过（机器项零失败 + 40 Scenario 均有落点与证据 + 离线链路三项通过；Scenario #21 的 SHALL 经需求文本收敛至已实现范围后达成，见「需求文本收敛记录」）。按 `tasks.md` 5.5 的裁定，**sync/archive 待读数腿（Δ3 `add-forward-paper-trading-cohort` / Δ4 `add-backtest-leakage-controls`）落地后统一执行**——本 delta 提供结算契约与判定同源证据，但真实读数（forward cohort / walk-forward 回测）尚未开跑，不随本 delta 单独 archive。
 
 [ ] 存在失败项，需修复后重新验证

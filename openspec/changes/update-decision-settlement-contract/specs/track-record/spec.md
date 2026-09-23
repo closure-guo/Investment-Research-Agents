@@ -4,13 +4,14 @@
 
 ### Requirement: 观点数据模型（append-only + 快照冻结）
 
-系统 SHALL 建立 `predictions` 表记录每条观点（Agent 一次可判定输出的最小单元：标的、方向、时间窗口，缺任一要素不进入统计）。表含 `source_type`（backtest/live，回测实盘分离）、`direction`（long/short/neutral）、`confidence`（0-1，校准用）、`rationale_snapshot`（完整分析原文 + 引用数据快照 + **TradeDecision 申报价位 entry/stop/target**）、`entry_price`（**参考价：决策时点实时价或最近收盘，供展示与盯市**）、`horizon_days`（默认取配置项 `OUTCOME_DEFAULT_HORIZON_DAYS`，默认值 20 交易日，上限 1 年）、`avoidance_status`（neutral 观点回避判定结果，系统计算写入，可空）、`settle_entry_price`（**结算入场价：判定时按标准化口径从行情派生**——决策归属日收盘；收盘后决策取次一交易日收盘；非交易日归属其后首个交易日；判定前 NULL，判定产出写入后冻结）。观点快照（rationale_snapshot/direction/entry_price/created_at）写入后 SHALL 冻结，禁止任何接口修改；判定结果由系统计算，只允许状态流转（open → resolved_* / unresolvable；neutral 观点 → 终态 `status="avoidance"`，细粒度结果写 `avoidance_status`）。`PREDICTIONS_STATUSES` SHALL 含终态 `avoidance`。
-(Previously: entry_price 为「参考价」且兼作判定基准、horizon_days 默认 252、rationale_snapshot 不含申报价位、无 avoidance_status / settle_entry_price 列。)
+系统 SHALL 建立 `predictions` 表记录每条观点（Agent 一次可判定输出的最小单元：标的、方向、时间窗口，缺任一要素不进入统计）。表含 `source_type`（backtest/live，回测实盘分离）、`direction`（long/short/neutral）、`confidence`（0-1，校准用）、`rationale_snapshot`（**观点摘要字段**：`action`、`fund_manager_decision` 及其 reasoning、**TradeDecision 申报价位 entry/stop/target**；完整分析原文 SHALL 存于会话报告并可由该观点的 `session_id` 关联，不重复存于快照）、`entry_price`（**参考价：决策时点实时价或最近收盘，供展示与盯市**）、`horizon_days`（默认取配置项 `OUTCOME_DEFAULT_HORIZON_DAYS`，默认值 20 交易日，上限 1 年）、`avoidance_status`（neutral 观点回避判定结果，系统计算写入，可空）、`settle_entry_price`（**结算入场价：判定时按标准化口径从行情派生**——决策归属日收盘；收盘后决策取次一交易日收盘；非交易日归属其后首个交易日；判定前 NULL，判定产出写入后冻结）。观点快照（rationale_snapshot/direction/entry_price/created_at）写入后 SHALL 冻结，禁止任何接口修改；判定结果由系统计算，只允许状态流转（open → resolved_* / unresolvable；neutral 观点 → 终态 `status="avoidance"`，细粒度结果写 `avoidance_status`）。`PREDICTIONS_STATUSES` SHALL 含终态 `avoidance`。
+(Previously: entry_price 为「参考价」且兼作判定基准、horizon_days 默认 252、rationale_snapshot 不含申报价位、无 avoidance_status / settle_entry_price 列。另本次收敛 rationale_snapshot 需求——原「完整分析原文 + 引用数据快照 + 申报价位」收敛为已实现的「观点摘要字段 + 申报价位」，完整原文改由 `session_id` 关联会话报告。)
 
 #### Scenario: 观点写入即冻结
 
 - **WHEN** 一条观点写入 predictions
-- **THEN** rationale_snapshot SHALL 含当时完整分析原文、引用数据与申报价位（如有）
+- **THEN** rationale_snapshot SHALL 含观点摘要字段（`action`、`fund_manager_decision` 及其 reasoning）与申报价位（如有）
+- **AND** 完整分析原文 SHALL 存于会话报告并可由该观点的 `session_id` 关联（不重复存于快照）
 - **AND** 后续任何接口（含服务端内部接口）尝试修改 direction/entry_price/rationale_snapshot/created_at SHALL 失败并留记录
 
 #### Scenario: 回测实盘分离
