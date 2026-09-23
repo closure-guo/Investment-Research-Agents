@@ -362,6 +362,245 @@ class TestRunBacktest:
         assert json.loads(json.dumps(report, ensure_ascii=False))["n_sample"] == 3
 
 
+def _valid_preregistration():
+    from evals.causal_ablation.preregister import OUTCOME_REQUIRED_FIELDS, parse_preregister
+
+    text = "\n".join(
+        [
+            "- 主指标: 逐决策 T+20 相对沪深300 超额收益均值与胜率",
+            "- MDE: n=30 → 5.1pp（换算依据见 §4）",
+            "- 决策阈值: 均值超额 95% CI 下限 > 0；依据：标的簇 bootstrap CI",
+            "- 样本量依据: forward ≥10 / ≥30 / ≥100（MDE 反算）",
+            "- 停止规则: 健康检查不过作废；探针 >0.60 降级",
+            "- 成本分型: forward 每标的 1 次 deep；回测 回放 ×3 + 探针",
+            "- 泄漏控制: 干净窗口 + 探针披露（阈值 0.60）",
+        ]
+    )
+    return parse_preregister(text, required_fields=OUTCOME_REQUIRED_FIELDS)
+
+
+def _probe(*, rate: float | None, downgraded: bool = False) -> dict:
+    return {
+        "probe_n": 10,
+        "questions_per_ticker": 3,
+        "direction_hit_rate": rate,
+        "magnitude_hit_rate": 0.4,
+        "event_hit_rate": 0.5,
+        "unknown_ratio": 0.1,
+        "threshold": 0.60,
+        "downgraded": downgraded,
+        "details": [],
+    }
+
+
+def _batch_setup(up: float = 0.014, down: float = -0.010):
+    """两 regime（bull/bear）一致标的批：regime 覆盖受限。"""
+    n = 90
+    closes = _closes(n, up, down)
+    dates = pd.date_range("2024-01-01", periods=n, freq="D").strftime("%Y-%m-%d").tolist()
+    decision_date, settle_date = dates[30], dates[40]
+    sample = [
+        {"code": "600000", "regime": "bull", "decision_date": decision_date},
+        {"code": "600001", "regime": "bear", "decision_date": decision_date},
+    ]
+    outcomes = {
+        "600000": _outcome(
+            "600000",
+            decision_date,
+            action="buy",
+            settle_date=settle_date,
+            settle_price=closes[40],
+            entry_price=closes[30],
+        ),
+        "600001": _outcome(
+            "600001",
+            decision_date,
+            action="sell",
+            settle_date=settle_date,
+            settle_price=closes[40],
+            entry_price=closes[30],
+        ),
+    }
+    klines = {c: _kline(closes) for c in outcomes}
+    return sample, outcomes, klines
+
+
+class TestBatchKindDisclosures:
+    """delta add-backtest-leakage-controls：批次准入 + 四段披露 + 结论句式三态。"""
+
+    def test_report_carries_five_disclosure_keys(self):
+        sample, outcomes, klines = _batch_setup()
+        report = run_backtest(sample, klines, replay_fn=_fake_replay(outcomes))
+        for key in (
+            "batch_kind",
+            "preregister",
+            "clean_window",
+            "leakage_probe",
+            "regime_coverage",
+        ):
+            assert key in report
+        assert report["batch_kind"] == "pathway"
+        assert report["regime_coverage"]["covered"] == ["bear", "bull"]
+        assert report["regime_coverage"]["limited"] is True
+
+    def test_formal_without_valid_preregistration_raises(self, tmp_path):
+        from evals.causal_ablation.preregister import MissingPreregistrationError
+
+        sample, outcomes, klines = _batch_setup()
+        with pytest.raises(MissingPreregistrationError):
+            run_backtest(
+                sample,
+                klines,
+                batch_kind="formal",
+                preregister_dir=tmp_path,  # 空目录 → 无有效预登记
+                probe=_probe(rate=0.3),
+                clean_window={"passed": True, "reason": "ok"},
+                replay_fn=_fake_replay(outcomes),
+            )
+
+    def test_formal_main_refuses_without_preregistration_and_writes_nothing(
+        self, monkeypatch, tmp_path
+    ):
+        """CLI 正式批无预登记 → 抛错且不落报告文件。"""
+        import sys
+
+        import evals.backtest.run_backtest as rb
+
+        monkeypatch.setattr(rb, "PREREGISTER_DIR", tmp_path / "preregister")
+        monkeypatch.setattr(
+            rb,
+            "stratified_sample",
+            lambda ik, codes, per_regime: [
+                {"code": "600000", "regime": "bull", "decision_date": "2024-01-01"}
+            ],
+        )
+        monkeypatch.setattr(rb, "run_leakage_probe", lambda *a, **k: _probe(rate=0.3))
+
+        class FakeClient:
+            def fetch_index_kline(self, code, days=None):
+                return _kline([100.0] * 5)
+
+            def fetch_kline(self, code, days=None, *, adjust="qfq"):
+                return _kline([100.0] * 5)
+
+        monkeypatch.setattr("finance_agent.data.akshare_client.AKShareClient", FakeClient)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["run_backtest.py", "--codes", "600000", "--batch-kind", "formal"],
+        )
+
+        from evals.causal_ablation.preregister import MissingPreregistrationError
+
+        with pytest.raises(MissingPreregistrationError):
+            rb.main()
+        assert not list((tmp_path / "reports").rglob("*.json"))
+
+    def test_formal_downgraded_probe_uses_upper_bound_sentence(self):
+        sample, outcomes, klines = _batch_setup()
+        report = run_backtest(
+            sample,
+            klines,
+            batch_kind="formal",
+            preregistration=_valid_preregistration(),
+            probe=_probe(rate=0.9, downgraded=True),
+            clean_window={"passed": True, "reason": "ok"},
+            replay_fn=_fake_replay(outcomes),
+        )
+        assert report["batch_kind"] == "formal"
+        assert report["preregister"]["valid"] is True
+        assert report["leakage_probe"]["downgraded"] is True
+        assert report["leakage_probe"]["state"] == "downgraded"
+        assert "上界证据" in report["conclusion"]
+        assert "赚钱能力主张成立" not in report["conclusion"]
+
+    def test_formal_unmeasurable_probe_falls_back_to_pathway(self):
+        sample, outcomes, klines = _batch_setup()
+        report = run_backtest(
+            sample,
+            klines,
+            batch_kind="formal",
+            preregistration=_valid_preregistration(),
+            probe=_probe(rate=None),
+            clean_window={"passed": True, "reason": "ok"},
+            replay_fn=_fake_replay(outcomes),
+        )
+        assert report["leakage_probe"]["state"] == "unmeasurable"
+        assert report["leakage_probe"]["direction_hit_rate"] is None
+        assert report["positioning"] == "pathway"
+        assert "通路验证" in report["conclusion"]
+        assert "显著为正" not in report["conclusion"]
+        assert "显著为负" not in report["conclusion"]
+        assert "赚钱能力主张成立" not in report["conclusion"]
+
+    def test_formal_failed_clean_window_degrades_to_pathway(self):
+        sample, outcomes, klines = _batch_setup()
+        report = run_backtest(
+            sample,
+            klines,
+            batch_kind="formal",
+            preregistration=_valid_preregistration(),
+            probe=_probe(rate=0.3),
+            clean_window={"passed": False, "reason": "决策日 2024-01-25 不足 20 个交易日"},
+            replay_fn=_fake_replay(outcomes),
+        )
+        assert report["clean_window"]["passed"] is False
+        assert report["positioning"] == "pathway"
+        assert "通路验证" in report["conclusion"]
+
+    def test_formal_clean_measurable_keeps_skill_positioning(self):
+        sample, outcomes, klines = _batch_setup()
+        report = run_backtest(
+            sample,
+            klines,
+            batch_kind="formal",
+            preregistration=_valid_preregistration(),
+            probe=_probe(rate=0.3),
+            clean_window={"passed": True, "reason": "ok"},
+            replay_fn=_fake_replay(outcomes),
+        )
+        assert report["positioning"] == "skill"
+        assert "通路验证" not in report["conclusion"]
+        assert "上界证据" not in report["conclusion"]
+
+    def test_formal_requires_probe_reading(self):
+        sample, outcomes, klines = _batch_setup()
+        with pytest.raises(ValueError, match="探针"):
+            run_backtest(
+                sample,
+                klines,
+                batch_kind="formal",
+                preregistration=_valid_preregistration(),
+                clean_window={"passed": True, "reason": "ok"},
+                replay_fn=_fake_replay(outcomes),
+            )
+
+    def test_pathway_conclusion_marked_pathway_without_skill_claim(self):
+        sample, outcomes, klines = _batch_setup()
+        report = run_backtest(
+            sample, klines, batch_kind="pathway", replay_fn=_fake_replay(outcomes)
+        )
+        assert report["batch_kind"] == "pathway"
+        assert report["positioning"] == "pathway"
+        assert "通路验证" in report["conclusion"]
+        assert "显著为正" not in report["conclusion"]
+        assert "显著为负" not in report["conclusion"]
+
+    def test_clean_window_computed_from_as_of_and_benchmark(self):
+        sample, outcomes, klines = _batch_setup()
+        # 基准日期序列覆盖到决策日之后 20 个交易日 → 通过
+        bench = _kline([100.0] * 90)
+        report = run_backtest(
+            sample,
+            klines,
+            benchmark_kline=bench,
+            as_of="2024-03-30",
+            replay_fn=_fake_replay(outcomes),
+        )
+        assert report["clean_window"]["passed"] is True
+
+
 class TestFetchCaliber:
     """delta add-backtest-leakage-controls：回测取数显式后复权（hfq）。
 
