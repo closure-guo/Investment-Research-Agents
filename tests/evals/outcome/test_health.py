@@ -22,6 +22,7 @@ def _insert(
     trace: str | None = "t1",
     snapshot: dict | None = None,
     horizon: int = 20,
+    created_at: str = "2026-09-20T10:00:00",
 ) -> None:
     import json as _json
 
@@ -43,8 +44,8 @@ def _insert(
                 _json.dumps(snap),
                 trace,
                 status,
-                "2026-09-20T10:00:00",
-                "2026-09-20T10:00:00",
+                created_at,
+                created_at,
                 compute_snapshot_hash(snap),
             ),
         )
@@ -73,6 +74,8 @@ class TestHealth:
         assert rep["settlement_success_rate"] == 1.0
         assert rep["market_missing_rate"] == 0.0
         assert rep["bookkeeping_completeness"] == 1.0
+        assert rep["checks"]["settlement_success"] is True
+        assert rep["integrity_scope"] == "whole-db"
         assert rep["passed"] is True and rep["checks"]["integrity"] is True
 
     def test_unresolvable_majority_fails_market_missing(self, tmp_path: Path):
@@ -84,6 +87,7 @@ class TestHealth:
         rep = collect_outcome_health(db, source_type="live")
         assert rep["market_missing_rate"] == 0.5
         assert rep["checks"]["market_missing"] is False
+        assert rep["checks"]["settlement_success"] is False
         assert rep["passed"] is False
 
     def test_integrity_mismatch_fails(self, tmp_path: Path):
@@ -123,6 +127,20 @@ class TestHealth:
         rep_all = collect_outcome_health(db, source_type=None)
         assert rep_all["total"] == 2
 
+    def test_since_filter_narrows_population(self, tmp_path: Path):
+        db = _db(tmp_path)
+        _insert(db, status="resolved_win", symbol="600519", created_at="2026-09-10T10:00:00")
+        _insert(db, status="resolved_win", symbol="600520", created_at="2026-09-20T10:00:00")
+        assert collect_outcome_health(db, source_type="live")["total"] == 2
+        rep = collect_outcome_health(db, source_type="live", since="2026-09-15")
+        assert rep["total"] == 1
+
+    def test_default_db_path_from_env(self, tmp_path: Path, monkeypatch):
+        db = _db(tmp_path)
+        _insert(db, status="resolved_win", symbol="600519")
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(db))
+        assert collect_outcome_health(None, source_type="live")["total"] == 1
+
 
 class TestCli:
     def test_cli_json_and_exit_code(self, tmp_path: Path, capsys):
@@ -136,3 +154,8 @@ class TestCli:
         db = _db(tmp_path)
         _insert(db, status="unresolvable", symbol="600519")
         assert main(["--db", str(db), "--source-type", "live"]) == 1
+
+    def test_cli_missing_db_exit_two(self, tmp_path: Path, capsys):
+        missing = tmp_path / "nope.db"
+        assert main(["--db", str(missing)]) == 2
+        assert "DB 不存在" in capsys.readouterr().err

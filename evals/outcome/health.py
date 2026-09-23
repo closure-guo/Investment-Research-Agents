@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,15 @@ def collect_outcome_health(
     source_type: str | None = "live",
     since: str | None = None,
 ) -> dict[str, Any]:
+    """采集指定 DB 的 outcome 读数（只读）。
+
+    integrity 为全库扫描、不受 source_type/since 过滤（integrity_check 既有契约，
+    见返回值 integrity_scope="whole-db"）；其余读数（total / status_counts / 各率）
+    按 source_type + since 过滤口径。DB 文件缺失时抛 FileNotFoundError（不建空库）。
+    """
     path = _db_path(db_path)
+    if not path.exists():
+        raise FileNotFoundError(f"DB 不存在：{path}")
     conn = sqlite3.connect(path, timeout=15.0)
     conn.row_factory = sqlite3.Row
     try:
@@ -42,6 +51,7 @@ def collect_outcome_health(
         if since:
             where += " AND created_at>=?"
             params.append(since)
+        # where 均为固定字面量拼装 + 值参数化
         counts = dict(
             conn.execute(
                 f"SELECT status, COUNT(*) FROM predictions{where} GROUP BY status",  # noqa: S608
@@ -106,6 +116,7 @@ def collect_outcome_health(
         "entry_price_missing": price_missing,
         "bookkeeping_completeness": round(1 - price_missing / total, 4) if total else None,
         "integrity_checked": integrity["checked"],
+        "integrity_scope": "whole-db",
         "integrity_mismatches": integrity["mismatch_count"],
         "trace_missing": trace_missing,
         "duplicate_snapshot_groups": len(dup_groups),
@@ -121,7 +132,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--source-type", default="live")
     ap.add_argument("--since", default=None)
     args = ap.parse_args(argv)
-    report = collect_outcome_health(args.db, source_type=args.source_type or None, since=args.since)
+    try:
+        report = collect_outcome_health(
+            args.db, source_type=args.source_type or None, since=args.since
+        )
+    except FileNotFoundError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["passed"] else 1
 
