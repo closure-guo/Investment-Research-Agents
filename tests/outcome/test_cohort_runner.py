@@ -13,13 +13,15 @@ Delta add-forward-paper-trading-cohort；逐标的串行跑 deep 分析、幂等
 
 import json
 import logging
+import sqlite3
 
+import finance_agent.outcome.cohort.runner as runner_mod
 from finance_agent.outcome.cohort.model import (
     init_cohort_runs,
     insert_cohort_run,
     list_cohort_runs,
 )
-from finance_agent.outcome.cohort.runner import run_cohort_batch
+from finance_agent.outcome.cohort.runner import FAILURE_CODES, run_cohort_batch
 
 _RUNNER_LOGGER = "finance_agent.outcome.cohort.runner"
 
@@ -295,21 +297,23 @@ def test_force_reruns_with_next_seq(tmp_path, monkeypatch):
 # ── 失败隔离 ────────────────────────────────────────────────────────────────
 
 
-def test_failure_isolation_continues_batch(tmp_path, monkeypatch):
-    monkeypatch.setattr("finance_agent.outcome.cohort.runner._live_trace_id", lambda: None)
+def test_failure_isolation_continues_batch(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: None)
     db = tmp_path / "c.db"
     universe = _universe_file(tmp_path, ["600519", "000001", "300750"])
     runner = _make_runner(fail={"000001"})
 
-    result = run_cohort_batch(
-        trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
-    )
+    with caplog.at_level(logging.WARNING, logger=_RUNNER_LOGGER):
+        result = run_cohort_batch(
+            trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+        )
 
     assert runner.calls == ["600519", "000001", "300750"], "单标失败不得中断后续标的"
     assert result["success"] == 2 and result["failure"] == 1 and result["skipped"] == 0
     by_ticker = {r["ticker"]: r for r in _rows(db)}
     assert by_ticker["000001"]["status"] == "failure"
-    assert "boom-000001" in by_ticker["000001"]["failure_reason"]
+    assert by_ticker["000001"]["failure_reason"] == "exception", "M1：稳定码，非异常消息"
+    assert "boom-000001" in caplog.text, "异常消息只进日志"
     assert by_ticker["300750"]["status"] == "success"
 
 
@@ -343,7 +347,8 @@ def test_budget_circuit_breaker_skips_rest(tmp_path, monkeypatch, caplog):
     skipped = [r for r in rows if r["status"] == "skipped"]
     assert {r["ticker"] for r in skipped} == {"000001", "300750"}
     assert all(r["failure_reason"] == "budget" for r in skipped)
-    assert any("预算熔断" in r.message for r in caplog.records)
+    assert all(r["failure_reason"] in FAILURE_CODES for r in skipped)
+    assert any("熔断" in r.message and "budget" in r.message for r in caplog.records)
 
 
 def test_budget_env_default_used_when_param_absent(tmp_path, monkeypatch):
@@ -380,20 +385,22 @@ def test_no_report_ready_is_failure(tmp_path, monkeypatch):
     assert row["failure_reason"] == "no_report_ready"
 
 
-def test_error_event_without_report_ready_names_event_type(tmp_path, monkeypatch):
-    monkeypatch.setattr("finance_agent.outcome.cohort.runner._live_trace_id", lambda: None)
+def test_error_event_without_report_ready_is_stable_code(tmp_path, monkeypatch, caplog):
+    """M1：error 事件也只落稳定码 no_report_ready；事件类型/消息进日志。"""
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: None)
     db = tmp_path / "c.db"
     universe = _universe_file(tmp_path, ["600519"])
     runner = _make_runner(mode="error")
 
-    result = run_cohort_batch(
-        trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
-    )
+    with caplog.at_level(logging.WARNING, logger=_RUNNER_LOGGER):
+        result = run_cohort_batch(
+            trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+        )
 
     assert result["failure"] == 1
     reason = _rows(db)[0]["failure_reason"]
-    assert reason.startswith("no_report_ready")
-    assert "error" in reason
+    assert reason == "no_report_ready"
+    assert "生成失败" in caplog.text
 
 
 def test_substring_report_ready_in_text_is_not_success(tmp_path, monkeypatch):
@@ -442,3 +449,190 @@ def test_real_graph_runner_path_writes_row(tmp_path, monkeypatch):
     assert row["session_id"]
     # 图被打桩、无真实 LLM 调用 → token 真值缺失，记 NULL（非 0）
     assert row["tokens_total"] is None
+
+
+# ── Δ3T4 审查路由：I1/I2/I3/I4/M1/M2/M3 ────────────────────────────────────
+
+
+def test_partial_usage_then_exception_records_real_tokens(tmp_path, monkeypatch, caplog):
+    """I1：跑了 N 次调用后失败 → 该行 failure 但 token 为**真值**（不丢），并进 spent。"""
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: None)
+    db = tmp_path / "c.db"
+    universe = _universe_file(tmp_path, ["600519"])
+
+    def runner(ticker, name, req, aid, st, session_id=None, llm_config=None):
+        _feed_usage({"prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140})
+        raise RuntimeError("stream broke after usage")
+
+    with caplog.at_level(logging.WARNING, logger=_RUNNER_LOGGER):
+        result = run_cohort_batch(
+            trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+        )
+
+    assert result["failure"] == 1
+    assert result["tokens_total"] == 140, "失败路径的真值也要计入本轮 spent（贵的失败不得逃预算）"
+    row = _rows(db)[0]
+    assert row["status"] == "failure" and row["failure_reason"] == "exception"
+    assert row["llm_calls"] == 1
+    assert (row["tokens_prompt"], row["tokens_completion"], row["tokens_total"]) == (100, 40, 140)
+
+
+def test_session_creation_failure_is_isolated(tmp_path, monkeypatch, caplog):
+    """I2：建 session 失败（在 try 外会中止整批）→ 只该标 failure，批次继续。"""
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: None)
+    db = tmp_path / "c.db"
+    universe = _universe_file(tmp_path, ["600519", "000001", "300750"])
+    real_create = runner_mod._create_session
+
+    def flaky(constituent):
+        if constituent.ticker == "000001":
+            raise RuntimeError("session store down")
+        return real_create(constituent)
+
+    monkeypatch.setattr(runner_mod, "_create_session", flaky)
+    runner = _make_runner()
+
+    with caplog.at_level(logging.WARNING, logger=_RUNNER_LOGGER):
+        result = run_cohort_batch(
+            trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+        )
+
+    assert runner.calls == ["600519", "300750"], "session 建失败不得中止整批"
+    assert result["success"] == 2 and result["failure"] == 1
+    by_ticker = {r["ticker"]: r for r in _rows(db)}
+    assert by_ticker["000001"]["status"] == "failure"
+    assert by_ticker["000001"]["failure_reason"] == "exception"
+    assert by_ticker["000001"]["session_id"] is None
+    assert "session store down" in caplog.text
+
+
+def test_record_failure_does_not_abort_batch(tmp_path, monkeypatch, caplog):
+    """I2：SQLite 冲突/写失败 → WARN 并继续下一标的（不整批中止）。"""
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: None)
+    db = tmp_path / "c.db"
+    universe = _universe_file(tmp_path, ["600519", "000001"])
+    runner = _make_runner()
+
+    def boom(*_a, **_k):
+        raise sqlite3.IntegrityError("UNIQUE constraint failed")
+
+    monkeypatch.setattr(runner_mod, "insert_cohort_run", boom)
+
+    with caplog.at_level(logging.WARNING, logger=_RUNNER_LOGGER):
+        result = run_cohort_batch(
+            trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+        )
+
+    assert runner.calls == ["600519", "000001"], "记账失败不得中止批次"
+    assert result["success"] == 2
+    assert _rows(db) == []
+    assert any("记账失败" in r.message for r in caplog.records)
+
+
+def test_unknown_usage_trips_budget_unknown(tmp_path, monkeypatch, caplog):
+    """I3：连续未知 usage（NULL）达限 → 停剩余标的，记 budget_unknown + WARN。"""
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: None)
+    db = tmp_path / "c.db"
+    universe = _universe_file(tmp_path, ["600519", "000001", "300750", "601398"])
+    runner = _make_runner(usage=None)  # 每次运行 usage 真值缺失 → tokens_total NULL
+
+    with caplog.at_level(logging.WARNING, logger=_RUNNER_LOGGER):
+        result = run_cohort_batch(
+            trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+        )
+
+    assert runner.calls == ["600519", "000001", "300750"], "未知 usage 达 3 次后不得再启动"
+    assert result["budget_stopped"] is True
+    assert result["success"] == 3 and result["skipped"] == 1
+    assert result["skipped_reasons"] == {"budget_unknown": 1}
+    skipped = [r for r in _rows(db) if r["status"] == "skipped"]
+    assert [r["ticker"] for r in skipped] == ["601398"]
+    assert skipped[0]["failure_reason"] == "budget_unknown"
+    assert "budget_unknown" in caplog.text
+
+
+def test_live_trace_id_persisted_to_session(tmp_path, monkeypatch):
+    """I4：解析到 trace 后回写 session（predictions 无 session_id 列，join 靠 trace）。"""
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: "trace-live-1")
+    db = tmp_path / "c.db"
+    universe = _universe_file(tmp_path, ["600519"])
+    runner = _make_runner()
+
+    result = run_cohort_batch(
+        trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+    )
+
+    assert result["success"] == 1
+    row = _rows(db)[0]
+    assert row["langfuse_trace_id"] == "trace-live-1"
+
+    from finance_agent.session_store import get_session_trace_id
+
+    assert get_session_trace_id(row["session_id"]) == "trace-live-1", "会话侧也须持久化"
+
+
+def test_retry_failed_ticker_uses_next_seq(tmp_path, monkeypatch):
+    """M2①：同 key 已有 failure 行后非 force 重跑 → run_seq=1，不撞 UNIQUE。"""
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: None)
+    db = tmp_path / "c.db"
+    universe = _universe_file(tmp_path, ["600519"])
+    init_cohort_runs(db)
+    insert_cohort_run(
+        {
+            "universe_version": "v1",
+            "ticker": "600519",
+            "trade_date": "2026-09-24",
+            "status": "failure",
+            "failure_reason": "no_report_ready",
+            "run_seq": 0,
+            "trigger_time": "2026-09-24T09:00:00",
+        },
+        db,
+    )
+    runner = _make_runner()
+
+    result = run_cohort_batch(
+        trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+    )
+
+    assert runner.calls == ["600519"], "failure 不在 success 集 → 应重跑"
+    assert result["success"] == 1
+    assert [r["run_seq"] for r in _rows(db)] == [0, 1]
+
+
+def test_non_numeric_budget_env_falls_back(tmp_path, monkeypatch, caplog):
+    """M3：COHORT_MAX_TOKENS_PER_RUN 非数值 → WARN + 默认值，不中止整批。"""
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: None)
+    monkeypatch.setenv("COHORT_MAX_TOKENS_PER_RUN", "abc")
+    db = tmp_path / "c.db"
+    universe = _universe_file(tmp_path, ["600519"])
+    runner = _make_runner()
+
+    with caplog.at_level(logging.WARNING, logger=_RUNNER_LOGGER):
+        result = run_cohort_batch(
+            trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+        )
+
+    assert result["success"] == 1 and result["budget_stopped"] is False
+    assert "非数值" in caplog.text
+
+
+def test_all_failure_reasons_are_stable_codes(tmp_path, monkeypatch):
+    """M1：混跑后落库的 failure_reason 全部 ∈ FAILURE_CODES（聚合键有限）。"""
+    monkeypatch.setattr(runner_mod, "_live_trace_id", lambda: None)
+    db = tmp_path / "c.db"
+    universe = _universe_file(tmp_path, ["600519", "000001", "300750"])
+    modes = {"600519": "report_ready", "000001": "empty", "300750": "error"}
+
+    def runner(ticker, name, req, aid, st, session_id=None, llm_config=None):
+        if modes[ticker] == "report_ready":
+            yield _sse({"type": "report_ready", "session_id": session_id})
+        elif modes[ticker] == "error":
+            yield _sse({"type": "error", "message": "boom"})
+
+    run_cohort_batch(
+        trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+    )
+
+    reasons = {r["failure_reason"] for r in _rows(db) if r["failure_reason"]}
+    assert reasons <= set(FAILURE_CODES), f"出现非稳定码: {reasons - set(FAILURE_CODES)}"

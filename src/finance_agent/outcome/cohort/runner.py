@@ -12,7 +12,15 @@
 **usage 真值非估算（硬约束）**：``acc.calls > 0 and acc.total_tokens == 0``
 （provider 未回计数）或 ``acc.calls == 0``（未走到任何 LLM 调用）→ token 记账
 ``NULL`` + WARNING，**不记 0**（0 会被读成「零成本」，NULL 才表达「真值缺失」）。
-有真值则如实记 ``prompt/completion/total`` 与 ``calls``。
+有真值则如实记 ``prompt/completion/total`` 与 ``calls``——**失败路径同样记**：
+异常退出时若累加器已有真实计数（跑了 N 次调用后失败），照实并入该行，且计入
+本轮 ``spent``（贵的失败不得逃出预算）。
+
+**未知 usage 熔断（Δ3T4 审查 I3）**：真值缺失（NULL）时 ``spent`` **不增长**，
+故单靠 token 预算无法防「provider 一直不回计数」导致的无限跑。故另设
+``_UNKNOWN_USAGE_LIMIT``：累计 ``_UNKNOWN_USAGE_LIMIT`` 次「usage 真值缺失」的
+运行后停止剩余标的，记 ``failure_reason="budget_unknown"`` + WARNING——把
+「无真值」与「零消耗」显式区分开（NULL 不计入 ``spent``，但计入未知计数）。
 
 **已知低估场景（本任务不修，待 Δ3 Task 7 与 Langfuse usage_details 对账）**：
 截断重试时 ``finished`` 事件只承载**末段** usage，二次截断走 error 分支不发
@@ -23,10 +31,19 @@
 **幂等**：键 ``(universe_version, ticker, trade_date)``。已 ``success`` → 跳过
 （不写行，与 Task 1 语义一致）；``force=True`` 绕过跳过，并以
 ``run_seq = 既有最大 seq + 1`` 另记一行。失败/预算跳过行同样取 next seq，
-避免 UNIQUE 冲突。
+避免 UNIQUE 冲突（已失败标的非 force 重跑也得新 seq，不撞唯一约束）。
 
-**失败隔离**：单标的异常 / 无 ``report_ready`` 只记该行 ``failure``，批内其余
-标的继续。
+**失败隔离（Δ3T4 审查 I2）**：单标的从「建 session」到「落账」全链路都在
+每标的同一 ``try`` 内——session 存储异常、SQLite 冲突均只影响该标的（尽力记
+failure 行；记不上则 WARNING），批次继续跑下一标的。
+
+**trace 关联（Δ3T4 审查 I4）**：``predictions`` 表**无 ``session_id`` 列**，Task 6
+的 join 只能靠 ``langfuse_trace_id``。故解析到 trace 后**回写**
+``session_store.set_session_trace_id(session_id, trace)``，使会话侧也持久化；
+再读回兜底（``get_session_trace_id``）以防 live 取值缺失。
+
+**failure_reason 为稳定码（Δ3T4 审查 M1）**：取值限于 ``FAILURE_CODES``，
+异常消息只进日志，不进 DB 字段（Task 6 的 ``failure_reasons`` 聚合键必须有限）。
 """
 
 from __future__ import annotations
@@ -53,6 +70,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_UNIVERSE_PATH = Path("data/cohort/universe-v1.json")
 _DEFAULT_MAX_TOKENS = 2_000_000
+# 累计「usage 真值缺失」运行数达此限 → 停止剩余标的（budget_unknown）
+_UNKNOWN_USAGE_LIMIT = 3
+# failure_reason 稳定码全集（Task 6 聚合键必须有限；异常消息只进日志）
+FAILURE_CODES = ("no_report_ready", "exception", "budget", "budget_unknown", "duplicate")
 
 
 def run_cohort_batch(
@@ -69,9 +90,10 @@ def run_cohort_batch(
 
     ``enabled`` 参数优先，否则 ``COHORT_ENABLED == "1"``（默认关）；关闭时**零调用**
     直接返回。``max_tokens`` 参数优先，否则 ``COHORT_MAX_TOKENS_PER_RUN``
-    （默认 2_000_000）；累计 ``spent`` 达限后剩余标的记 ``skipped/budget``，
-    **已启动的分析正常完成**。``graph_runner`` 为注入缝（默认
-    ``api._run_graph_streaming``），供测试注入 fake 生成器。
+    （默认 2_000_000，非数值时 WARN 回退默认）；累计 ``spent`` 达限或未知 usage
+    达 ``_UNKNOWN_USAGE_LIMIT`` 后剩余标的记 ``skipped``（``budget`` /
+    ``budget_unknown``），**已启动的分析正常完成**。``graph_runner`` 为注入缝
+    （默认 ``api._run_graph_streaming``），供测试注入 fake 生成器。
     """
     if enabled is None:
         enabled = os.getenv("COHORT_ENABLED") == "1"
@@ -81,11 +103,7 @@ def run_cohort_batch(
 
     universe = load_universe(universe_path or DEFAULT_UNIVERSE_PATH)
     day = trade_date or datetime.now().strftime("%Y-%m-%d")
-    budget = (
-        max_tokens
-        if max_tokens is not None
-        else int(os.getenv("COHORT_MAX_TOKENS_PER_RUN", str(_DEFAULT_MAX_TOKENS)))
-    )
+    budget = _resolve_budget(max_tokens)
 
     init_cohort_runs(db_path)
     existing = _successful_tickers(universe.version, day, db_path)
@@ -103,32 +121,61 @@ def run_cohort_batch(
     }
     skipped_reasons: dict[str, int] = {}
     spent = 0
-    budget_stopped = False
+    unknown_usage_runs = 0
+    stop_reason: str | None = None
 
     for constituent in universe.constituents:
         if not force and constituent.ticker in existing:
             _count_skip(skipped_reasons, "duplicate")
             result["skipped"] += 1
             continue
-        if spent >= budget:
-            budget_stopped = True
-            _record_skipped(universe.version, constituent.ticker, day, "budget", db_path)
-            _count_skip(skipped_reasons, "budget")
+        if stop_reason is not None:
+            _record_skipped_safely(universe.version, constituent.ticker, day, stop_reason, db_path)
+            _count_skip(skipped_reasons, stop_reason)
             result["skipped"] += 1
             continue
 
-        outcome = _run_one(constituent, graph_runner=graph_runner)
-        outcome["run_seq"] = _next_seq(universe.version, constituent.ticker, day, db_path)
-        _record(universe.version, constituent.ticker, day, outcome, db_path)
-        spent += outcome.get("tokens_total") or 0
+        outcome = _run_one(constituent, graph_runner=graph_runner)  # 不抛（内部隔离）
+        _record_outcome_safely(universe.version, constituent.ticker, day, outcome, db_path)
+        tokens = outcome.get("tokens_total")
+        spent += tokens or 0
         result["tokens_total"] = spent
+        if tokens is None:
+            unknown_usage_runs += 1
         result["success" if outcome["status"] == "success" else "failure"] += 1
 
+        if spent >= budget:
+            stop_reason = "budget"
+        elif unknown_usage_runs >= _UNKNOWN_USAGE_LIMIT:
+            stop_reason = "budget_unknown"
+        if stop_reason is not None:
+            result["budget_stopped"] = True
+            logger.warning(
+                "cohort 单轮熔断（reason=%s spent=%s budget=%s unknown_usage_runs=%s）",
+                stop_reason,
+                spent,
+                budget,
+                unknown_usage_runs,
+            )
+
     result["skipped_reasons"] = skipped_reasons
-    result["budget_stopped"] = budget_stopped
-    if budget_stopped:
-        logger.warning("cohort 单轮预算熔断（spent=%s >= budget=%s）", spent, budget)
     return result
+
+
+def _resolve_budget(max_tokens: int | None) -> int:
+    """预算：参数优先；env 非数值时 WARN 回退默认（ops 手滑不得中止整批）。"""
+    if max_tokens is not None:
+        return max_tokens
+    raw = os.getenv("COHORT_MAX_TOKENS_PER_RUN")
+    if raw is None:
+        return _DEFAULT_MAX_TOKENS
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "COHORT_MAX_TOKENS_PER_RUN 非数值（%r），回退默认 %d", raw, _DEFAULT_MAX_TOKENS
+        )
+        return _DEFAULT_MAX_TOKENS
 
 
 def _empty_result() -> dict[str, Any]:
@@ -173,22 +220,29 @@ def _run_one(
     *,
     graph_runner: Callable[..., Iterator[str]] | None,
 ) -> dict[str, Any]:
-    """单标的：建 session → 同线程迭代 fast path 生成器（收集 usage）→ 判 report_ready。"""
+    """单标的：建 session → 同线程迭代 fast path 生成器（收集 usage）→ 判 report_ready。
+
+    全链路（建 session / 迭代 / 落账前的 trace 回写）在本函数内隔离：**绝不抛出**，
+    失败一律返回 ``status="failure"`` 的结果 dict。
+    """
     from finance_agent.api import AnalyzeRequest, _run_graph_streaming
 
-    session_id = _create_session(constituent)
-    req = AnalyzeRequest(
-        query=f"深度分析{constituent.name}",
-        stock_code=constituent.ticker,
-        stock_name=constituent.name,
-    )
-    runner = graph_runner or _run_graph_streaming
     trigger = datetime.now().isoformat()
+    acc: UsageAccumulator | None = None
+    session_id: str | None = None
     report_ready = False
     error_event: dict[str, Any] | None = None
     trace_id: str | None = None
 
     try:
+        session_id = _create_session(constituent)
+        req = AnalyzeRequest(
+            query=f"深度分析{constituent.name}",
+            stock_code=constituent.ticker,
+            stock_name=constituent.name,
+        )
+        runner = graph_runner or _run_graph_streaming
+
         # 硬约束：同线程直接迭代（contextvar 才可见；executor/新线程会静默 0）
         with usage_collector() as acc:
             for chunk in runner(
@@ -207,42 +261,52 @@ def _run_one(
                     trace_id = _live_trace_id() or trace_id
                 elif event.get("type") == "error":
                     error_event = event
-        usage = _usage_fields(acc, constituent.ticker)
-    except Exception as exc:  # noqa: BLE001 - 单标失败隔离
-        logger.warning("cohort 单标失败 %s: %s", constituent.ticker, exc)
-        return {
-            "status": "failure",
-            "failure_reason": str(exc)[:200],
-            "session_id": session_id,
-            "langfuse_trace_id": None,
-            "trigger_time": trigger,
-        }
 
-    resolved_trace = trace_id or _session_trace_id(session_id)
-    if not report_ready:
+        usage = _usage_fields(acc, constituent.ticker)
+        _persist_session_trace(session_id, trace_id)
+        if not report_ready:
+            _log_no_report_ready(constituent.ticker, error_event)
+            return {
+                "status": "failure",
+                "failure_reason": "no_report_ready",
+                "session_id": session_id,
+                "langfuse_trace_id": trace_id or _session_trace_id(session_id),
+                "trigger_time": trigger,
+                **usage,
+            }
         return {
-            "status": "failure",
-            "failure_reason": _no_report_ready_reason(error_event),
+            "status": "success",
             "session_id": session_id,
-            "langfuse_trace_id": resolved_trace,
+            "langfuse_trace_id": trace_id or _session_trace_id(session_id),
             "trigger_time": trigger,
             **usage,
         }
-    return {
-        "status": "success",
-        "session_id": session_id,
-        "langfuse_trace_id": resolved_trace,
-        "trigger_time": trigger,
-        **usage,
-    }
+    except Exception as exc:  # noqa: BLE001 - 单标失败隔离（绝不外抛）
+        logger.warning("cohort 单标失败 %s: %s", constituent.ticker, exc, exc_info=True)
+        # 失败路径仍如实记真值：acc 可能已有真实计数（跑了 N 次调用后失败）
+        usage = _usage_fields(acc, constituent.ticker) if acc is not None else _null_usage_fields()
+        _persist_session_trace(session_id, trace_id)
+        return {
+            "status": "failure",
+            "failure_reason": "exception",  # 稳定码；异常消息只进日志
+            "session_id": session_id,
+            "langfuse_trace_id": trace_id or _session_trace_id(session_id),
+            "trigger_time": trigger,
+            **usage,
+        }
 
 
-def _no_report_ready_reason(error_event: dict[str, Any] | None) -> str:
-    """无 report_ready 的失败原因；观测到 error 事件时附事件类型与消息（便于归因）。"""
+def _log_no_report_ready(ticker: str, error_event: dict[str, Any] | None) -> None:
+    """无 report_ready 的告警（事件类型/消息只进日志，不进 DB 稳定码）。"""
     if error_event is None:
-        return "no_report_ready"
-    message = str(error_event.get("message") or "")[:160]
-    return f"no_report_ready(error: {message})" if message else "no_report_ready(error)"
+        logger.warning("cohort %s: 生成器结束但无 report_ready", ticker)
+        return
+    logger.warning(
+        "cohort %s: 无 report_ready（末事件 type=%s message=%s）",
+        ticker,
+        error_event.get("type"),
+        str(error_event.get("message") or "")[:160],
+    )
 
 
 def _usage_fields(acc: UsageAccumulator, ticker: str) -> dict[str, Any]:
@@ -251,29 +315,29 @@ def _usage_fields(acc: UsageAccumulator, ticker: str) -> dict[str, Any]:
         logger.warning(
             "cohort %s: 未记录到任何 LLM 调用，token 记账为 NULL（真值缺失，非 0）", ticker
         )
-        return {
-            "llm_calls": 0,
-            "tokens_prompt": None,
-            "tokens_completion": None,
-            "tokens_total": None,
-        }
+        return _null_usage_fields(llm_calls=0)
     if acc.total_tokens == 0:
         logger.warning(
             "cohort %s: calls=%d 但 provider usage 为 0，token 记账为 NULL（真值缺失，非 0）",
             ticker,
             acc.calls,
         )
-        return {
-            "llm_calls": acc.calls,
-            "tokens_prompt": None,
-            "tokens_completion": None,
-            "tokens_total": None,
-        }
+        return _null_usage_fields(llm_calls=acc.calls)
     return {
         "llm_calls": acc.calls,
         "tokens_prompt": acc.prompt_tokens,
         "tokens_completion": acc.completion_tokens,
         "tokens_total": acc.total_tokens,
+    }
+
+
+def _null_usage_fields(llm_calls: int | None = None) -> dict[str, Any]:
+    """真值缺失的记账字段（token 全 NULL；``llm_calls`` 未知时亦 NULL）。"""
+    return {
+        "llm_calls": llm_calls,
+        "tokens_prompt": None,
+        "tokens_completion": None,
+        "tokens_total": None,
     }
 
 
@@ -311,8 +375,22 @@ def _create_session(constituent: Constituent) -> str:
     )
 
 
-def _session_trace_id(session_id: str) -> str | None:
-    """session 表最近一次运行的 trace id（fast path 未必写；缺失返回 None）。"""
+def _persist_session_trace(session_id: str | None, trace_id: str | None) -> None:
+    """把 trace 回写 session（``predictions`` 无 session_id 列，Task 6 join 靠 trace）。"""
+    if not session_id or not trace_id:
+        return
+    try:
+        from finance_agent.session_store import set_session_trace_id
+
+        set_session_trace_id(session_id, trace_id)
+    except Exception as exc:  # noqa: BLE001 - trace 关联为尽力而为
+        logger.warning("cohort 回写 session trace_id 失败 %s: %s", session_id, exc)
+
+
+def _session_trace_id(session_id: str | None) -> str | None:
+    """读回 session 侧 trace id（本模块已回写；亦兼容他处预设值）。"""
+    if not session_id:
+        return None
     try:
         from finance_agent.session_store import get_session_trace_id
 
@@ -359,6 +437,21 @@ def _record(
     )
 
 
+def _record_outcome_safely(
+    version: str,
+    ticker: str,
+    day: str,
+    outcome: dict[str, Any],
+    db_path: str | Path | None,
+) -> None:
+    """落账（含 run_seq 计算）隔离：SQLite 冲突/写失败只 WARN，不中止批次。"""
+    try:
+        outcome["run_seq"] = _next_seq(version, ticker, day, db_path)
+        _record(version, ticker, day, outcome, db_path)
+    except Exception as exc:  # noqa: BLE001 - 记账失败不得中止整批
+        logger.warning("cohort 记账失败（跳过该行，批次继续）%s: %s", ticker, exc)
+
+
 def _record_skipped(
     version: str, ticker: str, day: str, reason: str, db_path: str | Path | None
 ) -> None:
@@ -374,3 +467,13 @@ def _record_skipped(
         },
         db_path,
     )
+
+
+def _record_skipped_safely(
+    version: str, ticker: str, day: str, reason: str, db_path: str | Path | None
+) -> None:
+    """预算/未知 usage 跳过行落账隔离（写失败只 WARN，批次继续）。"""
+    try:
+        _record_skipped(version, ticker, day, reason, db_path)
+    except Exception as exc:  # noqa: BLE001 - 记账失败不得中止整批
+        logger.warning("cohort 跳过行记账失败（批次继续）%s: %s", ticker, exc)
