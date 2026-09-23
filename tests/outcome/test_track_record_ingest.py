@@ -58,22 +58,30 @@ def test_reject_also_records(monkeypatch, tmp_path):
     assert rows[0]["status"] == "open"
 
 
-def test_no_price_archives_unresolvable(monkeypatch, tmp_path):
+def test_no_price_still_archives_open_with_warn(monkeypatch, tmp_path, caplog):
+    """参考价不可得（quote 与 kline 均无）不再标 unresolvable：状态 open + WARN 留痕。
+
+    delta update-decision-settlement-contract：判定不依赖参考价，结算入场价届时由行情派生。
+    """
+    import logging
+
     db = _db(monkeypatch, tmp_path)
-    _persist_decision_log(
-        {
-            "fund_manager_decision": "approve",
-            "final_trade_decision": {"action": "buy", "confidence": 0.8},
-            "stock_quote": None,
-        },
-        "sess-1",
-        "600519",
-        "贵州茅台",
-    )
+    with caplog.at_level(logging.WARNING, logger="finance_agent.track_record.ingest"):
+        _persist_decision_log(
+            {
+                "fund_manager_decision": "approve",
+                "final_trade_decision": {"action": "buy", "confidence": 0.8},
+                "stock_quote": None,
+            },
+            "sess-1",
+            "600519",
+            "贵州茅台",
+        )
     rows = list_predictions(db_path=db)
     assert len(rows) == 1
-    assert rows[0]["status"] == "unresolvable"
+    assert rows[0]["status"] == "open"
     assert rows[0]["entry_price"] is None
+    assert any("参考价不可得" in r.message for r in caplog.records)
 
 
 def test_no_decision_skips(monkeypatch, tmp_path):
@@ -85,3 +93,57 @@ def test_no_decision_skips(monkeypatch, tmp_path):
         "贵州茅台",
     )
     assert list_predictions(db_path=db) == []
+
+
+def test_ingest_writes_horizon_and_declared_prices(tmp_path, monkeypatch):
+    """horizon_days 显式 20；申报价位冻结入快照。"""
+    import sqlite3
+
+    from finance_agent.outcome.track_record.ingest import persist_prediction_from_accumulated
+    from finance_agent.outcome.track_record.model import init_track_record_tables
+
+    db = tmp_path / "s.db"
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(db))
+    init_track_record_tables(db)
+    accumulated = {
+        "final_trade_decision": {
+            "action": "buy",
+            "confidence": 0.7,
+            "entry_price": 101.5,
+            "stop_loss": 95.0,
+            "target_price": 120.0,
+        },
+        "stock_quote": {"price": 100.0},
+        "langfuse_trace_id": "t1",
+    }
+    persist_prediction_from_accumulated(accumulated, "sess-1", "600519", "贵州茅台")
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM predictions").fetchone()
+    assert row["horizon_days"] == 20
+    assert row["status"] == "open"
+    import json
+
+    snap = json.loads(row["rationale_snapshot"])
+    assert snap["declared_prices"] == {
+        "entry_price": 101.5,
+        "stop_loss": 95.0,
+        "target_price": 120.0,
+    }
+
+
+def test_ingest_reference_price_missing_stays_open(tmp_path, monkeypatch):
+    """参考价不可得 → 存档 + 状态 open（判定不依赖参考价）。"""
+    import sqlite3
+
+    from finance_agent.outcome.track_record.ingest import persist_prediction_from_accumulated
+    from finance_agent.outcome.track_record.model import init_track_record_tables
+
+    db = tmp_path / "s.db"
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(db))
+    init_track_record_tables(db)
+    accumulated = {"final_trade_decision": {"action": "watch", "confidence": 0.5}}
+    persist_prediction_from_accumulated(accumulated, "sess-2", "000001", "平安银行")
+    conn = sqlite3.connect(db)
+    row = conn.execute("SELECT status, entry_price FROM predictions").fetchone()
+    assert row[0] == "open" and row[1] is None

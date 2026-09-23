@@ -66,18 +66,26 @@ def test_deep_mode_reject_hold_recorded_neutral(monkeypatch, tmp_path):
     assert rows[0]["status"] == "open"
 
 
-def test_deep_mode_no_quote_no_kline_archives_unresolvable(monkeypatch, tmp_path):
+def test_deep_mode_no_quote_no_kline_archives_open_with_warn(monkeypatch, tmp_path, caplog):
+    """深模式无参考价：状态 open（不再 unresolvable）+ WARN 留痕。
+
+    delta update-decision-settlement-contract：判定不依赖参考价，结算入场价届时由行情派生。
+    """
+    import logging
+
     db = _db(monkeypatch, tmp_path)
-    persist_prediction_from_accumulated(
-        _reat_accumulated(stock_quote=None),
-        "sess-deep-1",
-        "600519",
-        "贵州茅台",
-    )
+    with caplog.at_level(logging.WARNING, logger="finance_agent.track_record.ingest"):
+        persist_prediction_from_accumulated(
+            _reat_accumulated(stock_quote=None),
+            "sess-deep-1",
+            "600519",
+            "贵州茅台",
+        )
     rows = list_predictions(db_path=db)
     assert len(rows) == 1
-    assert rows[0]["status"] == "unresolvable"
+    assert rows[0]["status"] == "open"
     assert rows[0]["entry_price"] is None
+    assert any("参考价不可得" in r.message for r in caplog.records)
 
 
 def test_no_decision_skips(monkeypatch, tmp_path):

@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS
 from finance_agent.outcome.track_record.model import insert_prediction
 
 logger = logging.getLogger("finance_agent.track_record.ingest")
@@ -22,8 +23,10 @@ def persist_prediction_from_accumulated(
     """观点全量落 predictions(旁路:任何失败仅 ERROR,不阻断业务)。
 
     approve/reject/hold/watch 均记录;action→direction 映射(buy→long,
-    sell→short,hold/watch→neutral);entry_price 取 quote 优先、kline 收盘兜底;
-    缺入场价(quote 与 kline 均不可得)存档为 unresolvable(计入样本不计入胜率)。
+    sell→short,hold/watch→neutral);horizon_days 显式写 DEFAULT_HORIZON_DAYS
+    (不再依赖插入兜底);rationale_snapshot 冻结申报价位(entry/stop/target);
+    entry_price 取 quote 优先、kline 收盘兜底——两者均不可得时仅 WARN,
+    状态保持 open(判定不依赖参考价,结算入场价届时由行情派生)。
     """
     try:
         decision = accumulated.get("final_trade_decision")
@@ -47,8 +50,9 @@ def persist_prediction_from_accumulated(
         status = "open"
         resolution_rule = None
         if entry_price is None:
-            status = "unresolvable"
-            resolution_rule = "missing_entry_price"
+            logger.warning(
+                "参考价不可得（quote 与 kline 均无）: %s；判定时由行情派生结算入场价", stock_code
+            )
         symbol = f"{stock_code}.SH" if str(stock_code).startswith("6") else f"{stock_code}.SZ"
         insert_prediction(
             {
@@ -58,6 +62,7 @@ def persist_prediction_from_accumulated(
                 "direction": direction,
                 "entry_price": float(entry_price) if entry_price is not None else None,
                 "target_price": decision.get("target_price"),
+                "horizon_days": DEFAULT_HORIZON_DAYS,
                 "confidence": decision.get("confidence"),
                 "rationale_snapshot": {
                     "action": action,
@@ -65,6 +70,11 @@ def persist_prediction_from_accumulated(
                     "fund_manager_decision_reasoning": accumulated.get(
                         "fund_manager_decision_reasoning"
                     ),
+                    "declared_prices": {
+                        "entry_price": decision.get("entry_price"),
+                        "stop_loss": decision.get("stop_loss"),
+                        "target_price": decision.get("target_price"),
+                    },
                 },
                 "langfuse_trace_id": accumulated.get("langfuse_trace_id"),
                 "timestamp": _now_iso(),
