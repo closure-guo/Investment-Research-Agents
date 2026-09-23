@@ -50,6 +50,15 @@ def _bench_close_on_or_before(benchmark: pd.DataFrame, date: str) -> float | Non
     return float(eligible.iloc[-1]["收盘"])
 
 
+def direction_for_action(action: str) -> str:
+    """action → direction：buy→long、sell→short、其余（含 hold/watch/空）→neutral。
+
+    单一来源：ingest（落库）/ model（decision_log 迁移）/ evals.backtest.replay
+    （回测预测量构造）三处共用，禁止各自再写三目拷贝。
+    """
+    return {"buy": "long", "sell": "short"}.get(str(action or ""), "neutral")
+
+
 def should_supersede(old: dict, new: dict) -> bool:
     """同标的方向相反或目标价不同 → 旧观点立即结算。"""
     if old.get("symbol") != new.get("symbol"):

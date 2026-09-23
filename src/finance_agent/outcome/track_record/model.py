@@ -17,7 +17,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS, MAX_HORIZON_DAYS
+from finance_agent.outcome.track_record.judgment import (
+    DEFAULT_HORIZON_DAYS,
+    MAX_HORIZON_DAYS,
+    direction_for_action,
+)
 
 PREDICTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS predictions (
@@ -893,7 +897,7 @@ def migrate_decision_log(db_path: str | Path | None = None) -> int:
             ).fetchall()
         for r in rows:
             action = r["action"]
-            direction = "long" if action == "buy" else ("short" if action == "sell" else "neutral")
+            direction = direction_for_action(action)
             pid = f"p_{uuid.uuid4().hex[:12]}"
             snapshot = json.dumps(
                 {

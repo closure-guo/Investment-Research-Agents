@@ -136,6 +136,31 @@ def test_migrate_decision_log(db, tmp_path):
     assert rows[0]["horizon_days"] == 252  # 存量不追溯：迁移行按其原语义窗口
 
 
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [("buy", "long"), ("sell", "short"), ("hold", "neutral"), ("watch", "neutral")],
+)
+def test_migrate_direction_matches_shared_mapping(db, action, expected):
+    """迁移方向 = judgment.direction_for_action（Δ2T6 审查：消除决策日志迁移的拷贝）。"""
+    from finance_agent.outcome.store import init_decision_log, insert_decision
+
+    init_decision_log(db)
+    insert_decision(
+        {
+            "session_id": "s",
+            "timestamp": "2026-09-01T10:00:00",
+            "ticker": "600519",
+            "name": "贵州茅台",
+            "action": action,
+            "entry_price": 100.0,
+            "confidence": 0.8,
+        },
+        db_path=db,
+    )
+    assert migrate_decision_log(db_path=db) == 1
+    assert list_predictions(db_path=db)[0]["direction"] == expected
+
+
 # ── add-track-record-sort-filter：排序白名单 / 关键字 / 时间段 / count ──
 
 

@@ -105,6 +105,20 @@ class TestSettlementMapping:
             settlement["decision_return"] - settlement["benchmark_return"], abs=1e-9
         )
 
+    def test_replay_settlement_benchmark_not_covering_window_excess_is_none(self, monkeypatch):
+        """基准非空但起始晚于出场日 → 未覆盖持有窗口 → 超额仍记 None（不回落成 0）。"""
+        _stub_graph(monkeypatch, {"action": "buy"})
+        kline = _dated_kline(_horizon_rows(11.0, 12.1))
+        bench = _dated_kline([("2026-11-02", 3000.0), ("2026-11-03", 3050.0)])
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision(
+            "600519", "2026-09-02", snapshot=snap, full_kline=kline, full_benchmark=bench
+        )
+
+        settlement = result["settlement"]
+        assert settlement["benchmark_return"] is None
+        assert settlement["decision_excess"] is None
+
     def test_replay_neutral_action_maps_avoidance(self, monkeypatch):
         """hold/watch → direction=neutral → 判定结果为 avoidance_*（回避正确）。"""
         _stub_graph(monkeypatch, {"action": "hold"})
@@ -155,8 +169,25 @@ class TestSettlementKlineCaliber:
         assert result["entry_price"] is None
         assert result["action"] == "buy"
 
+    def test_empty_full_kline_returns_no_settlement(self, monkeypatch):
+        """空全量 K 线（缺 日期 列）→ 走「无结算」优雅返回，不以 KeyError 逃逸。"""
+        _stub_graph(monkeypatch, {"action": "buy"})
+        snapshot_kline = _dated_kline([("2026-09-02", 11.0), ("2026-09-03", 12.0)])
+        snap = SnapshotResult(state={"kline": snapshot_kline}, metadata={})
+        result = rp.replay_decision(
+            "600519", "2026-09-02", snapshot=snap, full_kline=pd.DataFrame()
+        )
+        assert result["settlement"] is None
+        assert result["entry_price"] is None
+
 
 class TestConsistency:
+    def test_direction_uses_judgment_single_source(self):
+        """replay 的 action→direction 与 ingest/model 同源（Δ2T6 审查：消除第三份拷贝）。"""
+        from finance_agent.outcome.track_record.judgment import direction_for_action
+
+        assert rp.direction_for_action is direction_for_action
+
     def test_full_agreement(self):
         assert direction_agreement(["buy", "buy", "buy"]) == 1.0
 

@@ -4,6 +4,8 @@ import json
 import logging
 import sqlite3
 
+import pytest
+
 from finance_agent.api import _persist_decision_log
 from finance_agent.outcome.track_record.ingest import persist_prediction_from_accumulated
 from finance_agent.outcome.track_record.model import (
@@ -161,3 +163,19 @@ def test_ingest_reference_price_missing_stays_open(tmp_path, monkeypatch):
     conn = sqlite3.connect(db)
     row = conn.execute("SELECT status, entry_price FROM predictions").fetchone()
     assert row[0] == "open" and row[1] is None
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [("buy", "long"), ("sell", "short"), ("hold", "neutral"), ("watch", "neutral")],
+)
+def test_ingest_direction_matches_shared_mapping(monkeypatch, action, expected):
+    """ingest 落库方向 = judgment.direction_for_action（Δ2T6 审查：消除第三份拷贝）。"""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "finance_agent.outcome.track_record.ingest.insert_prediction",
+        lambda record, **kw: captured.update(record),
+    )
+    accumulated = {"final_trade_decision": {"action": action, "confidence": 0.7}}
+    persist_prediction_from_accumulated(accumulated, "sess-map", "600519", "贵州茅台")
+    assert captured["direction"] == expected

@@ -11,7 +11,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS
+from finance_agent.outcome.track_record.judgment import (
+    DEFAULT_HORIZON_DAYS,
+    direction_for_action,
+)
 from finance_agent.outcome.track_record.model import insert_prediction
 
 logger = logging.getLogger("finance_agent.track_record.ingest")
@@ -40,7 +43,7 @@ def persist_prediction_from_accumulated(
         if not decision.get("action"):
             return
         action = decision["action"]
-        direction = "long" if action == "buy" else ("short" if action == "sell" else "neutral")
+        direction = direction_for_action(action)
         entry_price = (accumulated.get("stock_quote") or {}).get("price")
         if entry_price is None:
             kline = accumulated.get("kline")

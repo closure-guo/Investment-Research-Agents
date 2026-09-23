@@ -12,6 +12,7 @@ from finance_agent.outcome.track_record.judgment import (
     Resolution,
     _effective_horizon,
     derive_entry,
+    direction_for_action,
     resolve_prediction,
     should_supersede,
 )
@@ -258,3 +259,22 @@ def test_default_horizon_days_env_override():
         check=True,
     )
     assert out.stdout.strip() == "30"
+
+
+def test_direction_for_action_mapping():
+    """action → direction 单一来源:buy→long、sell→short、其余(hold/watch/空/None)→neutral。"""
+    assert direction_for_action("buy") == "long"
+    assert direction_for_action("sell") == "short"
+    for action in ("hold", "watch", "", None, "unknown"):
+        assert direction_for_action(action) == "neutral"
+
+
+def test_direction_for_action_single_source_across_consumers():
+    """ingest / model 必须复用 judgment 的同一函数对象(不是各自拷贝的三目式)。
+
+    replay 侧同源断言在 tests/evals/backtest/test_replay.py(避免 tests/outcome 依赖 evals)。
+    """
+    from finance_agent.outcome.track_record import ingest, model
+
+    assert ingest.direction_for_action is direction_for_action
+    assert model.direction_for_action is direction_for_action

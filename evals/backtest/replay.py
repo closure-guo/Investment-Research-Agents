@@ -20,11 +20,11 @@ from finance_agent.nodes.compute import compute_metrics
 from finance_agent.outcome.track_record.judgment import (
     DEFAULT_HORIZON_DAYS,
     Resolution,
+    direction_for_action,
     resolve_prediction,
 )
 
-# action → 判定方向（hold/watch 及其余非买卖动作 → neutral → 回避判定）
-_ACTION_DIRECTION = {"buy": "long", "sell": "short"}
+_KLINE_REQUIRED_COLUMNS = ("日期", "收盘")
 
 
 def direction_agreement(actions: list[str]) -> float:
@@ -35,16 +35,28 @@ def direction_agreement(actions: list[str]) -> float:
     return top / len(actions)
 
 
+def _usable_kline(kline: pd.DataFrame | None) -> bool:
+    """可结算 K 线：非空且含 日期/收盘（缺列的空表曾以 KeyError 逃逸）。"""
+    return (
+        kline is not None
+        and not kline.empty
+        and all(col in kline.columns for col in _KLINE_REQUIRED_COLUMNS)
+    )
+
+
 def _settlement_kline(
     full_kline: pd.DataFrame | None, state: dict[str, Any]
 ) -> pd.DataFrame | None:
-    """结算 K 线：只接受 hfq 全量；回落快照 kline（管线 qfq）违反同源口径 → ValueError。"""
+    """结算 K 线：只接受 hfq 全量；回落快照 kline（管线 qfq）违反同源口径 → ValueError。
+
+    形状不全（空表/缺 日期·收盘 列）→ 返回 None 走「无结算」优雅返回，不以 KeyError 逃逸。
+    """
     if full_kline is not None:
-        return full_kline
+        return full_kline if _usable_kline(full_kline) else None
     snapshot_kline = state.get("kline")
-    if snapshot_kline is None or snapshot_kline.empty:
-        return None
-    raise ValueError("回测结算需 hfq 全量 K 线；快照 kline 为管线口径，不得混用")
+    if _usable_kline(snapshot_kline):
+        raise ValueError("回测结算需 hfq 全量 K 线；快照 kline 为管线口径，不得混用")
+    return None
 
 
 def _excess_split(
@@ -55,6 +67,8 @@ def _excess_split(
     与旧 outcome.settle 契约一致：基准缺失（未传或未覆盖入场/出场日）时超额记 None，
     不当作 0（下游 store AVG 与 Langfuse Score 均按 null 剔除）。
     """
+    # 保留理由：excess_return 类型为 float | None，此守卫同时是 mypy 的收窄
+    # （expiry 路径恒非 None，superseded 才可能 None）；删掉则 raw - None 无法通过类型检查。
     if resolution.excess_return is None:
         return None, None
     if benchmark is None or benchmark.empty:
@@ -126,7 +140,7 @@ def replay_decision(
     # 纯日期 created_at → before_close → 归属日收盘入场（与旧 _close_on_or_before 同值）
     prediction = {
         "created_at": decision_date,
-        "direction": _ACTION_DIRECTION.get(action, "neutral"),
+        "direction": direction_for_action(action),
         "horizon_days": DEFAULT_HORIZON_DAYS,
         "target_price": decision.get("target_price"),
     }
