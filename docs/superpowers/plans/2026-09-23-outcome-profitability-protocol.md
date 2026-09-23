@@ -899,6 +899,8 @@ Expected: pytest 全绿；ruff 零违例；mypy 触碰文件零错误
 
 对照 `openspec/changes/add-outcome-profitability-protocol/specs/evaluation/spec.md` 的三条需求 Scenario，逐条在 metrics.md §1.8 / 预登记文档 / 代码中找到落点，写进验证报告「Scenario 对照表」。
 
+**文档一致性补强（Task 4 审查采纳）**：metrics.md §1.8⑤ 的健康检查括注改为「健康检查（结算成功率 ≥0.90 / 行情缺失率 ≤0.10 / integrity 零不一致 / 记账完整率——读数不设阈值）」；并在同格补「integrity 为全库扫描（不受 source_type/since 过滤），其余读数按过滤口径（`integrity_scope` 字段随报告披露）」。改后重跑 `uv run pytest tests/evals/outcome/test_caliber_doc.py -v` 确认护栏测试仍绿。
+
 - [ ] **Step 3: 写人工验证报告**
 
 `tests/validation/2026-09-23-add-outcome-profitability-protocol-validation.md`，模板：
