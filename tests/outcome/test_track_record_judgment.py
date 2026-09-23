@@ -92,3 +92,20 @@ def test_default_horizon_days_and_cutoff_pinned():
 
     assert judgment.DEFAULT_HORIZON_DAYS == 20
     assert judgment.CLOSE_TIME_CUTOFF == "15:00"
+
+
+def test_default_horizon_days_env_override():
+    """env 覆盖生效（DEFAULT_HORIZON_DAYS 为导入期读取 → 须子进程验证）。"""
+    import os
+    import subprocess
+    import sys
+
+    probe = "import finance_agent.outcome.track_record.judgment as j; print(j.DEFAULT_HORIZON_DAYS)"
+    out = subprocess.run(  # noqa: S603 - sys.executable 固定路径，代码为内联常量
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, OUTCOME_DEFAULT_HORIZON_DAYS="30"),
+        check=True,
+    )
+    assert out.stdout.strip() == "30"

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+# 主评估窗口：唯一实现源在 track-record 判定（§1.8①「不另造定义」）
+from finance_agent.outcome.track_record.judgment import (  # noqa: F401  别名再导出
+    DEFAULT_HORIZON_DAYS as PRIMARY_WINDOW_DAYS,
+)
+
 # ±2% 中性带：唯一实现源在 track-record 判定（§1.8①「不另造定义」）
 from finance_agent.outcome.track_record.judgment import (  # noqa: F401  别名再导出
     DEFAULT_NEUTRAL_BAND as NEUTRAL_BAND,
 )
 
-PRIMARY_WINDOW_DAYS = 20  # 主评估窗口（交易日）；与结算默认 horizon 一致
 AUX_WINDOWS: tuple[int, ...] = (5, 10)  # 辅助观测窗（daily_marks 派生，只观测不判定）
 BENCHMARK_CODE = "000300.SH"  # 沪深300
 MIN_SETTLED_FOR_WINRATE = 10  # settled < 10 不报胜率（红线）

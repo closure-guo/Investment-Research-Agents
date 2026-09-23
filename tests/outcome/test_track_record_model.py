@@ -124,6 +124,7 @@ def test_migrate_decision_log(db, tmp_path):
     rows = list_predictions(db_path=db)
     assert rows[0]["symbol"] == "600519.SH"
     assert rows[0]["direction"] == "long"
+    assert rows[0]["horizon_days"] == 252  # 存量不追溯：迁移行按其原语义窗口
 
 
 # ── add-track-record-sort-filter：排序白名单 / 关键字 / 时间段 / count ──
@@ -241,6 +242,14 @@ def test_settlement_contract_columns_migrated(tmp_path):
     conn.commit()
     conn.close()
 
+    # 自证「老库」：四个待补列在 init 前均不存在，否则断言可能空转
+    pre = sqlite3.connect(db)
+    try:
+        pre_cols = {r[1] for r in pre.execute("PRAGMA table_info(predictions)")}
+    finally:
+        pre.close()
+    assert not {"avoidance_status", "settle_entry_price", "version_seq", "snapshot_hash"} & pre_cols
+
     init_track_record_tables(db)
     init_track_record_tables(db)  # 幂等
     conn = sqlite3.connect(db)
@@ -265,3 +274,39 @@ def test_mutable_fields_include_settlement_outputs():
     assert "settle_entry_price" in _MUTABLE_FIELDS
     assert "avoidance_status" not in _FROZEN_FIELDS
     assert "settle_entry_price" not in _FROZEN_FIELDS
+
+
+def test_fresh_db_horizon_days_ddl_default_is_20(tmp_path):
+    """DDL 表级默认值钉死：裸 INSERT（省略 horizon_days）落 20，不依赖 insert_prediction 兜底。"""
+    import sqlite3
+
+    from finance_agent.outcome.track_record.model import init_track_record_tables
+
+    db = tmp_path / "fresh.db"
+    init_track_record_tables(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            """INSERT INTO predictions (prediction_id, source_type, symbol, direction,
+                 rationale_snapshot, created_at, updated_at)
+               VALUES ('p_bare', 'live', '600519.SH', 'long', '{}', 't', 't')"""
+        )
+        conn.commit()
+        assert (
+            conn.execute(
+                "SELECT horizon_days FROM predictions WHERE prediction_id='p_bare'"
+            ).fetchone()[0]
+            == 20
+        )
+    finally:
+        conn.close()
+
+
+def test_insert_prediction_default_horizon_matches_config(db):
+    """insert_prediction 兜底 = 配置默认值（消除第二处 252 字面量，DDL 默认不再不可达）。"""
+    from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS
+
+    rec = dict(BASE)
+    rec.pop("horizon_days")
+    insert_prediction(rec, db_path=db)
+    assert list_predictions(db_path=db)[0]["horizon_days"] == DEFAULT_HORIZON_DAYS == 20

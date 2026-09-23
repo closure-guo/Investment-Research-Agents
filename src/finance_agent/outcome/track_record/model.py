@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS, MAX_HORIZON_DAYS
+
 PREDICTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS predictions (
   prediction_id     TEXT PRIMARY KEY,
@@ -38,7 +40,7 @@ CREATE TABLE IF NOT EXISTS predictions (
   raw_return        REAL,
   excess_return     REAL,
   resolution_rule   TEXT,
-  avoidance_status   TEXT,
+  avoidance_status  TEXT,
   settle_entry_price REAL,
   updated_at        TEXT NOT NULL,
   version_seq       INTEGER,
@@ -561,7 +563,7 @@ def insert_prediction(
                 record["direction"],
                 record.get("entry_price"),
                 record.get("target_price"),
-                int(record.get("horizon_days", 252)),
+                int(record.get("horizon_days", DEFAULT_HORIZON_DAYS)),
                 record.get("confidence"),
                 record.get("benchmark", "000300.SH"),
                 json.dumps(snapshot, ensure_ascii=False),
@@ -844,9 +846,9 @@ def migrate_decision_log(db_path: str | Path | None = None) -> int:
             conn.execute(
                 """INSERT INTO predictions (
                      prediction_id, source_type, symbol, symbol_name, direction,
-                     entry_price, target_price, confidence, benchmark,
+                     entry_price, target_price, horizon_days, confidence, benchmark,
                      rationale_snapshot, langfuse_trace_id, status, created_at, updated_at
-                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?, 'open', ?, ?)""",
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'open', ?, ?)""",
                 (
                     pid,
                     "live",
@@ -857,6 +859,8 @@ def migrate_decision_log(db_path: str | Path | None = None) -> int:
                     direction,
                     float(r["entry_price"]),
                     r["target_price"],
+                    # 存量不追溯：迁移行按其原语义窗口（252），不吃新默认窗口 20
+                    MAX_HORIZON_DAYS,
                     r["confidence"],
                     "000300.SH",
                     snapshot,
