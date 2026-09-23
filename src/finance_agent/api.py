@@ -135,6 +135,8 @@ def resolve_reports_path(file_name: str) -> Path:
 init_db()
 
 # 决策日志表(幂等建表,decision_log 与 sessions 同库;decision-outcome-tracking)
+# cohort 跑批记账表(delta add-forward-paper-trading-cohort;独立于 predictions)
+from finance_agent.outcome.cohort.model import init_cohort_runs  # noqa: E402
 from finance_agent.outcome.store import (  # noqa: E402
     DECISION_STATUSES,
     decision_stats,
@@ -170,6 +172,7 @@ from finance_agent.outcome.track_record.segments import segment_all  # noqa: E40
 init_decision_log()
 init_predictions()
 init_track_record_tables()
+init_cohort_runs()
 
 # ── Node → Layer/Description mapping (shared with frontend) ──
 
