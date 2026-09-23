@@ -169,6 +169,19 @@ def test_default_horizon_days_and_cutoff_pinned():
     assert judgment.CLOSE_TIME_CUTOFF == "15:00"
 
 
+def test_avoidance_statuses_and_terminal_constant():
+    """回避结果域(avoidance_win/loss/neutral)与生命周期终态(avoidance)是两个域。"""
+    from finance_agent.outcome.track_record import judgment
+
+    assert judgment.AVOIDANCE_STATUSES == (
+        "avoidance_win",
+        "avoidance_loss",
+        "avoidance_neutral",
+    )
+    assert judgment.TERMINAL_AVOIDANCE_STATUS == "avoidance"
+    assert judgment.TERMINAL_AVOIDANCE_STATUS not in judgment.AVOIDANCE_STATUSES
+
+
 def test_default_horizon_days_env_override():
     """env 覆盖生效（DEFAULT_HORIZON_DAYS 为导入期读取 → 须子进程验证）。"""
     import os

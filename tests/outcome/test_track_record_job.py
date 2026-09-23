@@ -141,7 +141,10 @@ def test_stale_marks_unresolvable(tmp_path):
 
 
 def test_neutral_prediction_writes_avoidance_status(tmp_path):
-    """neutral 观点到点判定 → 写 avoidance_status;status 保持 open(不写 resolved_*)。"""
+    """neutral 观点到点判定 → 结果只入 avoidance_status,status 落终态 avoidance。
+
+    终态(而非保持 open)是必须的:否则该行永远留在 open 池,日批无限重结算。
+    """
     db = _db(tmp_path)
     pid = _insert(db, direction="neutral", horizon=20, entry=88.0)  # 参考价故意≠派生入场
     # 入场 09-01 收盘 11 → 20 个交易日后 09-21 收盘 9.9(-10%);基准持平 → 超额 = raw
@@ -156,10 +159,29 @@ def test_neutral_prediction_writes_avoidance_status(tmp_path):
     row = list_predictions(db_path=db)[0]
     assert row["prediction_id"] == pid
     assert row["avoidance_status"] == "avoidance_win"  # 跑输 → 回避正确
-    assert row["status"] == "open"  # neutral 不进 resolved_* 流转
+    assert row["status"] == "avoidance"  # 终态:结果不入 status,状态不进 resolved_*
+    assert row["status"] not in ("resolved_win", "resolved_loss", "resolved_neutral")
+    assert list_predictions(status="open", db_path=db) == []  # 离开 open 池(不再重结算)
     assert row["settle_entry_price"] == 11.0  # 派生入场价落库
     assert row["resolved_at"] == "2026-09-21"  # 真实结算日
     assert langfuse.calls == []  # neutral 不上报 decision_* Score
+
+
+def test_settled_rows_leave_open_pool_on_rerun(tmp_path):
+    """幂等(重跑日批):已结算行不再进 open 池 → 不重复结算、不重复上报 Score。"""
+    db = _db(tmp_path)
+    _insert(db, trace_id="trace-long")
+    client = _StubClient(
+        {"600519": _kline([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 115])}
+    )
+    langfuse = _FakeLangfuse()
+    first = settle_open_predictions(client=client, db_path=db, langfuse=langfuse)
+    assert first["settled"] == 1 and first["scores_reported"] == 3
+    second = settle_open_predictions(client=client, db_path=db, langfuse=langfuse)
+    assert second["settled"] == 0 and second["skipped"] == 0
+    assert second["scores_reported"] == 0
+    assert len(langfuse.calls) == 3  # 未重复上报
+    assert list_predictions(db_path=db)[0]["status"] == "resolved_win"
 
 
 def test_long_prediction_writes_settle_entry_price(tmp_path):

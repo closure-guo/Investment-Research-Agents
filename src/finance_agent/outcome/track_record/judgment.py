@@ -19,6 +19,12 @@ DEFAULT_NEUTRAL_BAND = 0.02
 DEFAULT_HORIZON_DAYS = int(os.getenv("OUTCOME_DEFAULT_HORIZON_DAYS", "20"))
 CLOSE_TIME_CUTOFF = "15:00"  # 归属日收盘切分：created_at 时间部分 < 此值 → 归属日收盘入场
 
+# neutral 回避判定的结果域（写 avoidance_status 列）
+AVOIDANCE_STATUSES: tuple[str, ...] = ("avoidance_win", "avoidance_loss", "avoidance_neutral")
+# 回避判定的生命周期终态（写 status 列）：离开 open 池的标记，避免日批无限重结算；
+# 结果本身只入 avoidance_status，故与 AVOIDANCE_STATUSES 是两个域。
+TERMINAL_AVOIDANCE_STATUS = "avoidance"
+
 
 @dataclass
 class Resolution:

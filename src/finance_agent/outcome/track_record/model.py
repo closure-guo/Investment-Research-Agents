@@ -50,7 +50,15 @@ CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
 CREATE INDEX IF NOT EXISTS idx_predictions_symbol ON predictions(symbol);
 """
 
-PREDICTIONS_STATUSES = ("open", "resolved_win", "resolved_loss", "resolved_neutral", "unresolvable")
+PREDICTIONS_STATUSES = (
+    "open",
+    "resolved_win",
+    "resolved_loss",
+    "resolved_neutral",
+    # neutral 回避判定的生命周期终态（结果本身在 avoidance_status 列）
+    "avoidance",
+    "unresolvable",
+)
 _FROZEN_FIELDS = (
     "direction",
     "entry_price",
@@ -654,6 +662,7 @@ _STATUS_LABELS = {
     "命中": "resolved_win",
     "未中": "resolved_loss",
     "中性": "resolved_neutral",
+    "回避": "avoidance",
     "不可判定": "unresolvable",
 }
 

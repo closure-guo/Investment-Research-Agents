@@ -47,8 +47,16 @@ def test_statuses_enum():
         "resolved_win",
         "resolved_loss",
         "resolved_neutral",
+        "avoidance",  # neutral 回避判定终态(delta update-decision-settlement-contract)
         "unresolvable",
     )
+
+
+def test_terminal_avoidance_status_is_whitelisted():
+    """job 落库的 neutral 终态必须在白名单内（否则 API/前端过滤认不出该状态）。"""
+    from finance_agent.outcome.track_record.judgment import TERMINAL_AVOIDANCE_STATUS
+
+    assert TERMINAL_AVOIDANCE_STATUS in PREDICTIONS_STATUSES
 
 
 def test_insert_and_list(db):
@@ -169,6 +177,13 @@ def test_list_keyword_matches_symbol_name_and_labels(db):
     rows = list_predictions(db_path=db)
     update_prediction_status(rows[0]["prediction_id"], {"status": "resolved_win"}, db_path=db)
     assert len(list_predictions(keyword="命中", db_path=db)) == 1
+    # 状态标签「回避」→ avoidance（neutral 回避判定终态）
+    update_prediction_status(
+        rows[1]["prediction_id"],
+        {"status": "avoidance", "avoidance_status": "avoidance_win"},
+        db_path=db,
+    )
+    assert len(list_predictions(keyword="回避", db_path=db)) == 1
 
 
 def test_list_date_range_inclusive(db):

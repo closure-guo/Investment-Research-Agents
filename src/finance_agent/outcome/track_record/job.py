@@ -6,8 +6,9 @@ superseded(同标的新观点方向相反/目标价不同)立即按现价结算�
 失败隔离:单观点异常跳过不中断整批。
 
 delta update-decision-settlement-contract:两路径入场基准均为派生 settle_entry_price
-(judgment.derive_entry,非存档参考价);neutral 判定写 avoidance_status(不写 resolved_*);
-long/short 结算后向 Langfuse 上报 decision_hit/return/excess(Score 失败仅 WARN)。
+(judgment.derive_entry,非存档参考价);neutral 判定结果写 avoidance_status、status 落终态
+"avoidance"(不写 resolved_*,也不再留在 open 池);long/short 结算后向 Langfuse 上报
+decision_hit/return/excess(Score 失败仅 WARN)。
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ from typing import Any
 import pandas as pd
 
 from finance_agent.outcome.track_record.judgment import (
+    AVOIDANCE_STATUSES,
+    TERMINAL_AVOIDANCE_STATUS,
     Resolution,
     derive_entry,
     resolve_prediction,
@@ -41,7 +44,7 @@ def _report_scores(langfuse: Any, prediction: dict, resolution: Resolution) -> i
     与旧链路 outcome.job.report_outcome_scores 同形:trace 不可查仅 WARN,不阻断结算。
     """
     trace_id = prediction.get("langfuse_trace_id")
-    if not trace_id or langfuse is None or resolution.status.startswith("avoidance_"):
+    if not trace_id or langfuse is None or resolution.status in AVOIDANCE_STATUSES:
         return 0
     benchmark_return = (
         resolution.raw_return - resolution.excess_return
@@ -232,9 +235,11 @@ def settle_open_predictions(
             "resolved_at": resolution.exit_date,
             "settle_entry_price": resolution.entry_price,
         }
-        if resolution.status.startswith("avoidance_"):
-            # neutral 回避判定:独立字段流转,status 保持 open(不进胜率/不复用 resolved_*)
+        if resolution.status in AVOIDANCE_STATUSES:
+            # neutral 回避判定:结果只入 avoidance_status;status 落终态 avoidance 使其
+            # 离开 open 池(保持 open 会被日批反复重结算,且不进胜率/不复用 resolved_*)
             payload["avoidance_status"] = resolution.status
+            payload["status"] = TERMINAL_AVOIDANCE_STATUS
         else:
             payload["status"] = resolution.status
         try:
