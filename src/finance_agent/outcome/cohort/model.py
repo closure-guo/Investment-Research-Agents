@@ -62,7 +62,11 @@ def init_cohort_runs(db_path: str | Path | None = None) -> None:
 
 
 def insert_cohort_run(record: dict[str, Any], db_path: str | Path | None = None) -> str:
-    """插入一条跑批记账；run_id/created_at 服务端生成。返回 run_id。
+    """插入一条跑批记账；``run_id`` / ``created_at`` 默认服务端生成。返回 run_id。
+
+    ``record["run_id"]`` 若显式提供则**覆盖**服务端生成值（实现为
+    ``record.get("run_id") or uuid4().hex``）；runner 从不传该键，实际恒为
+    服务端生成。``created_at`` 恒服务端生成（不接受 record 覆盖）。
 
     同 key 同 run_seq 重复插入由 UNIQUE 约束拒绝（sqlite3.IntegrityError）。
     """

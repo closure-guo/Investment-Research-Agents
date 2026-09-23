@@ -62,6 +62,8 @@ META_KEYS = (
 POOL_KEY = "pool"
 
 STRATA_BY = "market_cap(quota)+industry(dedup)"
+# force 覆盖时必须逐字段一致的核心字段（spec Req1「版本生效期内标的池 SHALL NOT 变更」）
+FORCE_COMPARE_KEYS = ("constituents", "cut_points", "pool_size", "excluded", "strata")
 BUCKETS = ("large", "mid", "small")
 SOURCE_DIMENSIONS = ("constituents", "industry", "market_cap")
 UNKNOWN_SOURCE = "unknown"
@@ -140,12 +142,30 @@ def _version_from_filename(path: Path) -> str | None:
     return None
 
 
+def _assert_same_pool_content(payload: dict[str, Any], existing: dict[str, Any]) -> None:
+    """force 覆盖前逐字段比对：核心字段任一不同 → 拒绝（换池须另起 version）。
+
+    比对 ``FORCE_COMPARE_KEYS``（``constituents`` 含顺序 / ``cut_points`` /
+    ``pool_size`` / ``excluded`` / ``strata``）。披露字段（``sources`` /
+    ``unknown_industry``）与 ``effective_date`` 不参与——它们跨轮可变、不由池内容
+    决定，放行「同内容重生成」的离线重建场景（spec Req1 Scenario 2 的合法旁路）。
+    """
+    for key in FORCE_COMPARE_KEYS:
+        if payload.get(key) != existing.get(key):
+            raise ValueError(
+                f"force 覆盖被拒：核心字段 {key} 与既有登记文件不同"
+                "（版本生效期内标的池不得变更；换池请另起新 version）"
+            )
+
+
 def write_universe(data: dict[str, Any], path: str | Path, *, force: bool = False) -> Path:
     """落登记文件。
 
     校验（`force` 亦然）：文件名版本 = 内容 version = 既有文件 version。
-    默认拒绝覆盖既有文件（版本生效期内标的池不得变更）；`force=True` 仅允许
-    **同版本重生成**，换池必须另起 version。
+    默认拒绝覆盖既有文件（版本生效期内标的池不得变更）；`force=True` **仅允许
+    同内容重生成**——逐字段比对 ``FORCE_COMPARE_KEYS``，任一不同即抛 ``ValueError``
+    （换池必须另起 version）。离线重建（同 seed + 同池快照）核心字段逐字一致，
+    属合法覆盖场景。
 
     防御性剔除瞬态键 `POOL_KEY`（整池行只落旁车快照 `pool_ref`，不写进登记文件）。
     """
@@ -160,10 +180,10 @@ def write_universe(data: dict[str, Any], path: str | Path, *, force: bool = Fals
             f"文件名版本 {expected} 与内容 version {version} 不一致（登记文件不得混用版本号）"
         )
     if out.exists():
-        existing = str(json.loads(out.read_text(encoding="utf-8")).get("version"))
-        if existing != version:
+        existing = json.loads(out.read_text(encoding="utf-8"))
+        if str(existing.get("version")) != version:
             raise ValueError(
-                f"既有登记文件 version={existing} 与写入 version={version} 不一致"
+                f"既有登记文件 version={existing.get('version')} 与写入 version={version} 不一致"
                 "（换池须另起版本号）"
             )
         if not force:
@@ -171,6 +191,7 @@ def write_universe(data: dict[str, Any], path: str | Path, *, force: bool = Fals
                 f"universe 登记文件已存在，版本生效期内不得改写: {out}"
                 "（换池请用新 version，或显式 force=True 重生成同版本）"
             )
+        _assert_same_pool_content(payload, existing)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

@@ -82,6 +82,63 @@ class TestUsageAccumulator:
         assert (acc.prompt_tokens, acc.completion_tokens, acc.total_tokens) == (11, 3, 14)
 
 
+class TestUsageAccumulatorConcurrency:
+    """Δ3 终审 I1：LangGraph 并行分支经 executor ``copy_context`` 把累加器传播到
+    worker 线程，fan-out 会**并发**调用同一实例的 ``add``——无锁时读-改-写竞态丢计数。
+    """
+
+    def test_concurrent_adds_do_not_lose_counts(self):
+        import threading
+
+        from finance_agent.nodes._llm_utils import UsageAccumulator
+
+        acc = UsageAccumulator()
+        threads_n, per_thread = 8, 200
+        barrier = threading.Barrier(threads_n)
+
+        def worker() -> None:
+            barrier.wait()  # 尽量同时冲入，最大化竞态窗口
+            for _ in range(per_thread):
+                acc.add({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
+
+        threads = [threading.Thread(target=worker) for _ in range(threads_n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        expected_calls = threads_n * per_thread
+        assert acc.calls == expected_calls, "并发 add 丢计数 → 无锁（实例级 Lock 缺失）"
+        assert acc.prompt_tokens == 10 * expected_calls
+        assert acc.completion_tokens == 5 * expected_calls
+        assert acc.total_tokens == 15 * expected_calls
+
+    def test_add_holds_instance_lock(self):
+        """确定性守卫（GIL 下统计竞态难触发）：``add`` 必须持实例锁。
+
+        主线程先持锁 → worker 的 ``add`` 必须阻塞到释放；若 ``add`` 未持锁
+        （或锁属性不存在），worker 会立即完成 → 本断言失败。
+        """
+        import threading
+
+        from finance_agent.nodes._llm_utils import UsageAccumulator
+
+        acc = UsageAccumulator()
+        done = threading.Event()
+
+        def worker() -> None:
+            acc.add({"total_tokens": 15})
+            done.set()
+
+        with acc._lock:
+            t = threading.Thread(target=worker)
+            t.start()
+            assert not done.wait(0.2), "add 未持实例锁 → 并发 fan-out 会丢计数"
+        t.join(2)
+        assert done.is_set(), "释放锁后 add 应完成"
+        assert acc.total_tokens == 15
+
+
 class TestNoCollectorActive:
     """默认 noop：未激活时行为与加收集器之前完全一致。"""
 
@@ -273,7 +330,9 @@ class TestMalformedUsageIsNonFatal:
         acc.add({"prompt_tokens": "abc", "completion_tokens": None, "total_tokens": "12"})
         acc.add({"prompt_tokens": object(), "completion_tokens": [1], "total_tokens": {}})
         acc.add("not-a-dict")  # 形态违约：仍只计 calls
-        assert acc.calls == 3
+        # Δ3 终审 C2：int(inf) 抛 OverflowError、int(nan) 抛 ValueError → 均吞掉记 0
+        acc.add({"prompt_tokens": float("inf"), "completion_tokens": float("nan")})
+        assert acc.calls == 4
         assert acc.prompt_tokens == 0
         assert acc.completion_tokens == 0
         assert acc.total_tokens == 12, "可解析的字符串计数保留；不可解析记 0"

@@ -8,7 +8,6 @@ import sqlite3
 import pytest
 
 from finance_agent.outcome.cohort.model import (
-    COHORT_RUNS_DDL,
     init_cohort_runs,
     insert_cohort_run,
     list_cohort_runs,
@@ -139,6 +138,19 @@ def test_list_filters_and_ordering(tmp_path):
     assert [r["ticker"] for r in since] == ["000001"]
 
 
-def test_ddl_is_idempotent_create_if_not_exists():
-    assert "CREATE TABLE IF NOT EXISTS cohort_runs" in COHORT_RUNS_DDL
-    assert "UNIQUE (universe_version, ticker, trade_date, run_seq)" in COHORT_RUNS_DDL
+def test_init_is_idempotent_and_table_stays_usable(tmp_path):
+    """同库双 init_cohort_runs → 不抛、不丢表、仍可插入（行为断言，非 DDL 子串恒真）。"""
+    db = tmp_path / "s.db"
+    init_cohort_runs(db)
+    init_cohort_runs(db)
+    insert_cohort_run(
+        {
+            "universe_version": "v1",
+            "ticker": "600519",
+            "trade_date": "2026-09-24",
+            "status": "success",
+            "trigger_time": "2026-09-24T18:00:03",
+        },
+        db,
+    )
+    assert len(list_cohort_runs(db_path=db)) == 1

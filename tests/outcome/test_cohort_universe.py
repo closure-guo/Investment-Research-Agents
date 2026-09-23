@@ -388,14 +388,37 @@ class TestWriteUniverse:
             Constituent(**c) for c in data["constituents"]
         )
 
-    def test_force_allows_overwrite_same_version(self, tmp_path):
+    def test_force_rejects_different_content_same_version(self, tmp_path):
+        """force 不是「换池后门」：核心字段不同（seed 42→7 → 成分清单变）→ 拒绝。
+
+        spec Req1 Scenario 2「版本生效期内标的池 SHALL NOT 变更」——force 仅限
+        同内容重生成。
+        """
         path = tmp_path / "universe-v1.json"
         write_universe(build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH)), path)
         other = build_universe("v1", n=4, seed=7, client=StubClient(_THREE_EACH))
 
-        write_universe(other, path, force=True)
+        with pytest.raises(ValueError, match="新 version"):
+            write_universe(other, path, force=True)
+        assert load_universe(path).seed == 42  # 原文件未被改写
 
-        assert load_universe(path).seed == 7
+    def test_force_allows_same_content_regeneration(self, tmp_path):
+        """同内容 + force → 允许覆盖（离线重建：同 seed 同池复现同一成分清单）。"""
+        path = tmp_path / "universe-v1.json"
+        first = build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH))
+        write_universe(first, path)
+
+        again = build_universe("v1", n=4, seed=42, client=StubClient(_THREE_EACH))
+        # 披露字段与生效日跨轮可变，但不在比对集内 → 仍视为「同内容」
+        again["effective_date"] = "2026-12-31"
+        again["sources"] = {k: ["snapshot"] for k in ("constituents", "industry", "market_cap")}
+
+        write_universe(again, path, force=True)
+
+        assert load_universe(path).effective_date == "2026-12-31"
+        assert load_universe(path).constituents == tuple(
+            Constituent(**c) for c in first["constituents"]
+        )
 
     def test_rejects_filename_version_mismatch_even_with_force(self, tmp_path):
         """M2：文件名版本与内容 version 不一致 → 拒绝（force 亦然）。"""

@@ -3,11 +3,14 @@
 逐标的**串行**跑一次 deep 分析（fast path ``api._run_graph_streaming``），把每次
 运行的真值（session / langfuse trace / token usage）落 ``cohort_runs``。
 
-**同线程约束（硬约束）**：usage 经 ``contextvars`` 传递，必须**同线程直接迭代**
-生成器——``with usage_collector() as acc: for chunk in runner(...)``。**不得**经
-``loop.run_in_executor`` / 自起 ``threading.Thread``（不继承 contextvar →
-``_usage_acc.get()`` 返回 None → **静默** 0 calls / 0 tokens，见
-``nodes._llm_utils.usage_collector`` docstring）。
+**上下文传播（硬约束的准确表述）**：usage 经 ``contextvars`` 传递。LangGraph 的
+并行分支经 executor ``copy_context`` 会传播本 contextvar，故 fan-out 内部的 LLM
+调用**正常汇入**（并发 ``add`` 由 ``UsageAccumulator`` 实例级锁保护）。真正失效的
+是**外部**用 ``loop.run_in_executor`` / 裸 ``threading.Thread`` 起线程执行**整个
+生成器**（不复制 context → ``_usage_acc.get()`` 返回 None → **静默** 0 calls /
+0 tokens）。**runner 因此必须直接同线程迭代生成器**：
+``with usage_collector() as acc: for chunk in runner(...)``，不得把整个生成器交给
+executor / 另起线程（详见 ``nodes._llm_utils.usage_collector`` docstring）。
 
 **usage 真值非估算（硬约束）**：``acc.calls > 0 and acc.total_tokens == 0``
 （provider 未回计数）或 ``acc.calls == 0``（未走到任何 LLM 调用）→ token 记账
@@ -72,7 +75,9 @@ DEFAULT_UNIVERSE_PATH = Path("data/cohort/universe-v1.json")
 _DEFAULT_MAX_TOKENS = 2_000_000
 # 累计「usage 真值缺失」运行数达此限 → 停止剩余标的（budget_unknown）
 _UNKNOWN_USAGE_LIMIT = 3
-# failure_reason 稳定码全集（Task 6 聚合键必须有限；异常消息只进日志）
+# failure_reason 稳定码全集（Task 6 聚合键必须有限；异常消息只进日志）。
+# 注：`duplicate` 仅体现在 run_cohort_batch 的返回值 skipped_reasons（重复分支
+# continue，**不写行**），不会出现在 cohort_runs.failure_reason / 读数 skipped_reasons 桶。
 FAILURE_CODES = ("no_report_ready", "exception", "budget", "budget_unknown", "duplicate")
 
 
@@ -248,7 +253,8 @@ def _run_one(
         )
         runner = graph_runner or _run_graph_streaming
 
-        # 硬约束：同线程直接迭代（contextvar 才可见；executor/新线程会静默 0）
+        # 硬约束：直接同线程迭代（不经 executor/裸 Thread——那些不复制 contextvar，
+        # _usage_acc.get() 返回 None → 静默 0；fan-out 内部经 copy_context 传播可正常汇入）
         with usage_collector() as acc:
             for chunk in runner(
                 constituent.ticker,

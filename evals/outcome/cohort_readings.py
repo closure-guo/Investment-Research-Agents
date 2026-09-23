@@ -34,7 +34,9 @@ DB 文件缺失抛 ``FileNotFoundError``（不静默建空库）；表缺失按�
 - ``failure_reasons`` = ``status="failure"`` 行的非空 ``failure_reason``（真失败稳定码：
   ``no_report_ready`` / ``exception`` 等）+ ``unlinked``（success 未关联观点）。
 - ``skipped_reasons`` = ``status="skipped"`` 行的 ``failure_reason``（``budget`` /
-  ``budget_unknown`` / ``duplicate`` 等）——**非执行尝试，与真失败分桶**，不得混读为失败率。
+  ``budget_unknown`` 等）——**非执行尝试，与真失败分桶**，不得混读为失败率。
+  （``duplicate`` 是 runner **返回值**里的跳过码，重复分支 ``continue`` 不写行，
+  故不会出现在本桶，也不会出现在 ``cohort_runs.failure_reason``。）
 
 CLI：``python -m evals.outcome.cohort_readings --db ... --universe-version v1 --since 2026-09-24``
 （stdout JSON，``ensure_ascii=False, indent=2``）。

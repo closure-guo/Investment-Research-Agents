@@ -21,7 +21,7 @@
 | # | Scenario | 落点 | 证据 | 通过 |
 |---|---|---|---|---|
 | 1 | 登记文件字段完备（含种子复现） | `universe.py::REQUIRED_KEYS/CONSTITUENT_KEYS`（L50-51）、`load_universe`（L100，缺键抛 `ValueError` 含字段名）、`build_universe`（L282） | `test_cohort_universe.py::TestLoadUniverse::test_missing_required_key_raises_with_field_name`、`::test_missing_constituent_field_raises_with_field_name`；复现性：`TestBuildUniverse::test_same_seed_reproduces_same_constituents`、`TestPoolSnapshot::test_rebuild_from_pool_snapshot_is_identical`、`::test_rebuild_reproduces_excluded_and_pool_size`；**离线精确重建实测**（见「池快照披露」）：`constituents / cut_points / pool_size / excluded / strata / pool_hash` 逐键相等 | ✅ |
-| 2 | 版本期内换池被拒 | `write_universe`（L143，文件名版本 = 内容 version = 既有 version，`force` 亦然） | `TestWriteUniverse::test_refuses_overwrite_within_version_lifecycle`、`::test_force_allows_overwrite_same_version`、`::test_rejects_filename_version_mismatch_even_with_force`、`::test_rejects_version_mismatch_with_existing_file` | ✅ |
+| 2 | 版本期内换池被拒 | `write_universe`（L143）：文件名版本 = 内容 version = 既有 version（`force` 亦然）；**默认拒绝覆盖**；`force=True` **仅限同内容重生成**——逐字段比对 `constituents`（含顺序）/`cut_points`/`pool_size`/`excluded`/`strata`（`FORCE_COMPARE_KEYS`），任一不同 → `ValueError`（提示须新 version） | `TestWriteUniverse::test_refuses_overwrite_within_version_lifecycle`（默认拒绝）、`::test_force_rejects_different_content_same_version`（seed 42→7 成分变 → 拒绝且原文件未改）、`::test_force_allows_same_content_regeneration`（同内容 + force → 允许，离线重建场景）、`::test_rejects_filename_version_mismatch_even_with_force`、`::test_rejects_version_mismatch_with_existing_file` | ✅ |
 
 ### 需求②「定时跑批与记账」（4 Scenario）
 
