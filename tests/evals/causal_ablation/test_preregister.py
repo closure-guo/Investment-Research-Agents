@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from evals.causal_ablation.preregister import (
     OUTCOME_REQUIRED_FIELDS,
+    REQUIRED_FIELDS,
     MissingPreregistrationError,
     assert_preregistered,
     find_latest_preregister,
@@ -85,12 +86,25 @@ class TestOutcomeGate:
     def test_outcome_missing_leakage_field_reported(self):
         text = self.OUTCOME_GOOD.replace("- 泄漏控制: 探针阈值 60%\n", "")
         p = parse_preregister(text, required_fields=OUTCOME_REQUIRED_FIELDS)
+        assert p.valid is False
         assert any("泄漏控制" in i for i in p.issues)
 
     def test_default_required_fields_unchanged(self):
         """因果消融默认门禁不变：outcome 文档按默认口径应报缺 rubric 版本。"""
         p = parse_preregister(self.OUTCOME_GOOD)
         assert any("rubric 版本" in i for i in p.issues)
+
+    def test_required_fields_relationship_pinned(self):
+        assert set(REQUIRED_FIELDS) - set(OUTCOME_REQUIRED_FIELDS) == {"rubric 版本"}
+
+    def test_assert_preregistered_passes_required_fields_through(self, tmp_path: Path):
+        (tmp_path / "2026-09-23-outcome-x.md").write_text(self.OUTCOME_GOOD, encoding="utf-8")
+        found = assert_preregistered(
+            tmp_path, name_contains="outcome", required_fields=OUTCOME_REQUIRED_FIELDS
+        )
+        assert found.valid is True
+        with pytest.raises(MissingPreregistrationError):
+            assert_preregistered(tmp_path, name_contains="outcome")
 
     def test_real_outcome_preregister_document_valid(self):
         root = Path(__file__).resolve().parents[3]
@@ -99,11 +113,12 @@ class TestOutcomeGate:
             doc.read_text(encoding="utf-8"), required_fields=OUTCOME_REQUIRED_FIELDS
         )
         assert p.valid is True, p.issues
+        assert set(p.fields) == set(OUTCOME_REQUIRED_FIELDS)
 
 
 class TestOutcomeLookup:
     def test_name_contains_isolates_outcome_docs(self, tmp_path: Path):
-        (tmp_path / "2026-09-17-p2-family-b.md").write_text(
+        (tmp_path / "2026-10-01-p2-family-b.md").write_text(
             "# P2\n- 主指标: B1\n", encoding="utf-8"
         )
         (tmp_path / "2026-09-23-outcome-forward-and-backtest.md").write_text(
@@ -115,3 +130,6 @@ class TestOutcomeLookup:
         assert found is not None
         assert found.path.name == "2026-09-23-outcome-forward-and-backtest.md"
         assert found.valid is True
+        unfiltered = find_latest_preregister(tmp_path, required_fields=OUTCOME_REQUIRED_FIELDS)
+        assert unfiltered is not None and unfiltered.path.name == "2026-10-01-p2-family-b.md"
+        assert unfiltered.valid is False
