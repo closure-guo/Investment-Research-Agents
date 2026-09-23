@@ -137,8 +137,10 @@ class TestBatchAndRows:
         assert batch["opinions_persisted"] == 2
         assert batch["unlinked"] == 0
         assert batch["unlinked_trace_missing"] == 0
+        assert batch["unlinked_no_opinion"] == 0
         assert batch["settlement_status_counts"] == {"resolved_win": 1, "avoidance": 1}
         assert batch["failure_reasons"] == {}
+        assert batch["skipped_reasons"] == {}
         assert batch["tokens_total_sum"] == 200
         assert batch["tokens_null_runs"] == 0
         assert batch["llm_calls_sum"] == 10
@@ -179,6 +181,8 @@ class TestBatchAndRows:
         assert batch["opinions_persisted"] == 1
         assert batch["unlinked"] == 2
         assert batch["unlinked_trace_missing"] == 1  # 其中 1 行 trace 为 NULL
+        assert batch["unlinked_no_opinion"] == 1  # trace 有值但无观点行
+        assert batch["unlinked_trace_missing"] + batch["unlinked_no_opinion"] == batch["unlinked"]
         assert batch["failure_reasons"]["unlinked"] == 2
         assert len(out["rows"]) == 1
 
@@ -211,14 +215,17 @@ class TestBatchAndRows:
         assert batch["run_success_rate"] is None  # 分母 0 → None（不得报 0%）
         assert batch["opinions_persisted"] == 0
         assert batch["unlinked"] == 0
+        assert batch["unlinked_no_opinion"] == 0
         assert batch["settlement_status_counts"] == {}
         assert batch["failure_reasons"] == {}
+        assert batch["skipped_reasons"] == {}
         assert batch["tokens_total_sum"] == 0
         assert batch["tokens_null_runs"] == 0
         assert batch["llm_calls_sum"] == 0
         assert out["rows"] == []
 
-    def test_failure_rows_aggregate_and_rate_excludes_skipped(self, tmp_path: Path):
+    def test_failure_and_skipped_reasons_split_and_rate_excludes_skipped(self, tmp_path: Path):
+        """真失败码与 skipped 码分桶（budget 不得混读为失败）；skipped 不进成功率分母。"""
         db = _db(tmp_path)
         _run(db, ticker="600519", trace="t1")
         _run(db, ticker="600520", status="failure", failure_reason="no_report_ready", trace=None)
@@ -232,20 +239,30 @@ class TestBatchAndRows:
             tokens_total=None,
             llm_calls=None,
         )
+        _run(
+            db,
+            ticker="600524",
+            status="skipped",
+            failure_reason="budget_unknown",
+            tokens_total=None,
+            llm_calls=None,
+        )
 
         out = collect_cohort_readings(db)
         batch = out["batch"]
-        assert batch["planned"] == 5
+        assert batch["planned"] == 6
         assert batch["success"] == 1
         assert batch["failure"] == 3
-        assert batch["skipped"] == 1
+        assert batch["skipped"] == 2
         assert batch["run_success_rate"] == 0.25  # 1/(1+3)，skipped 非执行尝试不计分母
         assert batch["failure_reasons"] == {
             "no_report_ready": 2,
             "exception": 1,
-            "budget": 1,
             "unlinked": 1,  # success 但 trace 缺失
         }
+        assert "budget" not in batch["failure_reasons"]
+        assert "budget_unknown" not in batch["failure_reasons"]
+        assert batch["skipped_reasons"] == {"budget": 1, "budget_unknown": 1}
 
     def test_tokens_null_runs_counted_for_attempted_only(self, tmp_path: Path):
         db = _db(tmp_path)

@@ -374,7 +374,7 @@ def _canonical_pool(pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         for item in pool
     ]
-    rows.sort(key=lambda r: r["ticker"])
+    rows.sort(key=lambda r: str(r["ticker"]))
     return rows
 
 

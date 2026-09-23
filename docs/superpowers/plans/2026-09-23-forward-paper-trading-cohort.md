@@ -399,7 +399,7 @@ git commit -m "feat(cohort): 盘后调度接线（per-job 门控）+ 运维开�
 
 - [ ] **Step 1: 失败测试**
   - tmp DB 造 2 只 success 记账 + 对应 predictions 行（1 long closed / 1 neutral avoidance）→ `rows` 2 行、`batch.run_success_rate == 1.0`、`settlement_status_counts` 正确。
-  - 记账 success 但 predictions 无对应行 → `opinions_persisted` < success 且计入 `failure_reasons["no_opinion"]`。
+  - 记账 success 但 predictions 无对应行 → `opinions_persisted` < success 且计入 `failure_reasons["unlinked"]`（子桶 `unlinked_no_opinion`）。
   - `universe_version`/`since` 过滤生效；空库返回零值 + `run_success_rate=None`（不报 0%）。
 
 - [ ] **Step 2: 红 → Step 3: 实现 → Step 4: 绿**

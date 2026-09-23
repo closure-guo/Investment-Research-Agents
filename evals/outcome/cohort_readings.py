@@ -7,8 +7,11 @@
 （DDL 与迁移已核实），故 ``cohort_runs.langfuse_trace_id`` ↔
 ``predictions.langfuse_trace_id`` 是唯一可行关联。success 行若无法关联到任何观点行
 （trace 为 NULL/空，或 trace 有值但 predictions 无匹配行）→ 计入 ``unlinked``
-（同时进 ``failure_reasons["unlinked"]``），**不得当作普通失败码、也不得静默丢弃**；
-``unlinked_trace_missing`` 披露其中因 trace 缺失而无法 join 的子集。
+（同时进 ``failure_reasons["unlinked"]``），**不得当作普通失败码、也不得静默丢弃**。
+``unlinked`` 显式拆两个子桶供归因直接读：
+``unlinked_trace_missing``（trace 未持久化 → 无法 join）与
+``unlinked_no_opinion = unlinked - unlinked_trace_missing``（分析成功且 trace 有值，
+但 predictions 无对应观点行）。
 
 **消费方 = Δ1 收口流程**（``docs/evals/metrics.md`` §1.8⑤「收口纪律」）：
 健康检查 ``evals/outcome/health.py::collect_outcome_health`` 负责结算口径（结算成功率 /
@@ -28,7 +31,10 @@ DB 文件缺失抛 ``FileNotFoundError``（不静默建空库）；表缺失按�
 - ``rows`` = 关联到的**观点行**（一条 run 产出多条观点时逐行展开）。
 - ``tokens_null_runs`` = 已执行行（success/failure）中 ``tokens_total`` 为 NULL 的行数
   （usage 真值缺失信号；skipped 行本就无 usage，不计）。
-- ``failure_reasons`` = 非空 ``failure_reason``（failure/skipped 稳定码）+ ``unlinked``。
+- ``failure_reasons`` = ``status="failure"`` 行的非空 ``failure_reason``（真失败稳定码：
+  ``no_report_ready`` / ``exception`` 等）+ ``unlinked``（success 未关联观点）。
+- ``skipped_reasons`` = ``status="skipped"`` 行的 ``failure_reason``（``budget`` /
+  ``budget_unknown`` / ``duplicate`` 等）——**非执行尝试，与真失败分桶**，不得混读为失败率。
 
 CLI：``python -m evals.outcome.cohort_readings --db ... --universe-version v1 --since 2026-09-24``
 （stdout JSON，``ensure_ascii=False, indent=2``）。
@@ -49,6 +55,7 @@ from finance_agent.outcome.cohort.model import list_cohort_runs
 # 关联失败稳定码（success 行未关联到任何观点行；见模块 docstring）
 UNLINKED_CODE = "unlinked"
 _ATTEMPTED_STATUSES = ("success", "failure")
+_SKIPPED_STATUS = "skipped"
 
 _ROW_COLUMNS = (
     "symbol",
@@ -143,6 +150,7 @@ def collect_cohort_readings(
 
     status_counts: dict[str, int] = {}
     failure_reasons: dict[str, int] = {}
+    skipped_reasons: dict[str, int] = {}
     versions: set[str] = set()
     trade_dates: set[str] = set()
     success_runs: list[dict[str, Any]] = []
@@ -156,7 +164,9 @@ def collect_cohort_readings(
         trade_dates.add(run["trade_date"])
         if run["failure_reason"]:
             code = run["failure_reason"]
-            failure_reasons[code] = failure_reasons.get(code, 0) + 1
+            # skipped = 未执行的尝试（幂等重复 / 预算熔断），与真失败分桶
+            bucket = skipped_reasons if status == _SKIPPED_STATUS else failure_reasons
+            bucket[code] = bucket.get(code, 0) + 1
         if run["tokens_total"] is None:
             if status in _ATTEMPTED_STATUSES:
                 tokens_null_runs += 1  # skipped 未执行 → 无 usage，不计
@@ -214,8 +224,10 @@ def collect_cohort_readings(
             "opinions_persisted": opinions_persisted,
             "unlinked": unlinked,
             "unlinked_trace_missing": unlinked_trace_missing,
+            "unlinked_no_opinion": unlinked - unlinked_trace_missing,
             "settlement_status_counts": settlement_status_counts,
             "failure_reasons": failure_reasons,
+            "skipped_reasons": skipped_reasons,
             "tokens_total_sum": tokens_total_sum,
             "tokens_null_runs": tokens_null_runs,
             "llm_calls_sum": llm_calls_sum,
