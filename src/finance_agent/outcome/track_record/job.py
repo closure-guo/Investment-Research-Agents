@@ -1,8 +1,13 @@
 """predictions 日批判定 job(add-track-record):遍历 open 观点 → 拉行情 → 判定 → 落状态。
 
 与旧 settle_open_decisions(止损/目标/超期)不同:horizon 到点按区间超额判定 win/loss/neutral;
-superseded(同标的新观点方向相反/目标价不同)立即按现价结算旧观点;连续无行情标 unresolvable。
-幂等:update_prediction_status 前不重复处理已非 open 的观点;失败隔离:单观点异常跳过不中断整批。
+superseded(同标的新观点方向相反/目标价不同)立即按现价结算旧观点(neutral 不走 superseded);
+连续无行情标 unresolvable。幂等:update_prediction_status 前不重复处理已非 open 的观点;
+失败隔离:单观点异常跳过不中断整批。
+
+delta update-decision-settlement-contract:两路径入场基准均为派生 settle_entry_price
+(judgment.derive_entry,非存档参考价);neutral 判定写 avoidance_status(不写 resolved_*);
+long/short 结算后向 Langfuse 上报 decision_hit/return/excess(Score 失败仅 WARN)。
 """
 
 from __future__ import annotations
@@ -13,7 +18,12 @@ from typing import Any
 
 import pandas as pd
 
-from finance_agent.outcome.track_record.judgment import resolve_prediction, should_supersede
+from finance_agent.outcome.track_record.judgment import (
+    Resolution,
+    derive_entry,
+    resolve_prediction,
+    should_supersede,
+)
 from finance_agent.outcome.track_record.model import (
     list_predictions,
     update_prediction_status,
@@ -23,6 +33,41 @@ logger = logging.getLogger(__name__)
 
 STALE_DAYS = int(__import__("os").getenv("DECISION_STALE_DAYS", "5"))
 BENCHMARK_CODE = "000300"
+
+
+def _report_scores(langfuse: Any, prediction: dict, resolution: Resolution) -> int:
+    """long/short 结算后上报 3 个 Score;neutral 回避判定与缺 trace/langfuse 跳过。
+
+    与旧链路 outcome.job.report_outcome_scores 同形:trace 不可查仅 WARN,不阻断结算。
+    """
+    trace_id = prediction.get("langfuse_trace_id")
+    if not trace_id or langfuse is None or resolution.status.startswith("avoidance_"):
+        return 0
+    benchmark_return = (
+        resolution.raw_return - resolution.excess_return
+        if resolution.excess_return is not None
+        else None
+    )
+    comment = (
+        f"settle_price={resolution.exit_price} hold_days={resolution.hold_days} "
+        f"benchmark_return={benchmark_return if benchmark_return is not None else 'n/a'}"
+    )
+    scores: list[tuple[str, float, str]] = [
+        ("decision_hit", 1.0 if resolution.raw_return > 0 else 0.0, "BOOLEAN"),
+        ("decision_return", resolution.raw_return, "NUMERIC"),
+    ]
+    if resolution.excess_return is not None:
+        scores.append(("decision_excess", resolution.excess_return, "NUMERIC"))
+    reported = 0
+    for name, value, data_type in scores:
+        try:
+            langfuse.create_score(
+                name=name, value=value, trace_id=trace_id, data_type=data_type, comment=comment
+            )
+            reported += 1
+        except Exception as e:  # noqa: BLE001 - trace 不可查容错
+            logger.warning("score 上报失败(trace 不可查?): %s %s", name, e)
+    return reported
 
 
 def _code(symbol: str) -> str:
@@ -49,13 +94,29 @@ def settle_open_predictions(
     client: Any = None,
     db_path: str | Path | None = None,
     kline_days: int = 280,
+    langfuse: Any = None,
 ) -> dict[str, int]:
-    """遍历 open predictions 日批判定。返回 {settled, superseded, unresolvable, skipped, errors}。"""
+    """遍历 open predictions 日批判定。返回 {settled, superseded, unresolvable, skipped,
+    scores_reported, errors}。"""
     if client is None:
         from finance_agent.data.akshare_client import AKShareClient
 
         client = AKShareClient()
-    result = {"settled": 0, "superseded": 0, "unresolvable": 0, "skipped": 0, "errors": 0}
+    if langfuse is None:
+        try:
+            from finance_agent.langfuse_tracing import get_langfuse
+
+            langfuse = get_langfuse()
+        except Exception:  # noqa: BLE001 - 观测旁路,不阻断结算
+            langfuse = None
+    result = {
+        "settled": 0,
+        "superseded": 0,
+        "unresolvable": 0,
+        "skipped": 0,
+        "scores_reported": 0,
+        "errors": 0,
+    }
     try:
         open_preds = list_predictions(status="open", db_path=db_path)
     except Exception as e:  # noqa: BLE001
@@ -80,6 +141,8 @@ def settle_open_predictions(
         group.sort(key=lambda p: str(p["created_at"]))
         if len(group) > 1:
             for old in group[:-1]:
+                if old["direction"] == "neutral":
+                    continue  # spec:neutral 不走 superseded(回避判定以完整 horizon 窗口为准)
                 new = group[-1]
                 if should_supersede(old, new):
                     try:
@@ -94,7 +157,11 @@ def settle_open_predictions(
                         if exit_price is None:
                             result["skipped"] += 1
                             continue
-                        entry = float(old["entry_price"])
+                        derived = derive_entry(old, kline)
+                        if derived is None:
+                            result["skipped"] += 1
+                            continue
+                        _, entry = derived
                         sign = 1.0 if old["direction"] == "long" else -1.0
                         raw = sign * (exit_price / entry - 1.0) if entry > 0 else 0.0
                         update_prediction_status(
@@ -107,6 +174,7 @@ def settle_open_predictions(
                                 "raw_return": round(raw, 6),
                                 "resolution_rule": "superseded",
                                 "resolved_at": str(kline.iloc[-1]["日期"]),
+                                "settle_entry_price": entry,
                             },
                             db_path,
                         )
@@ -156,20 +224,23 @@ def settle_open_predictions(
         if resolution is None:
             result["skipped"] += 1
             continue
+        payload: dict[str, Any] = {
+            "exit_price": resolution.exit_price,
+            "raw_return": resolution.raw_return,
+            "excess_return": resolution.excess_return,
+            "resolution_rule": resolution.resolution_rule,
+            "resolved_at": resolution.exit_date,
+            "settle_entry_price": resolution.entry_price,
+        }
+        if resolution.status.startswith("avoidance_"):
+            # neutral 回避判定:独立字段流转,status 保持 open(不进胜率/不复用 resolved_*)
+            payload["avoidance_status"] = resolution.status
+        else:
+            payload["status"] = resolution.status
         try:
-            update_prediction_status(
-                p["prediction_id"],
-                {
-                    "status": resolution.status,
-                    "exit_price": resolution.exit_price,
-                    "raw_return": resolution.raw_return,
-                    "excess_return": resolution.excess_return,
-                    "resolution_rule": resolution.resolution_rule,
-                    "resolved_at": str(p["created_at"])[:10],
-                },
-                db_path,
-            )
+            update_prediction_status(p["prediction_id"], payload, db_path)
             result["settled"] += 1
+            result["scores_reported"] += _report_scores(langfuse, p, resolution)
         except Exception as e:  # noqa: BLE001
             logger.warning("落库异常,本次跳过 %s: %s", p["prediction_id"], e)
             result["errors"] += 1

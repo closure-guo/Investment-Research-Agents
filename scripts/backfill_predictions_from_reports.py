@@ -4,6 +4,10 @@
 predictions（历史战绩空）。本脚本扫描已完成会话的报告 markdown，解析「交易决策」
 段（方向/置信度/入场价等），回填 predictions。幂等：已有同 session 标记的跳过。
 
+delta update-decision-settlement-contract：与 ingest 同语义——参考价不可得不再标
+unresolvable，存档 + WARN 且状态保持 open（判定不依赖参考价，结算入场价由行情派生）；
+horizon_days 显式写配置默认值（不依赖表级默认）。
+
 用法：
     uv run python scripts/backfill_predictions_from_reports.py [--db data/sessions.db] [--dry-run]
 """
@@ -19,6 +23,8 @@ import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
+
+from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS
 
 DEFAULT_DB = os.getenv("SESSIONS_DB_PATH", "data/sessions.db")
 
@@ -76,7 +82,10 @@ def backfill(db_path: str, dry_run: bool = False) -> int:
             action = decision["action"]
             direction = _DIRECTION_MAP[action]
             entry_price = decision.get("entry_price")
-            status = "open" if entry_price is not None else "unresolvable"
+            # 参考价不可得：存档 + WARN，状态保持 open（判定不依赖参考价）
+            status = "open"
+            if entry_price is None:
+                print(f"  [WARN] {s['stock_code']} 报告无入场价（参考价不可得），存档 open")
             snapshot = json.dumps(
                 {
                     "backfill_session": s["session_id"],
@@ -93,10 +102,10 @@ def backfill(db_path: str, dry_run: bool = False) -> int:
             conn.execute(
                 """INSERT INTO predictions (
                      prediction_id, source_type, symbol, symbol_name, direction,
-                     entry_price, target_price, confidence, benchmark,
+                     entry_price, target_price, horizon_days, confidence, benchmark,
                      rationale_snapshot, langfuse_trace_id, status, created_at, updated_at,
                      resolution_rule
-                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     f"p_{uuid.uuid4().hex[:12]}",
                     "live",
@@ -107,6 +116,7 @@ def backfill(db_path: str, dry_run: bool = False) -> int:
                     direction,
                     entry_price,
                     decision.get("target_price"),
+                    DEFAULT_HORIZON_DAYS,
                     decision.get("confidence"),
                     "000300.SH",
                     snapshot,
@@ -114,7 +124,7 @@ def backfill(db_path: str, dry_run: bool = False) -> int:
                     status,
                     now,
                     now,
-                    None if entry_price is not None else "missing_entry_price",
+                    None,
                 ),
             )
             inserted += 1

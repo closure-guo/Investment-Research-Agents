@@ -227,6 +227,22 @@ class TestReportScores:
         )
         assert count == 0
 
+    def test_hold_watch_actions_skip(self):
+        """hold/watch 无方向语义（delta：旧链路上报同样排除），不上报任何 Score。"""
+        langfuse = MagicMock()
+        assert (
+            report_outcome_scores(langfuse, _open_decision(action="hold"), self._settlement()) == 0
+        )
+        assert (
+            report_outcome_scores(langfuse, _open_decision(action="watch"), self._settlement()) == 0
+        )
+        assert langfuse.create_score.call_count == 0
+
+    def test_missing_action_still_reports(self):
+        """action 缺失不误判为 hold（守卫只认 hold/watch 字面量）。"""
+        langfuse = MagicMock()
+        assert report_outcome_scores(langfuse, _open_decision(action=None), self._settlement()) == 3
+
     def test_excess_none_skips_excess_score(self):
         settlement = self._settlement()
         settlement.decision_excess = None

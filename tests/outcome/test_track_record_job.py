@@ -1,4 +1,9 @@
-"""add-track-record Task 3:predictions 日批判定 job(settle_open_predictions)。"""
+"""add-track-record Task 3:predictions 日批判定 job(settle_open_predictions)。
+
+delta update-decision-settlement-contract Task 4:判定落库改用派生 settle_entry_price、
+neutral 写 avoidance_status(不写 resolved_*)、long/short 上报 decision_* Score、
+neutral 不走 superseded。
+"""
 
 import datetime
 
@@ -46,8 +51,24 @@ class _StubClient:
         return self.benchmark
 
 
+class _FakeLangfuse:
+    """收集 create_score 调用（先例 test_job.py 用 MagicMock，此处要按 trace_id 分流）。"""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def create_score(self, **kwargs):
+        self.calls.append(kwargs)
+
+
 def _insert(
-    db, symbol="600519.SH", entry=100.0, horizon=10, direction="long", created="2026-09-01T10:00:00"
+    db,
+    symbol="600519.SH",
+    entry=100.0,
+    horizon=10,
+    direction="long",
+    created="2026-09-01T10:00:00",
+    trace_id=None,
 ):
     return insert_prediction(
         {
@@ -60,6 +81,7 @@ def _insert(
             "confidence": 0.8,
             "rationale_snapshot": {"action": "buy"},
             "created_at": created,
+            "langfuse_trace_id": trace_id,
         },
         db_path=db,
     )
@@ -68,7 +90,10 @@ def _insert(
 def test_settle_horizon_win(tmp_path):
     db = _db(tmp_path)
     pid = _insert(db)
-    client = _StubClient({"600519": _kline([101, 102, 103, 104, 105, 106, 107, 108, 109, 115])})
+    # 11 行:首行被派生入场吃掉,其后 10 行才够 horizon 10(delta:入场基准改为派生价)
+    client = _StubClient(
+        {"600519": _kline([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 115])}
+    )
     result = settle_open_predictions(client=client, db_path=db)
     assert result["settled"] == 1 and result["errors"] == 0
     row = list_predictions(db_path=db)[0]
@@ -110,3 +135,129 @@ def test_stale_marks_unresolvable(tmp_path):
     result = settle_open_predictions(client=client, db_path=db)
     assert result["unresolvable"] == 1
     assert list_predictions(db_path=db)[0]["status"] == "unresolvable"
+
+
+# ── delta update-decision-settlement-contract Task 4 ──
+
+
+def test_neutral_prediction_writes_avoidance_status(tmp_path):
+    """neutral 观点到点判定 → 写 avoidance_status;status 保持 open(不写 resolved_*)。"""
+    db = _db(tmp_path)
+    pid = _insert(db, direction="neutral", horizon=20, entry=88.0)  # 参考价故意≠派生入场
+    # 入场 09-01 收盘 11 → 20 个交易日后 09-21 收盘 9.9(-10%);基准持平 → 超额 = raw
+    prices = [11.0] + [10.5] * 19 + [9.9]
+    client = _StubClient(
+        {"600519": _kline(prices, start="2026-09-01")},
+        benchmark=_kline([4000.0] * 21, start="2026-09-01"),
+    )
+    langfuse = _FakeLangfuse()
+    result = settle_open_predictions(client=client, db_path=db, langfuse=langfuse)
+    assert result["errors"] == 0
+    row = list_predictions(db_path=db)[0]
+    assert row["prediction_id"] == pid
+    assert row["avoidance_status"] == "avoidance_win"  # 跑输 → 回避正确
+    assert row["status"] == "open"  # neutral 不进 resolved_* 流转
+    assert row["settle_entry_price"] == 11.0  # 派生入场价落库
+    assert row["resolved_at"] == "2026-09-21"  # 真实结算日
+    assert langfuse.calls == []  # neutral 不上报 decision_* Score
+
+
+def test_long_prediction_writes_settle_entry_price(tmp_path):
+    """long 判定落库含派生 settle_entry_price(非参考价)与真实结算日 resolved_at。"""
+    db = _db(tmp_path)
+    _insert(db, entry=95.0)  # 参考价 95 ≠ 派生入场 100
+    client = _StubClient(
+        {
+            "600519": _kline(
+                [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 115], start="2026-09-01"
+            )
+        }
+    )
+    result = settle_open_predictions(client=client, db_path=db)
+    assert result["settled"] == 1 and result["errors"] == 0
+    row = list_predictions(db_path=db)[0]
+    assert row["status"] == "resolved_win"
+    assert row["entry_price"] == 95.0  # 参考价不动(展示/盯市口径)
+    assert row["settle_entry_price"] == 100.0  # 派生结算入场价
+    assert row["resolved_at"] == "2026-09-11"  # 真实结算日,非 created_at[:10]
+    assert abs(row["raw_return"] - 0.15) < 1e-9  # 基于派生入场价计算
+
+
+def test_scores_reported_for_long_only(tmp_path):
+    """long 结算上报 3 个 decision_* Score;neutral 回避判定上报 0 个。"""
+    db = _db(tmp_path)
+    _insert(db, symbol="600519.SH", trace_id="trace-long")
+    _insert(db, symbol="000001.SZ", direction="neutral", horizon=20, trace_id="trace-neutral")
+    client = _StubClient(
+        {
+            "600519": _kline([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 115]),
+            "000001": _kline([11.0] + [10.5] * 19 + [9.9], start="2026-09-01"),
+        },
+        benchmark=_kline([4000.0] * 21, start="2026-09-01"),
+    )
+    langfuse = _FakeLangfuse()
+    result = settle_open_predictions(client=client, db_path=db, langfuse=langfuse)
+    assert result["errors"] == 0
+    assert result["scores_reported"] == 3
+    assert {c["name"] for c in langfuse.calls} == {
+        "decision_hit",
+        "decision_return",
+        "decision_excess",
+    }
+    assert {c["trace_id"] for c in langfuse.calls} == {"trace-long"}  # neutral 不报
+    by_name = {c["name"]: c for c in langfuse.calls}
+    assert by_name["decision_hit"]["data_type"] == "BOOLEAN"
+    assert by_name["decision_hit"]["value"] == 1.0
+    assert abs(by_name["decision_return"]["value"] - 0.15) < 1e-9
+    assert "settle_price=115" in by_name["decision_return"]["comment"]
+
+
+def test_score_failure_does_not_block_settlement(tmp_path, caplog):
+    """Score 上报异常仅 WARN:判定仍落库,不中断整批(旁路铁律)。"""
+    import logging
+
+    db = _db(tmp_path)
+    _insert(db, trace_id="trace-long")
+    langfuse = _FakeLangfuse()
+
+    def boom(**kwargs):
+        raise RuntimeError("trace expired")
+
+    langfuse.create_score = boom  # type: ignore[method-assign]
+    client = _StubClient(
+        {"600519": _kline([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 115])}
+    )
+    with caplog.at_level(logging.WARNING):
+        result = settle_open_predictions(client=client, db_path=db, langfuse=langfuse)
+    assert result["settled"] == 1 and result["scores_reported"] == 0
+    assert list_predictions(db_path=db)[0]["status"] == "resolved_win"
+    assert any("score 上报失败" in r.message for r in caplog.records)
+
+
+def test_superseded_skips_neutral_old(tmp_path):
+    """neutral 旧观点不走 superseded(回避判定以完整 horizon 窗口为准)。"""
+    db = _db(tmp_path)
+    old = _insert(db, direction="neutral", created="2026-09-01T10:00:00")
+    _insert(db, direction="short", created="2026-09-03T10:00:00")
+    client = _StubClient({"600519": _kline([100, 99, 98, 97])})
+    result = settle_open_predictions(client=client, db_path=db)
+    assert result["superseded"] == 0
+    row = {r["prediction_id"]: r for r in list_predictions(db_path=db)}[old]
+    assert row["status"] == "open"
+    assert row["resolution_rule"] is None
+    assert row["avoidance_status"] is None
+
+
+def test_superseded_long_uses_derived_entry(tmp_path):
+    """superseded 提前结算同样用派生入场价并落 settle_entry_price。"""
+    db = _db(tmp_path)
+    old = _insert(db, entry=95.0, direction="long", created="2026-09-01T10:00:00")
+    _insert(db, direction="short", created="2026-09-03T10:00:00")  # 反向 → supersede 旧观点
+    client = _StubClient({"600519": _kline([100, 99, 98, 97])})  # 09-02..09-05
+    result = settle_open_predictions(client=client, db_path=db)
+    assert result["superseded"] == 1
+    row = {r["prediction_id"]: r for r in list_predictions(db_path=db)}[old]
+    assert row["resolution_rule"] == "superseded"
+    assert row["settle_entry_price"] == 100.0  # 派生入场 = 首行收盘
+    assert row["resolved_at"] == "2026-09-05"  # 结算日 = 最新行情日
+    assert row["status"] == "resolved_loss"  # 100 → 97

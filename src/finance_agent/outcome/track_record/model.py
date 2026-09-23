@@ -531,8 +531,10 @@ def insert_prediction(
 ) -> str:
     """插入一条观点;created_at 服务端生成;快照 JSON 序列化后冻结。
 
-    status 默认 open;缺可判定要素(如 entry_price)的存档记录由调用方传
-    status='unresolvable' + resolution_rule 说明,计入样本但不计入胜率。
+    status 默认 open。参考价(entry_price)不可得不再标 unresolvable:存档 + WARN、
+    状态保持 open——判定不依赖参考价,结算入场价届时由行情派生 settle_entry_price
+    (delta update-decision-settlement-contract)。真不可判定(长期无行情/停牌退市)
+    由判定 job 落 status='unresolvable' + resolution_rule 说明,计入样本但不计入胜率。
     """
     prediction_id = record.get("prediction_id") or f"p_{uuid.uuid4().hex[:12]}"
     created_at = record.get("created_at") or record.get("timestamp") or datetime.now().isoformat()

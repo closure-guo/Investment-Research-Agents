@@ -30,8 +30,11 @@ def report_outcome_scores(langfuse: Any, decision: dict[str, Any], settlement: S
 
     trace 不存在/已过期 → WARN 不阻断(spec「trace 不可查容错」);
     trace_id 为 None 或 langfuse 为 None → 直接跳过;
-    excess 为 None(基准缺失)→ 不上报 excess。
+    excess 为 None(基准缺失)→ 不上报 excess;
+    hold/watch 无方向语义 → 不上报(delta update-decision-settlement-contract)。
     """
+    if str(decision.get("action") or "") in ("hold", "watch"):
+        return 0
     trace_id = decision.get("langfuse_trace_id")
     if not trace_id or langfuse is None:
         return 0
