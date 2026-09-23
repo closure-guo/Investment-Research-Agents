@@ -132,6 +132,27 @@ def test_ingest_writes_horizon_and_declared_prices(tmp_path, monkeypatch):
     }
 
 
+def test_ingest_writes_horizon_explicitly(tmp_path, monkeypatch):
+    """horizon_days 由 ingest 显式传入（不依赖表级默认值 20 隐式生效）。
+
+    spy 到 insert_prediction 入参：删掉 ingest 的显式写入即红。
+    """
+    from finance_agent.outcome.track_record.ingest import persist_prediction_from_accumulated
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "finance_agent.outcome.track_record.ingest.insert_prediction",
+        lambda record, **kw: captured.update(record),
+    )
+    accumulated = {
+        "final_trade_decision": {"action": "buy", "confidence": 0.7, "entry_price": 101.5},
+        "stock_quote": {"price": 100.0},
+        "langfuse_trace_id": "t1",
+    }
+    persist_prediction_from_accumulated(accumulated, "sess-h", "600519", "贵州茅台")
+    assert captured["horizon_days"] == 20
+
+
 def test_ingest_reference_price_missing_stays_open(tmp_path, monkeypatch):
     """参考价不可得 → 存档 + 状态 open（判定不依赖参考价）。"""
     import sqlite3

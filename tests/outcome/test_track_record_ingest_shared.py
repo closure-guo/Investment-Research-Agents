@@ -129,3 +129,11 @@ def test_pydantic_trade_decision_recorded(monkeypatch, tmp_path):
     assert row["entry_price"] == 100.0  # quote 优先于模型 entry_price
     assert row["target_price"] == 120.0
     assert row["confidence"] == 0.8
+    # 申报价位（含 stop_loss）冻结入快照：pydantic 路径同样富化
+    import json
+
+    assert json.loads(row["rationale_snapshot"])["declared_prices"] == {
+        "entry_price": 100.0,
+        "stop_loss": 90.0,
+        "target_price": 120.0,
+    }
