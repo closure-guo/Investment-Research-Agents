@@ -11,17 +11,25 @@ def _metrics_text() -> str:
 
 def test_section_1_8_registered_with_core_caliber():
     text = _metrics_text()
-    assert "### 1.8 Outcome 收益指标" in text
+    assert "### 1.8 Outcome 收益指标" in text, "§1.8 小节缺失"
+    assert text.index("### 1.8 ") < text.index("## 2. 时间线"), "§1.8 须登记在 §2 时间线之前"
+    # 锚点须落在 §1.8 小节内：全文断言会被他处同名锚点满足（如 `runs.jsonl` 在文档头部亦出现），
+    # 整段被删测试仍绿。
+    sec = text.split("### 1.8 ", 1)[1].split("\n---", 1)[0]
     for anchor in ("T+20", "000300.SH", "回避正确率", "settled", "1.4008", "0.2802", "runs.jsonl"):
-        assert anchor in text, f"§1.8 缺口径锚点: {anchor}"
+        assert anchor in sec, f"§1.8 缺口径锚点: {anchor}"
 
 
 def test_timeline_has_outcome_switchpoint():
-    text = _metrics_text()
-    assert "Outcome 收益口径切点（2026-09-23" in text
-    assert "add-outcome-profitability-protocol" in text
+    switchpoints = [
+        ln for ln in _metrics_text().splitlines() if "Outcome 收益口径切点（2026-09-23" in ln
+    ]
+    assert switchpoints, "§2 时间线缺 outcome 收益口径切点行"
+    line = switchpoints[0]
+    assert "add-outcome-profitability-protocol" in line, "切点行未钉死 delta 名"
+    assert "未跑批" in line, "切点行未标「未跑批」"
 
 
 def test_no_report_status_literal_marker():
-    """docs/evals 非报告文档不得复现 status 头字面标记（README 扫描器警告）。"""
-    assert "**status**:" not in _metrics_text()
+    """本文件（metrics.md）不得复现 status 头字面标记（status_index 扫描器以 `**status**` 为键，全宽冒号变体同拦）。"""
+    assert "**status**" not in _metrics_text()
