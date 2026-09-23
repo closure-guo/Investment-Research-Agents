@@ -79,6 +79,17 @@ describe('观点详情页（add-track-record-stage-c）', () => {
     expect(screen.getByTestId('prediction-detail-disclaimer')).toBeInTheDocument()
   })
 
+  it('avoidance 终态渲染「回避」标签而非原始状态码', async () => {
+    mockFetch({
+      ...DETAIL,
+      prediction: { ...DETAIL.prediction, status: 'avoidance', direction: 'neutral', resolved_at: '2026-09-30' },
+    })
+    renderPage()
+    const card = await screen.findByTestId('prediction-decision')
+    expect(card.textContent).toContain('回避')
+    expect(card.textContent).not.toContain('avoidance')
+  })
+
   it('404 显示错误态', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('', { status: 404 }))))
     renderPage()

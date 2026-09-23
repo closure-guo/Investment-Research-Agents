@@ -27,7 +27,7 @@ outcome 收益评估的口径（`add-outcome-profitability-protocol`）要求 T+
 
 - 代码：`src/finance_agent/outcome/track_record/`（model 迁移加列 / ingest / judgment / metrics 统计 / job 分支 / Score 上报）、`src/finance_agent/api.py`（overview 辅助字段，additive）、`evals/backtest/replay.py`（结算调用切同源实现）、`src/finance_agent/outcome/settle.py`（deprecated 标注）、`src/finance_agent/outcome/job.py`（旧链路 hold/watch 排除上报）
 - 数据库：predictions 加 `avoidance_status` 与 `settle_entry_price` 列（可空，迁移幂等）；存量行不回填不重算
-- 前端：战绩页**无代码改动**（回避指标对外展示留待后续增量；胜率数值语义变化为被动展示）——非交互类变更判定：不涉前端 UI 代码/SSE/会话切换/状态流转，E2E 门禁不适用；但胜率语义用户可见，人工验证须覆盖战绩页展示不失真
+- 前端：战绩页**仅标签/类型映射小改**（新增回避终态 status 的「回避」标签与 `PredictionStatus` 联合类型成员——避免已结算 neutral 行渲染空白；回避指标数值展示仍留待后续增量）——交互行为未变（无新交互路径/SSE/状态流转），E2E 门禁仍不适用；人工验证须覆盖战绩页对 avoidance 行的渲染核对与胜率语义变化不失真。
 - prompt / LLM 契约：**零变更**（固定窗口方案不给 TradeDecision 加 horizon 字段，理由见 design D1）
 - 协调：#57（outcome 硬化遗留）第 2 项 position_size 恒 NULL——本 delta 富化 rationale_snapshot 时**不顺手修**（独立摘取）；#134（Trader watch 姿态）不受影响——本 delta 让 watch 可计分，不改 watch 产出分布
 - 依赖：实现顺序在 `add-outcome-profitability-protocol`（口径先行）之后；`add-forward-paper-trading-cohort` 与 `add-backtest-leakage-controls` 依赖本 delta 的窗口与入场价口径

@@ -4,14 +4,7 @@ import ReactECharts from 'echarts-for-react'
 import type { PredictionDetail } from '../../types'
 import { Button } from '../../components/ui/button'
 import { cssVar } from '../../Charts'
-
-const STATUS_LABEL: Record<string, string> = {
-  open: '进行中',
-  resolved_win: '命中',
-  resolved_loss: '未中',
-  resolved_neutral: '中性',
-  unresolvable: '不可判定',
-}
+import { PREDICTION_STATUS_LABEL } from './predictionStatus'
 
 function fmt(v: number | null, digits = 2) {
   return v === null ? '—' : v.toFixed(digits)
@@ -92,7 +85,7 @@ export function PredictionDetailPage({ predictionId, onBack }: { predictionId: s
           {/* 判定信息卡 */}
           <div className="rounded-xl p-4 mb-6" style={{ background: 'var(--bg-overlay-l1)' }} data-testid="prediction-decision">
             <div className="text-xs mb-2" style={{ color: 'var(--text-tertiary)' }}>判定信息</div>
-            <Field label="状态">{STATUS_LABEL[p.status] ?? p.status}</Field>
+            <Field label="状态">{PREDICTION_STATUS_LABEL[p.status] ?? p.status}</Field>
             <Field label="方向">{p.direction}</Field>
             <Field label="置信度">{fmt(p.confidence, 2)}</Field>
             <Field label="入场价">{fmt(p.entry_price)}</Field>

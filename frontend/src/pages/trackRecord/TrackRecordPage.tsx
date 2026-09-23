@@ -1,28 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import ReactECharts from 'echarts-for-react'
-import type { EquityCurvePoint, PredictionRecord, PredictionStatus, PredictionsResponse, SegmentDimension, TrackRecordOverview } from '../../types'
+import type { EquityCurvePoint, PredictionRecord, PredictionsResponse, SegmentDimension, TrackRecordOverview } from '../../types'
 import { Button } from '../../components/ui/button'
 import { navigate } from '../../route'
 import { cssVar } from '../../Charts'
 import { loadTrackPrefs, type TrackTimeSpan } from '../../lib/trackPrefs'
-
-const STATUS_LABEL: Record<PredictionStatus, string> = {
-  open: '进行中',
-  resolved_win: '命中',
-  resolved_loss: '未中',
-  resolved_neutral: '中性',
-  unresolvable: '不可判定',
-}
-
-// 状态标签色（语义令牌）：命中=成功绿、未中=错误红、中性=次要灰、进行中=主色蓝、不可判定=三级灰斜杠
-const STATUS_CLS: Record<PredictionStatus, string> = {
-  open: 'text-[color:var(--status-primary-default)]',
-  resolved_win: 'text-[color:var(--status-success-default)]',
-  resolved_loss: 'text-[color:var(--status-error-default)]',
-  resolved_neutral: 'text-[color:var(--text-secondary)]',
-  unresolvable: 'text-[color:var(--text-tertiary)] line-through',
-}
+import { PREDICTION_STATUS_CLS as STATUS_CLS, PREDICTION_STATUS_LABEL as STATUS_LABEL } from './predictionStatus'
 
 const DIRECTION_LABEL: Record<string, string> = {
   long: '看多',

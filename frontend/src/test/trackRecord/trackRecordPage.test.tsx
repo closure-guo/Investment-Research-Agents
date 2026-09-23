@@ -407,6 +407,31 @@ describe('观点日志排序/过滤/日期列/分页（add-track-record-sort-fil
   })
 })
 
+describe('回避终态标签（update-decision-settlement-contract：status=avoidance）', () => {
+  beforeEach(() => vi.spyOn(window, 'scrollTo').mockImplementation(() => {}))
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
+
+  // 已结算 neutral 行：后端终态 status='avoidance'，细粒度结果在 avoidance_status 列
+  const AVOIDANCE_ROW = {
+    prediction_id: 'p3', source_type: 'live', symbol: '300308.SZ', symbol_name: '中际旭创',
+    direction: 'neutral', entry_price: 100, target_price: null, horizon_days: 20,
+    confidence: 0.5, benchmark: '000300.SH', langfuse_trace_id: null,
+    status: 'avoidance', created_at: '2026-09-02T10:00:00', resolved_at: '2026-09-30',
+    exit_price: 92, raw_return: -0.08, excess_return: -0.06, resolution_rule: 'expiry',
+  }
+
+  it('avoidance 行渲染「回避」标签（不空白）且为中性同族灰、无不可判定删除线', async () => {
+    mockFetch({ overview: OVERVIEW, predictions: [AVOIDANCE_ROW] })
+    renderPage()
+    const row = await screen.findByTestId('prediction-row-p3')
+    const label = within(row).getByText('回避')
+    expect(label).toBeInTheDocument()
+    // 颜色与「中性」同族（--text-secondary），且不沿用 unresolvable 的删除线
+    expect(label.className).toContain('var(--text-secondary)')
+    expect(label.className).not.toContain('line-through')
+  })
+})
+
 describe('战绩展示偏好消费（add-agent-settings-center Task 12）', () => {
   // 净值点 ≥2 才渲染曲线（TrackRecordPage showCurve 条件）
   const CURVE = [
