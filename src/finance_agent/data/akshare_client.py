@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -119,6 +120,12 @@ _INDUSTRY_KEY_MAP = {
     "公司简称": "name",
     "行业": "industry",
 }
+
+# 指数成分接口列名（2026-09-23 实测，akshare 1.18.94）：
+#   中证官网 ak.index_stock_cons_csindex → '成分券代码' / '成分券名称'
+#   东财回退 ak.index_stock_cons        → '品种代码' / '品种名称'
+_CONSTITUENT_CODE_COLS = ("成分券代码", "品种代码", "代码")
+_CONSTITUENT_NAME_COLS = ("成分券名称", "品种名称", "名称", "股票名称", "股票简称")
 
 
 def _add_prefix(code: str) -> str:
@@ -557,6 +564,49 @@ class AKShareClient:
     def fetch_benchmark_kline(self, days: int = 250) -> pd.DataFrame:
         """沪深 300 日 K(fetch_index_kline 的 000300 特化,行为与原来一致)。"""
         return self.fetch_index_kline("000300", days=days)
+
+    @staticmethod
+    def _parse_constituents(df: pd.DataFrame | None) -> list[dict[str, str]]:
+        """从指数成分 DataFrame 提取 [{"ticker","name"}]。
+
+        ticker 统一为 6 位数字（去交易所后缀 / sh|sz 前缀）。列名不可识别时返回 []。
+        """
+        if df is None or getattr(df, "empty", True):
+            return []
+        cols = list(df.columns)
+        code_col = next((c for c in _CONSTITUENT_CODE_COLS if c in cols), None)
+        name_col = next((c for c in _CONSTITUENT_NAME_COLS if c in cols), None)
+        if code_col is None or name_col is None:
+            return []
+        rows: list[dict[str, str]] = []
+        for _, row in df.iterrows():
+            match = re.search(r"\d{6}", str(row[code_col]))
+            if not match:
+                continue
+            rows.append({"ticker": match.group(0), "name": str(row[name_col]).strip()})
+        return rows
+
+    def fetch_index_constituents(self, index_code: str = "000300") -> list[dict[str, str]]:
+        """指数成分券清单（中证官网优先，东财回退）。返回 [{"ticker","name"}]。
+
+        ticker 为 6 位数字（去交易所后缀）。两源均失败/列名漂移时返回 [] 并留 ERROR。
+
+        实测列名（2026-09-23，akshare 1.18.94，symbol="000300"，各 300 行）：
+        - ak.index_stock_cons_csindex(symbol=...)：'成分券代码' / '成分券名称'
+          （另有 日期/指数代码/指数名称/成分券英文名称/交易所 等）
+        - ak.index_stock_cons(symbol=...)：'品种代码' / '品种名称'（另有 '纳入日期'）
+        """
+        for label, func in (
+            ("index_stock_cons_csindex", ak.index_stock_cons_csindex),
+            ("index_stock_cons", ak.index_stock_cons),
+        ):
+            df = _call_ak(func, symbol=index_code)
+            rows = self._parse_constituents(df)
+            if rows:
+                return rows
+            logger.warning("指数成分接口 %s 无可用数据（空返回/列名漂移）: %s", label, index_code)
+        logger.error("指数成分双源均失败（成分信源缺失）: %s", index_code)
+        return []
 
     # ── 宏观指标 ──
 

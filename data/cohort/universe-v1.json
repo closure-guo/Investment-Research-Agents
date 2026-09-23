@@ -1,0 +1,71 @@
+{
+  "version": "v1",
+  "effective_date": "2026-09-23",
+  "seed": 42,
+  "strata": {
+    "by": "industry+market_cap",
+    "n": 10
+  },
+  "constituents": [
+    {
+      "ticker": "002938",
+      "name": "鹏鼎控股",
+      "industry": "印制电路板",
+      "market_cap_bucket": "large"
+    },
+    {
+      "ticker": "300413",
+      "name": "芒果超媒",
+      "industry": "批发和零售贸易",
+      "market_cap_bucket": "small"
+    },
+    {
+      "ticker": "300498",
+      "name": "温氏股份",
+      "industry": "农林牧渔",
+      "market_cap_bucket": "mid"
+    },
+    {
+      "ticker": "300750",
+      "name": "宁德时代",
+      "industry": "储能设备",
+      "market_cap_bucket": "large"
+    },
+    {
+      "ticker": "600176",
+      "name": "中国巨石",
+      "industry": "玻纤",
+      "market_cap_bucket": "large"
+    },
+    {
+      "ticker": "600346",
+      "name": "恒力石化",
+      "industry": "合成纤维",
+      "market_cap_bucket": "mid"
+    },
+    {
+      "ticker": "600845",
+      "name": "宝信软件",
+      "industry": "IT服务",
+      "market_cap_bucket": "small"
+    },
+    {
+      "ticker": "600919",
+      "name": "江苏银行",
+      "industry": "银行",
+      "market_cap_bucket": "large"
+    },
+    {
+      "ticker": "601077",
+      "name": "渝农商行",
+      "industry": "综合性银行",
+      "market_cap_bucket": "small"
+    },
+    {
+      "ticker": "601117",
+      "name": "中国化学",
+      "industry": "其他专业工程",
+      "market_cap_bucket": "small"
+    }
+  ]
+}
