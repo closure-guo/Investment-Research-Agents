@@ -72,21 +72,21 @@ class TestHealth:
         _insert(db, status="open", symbol="631")
         rep = collect_outcome_health(db, source_type="live")
         assert rep["settlement_success_rate"] == 1.0
-        assert rep["market_missing_rate"] == 0.0
+        assert rep["unresolvable_rate"] == 0.0
         assert rep["bookkeeping_completeness"] == 1.0
         assert rep["checks"]["settlement_success"] is True
         assert rep["integrity_scope"] == "whole-db"
         assert rep["passed"] is True and rep["checks"]["integrity"] is True
 
-    def test_unresolvable_majority_fails_market_missing(self, tmp_path: Path):
+    def test_unresolvable_majority_fails_unresolvable(self, tmp_path: Path):
         db = _db(tmp_path)
         for i in range(5):
             _insert(db, status="resolved_win", symbol=f"70{i}")
         for i in range(5):
             _insert(db, status="unresolvable", symbol=f"71{i}")
         rep = collect_outcome_health(db, source_type="live")
-        assert rep["market_missing_rate"] == 0.5
-        assert rep["checks"]["market_missing"] is False
+        assert rep["unresolvable_rate"] == 0.5
+        assert rep["checks"]["unresolvable"] is False
         assert rep["checks"]["settlement_success"] is False
         assert rep["passed"] is False
 

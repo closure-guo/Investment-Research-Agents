@@ -559,10 +559,11 @@ git commit -m "feat(outcome): 判定 job 派生入场价/回避落库/Score 补�
 **Interfaces:**
 - Produces: `prediction_stats(source_type=None, db_path=None, version_seq=None, horizon_days: int | None = None) -> dict`；`avoidance_stats(source_type=None, db_path=None, version_seq=None) -> dict`（键：`avoidance_win/avoidance_loss/avoidance_neutral/settled/avoidance_rate`）；overview 响应新增 `avoidance` 与 `caliber_horizon`、`legacy_settled`
 
-- [ ] **Step 1: 失败测试**（要点：① 胜率分母只含 long/short——存量 neutral 已 resolved 行不计入；② 回避统计独立；③ horizon 过滤把 252 存量段排除出头条读数并披露）
+- [ ] **Step 1: 失败测试**（要点：① 胜率分母只含 long/short——存量 neutral 已 resolved 行不计入；② 回避统计独立；③ horizon 过滤把 252 存量段排除出头条读数并披露；④ 均值人口 ≠ 胜率人口——带内 neutral 行计入均值、不计入胜率，排除 unresolvable）
 
 ```python
 def test_win_rate_excludes_neutral_rows(tmp_path): ...      # 4 long win + 1 neutral resolved_win → win_rate=1.0, settled=4
+def test_avg_excess_includes_neutral_band_rows(tmp_path): ...  # 带内 neutral 行计入均值、不计入胜率（口径 §1.8① 均值人口=三态）
 def test_avoidance_stats_rate_and_threshold(tmp_path): ...  # 6 win + 3 loss → rate 0.667；settled=9
 def test_stats_horizon_filter(tmp_path): ...                # horizon=20 只数新口径行；horizon=None 全量
 ```
@@ -571,7 +572,7 @@ def test_stats_horizon_filter(tmp_path): ...                # horizon=20 只数�
 
 - [ ] **Step 3: 实现**
 
-`prediction_stats`：wins/losses/avg_excess 三个 SQL 追加 `AND direction IN ('long','short')`；新增可选 `horizon_days` 参数并入 `where` 条件（`AND horizon_days=?`）。
+`prediction_stats`：wins/losses SQL 追加 `AND direction IN ('long','short')`；avg_excess 改为对 long/short 全部已判定行（resolved_win/loss/neutral 三态，排除 unresolvable）取均值（口径 metrics.md §1.8①——避免 ±2% 带截断偏差）；新增可选 `horizon_days` 参数并入 `where` 条件（`AND horizon_days=?`）。
 
 `avoidance_stats`（新增函数，紧邻 `prediction_stats`）：
 

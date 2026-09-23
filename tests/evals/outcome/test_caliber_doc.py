@@ -16,7 +16,22 @@ def test_section_1_8_registered_with_core_caliber():
     # 锚点须落在 §1.8 小节内：全文断言会被他处同名锚点满足（如 `runs.jsonl` 在文档头部亦出现），
     # 整段被删测试仍绿。
     sec = text.split("### 1.8 ", 1)[1].split("\n---", 1)[0]
-    for anchor in ("T+20", "000300.SH", "回避正确率", "settled", "1.4008", "0.2802", "runs.jsonl"):
+    for anchor in (
+        "T+20",
+        "000300.SH",
+        "回避正确率",
+        "settled",
+        "1.4008",
+        "0.2802",
+        "runs.jsonl",
+        # ③⑤⑥ 三行锚点（终审 I3）：辅助观测窗 / 两项健康阈值 / 泄漏阈值与通路验证定位
+        "T+5",
+        "0.90",
+        "0.10",
+        "0.60",
+        "通路验证",
+        "记账完整率",
+    ):
         assert anchor in sec, f"§1.8 缺口径锚点: {anchor}"
 
 

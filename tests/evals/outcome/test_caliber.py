@@ -16,4 +16,4 @@ def test_caliber_values_pinned():
 def test_neutral_band_aliases_production_definition():
     from finance_agent.outcome.track_record.judgment import DEFAULT_NEUTRAL_BAND
 
-    assert caliber.NEUTRAL_BAND == DEFAULT_NEUTRAL_BAND
+    assert caliber.NEUTRAL_BAND is DEFAULT_NEUTRAL_BAND

@@ -1,7 +1,8 @@
 """Outcome 读数健康检查（spec evaluation「Outcome 读数收口纪律」第①步）。
 
-四项读数 + 快照完整性：结算成功率 / 行情缺失率 / 记账完整率 / 污染护栏。
-主检查（passed 判据）：结算成功率 ≥0.90、行情缺失率 ≤0.10、integrity 零不一致。
+四项读数 + 快照完整性：结算成功率 / 不可判定率 / 记账完整率 / 污染护栏。
+主检查（passed 判据）：结算成功率 ≥0.90、不可判定率 ≤0.10、integrity 零不一致。
+不可判定率 = unresolvable/settleable，与结算成功率互补、同一分母（口径 metrics.md §1.8⑤）。
 告警（不阻断，供人工终裁入口）：trace 缺失行数、重复 snapshot_hash 组数（incident 031 指纹形态）。
 只读：不写 predictions；integrity_check 例外——按既有契约写 integrity_mismatch 审计。
 """
@@ -19,7 +20,7 @@ from typing import Any
 from finance_agent.outcome.track_record.model import integrity_check
 
 MIN_SETTLEMENT_SUCCESS_RATE = 0.90
-MAX_MARKET_MISSING_RATE = 0.10
+MAX_UNRESOLVABLE_RATE = 0.10
 
 
 def _db_path(db_path: str | Path | None) -> Path:
@@ -65,7 +66,7 @@ def collect_outcome_health(
         unresolvable = counts.get("unresolvable", 0)
         settleable = resolved + unresolvable
         success_rate = round(resolved / settleable, 4) if settleable else None
-        missing_rate = round(unresolvable / settleable, 4) if settleable else None
+        unresolvable_rate = round(unresolvable / settleable, 4) if settleable else None
         price_missing = int(
             conn.execute(
                 f"SELECT COUNT(*) FROM predictions{where} AND entry_price IS NULL",  # noqa: S608
@@ -91,7 +92,7 @@ def collect_outcome_health(
     checks = {
         "settlement_success": success_rate is not None
         and success_rate >= MIN_SETTLEMENT_SUCCESS_RATE,
-        "market_missing": missing_rate is None or missing_rate <= MAX_MARKET_MISSING_RATE,
+        "unresolvable": unresolvable_rate is None or unresolvable_rate <= MAX_UNRESOLVABLE_RATE,
         "integrity": integrity["mismatch_count"] == 0,
     }
     warnings: list[str] = []
@@ -112,7 +113,7 @@ def collect_outcome_health(
         "settled_resolved": resolved,
         "unresolvable": unresolvable,
         "settlement_success_rate": success_rate,
-        "market_missing_rate": missing_rate,
+        "unresolvable_rate": unresolvable_rate,
         "entry_price_missing": price_missing,
         "bookkeeping_completeness": round(1 - price_missing / total, 4) if total else None,
         "integrity_checked": integrity["checked"],
