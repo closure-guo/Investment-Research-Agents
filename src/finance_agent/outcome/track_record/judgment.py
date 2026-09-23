@@ -117,6 +117,8 @@ def resolve_prediction(
         exit_bench = _bench_close_on_or_before(bench_df, exit_date)
         if entry_bench is not None and exit_bench is not None:
             excess = raw_return - sign * (exit_bench / entry_bench - 1.0)
+    # 分类前先消浮点噪声:102/100−1 = 0.020000000000000018 会被误判越出 ±2% 中性带
+    excess = round(excess, 6)
     band = float(neutral_band)
     if direction == "neutral":
         status = (

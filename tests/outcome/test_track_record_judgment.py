@@ -81,6 +81,51 @@ def test_excess_uses_benchmark():
     assert abs(r.excess_return - (0.03 - 0.0)) < 1e-9
 
 
+def test_excess_non_flat_benchmark_formula():
+    """基准在入场/出场日之间非零变动:excess = raw − bench_ret(平坦基准无判别力)。"""
+    kline = _kline([("2026-09-02", 100.0), ("2026-09-03", 99.0)])  # raw = −1%
+    bench = _kline([("2026-09-02", 100.0), ("2026-09-03", 103.0)])  # bench_ret = +3%
+    r = resolve_prediction(_pred(horizon=1), kline, bench)
+    assert r is not None
+    assert abs(r.excess_return - (-0.04)) < 1e-9
+    # 若误用 raw + bench_ret(+2%)则判 neutral,此处锁死 loss
+    assert r.status == "resolved_loss"
+
+
+def test_excess_short_benchmark_sign():
+    """short 的基准收益同样符号化取负:excess = raw_short − (−1)·bench_ret。"""
+    kline = _kline([("2026-09-02", 100.0), ("2026-09-03", 103.0)])  # short raw = −3%
+    bench = _kline([("2026-09-02", 100.0), ("2026-09-03", 103.0)])  # bench_ret = +3%
+    r = resolve_prediction(_pred(horizon=1, direction="short"), kline, bench)
+    assert r is not None
+    assert abs(r.excess_return - 0.0) < 1e-9  # −3% −(−1)(+3%) = 0
+    assert r.status == "resolved_neutral"  # 漏掉基准符号会得 −6% → loss
+
+
+def test_neutral_band_boundary_exact_two_percent():
+    """恰 ±2% 归中性带:分类须先 round(excess,6),否则 102/100−1 的浮点尾数越界。"""
+    r_plus = resolve_prediction(_pred(horizon=1), _kline_prices([100, 102]))
+    assert r_plus is not None and r_plus.status == "resolved_neutral"
+    assert r_plus.excess_return == 0.02
+    r_minus = resolve_prediction(_pred(horizon=1), _kline_prices([100, 98]))
+    assert r_minus is not None and r_minus.status == "resolved_neutral"
+    assert r_minus.excess_return == -0.02
+    # neutral 方向共用同一中性带:恰 +2% → avoidance_neutral(非错过上行)
+    r_avoid = resolve_prediction(_pred(horizon=1, direction="neutral"), _kline_prices([100, 102]))
+    assert r_avoid is not None and r_avoid.status == "avoidance_neutral"
+
+
+def test_resolve_neutral_flat_is_avoidance_neutral():
+    """平坦序列(标的与基准同幅)→ 回避无差别 → avoidance_neutral。"""
+    flat = _kline_prices([100, 100, 100])
+    r = resolve_prediction(
+        _pred(horizon=2, direction="neutral"), flat, _kline_prices([4000, 4000, 4000])
+    )
+    assert r is not None
+    assert r.status == "avoidance_neutral"
+    assert r.excess_return == 0.0
+
+
 def test_not_enough_rows_returns_none():
     # 派生入场 9/2 后仅 1 个交易日 < horizon 10 → 未到点 None(保持 open)
     assert resolve_prediction(_pred(horizon=10), _kline_prices([101, 102])) is None
@@ -108,6 +153,22 @@ def test_derive_entry_no_rows_returns_none():
     assert (
         derive_entry({"created_at": "2026-09-10T10:00:00"}, _kline([("2026-09-01", 10.0)])) is None
     )
+
+
+def test_derive_entry_pure_date_created_at_takes_that_day_close():
+    """纯日期 created_at(无时间部分)→ 视为归属日盘前,取归属日收盘(Task 6 replay 契约)。"""
+    kline = _kline([("2026-09-01", 10.0), ("2026-09-02", 11.0), ("2026-09-03", 12.0)])
+    assert derive_entry({"created_at": "2026-09-02"}, kline) == ("2026-09-02", 11.0)
+
+
+def test_resolve_pure_date_created_at_uses_that_day_close():
+    """判定链路对纯日期 created_at 同样以归属日收盘为入场基准。"""
+    kline = _kline([("2026-09-02", 11.0), ("2026-09-03", 12.1)])
+    p = {"created_at": "2026-09-02", "direction": "long", "horizon_days": 1}
+    r = resolve_prediction(p, kline)
+    assert r is not None
+    assert r.entry_date == "2026-09-02" and r.entry_price == 11.0
+    assert abs(r.raw_return - (12.1 / 11.0 - 1.0)) < 1e-6
 
 
 def test_resolve_neutral_avoidance_semantics():
