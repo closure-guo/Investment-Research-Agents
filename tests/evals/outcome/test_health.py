@@ -23,6 +23,8 @@ def _insert(
     snapshot: dict | None = None,
     horizon: int = 20,
     created_at: str = "2026-09-20T10:00:00",
+    direction: str = "long",
+    avoidance_status: str | None = None,
 ) -> None:
     import json as _json
 
@@ -32,12 +34,13 @@ def _insert(
         conn.execute(
             "INSERT INTO predictions (prediction_id, source_type, symbol, direction, entry_price,"
             " horizon_days, confidence, rationale_snapshot, langfuse_trace_id, status, created_at,"
-            " updated_at, snapshot_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " updated_at, snapshot_hash, avoidance_status)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 f"p-{symbol}-{status}-{_json.dumps(snap)}",
                 source_type,
                 symbol,
-                "long",
+                direction,
                 entry_price,
                 horizon,
                 0.6,
@@ -47,6 +50,7 @@ def _insert(
                 created_at,
                 created_at,
                 compute_snapshot_hash(snap),
+                avoidance_status,
             ),
         )
         conn.commit()
@@ -89,6 +93,46 @@ class TestHealth:
         assert rep["checks"]["unresolvable"] is False
         assert rep["checks"]["settlement_success"] is False
         assert rep["passed"] is False
+
+    def test_avoidance_terminal_counted_as_settled(self, tmp_path: Path):
+        """Δ2 终审 A：avoidance 终态计入 settled 分母（否则 §1.8⑤ 门禁会假 FAIL）。
+
+        旧公式只认 resolved_* 三态 → 95 条 avoidance 两侧都不计，
+        success = 9/(9+6) = 0.60（假 FAIL）；新公式 settled = 95 avoidance + 9 resolved。
+        """
+        db = _db(tmp_path)
+        for i in range(95):
+            _insert(
+                db,
+                status="avoidance",
+                avoidance_status="avoidance_win",
+                direction="neutral",
+                symbol=f"n{i:02d}",
+            )
+        for i in range(5):
+            _insert(db, status="unresolvable", direction="neutral", symbol=f"nu{i}")
+        for i in range(9):
+            _insert(db, status="resolved_win", symbol=f"l{i}")
+        _insert(db, status="unresolvable", symbol="lu0")
+
+        rep = collect_outcome_health(db, source_type="live")
+        assert rep["settled"] == 104  # 95 avoidance + 9 resolved
+        assert rep["settled_avoidance"] == 95
+        assert rep["unresolvable"] == 6
+        assert rep["settlement_success_rate"] == round(104 / 110, 4)  # ≈0.9455（旧公式 0.60）
+        assert rep["unresolvable_rate"] == round(6 / 110, 4)
+        assert rep["checks"]["settlement_success"] is True
+        assert rep["checks"]["unresolvable"] is True
+
+    def test_avoidance_without_status_not_settled(self, tmp_path: Path):
+        """status='avoidance' 但 avoidance_status 为空（未判定）→ 不计 settled（不虚增分母）。"""
+        db = _db(tmp_path)
+        _insert(db, status="resolved_win", symbol="600519")
+        _insert(db, status="avoidance", avoidance_status=None, direction="neutral", symbol="600520")
+        rep = collect_outcome_health(db, source_type="live")
+        assert rep["settled"] == 1
+        assert rep["settled_avoidance"] == 0
+        assert rep["settlement_success_rate"] == 1.0
 
     def test_integrity_mismatch_fails(self, tmp_path: Path):
         db = _db(tmp_path)

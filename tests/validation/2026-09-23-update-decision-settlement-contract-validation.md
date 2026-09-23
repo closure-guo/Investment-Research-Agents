@@ -13,7 +13,7 @@
 
 ## Scenario 对照表
 
-`openspec/changes/update-decision-settlement-contract/specs/` 三个 delta 文件共 **40 Scenario**（decision-outcome 20 / track-record 18 / track-record-calibration 2）。
+`openspec/changes/update-decision-settlement-contract/specs/` 四个 delta 文件共 **52 Scenario**（decision-outcome 20 / track-record 28 / track-record-calibration 2 / track-record-segments 2）。
 
 ### 需求①「决策落库」（decision-outcome，7 Scenario）
 
@@ -90,7 +90,29 @@
 | 39 | 分桶输出（L10） | `calibration.py:58` `calibration_table`（[0.5,0.6)...[0.9,1.0] 桶） | `test_track_record_stage_c.py::TestCalibration::test_buckets_and_hit_rate`、`::test_neutral_excluded_when_none` | ✅ |
 | 40 | 回避终态映射命中值（L15） | `calibration.py:25` `outcome_value`（`status=="avoidance"` → avoidance_win 1.0 / loss 0.0 / neutral neutral_prob；NULL 跳过，L33-41） | `test_track_record_stage_c.py::TestCalibration::test_outcome_value_avoidance_mapping`、`::test_outcome_value_avoidance_undecided_skipped`、`::test_outcome_value_other_statuses_unchanged` | ✅ |
 
-**合计 40 Scenario（decision-outcome 20 / track-record 18 / track-record-calibration 2）：40 行落点齐备。**
+### 需求⑧「战绩页面（总览 + 观点日志）」（track-record，10 Scenario；Δ2T7 终审 C 纳入）
+
+| # | Scenario（delta spec 行号） | 落点 | 证据 | 通过 |
+|---|---|---|---|---|
+| 41 | 页面渲染总览与观点日志 | `frontend/src/pages/trackRecord/TrackRecordPage.tsx` | `frontend/src/test/trackRecord/trackRecordPage.test.tsx`（总览与观点日志渲染，含 loss） | ✅ |
+| 42 | 默认视图不可隐藏 loss | 同上（无「只看好单」预设） | 同上（默认含 loss）；E2E 不适用（非交互类变更） | ✅ |
+| 43 | 回避终态标签渲染 | `frontend/src/pages/trackRecord/predictionStatus.ts:7-12/18-23`（`avoidance: '回避'` 单一映射） | `trackRecordPage.test.tsx:423`「avoidance 行渲染『回避』标签（不空白）且为中性同族灰、无不可判定删除线」 | ✅ |
+| 44 | 展示建立日期列 | `TrackRecordPage.tsx`（建立日期列） | `trackRecordPage.test.tsx:312`（渲染建立日期列） | ✅ |
+| 45 | 按列排序交互 | 同上（列头排序） | `trackRecordPage.test.tsx:320`（点击「区间收益」→ sort_by=raw_return） | ✅ |
+| 46 | 关键字过滤交互 | 同上（过滤控件） | `trackRecordPage.test.tsx:345`（keyword 参数） | ✅ |
+| 47 | 时间段过滤交互 | 同上（起止日期） | `trackRecordPage.test.tsx:367`（date_from/date_to） | ✅ |
+| 48 | 过滤后分页浏览 | 同上（分页控件） | `trackRecordPage.test.tsx:388`（下一页 page=2） | ✅ |
+| 49 | 空态与样本不足 | `TrackRecordPage.tsx` + `api.py:2090` insufficient_sample | `trackRecordPage.test.tsx:89`（空态「样本积累中」不显示 0）、`tests/test_api_track_record.py::test_overview_empty` | ✅ |
+| 50 | 数据缺口不伪造 | 净值/叠加图断点处理（`TrackRecordPage.tsx`） | `trackRecordPage.test.tsx`（无快照空态不渲染曲线 L194） | ✅ |
+
+### 需求⑨「四维切片指标」（track-record-segments，2 Scenario；Δ2T7 终审 C 纳入）
+
+| # | Scenario（delta spec 行号） | 落点 | 证据 | 通过 |
+|---|---|---|---|---|
+| 51 | 切片查询 | `src/finance_agent/outcome/track_record/segments.py:205` `segment_all`；`api.py:2190` segments 端点 | `test_track_record_stage_c.py::TestSegments::test_holding_period_buckets`、`::test_industry_map_and_unknown`、`::test_market_cap_buckets`、`::test_market_environment`、`::test_segment_all_includes_four_dimensions`；`::test_api_segments` | ✅ |
+| 52 | 回避终态不进切片胜率与超额 | `segments.py:65` `_is_long_short`、`:70` `_win_flag`、`:91-97` 超额人口（`avoidance` 行不进 win_rate/avg_excess，仍计样本数） | `test_track_record_stage_c.py::TestSegments::test_win_rate_requires_long_short_and_excludes_avoidance`、`::test_win_rate_none_when_no_long_short_decided` | ✅ |
+
+**合计 52 Scenario（decision-outcome 20 / track-record 28 / track-record-calibration 2 / track-record-segments 2）：52 行落点齐备。**
 
 ## 机器验证结果
 
@@ -99,6 +121,8 @@
 | 命令 | 输出摘要 | 判定 |
 |---|---|---|
 | `uv run pytest tests/outcome tests/evals/backtest tests/test_api_track_record.py tests/evals/outcome -v` | `356 passed, 15 warnings in 66.30s` | ✅ 全绿 |
+| `uv run pytest tests/outcome tests/evals/outcome tests/evals/backtest tests/test_api_track_record.py -q`（Δ2T7 终审 A–F 后复跑） | `364 passed, 15 warnings in 60.29s` | ✅ 全绿（+8：健康检查 2 + 回测 6 参数化） |
+| `uv run pytest tests/evals/backtest -q`（终审处方后） | `100 passed in 2.50s` | ✅ |
 | `uv run ruff check src/ evals/ tests/ scripts/` | `All checks passed!` | ✅ 零违例 |
 | `uv run ruff format --check src/ tests/ evals/` | `546 files already formatted` | ✅ |
 | `uv run mypy src/finance_agent/outcome/track_record evals/outcome` | `Success: no issues found in 14 source files` | ✅ 零错误（详见「异常记录」） |
@@ -138,6 +162,15 @@
 
 收敛后无残留未满足的 SHALL，原「`rationale_snapshot` 未含完整分析原文」缺口登记随之作废（另无其他既有缺口）。该改动为纯需求/文档文本收敛，零代码行为变更。
 
+## 终审口径收口（Δ2 收尾第二批 A–F）
+
+- **A（Important）健康检查纳入回避终态**：`evals/outcome/health.py` 已判定 `settled` 改为 `resolved_*` 三态 **+** `status='avoidance'` 且 `avoidance_status` 非空；`settleable = settled + unresolvable`，两率互补。修前 avoidance 行两侧都不计，会使 §1.8⑤ 门禁对大量 neutral 流量**假 FAIL**（100 neutral + 10 long 场景：旧 0.60 / 新 ≈0.9455）。`metrics.md` §1.8⑤ 表述同步（「已判定（含回避判定）」），并在 §2 切点行补实施期修订注记（**必须在任何读数之前**修订，未跑批、无数据依赖）。测试：`test_health.py::TestHealth::test_avoidance_terminal_counted_as_settled`、`::test_avoidance_without_status_not_settled`。
+- **B（Important）回测聚合排除 neutral/avoidance**：`evals/backtest/run_backtest.py` 现在把非 buy/sell（hold/watch→neutral）的决策**整条排除**出 system 与基线聚合（不再按「其余为负」反向计入），并在 `methodology.system_population` + `excluded_non_executable` 披露排除数；`_trade_daily_returns` 对非 buy/sell 返回 `[]`；`replay.py` 与 `run_backtest.py` 的陈旧 docstring 同步。测试：`test_run_backtest.py::TestTradeDailyReturns::test_non_executable_action_returns_empty`（5 参数化）、`::TestRunBacktest::test_neutral_action_excluded_from_system_aggregation`。
+- **C（Important）补齐两个无 delta 覆盖的 capability**：新增 `specs/track-record-segments/spec.md`（MODIFIED「四维切片指标」+ 回避终态不进切片胜率/超额 Scenario）；`specs/track-record/spec.md` 新增 MODIFIED「战绩页面」需求（含新增 Scenario「回避终态标签渲染」）；`proposal.md` Modified Capabilities 增列 `track-record-segments`。
+- **D（Minor）** `tests/outcome/test_track_record_stage_c.py::_seg_preds` 补 `direction="long"`，恢复该文件切片 win_rate/avg_excess 实际覆盖（既有断言只断 sample_size，零回归）。
+- **E（Minor）** `api.py` calibration 端点 docstring 更新为现语义（avoidance 按 `avoidance_win→1.0 / avoidance_loss→0.0 / avoidance_neutral→neutral_prob` 入桶，未判定跳过）。
+- **F（Minor）** `api.py:2142` avoidance 门槛 10 加注释，指明对应 `evals/outcome/caliber.MIN_SETTLED_FOR_WINRATE`（生产侧不 import evals，按字面同步）。
+
 ## Owner 待办（人工核对项，本报告未覆盖）
 
 - **LLM 端到端实跑**：真实 deep 分析 → `persist_prediction_from_accumulated` 落库 → `settle_open_predictions` 判定的全链路（含 Langfuse 真实 Score 写入与 trace 关联）。本报告已用离线脚本覆盖同一代码路径的契约，但真实模型输出的 `final_trade_decision` 形态（pydantic → dict、action 分布）与新窗口下首批真实读数的合理性仍需 owner 实跑。
@@ -155,6 +188,6 @@
 
 [x] 全部 Scenario 经文本收敛后达成；owner 待办见上（可进 sync + archive 前置）
 
-勾选语义：本 delta 的**验证项**全过（机器项零失败 + 40 Scenario 均有落点与证据 + 离线链路三项通过；Scenario #21 的 SHALL 经需求文本收敛至已实现范围后达成，见「需求文本收敛记录」）。按 `tasks.md` 5.5 的裁定，**sync/archive 待读数腿（Δ3 `add-forward-paper-trading-cohort` / Δ4 `add-backtest-leakage-controls`）落地后统一执行**——本 delta 提供结算契约与判定同源证据，但真实读数（forward cohort / walk-forward 回测）尚未开跑，不随本 delta 单独 archive。
+勾选语义：本 delta 的**验证项**全过（机器项零失败 + 52 Scenario 均有落点与证据 + 离线链路三项通过；Scenario #21 的 SHALL 经需求文本收敛至已实现范围后达成，见「需求文本收敛记录」）。按 `tasks.md` 5.5 的裁定，**sync/archive 待读数腿（Δ3 `add-forward-paper-trading-cohort` / Δ4 `add-backtest-leakage-controls`）落地后统一执行**——本 delta 提供结算契约与判定同源证据，但真实读数（forward cohort / walk-forward 回测）尚未开跑，不随本 delta 单独 archive。
 
 [ ] 存在失败项，需修复后重新验证

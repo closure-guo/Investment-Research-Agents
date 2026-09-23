@@ -3,7 +3,8 @@
 结算语义与生产 track-record 判定同源（`outcome.track_record.judgment.resolve_prediction`：
 horizon 到点 + 区间超额 + ±2% 中性带），不另造一套（spec「绩效指标与基线对比」）。
 入场基准由 K 线派生（决策日收盘，非存档参考价）；neutral 方向（hold/watch）判定
-输出 avoidance_*，回测聚合仍按既有 action 符号口径（见 run_backtest 报告口径说明）。
+输出 avoidance_*，回测聚合**整条排除**（system 收益仅计 buy/sell，§1.8②）——
+口径说明见 run_backtest 报告的 `methodology.system_population`。
 口径护栏：结算只用 hfq 全量 K 线——快照 kline 是管线 qfq 口径，不得混用。
 """
 

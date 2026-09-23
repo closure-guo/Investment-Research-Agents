@@ -2,7 +2,10 @@
 
 四项读数 + 快照完整性：结算成功率 / 不可判定率 / 记账完整率 / 污染护栏。
 主检查（passed 判据）：结算成功率 ≥0.90、不可判定率 ≤0.10、integrity 零不一致。
-不可判定率 = unresolvable/settleable，与结算成功率互补、同一分母（口径 metrics.md §1.8⑤）。
+已判定 settled = resolved_* 三态 + 回避终态（status='avoidance' 且 avoidance_status 非空，
+delta update-decision-settlement-contract）；settleable = settled + unresolvable，
+结算成功率 = settled/settleable、不可判定率 = unresolvable/settleable（互补、同一分母，
+口径 metrics.md §1.8⑤）。
 告警（不阻断，供人工终裁入口）：trace 缺失行数、重复 snapshot_hash 组数（incident 031 指纹形态）。
 只读：不写 predictions；integrity_check 例外——按既有契约写 integrity_mismatch 审计。
 """
@@ -63,9 +66,18 @@ def collect_outcome_health(
         resolved = sum(
             counts.get(s, 0) for s in ("resolved_win", "resolved_loss", "resolved_neutral")
         )
+        # 回避终态（status='avoidance'）也是已判定；须 avoidance_status 非空（未判定不算）
+        avoidance_settled = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM predictions{where}"  # noqa: S608
+                " AND status='avoidance' AND avoidance_status IS NOT NULL",
+                params,
+            ).fetchone()[0]
+        )
+        settled = resolved + avoidance_settled
         unresolvable = counts.get("unresolvable", 0)
-        settleable = resolved + unresolvable
-        success_rate = round(resolved / settleable, 4) if settleable else None
+        settleable = settled + unresolvable
+        success_rate = round(settled / settleable, 4) if settleable else None
         unresolvable_rate = round(unresolvable / settleable, 4) if settleable else None
         price_missing = int(
             conn.execute(
@@ -110,7 +122,9 @@ def collect_outcome_health(
         "since": since,
         "total": total,
         "status_counts": counts,
+        "settled": settled,
         "settled_resolved": resolved,
+        "settled_avoidance": avoidance_settled,
         "unresolvable": unresolvable,
         "settlement_success_rate": success_rate,
         "unresolvable_rate": unresolvable_rate,

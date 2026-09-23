@@ -220,10 +220,13 @@ class TestCalibration:
 
 
 def _seg_preds():
+    # direction="long"：切片胜率/平均超额人口限 long/short 三态（§1.8①），
+    # 缺 direction 会让本文件的分桶基线只覆盖样本数、不覆盖 win_rate/avg_excess。
     return [
         {
             "prediction_id": "p1",
             "symbol": "600519.SH",
+            "direction": "long",
             "created_at": "2026-06-01T00:00:00",
             "resolved_at": "2026-06-10",
             "status": "resolved_win",
@@ -232,6 +235,7 @@ def _seg_preds():
         {
             "prediction_id": "p2",
             "symbol": "600519.SH",
+            "direction": "long",
             "created_at": "2026-06-01T00:00:00",
             "resolved_at": "2026-06-02",
             "status": "resolved_loss",
@@ -240,6 +244,7 @@ def _seg_preds():
         {
             "prediction_id": "p3",
             "symbol": "999999.SH",  # 未知行业
+            "direction": "long",
             "created_at": "2026-06-01T00:00:00",
             "resolved_at": "2026-07-01",
             "status": "resolved_win",

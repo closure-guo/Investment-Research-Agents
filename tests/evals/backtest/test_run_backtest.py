@@ -176,6 +176,23 @@ class TestTradeDailyReturns:
             == []
         )
 
+    @pytest.mark.parametrize("action", ["hold", "watch", "neutral", "unknown", ""])
+    def test_non_executable_action_returns_empty(self, action):
+        """Δ2 终审 B：非 buy/sell（hold/watch→neutral）不产生方向化 system 收益（§1.8②）。"""
+        kline = _kline([100.0, 110.0, 121.0])
+        assert (
+            _trade_daily_returns(
+                {
+                    "settlement": _settlement("2024-01-02", 110.0),
+                    "entry_price": 100.0,
+                    "action": action,
+                    "decision_date": "2024-01-01",
+                },
+                kline,
+            )
+            == []
+        )
+
 
 class TestRunBacktest:
     def _setup(self, up: float, down: float, *, actions: tuple[str, str] = ("buy", "sell")):
@@ -272,6 +289,24 @@ class TestRunBacktest:
         assert report["sanity"] == "valid"
         assert not report["conclusion"].startswith("invalid")
         assert set(report["block_length_sensitivity"]) == {"10", "20", "40"}
+
+    def test_neutral_action_excluded_from_system_aggregation(self):
+        """Δ2 终审 B：hold/watch（neutral）整条排除出 system 聚合（§1.8②），报告披露排除数。"""
+        sample, outcomes, klines, _ = self._setup(up=0.014, down=-0.010, actions=("buy", "hold"))
+        report = run_backtest(sample, klines, replay_fn=_fake_replay(outcomes))
+        assert report["n_consistent"] == 2  # 一致率不受影响（方向仍一致）
+        assert report["methodology"]["excluded_non_executable"] == 1  # 600001 hold 被排除
+        assert "排除" in report["methodology"]["system_population"]
+        # 系统序列只剩 600000(buy) 的收益 → 与「同时含 hold 反向收益」的旧口径不同
+        only_buy_sample, only_buy_outcomes, only_buy_klines, _ = self._setup(
+            up=0.014, down=-0.010, actions=("buy", "sell")
+        )
+        only_buy_outcomes = {"600000": only_buy_outcomes["600000"]}
+        only_buy_klines = {"600000": only_buy_klines["600000"]}
+        report_buy = run_backtest(
+            [only_buy_sample[0]], only_buy_klines, replay_fn=_fake_replay(only_buy_outcomes)
+        )
+        assert report["perf_table"]["system"] == report_buy["perf_table"]["system"]
 
     def test_paired_ci_truncation_recorded(self):
         sample, outcomes, klines, _ = self._setup(up=0.014, down=-0.010)

@@ -2137,6 +2137,8 @@ async def track_record_overview(
         "version_seq": version,
         "versions": await asyncio.to_thread(list_agents),
         # Δ2 口径字段：回避正确率独立（门控同胜率）+ 头条窗口 + 跨口径存量披露
+        # 门槛 10 = evals/outcome/caliber.MIN_SETTLED_FOR_WINRATE（生产侧不可 import evals，
+        # 故此处按字面同步；口径变更先改 metrics.md §1.8④ 再同步本常量与 evals 侧）。
         "avoidance": {
             **avoidance,
             "avoidance_rate": None if avoidance["settled"] < 10 else avoidance["avoidance_rate"],
@@ -2173,8 +2175,11 @@ async def track_record_equity_curve() -> dict[str, Any]:
 async def track_record_calibration() -> dict[str, Any]:
     """add-track-record-stage-c:置信度校准（分桶 + Brier Score）。
 
-    桶含中值/样本数/实际命中率；Brier 越低校准越好。neutral 按 0.5 计，
-    unresolvable 与 open 不进桶。
+    桶含中值/样本数/实际命中率；Brier 越低校准越好。命中值按终态取：
+    resolved_win→1.0 / resolved_loss→0.0 / resolved_neutral→neutral_prob（默认 0.5）；
+    neutral 回避终态（status='avoidance'）按 avoidance_status 映射——
+    avoidance_win→1.0 / avoidance_loss→0.0 / avoidance_neutral→neutral_prob；
+    avoidance_status 为空（未判定）与 unresolvable/open 不进桶。
     """
     preds = await asyncio.to_thread(list_predictions, limit=10000)
     result = await asyncio.to_thread(calibration_table, preds)

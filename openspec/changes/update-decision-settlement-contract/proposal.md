@@ -23,6 +23,7 @@ outcome 收益评估的口径（`add-outcome-profitability-protocol`）要求 T+
 - `decision-outcome`: 「决策落库」（参考价/结算入场价分离 + horizon 显式写入 + 申报价冻结）、「事后行情追踪」（默认 horizon T+252→T+20 + 派生入场基准确认）、「决策效果 Score 反向上报」（仅 long/short 上报；neutral 排除）
 - `track-record`: 「观点数据模型」（horizon 默认 20、avoidance_status + settle_entry_price 列、申报价入快照）、「判定规则」（默认窗口 T+20 + 派生入场基准 + 中性回避判定 + long/short Score 上报）、「基础统计」（胜率仅计 long/short + 回避正确率独立辅助统计 + 切点分段）
 - `track-record-calibration`: 「置信度校准分桶」（neutral 回避终态按 avoidance_status 映射命中值，替代按 0.5 一律命中）
+- `track-record-segments`: 「四维切片指标」（切片胜率/平均超额人口限 long/short 三态，`avoidance` 终态行不进二者、只计样本数）
 
 ## Impact
 

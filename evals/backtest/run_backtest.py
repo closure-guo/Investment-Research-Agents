@@ -37,12 +37,15 @@ def _trade_daily_returns(result: dict, kline: pd.DataFrame) -> list[float]:
     decision_date）→ 持有期日收益序列（entry=决策日收盘，exit=结算价）。
 
     近似：持有期内按逐日收盘 pct_change，末日修正到结算价；
-    方法在报告 metadata.methodology 披露。方向符号与 outcome.settle 一致
-    （buy 为正，其余为负）。
+    方法在报告 metadata.methodology 披露。方向符号：buy 为正、sell 为负；
+    非 buy/sell（hold/watch→neutral，属回避语义）不产生方向化 system 收益——本节返回 []
+    且由编排层整条排除（§1.8② 主结论仅基于可执行决策 long/short）。
     """
     settlement = result.get("settlement") or {}
     entry = float(result.get("entry_price") or 0.0)
     if not settlement or entry <= 0:
+        return []
+    if str(result.get("action") or "") not in ("buy", "sell"):
         return []
     dates = kline["日期"].astype(str).str[:10]
     start = str(result.get("decision_date", ""))[:10]
@@ -126,9 +129,15 @@ def run_backtest(
     system_returns: list[float] = []
     baseline_returns: dict[Strategy, list[float]] = {s: [] for s in BASELINE_STRATEGIES}
     regime_returns: dict[str, list[float]] = {}
+    excluded_non_executable = 0
     for r in consistent:
         kline = klines.get(r["code"])
         if kline is None:
+            continue
+        # §1.8②：主结论仅基于可执行决策（buy/sell → long/short）；hold/watch（neutral，
+        # 回避语义）整条排除——system 与基线两侧同除，保持两条序列对齐。
+        if str(r.get("action") or "") not in ("buy", "sell"):
+            excluded_non_executable += 1
             continue
         trade_returns = _trade_daily_returns(r, kline)
         system_returns.extend(trade_returns)
@@ -198,6 +207,12 @@ def run_backtest(
                 "结算语义与生产 track-record 判定同源（horizon/超额/±2% 带；入场价由行情派生）"
             ),
             "daily_returns": "单笔结算收益摊到持有期逐日；基线为 T-1 信号 T 生效的逐日仓位收益",
+            "system_population": (
+                "system 收益仅计 buy/sell 决策（long/short）；hold/watch（neutral，回避语义）"
+                "整条排除、不计方向化收益（§1.8② 主结论仅基于可执行决策），"
+                "被排除的已一致标的数见 excluded_non_executable"
+            ),
+            "excluded_non_executable": excluded_non_executable,
             "benchmark": f"BENCHMARK_CODE 默认 {BENCHMARK_CODE}（沿 decision-outcome 默认，待 ADR 确认）",
             "ci_truncation": ci_truncation,
         },
