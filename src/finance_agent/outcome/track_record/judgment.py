@@ -6,12 +6,16 @@ short 方向对称;neutral 不进胜率。停牌/退市由 job 层按连续无�
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import pandas as pd
 
 MAX_HORIZON_DAYS = 252
 DEFAULT_NEUTRAL_BAND = 0.02
+# outcome 评估默认判定窗口（delta update-decision-settlement-contract；口径 metrics.md §1.8）
+DEFAULT_HORIZON_DAYS = int(os.getenv("OUTCOME_DEFAULT_HORIZON_DAYS", "20"))
+CLOSE_TIME_CUTOFF = "15:00"  # 归属日收盘切分：created_at 时间部分 < 此值 → 归属日收盘入场
 
 
 @dataclass

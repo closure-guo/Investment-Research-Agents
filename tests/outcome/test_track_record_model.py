@@ -187,3 +187,81 @@ def test_count_predictions_reflects_filters(db):
         count_predictions(keyword="茅台", date_from="2026-09-01", date_to="2026-09-30", db_path=db)
         == 2
     )
+
+
+# ── update-decision-settlement-contract Task 1：结算契约 schema 与迁移 ──
+
+# Δ2 前（stage-a 形态）的 predictions DDL：无 version_seq/snapshot_hash、无新列。
+# 老库夹具必须含 stage-a 全列（尤其 symbol）——init_track_record_tables 第一步
+# executescript(PREDICTIONS_DDL) 会建 idx_predictions_symbol，缺列则在建索引处报错，
+# 早于任何 ALTER；因此不能只建 prediction_id/status 的退化表。
+_LEGACY_PREDICTIONS_DDL = """
+CREATE TABLE predictions (
+  prediction_id     TEXT PRIMARY KEY,
+  source_type       TEXT NOT NULL CHECK (source_type IN ('backtest','live')),
+  symbol            TEXT NOT NULL,
+  symbol_name       TEXT,
+  direction         TEXT NOT NULL CHECK (direction IN ('long','short','neutral')),
+  entry_price       REAL,
+  target_price      REAL,
+  horizon_days      INTEGER NOT NULL DEFAULT 252,
+  confidence        REAL CHECK (confidence BETWEEN 0 AND 1),
+  benchmark         TEXT NOT NULL DEFAULT '000300.SH',
+  rationale_snapshot TEXT NOT NULL,
+  langfuse_trace_id TEXT,
+  status            TEXT NOT NULL DEFAULT 'open',
+  created_at        TEXT NOT NULL,
+  resolved_at       TEXT,
+  exit_price        REAL,
+  raw_return        REAL,
+  excess_return     REAL,
+  resolution_rule   TEXT,
+  updated_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
+CREATE INDEX IF NOT EXISTS idx_predictions_symbol ON predictions(symbol);
+"""
+
+
+def test_settlement_contract_columns_migrated(tmp_path):
+    """老库（无新列）经 init 后补齐 avoidance_status / settle_entry_price，幂等。"""
+    import sqlite3
+
+    from finance_agent.outcome.track_record.model import init_track_record_tables
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_LEGACY_PREDICTIONS_DDL)
+    conn.execute(
+        """INSERT INTO predictions (prediction_id, source_type, symbol, direction, horizon_days,
+             rationale_snapshot, status, created_at, updated_at)
+           VALUES ('p_legacy', 'live', '600519.SH', 'long', 252, '{}', 'open',
+                   '2026-09-01T10:00:00', '2026-09-01T10:00:00')"""
+    )
+    conn.commit()
+    conn.close()
+
+    init_track_record_tables(db)
+    init_track_record_tables(db)  # 幂等
+    conn = sqlite3.connect(db)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)")}
+        assert {"avoidance_status", "settle_entry_price"} <= cols
+        assert {"version_seq", "snapshot_hash"} <= cols  # 既有迁移不回归
+        # 存量行不回填、窗口不追溯（delta Scenario：存量观点不追溯）
+        legacy = conn.execute(
+            """SELECT horizon_days, avoidance_status, settle_entry_price FROM predictions
+               WHERE prediction_id='p_legacy'"""
+        ).fetchone()
+        assert legacy == (252, None, None)
+    finally:
+        conn.close()
+
+
+def test_mutable_fields_include_settlement_outputs():
+    from finance_agent.outcome.track_record.model import _FROZEN_FIELDS, _MUTABLE_FIELDS
+
+    assert "avoidance_status" in _MUTABLE_FIELDS
+    assert "settle_entry_price" in _MUTABLE_FIELDS
+    assert "avoidance_status" not in _FROZEN_FIELDS
+    assert "settle_entry_price" not in _FROZEN_FIELDS

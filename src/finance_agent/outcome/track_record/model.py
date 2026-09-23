@@ -2,7 +2,8 @@
 
 与 outcome/store.py 同款 SQLite(WAL + busy_timeout 短连接),db_path 调用期注入。
 冻结铁律:方向/入场价/快照/创建时间写入后不可改;判定结果只经 update_prediction_status
-更新 status/resolved_at/exit_price/raw_return/excess_return/resolution_rule。
+更新 status/resolved_at/exit_price/raw_return/excess_return/resolution_rule/
+avoidance_status/settle_entry_price。
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ CREATE TABLE IF NOT EXISTS predictions (
   direction         TEXT NOT NULL CHECK (direction IN ('long','short','neutral')),
   entry_price       REAL,
   target_price      REAL,
-  horizon_days      INTEGER NOT NULL DEFAULT 252,
+  horizon_days      INTEGER NOT NULL DEFAULT 20,
   confidence        REAL CHECK (confidence BETWEEN 0 AND 1),
   benchmark         TEXT NOT NULL DEFAULT '000300.SH',
   rationale_snapshot TEXT NOT NULL,
@@ -37,6 +38,8 @@ CREATE TABLE IF NOT EXISTS predictions (
   raw_return        REAL,
   excess_return     REAL,
   resolution_rule   TEXT,
+  avoidance_status   TEXT,
+  settle_entry_price REAL,
   updated_at        TEXT NOT NULL,
   version_seq       INTEGER,
   snapshot_hash     TEXT
@@ -63,6 +66,8 @@ _MUTABLE_FIELDS = (
     "excess_return",
     "resolution_rule",
     "updated_at",
+    "avoidance_status",
+    "settle_entry_price",
 )
 
 
@@ -164,6 +169,7 @@ def init_track_record_tables(db_path: str | Path | None = None) -> None:
         conn.executescript(PREDICTIONS_DDL)
         conn.executescript(TRACK_RECORD_EXTRA_DDL)
         _migrate_stage_c_columns(conn)
+        _migrate_settlement_contract_columns(conn)
         conn.commit()
     finally:
         conn.close()
@@ -179,6 +185,20 @@ _STAGE_C_COLUMNS = (
 def _migrate_stage_c_columns(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
     for col, ddl in _STAGE_C_COLUMNS:
+        if col not in cols:
+            conn.execute(ddl)
+
+
+# ── update-decision-settlement-contract：回避判定 + 派生结算入场价（幂等迁移）──
+_SETTLEMENT_CONTRACT_COLUMNS = (
+    ("avoidance_status", "ALTER TABLE predictions ADD COLUMN avoidance_status TEXT"),
+    ("settle_entry_price", "ALTER TABLE predictions ADD COLUMN settle_entry_price REAL"),
+)
+
+
+def _migrate_settlement_contract_columns(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
+    for col, ddl in _SETTLEMENT_CONTRACT_COLUMNS:
         if col not in cols:
             conn.execute(ddl)
 

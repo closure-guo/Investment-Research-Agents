@@ -85,3 +85,10 @@ def test_superseded():
     # 目标价不同 → 触发
     diff_target = {"symbol": "600519.SH", "direction": "long", "target_price": 121.0}
     assert should_supersede(old, diff_target) is True
+
+
+def test_default_horizon_days_and_cutoff_pinned():
+    from finance_agent.outcome.track_record import judgment
+
+    assert judgment.DEFAULT_HORIZON_DAYS == 20
+    assert judgment.CLOSE_TIME_CUTOFF == "15:00"
