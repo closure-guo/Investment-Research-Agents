@@ -1,18 +1,20 @@
 """回测批次准入与报告四段披露（spec decision-backtest「历史离线回放」「知识泄漏探针」
 「分层市场状态抽样」「回测批次预登记与报告生命周期」，delta add-backtest-leakage-controls）。
 
-本模块只做**判定与组装**（纯函数，便于单测），落盘/渲染由 run_backtest 与
-Task 4 的 md 渲染承担。三段职责：
+本模块只做**判定与组装**（纯函数，便于单测），落盘由 run_backtest 承担、md 渲染由
+`render_backtest_report_md` 承担。四段职责：
 
 1. `assert_clean_window`：干净窗口硬条件——每个决策日距跑批日（as_of）≥ 主评估窗口
    （默认 20）个交易日，全部样本可完成结算。以**交易日**计（基准指数日期序列），
-   不是自然日；基准不可得 → 保守判不通过（不静默放行）。
+   不是自然日；基准不可得 / 空样本 → 保守判不通过（不静默放行）。
 2. `build_disclosures`：报告五键（batch_kind / preregister / clean_window /
    leakage_probe / regime_coverage），探针段须能表达三态——可测且低于阈值 /
-   超阈（降级）/ 不可测（`direction_hit_rate is None`）。
+   超阈（降级）/ 不可测（`direction_hit_rate is None`），并披露 `probe_window`。
 3. `build_conclusion`：结论句式唯一生成点（便于 Task 5 与 Δ1 收口纪律对接）。
    通路验证批不得出现 skill / 赚钱能力结论句；超阈降级为「泄漏污染下的上界证据」；
    探针不可测按通路验证处理。
+4. `render_backtest_report_md`：批次报告 md 渲染（头部含生命周期 status 头，
+   渲染后经 `evals.outcome.report.assert_outcome_report` 自校）。
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ from bisect import bisect_right
 from typing import Any
 
 import pandas as pd
+
+from evals.outcome.report import assert_outcome_report
 
 BENCHMARK_INDEX_CODE = "000300"  # 沪深300（与 leakage_probe / 生产基准同源）
 ALL_REGIMES: tuple[str, ...] = ("bull", "bear", "sideways")
@@ -35,6 +39,14 @@ PROBE_MEASURABLE = "measurable"
 PROBE_DOWNGRADED = "downgraded"
 PROBE_UNMEASURABLE = "unmeasurable"
 PROBE_MISSING = "missing"
+
+# 渲染层状态文案（三态 + 缺失）；渲染自校与断言以此为准。
+PROBE_STATE_TEXT: dict[str, str] = {
+    PROBE_MEASURABLE: "可测（低于阈值）",
+    PROBE_DOWNGRADED: "超阈（降级：泄漏污染下的上界证据）",
+    PROBE_UNMEASURABLE: "不可测（探针不可测）",
+    PROBE_MISSING: "未执行（无探针读数）",
+}
 
 
 def _load_benchmark() -> pd.DataFrame | None:
@@ -94,9 +106,14 @@ def assert_clean_window(
         }
     dates = [str(d)[:10] for d in decision_dates]
     if not dates:
+        # D3（Task 3 审查）：空样本不得真空真——无样本可判 → 不通过（与「基准不可得」同属
+        # 保守处置，避免 formal 批在零样本时以「窗口干净」身份放行）。
         return {
-            "passed": True,
-            "reason": f"无决策日（空样本）；as_of={as_of}，window_days={window_days}",
+            "passed": False,
+            "reason": (
+                f"无样本可判（空决策日集合）；as_of={as_of}，window_days={window_days}，"
+                "保守判不通过"
+            ),
         }
     counts = {d: _trading_days_between(trading, d, as_of) for d in dates}
     short = [d for d in dates if counts[d] < window_days]
@@ -131,10 +148,9 @@ def probe_state(probe: dict[str, Any] | None) -> str:
 
 
 def _probe_disclosure(probe: dict[str, Any] | None) -> dict[str, Any]:
-    state = probe_state(probe)
     if probe is None:
         return {
-            "state": state,
+            "state": PROBE_MISSING,
             "probe_n": None,
             "questions_per_ticker": None,
             "direction_hit_rate": None,
@@ -143,7 +159,10 @@ def _probe_disclosure(probe: dict[str, Any] | None) -> dict[str, Any]:
             "unknown_ratio": None,
             "threshold": None,
             "downgraded": False,
+            "probe_window": None,
         }
+    # 显式 state 优先（`aggregate_probes` 的最差态汇总）；否则按读数三态推导。
+    state = probe.get("state") or probe_state(probe)
     return {
         "state": state,
         "probe_n": probe.get("probe_n"),
@@ -154,7 +173,79 @@ def _probe_disclosure(probe: dict[str, Any] | None) -> dict[str, Any]:
         "unknown_ratio": probe.get("unknown_ratio"),
         "threshold": probe.get("threshold"),
         "downgraded": bool(probe.get("downgraded")),
+        # 探针窗口（D2）：批内 distinct 决策日各探一次时列出全部窗口；单窗口批亦列。
+        "probe_window": list(probe.get("probe_window") or []) or None,
     }
+
+
+def aggregate_probes(
+    probes: list[dict[str, Any] | None],
+    *,
+    windows: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any] | None:
+    """按批内 distinct 决策日分别探针 → 最差态汇总（D2，Task 3 审查收口）。
+
+    `stratified_sample` 每 regime 取一个决策日，批内决策日可能不唯一；只探首个
+    窗口会低估其余窗口的泄漏风险。故逐 distinct 决策日探针后取**最差态**：
+
+    - 任一窗口不可测（`direction_hit_rate is None`）→ 汇总态 `unmeasurable`
+      （读数置 None，`resolve_positioning`/`build_conclusion` 按通路验证处理）；
+    - 否则任一窗口超阈（`downgraded`）→ `downgraded`，读数为触发降级的最差（最大）命中率；
+    - 否则 `measurable`，读数为各窗口最大命中率（保守取高）。
+
+    `probe_window` 列出全部被探窗口，`per_window` 保留逐窗口读数，汇总不掩盖单窗口异常。
+    成本：探针次数 = distinct 决策日数（≤ regime 数），相对回放 LLM 成本可忽略。
+    """
+    usable = [p for p in probes if p is not None]
+    if not usable:
+        return None
+    states = [probe_state(p) for p in usable]
+    rates = [p.get("direction_hit_rate") for p in usable]
+    measurable_rates = [r for r in rates if isinstance(r, (int, float))]
+    unknown_ratios = [
+        p.get("unknown_ratio") for p in usable if isinstance(p.get("unknown_ratio"), (int, float))
+    ]
+    if any(s == PROBE_UNMEASURABLE for s in states):
+        state = PROBE_UNMEASURABLE
+        rate: float | None = None
+        downgraded = False
+    elif any(bool(p.get("downgraded")) for p in usable):
+        state = PROBE_DOWNGRADED
+        rate = max(measurable_rates) if measurable_rates else None
+        downgraded = True
+    else:
+        state = PROBE_MEASURABLE
+        rate = max(measurable_rates) if measurable_rates else None
+        downgraded = False
+    windows_list = [str(w)[:10] for w in windows if str(w).strip()]
+    return {
+        "state": state,
+        "probe_n": sum(int(p.get("probe_n") or 0) for p in usable),
+        "questions_per_ticker": usable[0].get("questions_per_ticker"),
+        "direction_hit_rate": rate,
+        "magnitude_hit_rate": _max_optional(p.get("magnitude_hit_rate") for p in usable),
+        "event_hit_rate": _max_optional(p.get("event_hit_rate") for p in usable),
+        "unknown_ratio": max(unknown_ratios) if unknown_ratios else None,
+        "threshold": usable[0].get("threshold"),
+        "downgraded": downgraded,
+        "probe_window": windows_list or None,
+        "per_window": [
+            {
+                "probe_window": (list(p.get("probe_window") or windows_list) or None),
+                "state": probe_state(p),
+                "direction_hit_rate": p.get("direction_hit_rate"),
+                "probe_n": p.get("probe_n"),
+                "unknown_ratio": p.get("unknown_ratio"),
+                "downgraded": bool(p.get("downgraded")),
+            }
+            for p in usable
+        ],
+    }
+
+
+def _max_optional(values: Any) -> float | None:
+    nums = [v for v in values if isinstance(v, (int, float))]
+    return max(nums) if nums else None
 
 
 def resolve_positioning(
@@ -260,3 +351,171 @@ def build_conclusion(
             "结论不外推至未覆盖 regime）"
         )
     return sentence
+
+
+# ---------------------------------------------------------------------------
+# md 渲染层（Δ4 Task 4 A）：报告 dict → 带生命周期 status 头的 md
+# ---------------------------------------------------------------------------
+
+NOT_PROVIDED = "未提供"
+PERF_COLUMNS: tuple[str, ...] = ("CR", "ARR", "Sharpe", "MDD")
+
+
+def _pct(value: Any) -> str:
+    """比例 → 百分数字符串（0.3 → 30%，0.125 → 12.5%）；非数值 → 未提供。"""
+    if not isinstance(value, (int, float)):
+        return NOT_PROVIDED
+    text = f"{value * 100:.1f}".rstrip("0").rstrip(".")
+    return f"{text}%"
+
+
+def _num(value: Any) -> str:
+    return f"{value:.4f}" if isinstance(value, (int, float)) else NOT_PROVIDED
+
+
+def _preregister_text(preregister: dict[str, Any] | None) -> str:
+    if not preregister:
+        return "未绑定"
+    path = preregister.get("path") or NOT_PROVIDED
+    if preregister.get("valid"):
+        return f"{path}（valid）"
+    return f"{path}（无效：valid=False，不得作为正式批身份）"
+
+
+def _clean_window_lines(clean_window: dict[str, Any] | None) -> list[str]:
+    if not clean_window:
+        return [f"- 判定：{NOT_PROVIDED}（未判定；pathway 批可不判）"]
+    verdict = "通过" if clean_window.get("passed") else "不通过"
+    reason = clean_window.get("reason") or NOT_PROVIDED
+    return [f"- 判定：{verdict}", f"- 理由：{reason}"]
+
+
+def _probe_lines(report: dict[str, Any]) -> list[str]:
+    raw = report.get("leakage_probe")
+    if raw is None:
+        state = PROBE_MISSING
+        probe: dict[str, Any] = {}
+    else:
+        state = raw.get("state") or probe_state(raw)
+        probe = raw
+    window = probe.get("probe_window")
+    window_text = ", ".join(str(w) for w in window) if window else NOT_PROVIDED
+    lines = [
+        f"- 状态：{PROBE_STATE_TEXT.get(state, state)}",
+        (
+            f"- 方向命中率 direction_hit_rate：{_pct(probe.get('direction_hit_rate'))}"
+            f"（阈值 threshold：{_pct(probe.get('threshold'))}；"
+            f"probe_n={probe.get('probe_n') if probe.get('probe_n') is not None else NOT_PROVIDED}）"
+        ),
+        f"- 未知占比 unknown_ratio：{_pct(probe.get('unknown_ratio'))}",
+        (
+            f"- 探针窗口 probe_window：{window_text}"
+            "（批内 distinct 决策日各探一次，取最差态汇总；仅覆盖该窗口）"
+        ),
+    ]
+    if state == PROBE_DOWNGRADED:
+        lines.append(
+            "- 处置：超阈 → 结论降级为「泄漏污染下的上界证据（真实 skill ≤ 读数）」，"
+            "不得单独作为赚钱能力主张。"
+        )
+    elif state == PROBE_UNMEASURABLE:
+        lines.append(
+            "- 处置：探针不可测（无有效答题样本）→ 按通路验证处理，不产出 skill / 赚钱能力结论句。"
+        )
+    elif state == PROBE_MISSING:
+        lines.append("- 处置：本批未执行探针，泄漏风险未测——不得以 skill 定位下结论。")
+    return lines
+
+
+def _regime_lines(report: dict[str, Any]) -> list[str]:
+    coverage = report.get("regime_coverage") or {}
+    covered = coverage.get("covered") or []
+    covered_text = ", ".join(str(r) for r in covered) if covered else NOT_PROVIDED
+    limited = bool(coverage.get("limited"))
+    verdict = "受限（结论不外推至未覆盖 regime）" if limited else "全覆盖"
+    return [f"- covered：{covered_text}", f"- 是否受限：{verdict}"]
+
+
+def _perf_table_lines(report: dict[str, Any]) -> list[str]:
+    table = report.get("perf_table") or {}
+    if not table:
+        return [f"绩效表：{NOT_PROVIDED}"]
+    lines = [
+        f"| 策略 | {' | '.join(PERF_COLUMNS)} |",
+        f"|{'---|' * (len(PERF_COLUMNS) + 1)}",
+    ]
+    for name, metrics in table.items():
+        cells = " | ".join(_num((metrics or {}).get(col)) for col in PERF_COLUMNS)
+        lines.append(f"| {name} | {cells} |")
+    best = report.get("best_baseline")
+    if best:
+        lines += ["", f"（最优基线 best_baseline：{best}）"]
+    return lines
+
+
+def _methodology_lines(report: dict[str, Any]) -> list[str]:
+    methodology = report.get("methodology") or {}
+    labels = (
+        ("entry", "入场/结算语义"),
+        ("daily_returns", "日收益口径"),
+        ("benchmark", "基准"),
+        ("adjust", "复权口径（hfq）"),
+        ("system_population", "非可执行决策排除"),
+    )
+    lines = [f"- {label}：{methodology.get(key) or NOT_PROVIDED}" for key, label in labels]
+    lines.append("- 复权：结算/回测区间收益走后复权（hfq），非可执行决策（hold/watch）整条排除。")
+    return lines
+
+
+def render_backtest_report_md(report: dict, *, name: str) -> str:
+    """回测报告 dict → md（头部含生命周期 status 头；渲染后自校契约）。
+
+    固定段落顺序：① 干净窗口 ② 泄漏探针（三态 + unknown_ratio + probe_window）
+    ③ regime 覆盖 ④ 绩效表（system + 各基线）⑤ 结论（逐字）⑥ 口径说明。
+    缺数据如实写「未提供/不适用」，不静默省略。
+
+    Args:
+        report: `run_backtest` 返回的报告 dict（或测试构造的最小 dict）。
+        name: 报告名（文件名主干，如 `formal-20260923-120000`）。
+
+    Returns:
+        md 文本；末尾调用 `assert_outcome_report` 自校 status 头，缺头/非法取值抛错。
+    """
+    report = report or {}
+    conclusion = report.get("conclusion")
+    lines = [
+        f"# 回测报告：{name}",
+        "",
+        "**status**: active",
+        f"**日期**: {report.get('generated_at') or NOT_PROVIDED}",
+        f"**批次类型**: {report.get('batch_kind') or NOT_PROVIDED}",
+        f"**预登记**: {_preregister_text(report.get('preregister'))}",
+        "",
+        "## 1. 干净窗口判定",
+        "",
+        *_clean_window_lines(report.get("clean_window")),
+        "",
+        "## 2. 泄漏探针",
+        "",
+        *_probe_lines(report),
+        "",
+        "## 3. regime 覆盖",
+        "",
+        *_regime_lines(report),
+        "",
+        "## 4. 绩效表",
+        "",
+        *_perf_table_lines(report),
+        "",
+        "## 5. 结论",
+        "",
+        conclusion if conclusion else NOT_PROVIDED,
+        "",
+        "## 6. 口径说明",
+        "",
+        *_methodology_lines(report),
+        "",
+    ]
+    text = "\n".join(lines)
+    assert_outcome_report(text)  # 渲染自校：缺 status 头须抛错
+    return text

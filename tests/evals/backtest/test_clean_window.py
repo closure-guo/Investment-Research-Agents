@@ -86,6 +86,13 @@ class TestAssertCleanWindow:
         result = assert_clean_window(["2024-01-01"], as_of="2024-01-28", window_days=20)
         assert result["passed"] is True
 
+    def test_empty_decision_dates_fails_no_sample(self):
+        """空样本不得真空真（D3）：无样本可判 → passed False + reason「无样本可判」。"""
+        bench = _benchmark(_days("2024-01-01", 28))
+        result = assert_clean_window([], as_of="2024-01-28", window_days=20, benchmark=bench)
+        assert result["passed"] is False
+        assert "无样本可判" in result["reason"]
+
 
 class TestBuildDisclosures:
     def test_five_keys_with_preregister_path_and_validity(self):

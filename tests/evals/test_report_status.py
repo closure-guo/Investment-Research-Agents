@@ -16,13 +16,20 @@ from pathlib import Path
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
-_REPORTS_DIR = _ROOT / "evals" / "ablation" / "results"
+# Δ4 Task 4：契约扫描范围扩至回测结果目录（evals/backtest/results/*.md 同样强制 status 头）
+_REPORTS_DIRS: tuple[Path, ...] = (
+    _ROOT / "evals" / "ablation" / "results",
+    _ROOT / "evals" / "backtest" / "results",
+)
 
 _STATUS_RE = re.compile(r"^\*\*status\*\*:\s*(?P<value>.+?)\s*$", re.MULTILINE)
 
 
 def _report_files() -> list[Path]:
-    return sorted(_REPORTS_DIR.glob("*.md"))
+    files: list[Path] = []
+    for dir_path in _REPORTS_DIRS:
+        files += sorted(dir_path.glob("*.md"))
+    return files
 
 
 def _status_value(report: Path) -> str | None:
@@ -43,9 +50,10 @@ def report(request: pytest.FixtureRequest) -> Path:
 
 
 class TestAblationReportStatus:
-    def test_reports_directory_not_empty(self):
+    @pytest.mark.parametrize("dir_path", _REPORTS_DIRS, ids=lambda p: p.parent.name)
+    def test_reports_directory_not_empty(self, dir_path: Path):
         """防目录改名后本文件静默全绿（契约消失而无人发现）。"""
-        assert _report_files(), f"{_REPORTS_DIR} 下应有消融结果报告"
+        assert list(dir_path.glob("*.md")), f"{dir_path} 下应有结果报告"
 
     def test_status_header_valid(self, report: Path):
         value = _status_value(report)

@@ -1,5 +1,7 @@
 """回测编排聚合逻辑测试：注入 fake replay_fn，不调 LLM/网络。"""
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 from evals.backtest.run_backtest import _trade_daily_returns, run_backtest
@@ -668,3 +670,203 @@ class TestBaselineHorizonAlignment:
         window = _baseline_window_returns(kline, "buy_hold", "2023-01-04", "2023-01-06")
         assert len(full) == 8
         assert len(window) == 2  # 只含 01-05, 01-06
+
+
+def _invalid_preregistration():
+    """缺全部字段的预登记（valid=False）——库层注入也必须被拒。"""
+    from evals.causal_ablation.preregister import OUTCOME_REQUIRED_FIELDS, parse_preregister
+
+    return parse_preregister("（空文档）", required_fields=OUTCOME_REQUIRED_FIELDS)
+
+
+class TestTask3ReviewClosures:
+    """Δ4 Task 4 D1–D4：Task 3 审查收口。"""
+
+    def test_formal_injected_invalid_preregistration_raises(self):
+        """D1：库层注入无效预登记（非 None）同样拒绝 formal 批。"""
+        from evals.causal_ablation.preregister import MissingPreregistrationError
+
+        sample, outcomes, klines = _batch_setup()
+        with pytest.raises(MissingPreregistrationError, match="无效"):
+            run_backtest(
+                sample,
+                klines,
+                batch_kind="formal",
+                preregistration=_invalid_preregistration(),
+                probe=_probe(rate=0.3),
+                clean_window={"passed": True, "reason": "ok"},
+                replay_fn=_fake_replay(outcomes),
+            )
+
+    def test_batch_probe_probes_each_distinct_decision_date(self, monkeypatch):
+        """D2：批内 distinct 决策日各探一次，取最差态（任一超阈 → downgraded）。"""
+        import evals.backtest.run_backtest as rb
+
+        seen: list[str] = []
+
+        def fake_probe(codes, decision_date, *, window_days=20, client=None):
+            seen.append(str(decision_date))
+            if str(decision_date) == "2023-06-01":
+                return _probe(rate=0.9, downgraded=True)
+            return _probe(rate=0.3)
+
+        monkeypatch.setattr(rb, "run_leakage_probe", fake_probe)
+        aggregate = rb.run_batch_probe(
+            ["600000", "600001"],
+            ["2023-01-05", "2023-01-05", "2023-06-01"],
+        )
+        assert seen == ["2023-01-05", "2023-06-01"]  # 去重且升序
+        assert aggregate["state"] == "downgraded"
+        assert aggregate["downgraded"] is True
+        assert aggregate["direction_hit_rate"] == 0.9  # 最差（触发降级）读数
+        assert aggregate["probe_window"] == ["2023-01-05", "2023-06-01"]
+
+    def test_batch_probe_any_unmeasurable_wins(self, monkeypatch):
+        """D2：任一窗口不可测 → 汇总态 unmeasurable（读数 None，按通路验证处理）。"""
+        import evals.backtest.run_backtest as rb
+
+        def fake_probe(codes, decision_date, *, window_days=20, client=None):
+            if str(decision_date) == "2023-06-01":
+                return _probe(rate=None)
+            return _probe(rate=0.3)
+
+        monkeypatch.setattr(rb, "run_leakage_probe", fake_probe)
+        aggregate = rb.run_batch_probe(["600000"], ["2023-01-05", "2023-06-01"])
+        assert aggregate["state"] == "unmeasurable"
+        assert aggregate["direction_hit_rate"] is None
+
+    def test_batch_probe_empty_dates_returns_none(self):
+        import evals.backtest.run_backtest as rb
+
+        assert rb.run_batch_probe(["600000"], []) is None
+
+    def test_disclosures_carry_probe_window(self):
+        """D2：build_disclosures 的 leakage_probe 段同步 probe_window 字段。"""
+        from evals.backtest.report import build_disclosures
+
+        disclosure = build_disclosures(
+            batch_kind="formal",
+            probe={**_probe(rate=0.3), "probe_window": ["2023-01-05", "2023-06-01"]},
+        )
+        assert disclosure["leakage_probe"]["probe_window"] == ["2023-01-05", "2023-06-01"]
+
+    def test_empty_decision_dates_clean_window_fails(self):
+        """D3：空样本 → passed False（消除真空真）。"""
+        from evals.backtest.report import assert_clean_window
+
+        result = assert_clean_window(
+            [], as_of="2024-01-28", window_days=20, benchmark=_kline([1.0] * 5)
+        )
+        assert result["passed"] is False
+        assert "无样本可判" in result["reason"]
+
+    def test_no_probe_with_formal_logs_ignored(self, monkeypatch, tmp_path, caplog):
+        """D4：--no-probe + --batch-kind formal → 打日志说明已忽略。"""
+        import sys
+
+        import evals.backtest.run_backtest as rb
+
+        monkeypatch.setattr(rb, "assert_preregistered", lambda *a, **k: _valid_preregistration())
+        monkeypatch.setattr(
+            rb,
+            "stratified_sample",
+            lambda ik, codes, per_regime: [
+                {"code": "600000", "regime": "bull", "decision_date": "2024-01-01"}
+            ],
+        )
+        monkeypatch.setattr(rb, "run_leakage_probe", lambda *a, **k: _probe(rate=0.3))
+        monkeypatch.setattr(rb, "run_backtest", lambda *a, **k: {"batch_kind": "formal"})
+
+        class FakeClient:
+            def fetch_index_kline(self, code, days=None):
+                return _kline([100.0] * 5)
+
+            def fetch_kline(self, code, days=None, *, adjust="qfq"):
+                return _kline([100.0] * 5)
+
+        monkeypatch.setattr("finance_agent.data.akshare_client.AKShareClient", FakeClient)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["run_backtest.py", "--codes", "600000", "--batch-kind", "formal", "--no-probe"],
+        )
+        with caplog.at_level("WARNING"):
+            rb.main()
+        assert any("强制探针" in r.message for r in caplog.records)
+        assert any("--no-probe" in r.message for r in caplog.records)
+
+
+class TestMainWritesMarkdown:
+    """Δ4 Task 4 B：JSON 仍落 reports/backtest，md 落 <out-dir>/<name>.md。"""
+
+    def _run_main(self, monkeypatch, tmp_path, argv_extra: list[str]):
+        import sys
+
+        import evals.backtest.run_backtest as rb
+
+        monkeypatch.setattr(
+            rb,
+            "stratified_sample",
+            lambda ik, codes, per_regime: [
+                {"code": "600000", "regime": "bull", "decision_date": "2024-01-01"}
+            ],
+        )
+        monkeypatch.setattr(rb, "run_backtest", lambda *a, **k: {"batch_kind": "pathway"})
+
+        class FakeClient:
+            def fetch_index_kline(self, code, days=None):
+                return _kline([100.0] * 5)
+
+            def fetch_kline(self, code, days=None, *, adjust="qfq"):
+                return _kline([100.0] * 5)
+
+        monkeypatch.setattr("finance_agent.data.akshare_client.AKShareClient", FakeClient)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["run_backtest.py", "--codes", "600000", *argv_extra])
+        rb.main()
+
+    def test_md_written_to_explicit_out_dir_and_name(self, monkeypatch, tmp_path):
+        out_dir = tmp_path / "custom-results"
+        self._run_main(monkeypatch, tmp_path, ["--name", "my-batch", "--out-dir", str(out_dir)])
+        md = out_dir / "my-batch.md"
+        assert md.exists()
+        text = md.read_text(encoding="utf-8")
+        assert text.startswith("# 回测报告：my-batch")
+        assert "**status**: active" in text
+        # JSON 仍落 reports/backtest（相对 cwd）
+        assert list((tmp_path / "reports" / "backtest").glob("*.json"))
+
+    def test_md_default_name_is_batch_kind_timestamp(self, monkeypatch, tmp_path):
+        out_dir = tmp_path / "results"
+        self._run_main(monkeypatch, tmp_path, ["--out-dir", str(out_dir)])
+        files = list(out_dir.glob("pathway-*.md"))
+        assert len(files) == 1
+
+
+class TestPilotAnnotation:
+    """Δ4 Task 4 C：pilot 就地补 status 头 + 「通路验证 + 泄漏风险」标注，原文保留。"""
+
+    def _text(self) -> str:
+        root = Path(__file__).resolve().parents[3]
+        return (root / "evals" / "backtest" / "results" / "pilot-2023-shock.md").read_text(
+            encoding="utf-8"
+        )
+
+    def test_pilot_carries_status_header(self):
+        assert "**status**: active" in self._text()
+
+    def test_pilot_carries_pathway_and_leakage_annotation(self):
+        text = self._text()
+        assert "通路验证" in text
+        assert "泄漏风险" in text
+        assert "2023-01-05" in text  # 泄漏风险标注引用决策日
+
+    def test_pilot_original_content_preserved(self):
+        text = self._text()
+        # 原文标题、结论段与绩效数字均不得被删改
+        assert "# 回测设施试跑记录：pilot-2023-shock" in text
+        assert "全链路验证结论" in text
+        assert "0.6666" in text  # Buy-and-Hold Sharpe 原文数字
+        assert "-4.2816" in text  # 系统 Sharpe 原文数字
+        assert "#102" in text and "#104" in text  # 缺陷表原文

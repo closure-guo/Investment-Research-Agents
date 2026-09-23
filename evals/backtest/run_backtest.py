@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -28,20 +29,25 @@ from evals.backtest.performance import perf_metrics
 from evals.backtest.replay import replay_with_consistency
 from evals.backtest.report import (
     ALL_REGIMES,
+    aggregate_probes,
     assert_clean_window,
     build_conclusion,
     build_disclosures,
+    render_backtest_report_md,
     resolve_positioning,
 )
 from evals.backtest.sampling import stratified_sample
 from evals.backtest.significance import block_length_sensitivity, validate_sanity
 from evals.causal_ablation.preregister import (
     OUTCOME_REQUIRED_FIELDS,
+    MissingPreregistrationError,
     assert_preregistered,
 )
 from evals.stats import paired_block_bootstrap_diff
 from finance_agent.data.akshare_client import SETTLEMENT_ADJUST
 from finance_agent.outcome.settle import BENCHMARK_CODE
+
+logger = logging.getLogger(__name__)
 
 CONSISTENCY_FLOOR = 2 / 3
 BASELINE_STRATEGIES: tuple[Strategy, ...] = ("buy_hold", "macd", "kdj", "rsi")
@@ -49,6 +55,9 @@ BATCH_KINDS: tuple[str, ...] = ("pathway", "formal")
 PREREGISTER_DIR = Path("evals/ablation/preregister")
 # 目录多实验共用：门禁必须读本实验自己的预登记文档（见 preregister.find_latest_preregister）
 PREREGISTER_NAME_CONTAINS = "outcome"
+# JSON 报告落盘目录（gitignored）；md 报告落 evals/backtest/results（入库）
+JSON_REPORT_DIR = Path("reports/backtest")
+MD_REPORT_DIR = Path("evals/backtest/results")
 
 
 def _trade_daily_returns(result: dict, kline: pd.DataFrame) -> list[float]:
@@ -144,6 +153,13 @@ def run_backtest(
                 preregister_dir,
                 name_contains=PREREGISTER_NAME_CONTAINS,
                 required_fields=OUTCOME_REQUIRED_FIELDS,
+            )
+        # D1（Task 3 审查）：库层注入的预登记也须校验有效性——只判 None 会让调用方
+        # 传入 valid=False 的预登记绕过 formal 身份门禁。
+        if not getattr(preregistration, "valid", False):
+            issues = "; ".join(getattr(preregistration, "issues", None) or ["未提供校验细节"])
+            raise MissingPreregistrationError(
+                f"预登记无效（{getattr(preregistration, 'path', '<unknown>')}）：{issues}"
             )
         if probe is None:
             raise ValueError("formal 批必须提供泄漏探针读数（探针不可测时按通路验证处理）")
@@ -291,6 +307,11 @@ def run_backtest(
             ),
             "excluded_non_executable": excluded_non_executable,
             "benchmark": f"BENCHMARK_CODE 默认 {BENCHMARK_CODE}（沿 decision-outcome 默认，待 ADR 确认）",
+            "probe_coverage": (
+                "批内决策日可能不唯一（stratified_sample 每 regime 一个）；探针对每个 distinct "
+                "决策日各执行一次并取最差态汇总（任一超阈→downgraded；任一不可测→unmeasurable），"
+                "覆盖窗口见 leakage_probe.probe_window——单窗口批即该窗口，仅覆盖该窗口"
+            ),
             "ci_truncation": ci_truncation,
             "batch_kind": (
                 "pathway = 通路验证（不产 skill 结论句）；formal = 正式批"
@@ -298,6 +319,30 @@ def run_backtest(
             ),
         },
     }
+
+
+def run_batch_probe(
+    codes: list[str],
+    decision_dates: list[str],
+    *,
+    window_days: int = 20,
+    client: Any = None,
+) -> dict[str, Any] | None:
+    """批级泄漏探针（D2）：对批内每个 distinct 决策日各探一次 → 最差态汇总。
+
+    只探首个决策日会低估其余窗口的泄漏风险；本函数覆盖全部 distinct 窗口
+    （`run_leakage_probe` 逐窗口调用，成本 = 窗口数 × 探针题量，相对回放可忽略），
+    由 `aggregate_probes` 汇总（任一超阈→downgraded；任一不可测→unmeasurable）。
+    无决策日 → None（不探、不冒充读数）。
+    """
+    windows = sorted({str(d)[:10] for d in decision_dates if str(d).strip()})
+    if not windows:
+        return None
+    probes = [
+        run_leakage_probe(codes, window, window_days=window_days, client=client)
+        for window in windows
+    ]
+    return aggregate_probes(probes, windows=windows)
 
 
 def main() -> None:
@@ -320,8 +365,18 @@ def main() -> None:
     parser.add_argument(
         "--probe",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="是否执行泄漏探针（formal 批强制开启）",
+        default=None,
+        help="是否执行泄漏探针（formal 批强制开启；--no-probe 在 formal 下被忽略）",
+    )
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="报告名（md 文件名主干；默认 <batch_kind>-<时间戳>）",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default=str(MD_REPORT_DIR),
+        help=f"md 报告落盘目录（默认 {MD_REPORT_DIR}；JSON 恒落 {JSON_REPORT_DIR}）",
     )
     args = parser.parse_args()
 
@@ -331,6 +386,9 @@ def main() -> None:
     from finance_agent.data.akshare_client import AKShareClient
 
     as_of = args.as_of or datetime.now().strftime("%Y-%m-%d")
+    # D4（Task 3 审查）：formal 批强制探针，显式 --no-probe 被忽略（打日志，不静默）。
+    if args.batch_kind == "formal" and args.probe is False:
+        logger.warning("formal 批强制探针，已忽略 --no-probe（formal 不得以未测泄漏风险下结论）")
     # formal 批前置门禁：无有效预登记拒绝正式批身份（可降级 --batch-kind pathway）
     if args.batch_kind == "formal":
         assert_preregistered(
@@ -345,12 +403,13 @@ def main() -> None:
     klines = {
         code: client.fetch_kline(code, days=1500, adjust=SETTLEMENT_ADJUST) for code in args.codes
     }
-    use_probe = args.batch_kind == "formal" or args.probe
+    use_probe = args.batch_kind == "formal" or bool(args.probe)
     probe: dict[str, Any] | None = None
     if use_probe and sample:
-        probe = run_leakage_probe(
+        # D2：对批内每个 distinct 决策日各探一次（最差态汇总），不再只探首个窗口。
+        probe = run_batch_probe(
             args.codes,
-            str(sample[0]["decision_date"])[:10],
+            [str(item.get("decision_date", "")) for item in sample],
             client=client,
         )
     report = run_backtest(
@@ -363,12 +422,18 @@ def main() -> None:
         as_of=as_of,
         probe=probe,
     )
-    out_dir = Path("reports/backtest")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"backtest-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
-    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    name = args.name or f"{args.batch_kind}-{stamp}"
+    json_dir = JSON_REPORT_DIR
+    json_dir.mkdir(parents=True, exist_ok=True)
+    json_path = json_dir / f"backtest-{stamp}.json"
+    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    md_dir = Path(args.out_dir)
+    md_dir.mkdir(parents=True, exist_ok=True)
+    md_path = md_dir / f"{name}.md"
+    md_path.write_text(render_backtest_report_md(report, name=name), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    print(f"回测报告已写入 {path}")
+    print(f"回测报告已写入 {json_path}（JSON）与 {md_path}（md）")
 
 
 if __name__ == "__main__":

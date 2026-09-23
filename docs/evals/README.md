@@ -13,6 +13,7 @@
 | docs/evals/2026-09-14-round9-v8审计.md | ![active](badge:active) | — |
 | docs/evals/2026-09-21-决策层全watch取证.md | ![active](badge:active) | — |
 | evals/ablation/results/pilot.md | ![superseded](badge:superseded) → docs/evals/2026-09-03-消融n10权威结果.md | docs/evals/2026-09-03-消融n10权威结果.md |
+| evals/backtest/results/pilot-2023-shock.md | ![active](badge:active) | — |
 
 ## 未标注生命周期（4 份）
 
@@ -26,8 +27,8 @@
 
 - **生成方式**：`evals/causal_ablation/status_index.py` 的 `collect_status_index`（收集）+ `render_status_index`（渲染）。纯读扫描 + 纯渲染，不改动任何报告；无时间戳，输出确定性。报告状态由撰写者维护，本索引只负责让它可见。
 - **落位说明**：`status_index.py` / 规范均未固定索引的输出路径，本索引按约定落 `docs/evals/README.md`（口径变更见 `docs/evals/metrics.md` §1.7④ 与时间线「消融 v2 口径切点」段）。
-- **扫描范围**：`docs/evals/*.md`（非递归）+ `evals/ablation/results/*.md`；本文件（索引自身）不参与扫描，避免索引自登。
-- **状态契约覆盖面**：`evals/ablation/results/*.md` 已是强制契约（`openspec/specs/evaluation`）；本 delta 把该字段扩为 evals 实验报告通则（`openspec/changes/revamp-ablation-v2-causal-claims`，待 sync），存量 `docs/evals/*.md` 报告尚未回填，故整体落在「未标注生命周期」段——**未标注 = 未登记，不等于结论作废**（台账 `metrics.md`、模板、设计文档等同列，属预期）。
+- **扫描范围**：`docs/evals/*.md`（非递归）+ `evals/ablation/results/*.md` + `evals/backtest/results/*.md`；本文件（索引自身）不参与扫描，避免索引自登。
+- **状态契约覆盖面**：`evals/ablation/results/*.md` 与 `evals/backtest/results/*.md` 已是强制契约（`openspec/specs/evaluation`、`tests/evals/test_report_status.py` 参数化扫描）；本 delta 把该字段扩为 evals 实验报告通则（`openspec/changes/revamp-ablation-v2-causal-claims`，待 sync），存量 `docs/evals/*.md` 报告尚未回填，故整体落在「未标注生命周期」段——**未标注 = 未登记，不等于结论作废**（台账 `metrics.md`、模板、设计文档等同列，属预期）。
 - **刷新命令**（仓库根目录执行，输出替换上方标记区）：
 
 ```bash
@@ -37,7 +38,7 @@ from pathlib import Path
 from evals.causal_ablation.status_index import collect_status_index, render_status_index
 
 entries, unstamped = [], []
-for d in ("docs/evals", "evals/ablation/results"):
+for d in ("docs/evals", "evals/ablation/results", "evals/backtest/results"):
     e, u = collect_status_index(Path(d))
     entries += e
     unstamped += [p for p in u if Path(p).name != "README.md"]  # 索引自身不登记
