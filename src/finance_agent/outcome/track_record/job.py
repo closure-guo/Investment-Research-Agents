@@ -177,7 +177,7 @@ def settle_open_predictions(
                         # 分类前 round 消浮点噪声；与 horizon 路径共用 ±2% 中性带
                         raw = round(sign * (exit_price / entry - 1.0), 6)
                         band = DEFAULT_NEUTRAL_BAND
-                        resolution = Resolution(
+                        sup_resolution = Resolution(
                             status=(
                                 "resolved_win"
                                 if raw > band
@@ -196,18 +196,18 @@ def settle_open_predictions(
                         update_prediction_status(
                             old["prediction_id"],
                             {
-                                "status": resolution.status,
-                                "exit_price": resolution.exit_price,
-                                "raw_return": resolution.raw_return,
-                                "resolution_rule": resolution.resolution_rule,
-                                "resolved_at": resolution.exit_date,
-                                "settle_entry_price": resolution.entry_price,
+                                "status": sup_resolution.status,
+                                "exit_price": sup_resolution.exit_price,
+                                "raw_return": sup_resolution.raw_return,
+                                "resolution_rule": sup_resolution.resolution_rule,
+                                "resolved_at": sup_resolution.exit_date,
+                                "settle_entry_price": sup_resolution.entry_price,
                             },
                             db_path,
                         )
                         result["superseded"] += 1
                         # spec decision-outcome「结算即上报 Score」:状态转 resolved_* 即上报
-                        result["scores_reported"] += _report_scores(langfuse, old, resolution)
+                        result["scores_reported"] += _report_scores(langfuse, old, sup_resolution)
                     except Exception as e:  # noqa: BLE001
                         logger.warning("superseded 判定失败 %s: %s", old["prediction_id"], e)
                         result["errors"] += 1

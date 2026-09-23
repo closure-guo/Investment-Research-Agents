@@ -194,7 +194,9 @@ def run_backtest(
         ),
         "perf_by_regime": by_regime,
         "methodology": {
-            "entry": "决策日收盘；结算自 T+1 行起评（复用 outcome.settle 语义）",
+            "entry": (
+                "结算语义与生产 track-record 判定同源（horizon/超额/±2% 带；入场价由行情派生）"
+            ),
             "daily_returns": "单笔结算收益摊到持有期逐日；基线为 T-1 信号 T 生效的逐日仓位收益",
             "benchmark": f"BENCHMARK_CODE 默认 {BENCHMARK_CODE}（沿 decision-outcome 默认，待 ADR 确认）",
             "ci_truncation": ci_truncation,
