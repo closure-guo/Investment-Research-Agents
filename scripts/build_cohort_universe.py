@@ -18,6 +18,8 @@ from pathlib import Path
 
 from finance_agent.outcome.cohort.universe import build_universe, write_universe
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="构建 cohort universe 登记文件")
@@ -25,14 +27,19 @@ def main() -> int:
     parser.add_argument("--n", type=int, default=10, help="抽样成分数（默认 10）")
     parser.add_argument("--seed", type=int, default=42, help="抽样种子（默认 42）")
     parser.add_argument(
-        "--out", default=None, help="输出路径（默认 data/cohort/universe-<version>.json）"
+        "--out", default=None, help="输出路径（默认 <仓库根>/data/cohort/universe-<version>.json）"
     )
     parser.add_argument(
-        "--force", action="store_true", help="覆盖既有登记文件（版本期内换池才用，慎用）"
+        "--force", action="store_true", help="同版本重生成（覆盖既有登记文件；换池须换 version）"
     )
     args = parser.parse_args()
 
-    out = Path(args.out) if args.out else Path("data/cohort") / f"universe-{args.version}.json"
+    # M7：默认按**仓库根**解析，避免在任意 CWD 下写错位置
+    out = (
+        Path(args.out)
+        if args.out
+        else REPO_ROOT / "data" / "cohort" / f"universe-{args.version}.json"
+    )
 
     data = build_universe(args.version, n=args.n, seed=args.seed)
     write_universe(data, out, force=args.force)

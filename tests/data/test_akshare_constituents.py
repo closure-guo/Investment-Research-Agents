@@ -130,3 +130,63 @@ class TestFetchIndexConstituents:
             result = client.fetch_index_constituents("000300")
 
         assert result == []
+
+
+class TestSourceProvenance:
+    """sources_seen：记录**实际生效**的数据源（供 universe 登记文件落 `sources` 审计）。"""
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_records_csindex_on_success(self, mock_ak, client):
+        mock_ak.index_stock_cons_csindex.return_value = _csindex_df()
+
+        client.fetch_index_constituents("000300")
+
+        assert client.sources_seen["constituents"] == {"csindex"}
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_records_eastmoney_on_constituent_fallback(self, mock_ak, client):
+        mock_ak.index_stock_cons_csindex.side_effect = ConnectionError("csindex refused")
+        mock_ak.index_stock_cons.return_value = _em_df()
+
+        client.fetch_index_constituents("000300")
+
+        assert client.sources_seen["constituents"] == {"eastmoney"}
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_records_none_when_both_constituent_sources_fail(self, mock_ak, client):
+        mock_ak.index_stock_cons_csindex.side_effect = ConnectionError("csindex refused")
+        mock_ak.index_stock_cons.side_effect = ConnectionError("em refused")
+
+        client.fetch_index_constituents("000300")
+
+        assert client.sources_seen["constituents"] == {"none"}
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_records_industry_and_market_cap_sources(self, mock_ak, client):
+        """行业/市值维度同样留痕（东财被封锁 → cninfo / baidu）。"""
+        mock_ak.stock_individual_info_em.return_value = None  # 行业主源不可用
+        mock_ak.stock_info_a_code_name.return_value = pd.DataFrame(
+            {"code": ["600519"], "name": ["贵州茅台"]}
+        )
+        mock_ak.stock_industry_change_cninfo.return_value = pd.DataFrame({"行业中类": ["白酒"]})
+        client.fetch_industry("600519")
+        assert client.sources_seen["industry"] == {"cninfo"}
+
+        mock_ak.stock_zh_a_spot_em.return_value = None  # 市值主源不可用
+        mock_ak.stock_zh_valuation_baidu.return_value = pd.DataFrame({"value": [15641.52]})
+        mock_ak.stock_zh_a_hist_tx.return_value = pd.DataFrame({"close": [1500.0]})
+        client.fetch_stock_quote("600519")
+        assert client.sources_seen["market_cap"] == {"baidu"}
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_records_market_cap_missing_when_all_sources_fail(self, mock_ak, client):
+        mock_ak.stock_zh_a_spot_em.return_value = None
+        mock_ak.stock_info_a_code_name.return_value = pd.DataFrame(
+            {"code": ["600519"], "name": ["贵州茅台"]}
+        )
+        mock_ak.stock_zh_valuation_baidu.side_effect = ConnectionError("baidu refused")
+        mock_ak.stock_zh_a_hist_tx.side_effect = ConnectionError("tencent refused")
+
+        client.fetch_stock_quote("600519")
+
+        assert client.sources_seen["market_cap"] == {"missing"}

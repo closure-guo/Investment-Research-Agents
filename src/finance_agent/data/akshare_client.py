@@ -138,6 +138,15 @@ def _add_prefix(code: str) -> str:
 
 
 class AKShareClient:
+    def __init__(self) -> None:
+        # 实际生效的数据源留痕（供 cohort universe 登记文件落 `sources` 审计）：
+        # 每维度只记标签集合（values 为常量集合，无增长风险）。
+        self.sources_seen: dict[str, set[str]] = {
+            "constituents": set(),
+            "industry": set(),
+            "market_cap": set(),
+        }
+
     def _filter_annual(self, df: pd.DataFrame) -> pd.DataFrame:
         """只保留年报（报告日以 1231 结尾），并按报告日降序（最新在前）对齐契约。"""
         if df.empty:
@@ -254,6 +263,7 @@ class AKShareClient:
                 key = _INDUSTRY_KEY_MAP.get(row["item"], row["item"])
                 result[key] = row["value"]
             if result.get("name") or result.get("industry"):
+                self.sources_seen["industry"].add("eastmoney")
                 return result
         # 降级：cninfo 行业 + 名称 fallback
         logger.warning("东财个股信息不可用，降级 cninfo 行业+名称: %s", stock_code)
@@ -261,8 +271,10 @@ class AKShareClient:
         industry = self._fetch_industry_cninfo(stock_code)
         if industry:
             result["industry"] = industry
+            self.sources_seen["industry"].add("cninfo")
         else:
             logger.error("行业数据降级后仍缺失（名称/cninfo 均无返回）: %s", stock_code)
+            self.sources_seen["industry"].update({"cninfo", "missing"})
         return result
 
     def fetch_stock_quote(self, stock_code: str) -> dict:
@@ -276,7 +288,11 @@ class AKShareClient:
                     break
             if not row.empty:
                 raw = row.iloc[0].to_dict()
-                return {_QUOTE_KEY_MAP.get(k, k): v for k, v in raw.items()}
+                mapped = {_QUOTE_KEY_MAP.get(k, k): v for k, v in raw.items()}
+                self.sources_seen["market_cap"].add(
+                    "eastmoney" if mapped.get("market_cap") is not None else "missing"
+                )
+                return mapped
 
         # ── 二级回退（add-quote-baidu-fallback）：东财被 TLS 风控封锁时，
         # 用百度估值补 market_cap/PB、腾讯日线补 price——恢复估值与价格维度
@@ -311,6 +327,9 @@ class AKShareClient:
 
         # 可观测性：估值/价格维度全部缺失时留 ERROR（数据维度缺失，非预期降级）
         has_valuation = any(result.get(k) is not None for k in ("market_cap", "PB", "price"))
+        self.sources_seen["market_cap"].add(
+            "baidu" if result.get("market_cap") is not None else "missing"
+        )
         if not has_valuation:
             logger.error("行情回退后仍缺估值/价格（PE/PB/市值/价格缺失）: %s", stock_code)
         return result
@@ -603,9 +622,12 @@ class AKShareClient:
             df = _call_ak(func, symbol=index_code)
             rows = self._parse_constituents(df)
             if rows:
+                source = "csindex" if label == "index_stock_cons_csindex" else "eastmoney"
+                self.sources_seen["constituents"].add(source)
                 return rows
             logger.warning("指数成分接口 %s 无可用数据（空返回/列名漂移）: %s", label, index_code)
         logger.error("指数成分双源均失败（成分信源缺失）: %s", index_code)
+        self.sources_seen["constituents"].add("none")
         return []
 
     # ── 宏观指标 ──
