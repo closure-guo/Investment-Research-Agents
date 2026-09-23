@@ -5,6 +5,9 @@
 - market_cap：外部市值（亿）→ 桶；缺 → 未知
 - market_environment：基准 250 日均线牛熊信号 map {prediction_id: bull|bear}
 - holding_period：resolved_at - created_at 日历天数分桶
+
+口径对齐 metrics.md §1.8①：胜率与平均超额仅统计 long/short 方向的观点
+（avoidance 终态与 neutral 方向 resolved_* 存量行不进；计数/分桶分母仍含全量）。
 """
 
 from __future__ import annotations
@@ -59,7 +62,16 @@ class DimensionResult:
     settled: int
 
 
+def _is_long_short(p: dict[str, Any]) -> bool:
+    """主指标人口限可执行决策（long/short）；neutral 方向与 avoidance 终态不在其中（§1.8①）。"""
+    return p.get("direction") in ("long", "short")
+
+
 def _win_flag(p: dict[str, Any]) -> bool | None:
+    """胜率标志只认 long/short 的 resolved_win/loss；其余（neutral 方向 / avoidance /
+    resolved_neutral / open / unresolvable）返回 None，不进分子分母。"""
+    if not _is_long_short(p):
+        return None
     status = p.get("status")
     if status == "resolved_win":
         return True
@@ -76,7 +88,14 @@ def _bucket_metrics(items: list[dict[str, Any]]) -> SegmentBucket:
     if decided:
         win_rate = round(sum(1 for w in decided if w) / len(decided), 4)
     avg_excess = None
-    excesses = [p["excess_return"] for p in items if p.get("excess_return") is not None]
+    # 超额人口 = long/short 三态（含带内 neutral），排除 avoidance/unresolvable（§1.8①）
+    excesses = [
+        p["excess_return"]
+        for p in items
+        if p.get("excess_return") is not None
+        and _is_long_short(p)
+        and p.get("status") in ("resolved_win", "resolved_loss", "resolved_neutral")
+    ]
     if excesses:
         avg_excess = round(sum(excesses) / len(excesses), 4)
     return SegmentBucket(

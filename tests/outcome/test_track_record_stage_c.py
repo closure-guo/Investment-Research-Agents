@@ -3,7 +3,7 @@
 from fastapi.testclient import TestClient
 
 from finance_agent.api import app
-from finance_agent.outcome.track_record.calibration import calibration_table
+from finance_agent.outcome.track_record.calibration import calibration_table, outcome_value
 from finance_agent.outcome.track_record.model import (
     append_audit,
     compute_snapshot_hash,
@@ -186,6 +186,38 @@ class TestCalibration:
         result = calibration_table(preds)
         assert result.brier == 0.04
 
+    # ── Δ2 Task 5：回避终态按 avoidance_status 映射（原 status='avoidance' 落 None）──
+
+    def test_outcome_value_avoidance_mapping(self):
+        assert outcome_value({"status": "avoidance", "avoidance_status": "avoidance_win"}) == 1.0
+        assert outcome_value({"status": "avoidance", "avoidance_status": "avoidance_loss"}) == 0.0
+        assert (
+            outcome_value({"status": "avoidance", "avoidance_status": "avoidance_neutral"}) == 0.5
+        )
+
+    def test_outcome_value_avoidance_undecided_skipped(self):
+        # avoidance_status 缺失/为空 → 不参与（原状态机未判定，非结果）
+        assert outcome_value({"status": "avoidance", "avoidance_status": None}) is None
+        assert outcome_value({"status": "avoidance"}) is None
+
+    def test_outcome_value_other_statuses_unchanged(self):
+        assert outcome_value({"status": "resolved_win"}) == 1.0
+        assert outcome_value({"status": "resolved_loss"}) == 0.0
+        assert outcome_value({"status": "resolved_neutral"}) == 0.5
+        assert outcome_value({"status": "open"}) is None
+        assert outcome_value({"status": "unresolvable"}) is None
+
+    def test_calibration_includes_avoidance_rows(self):
+        preds = [
+            {"confidence": 0.8, "status": "avoidance", "avoidance_status": "avoidance_win"},
+            {"confidence": 0.8, "status": "avoidance", "avoidance_status": "avoidance_neutral"},
+            {"confidence": 0.8, "status": "avoidance", "avoidance_status": None},  # 跳过
+        ]
+        result = calibration_table(preds)
+        assert result.sample_size == 2
+        by_bucket = {b["bucket"]: b for b in result.buckets}
+        assert by_bucket["[0.8,0.9)"]["hit_rate"] == 0.75  # (1.0 + 0.5)/2
+
 
 def _seg_preds():
     return [
@@ -254,6 +286,72 @@ class TestSegments:
         by = {b.name: b for b in dim.buckets}
         assert by["未知"].sample_size == 3
 
+    # ── Δ2 Task 5：切片口径对齐 §1.8①（胜率限 long/short；avoidance 不进胜率/超额）──
+
+    def test_win_rate_requires_long_short_and_excludes_avoidance(self):
+        preds = [
+            {
+                "prediction_id": "p1",
+                "symbol": "600519.SH",
+                "direction": "long",
+                "status": "resolved_win",
+                "excess_return": 0.1,
+            },
+            {
+                "prediction_id": "p2",
+                "symbol": "600519.SH",
+                "direction": "short",
+                "status": "resolved_loss",
+                "excess_return": -0.05,
+            },
+            {
+                "prediction_id": "p3",
+                "symbol": "600519.SH",
+                "direction": "long",
+                "status": "resolved_neutral",
+                "excess_return": 0.0,
+            },
+            # 存量遗留：neutral 方向却落 resolved_win → 不进胜率也不进超额
+            {
+                "prediction_id": "p4",
+                "symbol": "600519.SH",
+                "direction": "neutral",
+                "status": "resolved_win",
+                "excess_return": 0.5,
+            },
+            # 回避终态：有 excess_return 但不属主指标人口
+            {
+                "prediction_id": "p5",
+                "symbol": "600519.SH",
+                "direction": "neutral",
+                "status": "avoidance",
+                "avoidance_status": "avoidance_win",
+                "excess_return": -0.2,
+            },
+        ]
+        dim = segment_by_industry(preds)
+        bucket = {b.name: b for b in dim.buckets}["白酒"]
+        assert bucket.sample_size == 5  # 计数/分桶分母保留全量
+        assert bucket.win_rate == 0.5  # 1 win / (1 win + 1 loss)
+        assert bucket.avg_excess == round((0.1 - 0.05 + 0.0) / 3, 4)  # long/short 三态
+        assert dim.settled == 2
+
+    def test_win_rate_none_when_no_long_short_decided(self):
+        """无 long/short 已判定行 → 胜率 None（旧行为会把 neutral 方向 resolved_* 计入）。"""
+        preds = [
+            {
+                "prediction_id": "n1",
+                "symbol": "600519.SH",
+                "direction": "neutral",
+                "status": "resolved_win",
+                "excess_return": 0.5,
+            }
+        ]
+        dim = segment_by_industry(preds)
+        bucket = {b.name: b for b in dim.buckets}["白酒"]
+        assert bucket.win_rate is None and bucket.avg_excess is None
+        assert bucket.sample_size == 1
+
     def test_market_env_signal(self):
         rising = list(range(300))  # 上涨 > MA250
         assert market_env_signal(rising) == "bull"
@@ -315,7 +413,7 @@ def test_api_detail_with_audit_and_marks(monkeypatch, tmp_path):
 def test_api_overview_version_param(monkeypatch, tmp_path):
     db = _use_db(monkeypatch, tmp_path)
     register_agent("v1", db_path=db)
-    pid = _insert(db)
+    pid = _insert(db, horizon_days=20)  # 头条口径窗口（Δ2 Task 5：overview 限 T+20）
     _resolve(db, pid)
     register_agent("v2", db_path=db)
     # 默认取当前版本（v2）→ 无观点

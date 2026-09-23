@@ -1,7 +1,8 @@
 """predictions 日批判定 job(add-track-record):遍历 open 观点 → 拉行情 → 判定 → 落状态。
 
 与旧 settle_open_decisions(止损/目标/超期)不同:horizon 到点按区间超额判定 win/loss/neutral;
-superseded(同标的新观点方向相反/目标价不同)立即按现价结算旧观点(neutral 不走 superseded);
+superseded(同标的新观点方向相反/目标价不同)立即按现价结算旧观点(neutral 不走 superseded;
+与 horizon 路径共用 ±2% 中性带判定 win/loss/neutral);
 连续无行情标 unresolvable。幂等:update_prediction_status 前不重复处理已非 open 的观点;
 失败隔离:单观点异常跳过不中断整批。
 
@@ -22,6 +23,7 @@ import pandas as pd
 
 from finance_agent.outcome.track_record.judgment import (
     AVOIDANCE_STATUSES,
+    DEFAULT_NEUTRAL_BAND,
     TERMINAL_AVOIDANCE_STATUS,
     Resolution,
     derive_entry,
@@ -172,11 +174,15 @@ def settle_open_predictions(
                             continue
                         exit_date = str(kline.iloc[-1]["日期"])
                         sign = 1.0 if old["direction"] == "long" else -1.0
-                        raw = sign * (exit_price / entry - 1.0)
+                        # 分类前 round 消浮点噪声；与 horizon 路径共用 ±2% 中性带
+                        raw = round(sign * (exit_price / entry - 1.0), 6)
+                        band = DEFAULT_NEUTRAL_BAND
                         resolution = Resolution(
-                            status="resolved_win"
-                            if raw > 0
-                            else ("resolved_loss" if raw < 0 else "resolved_neutral"),
+                            status=(
+                                "resolved_win"
+                                if raw > band
+                                else ("resolved_loss" if raw < -band else "resolved_neutral")
+                            ),
                             entry_date=entry_date,
                             entry_price=round(entry, 6),
                             exit_date=exit_date,

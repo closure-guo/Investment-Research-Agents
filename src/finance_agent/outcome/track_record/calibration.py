@@ -23,8 +23,22 @@ NEUTRAL_PROB = 0.5  # neutral 观点在概率口径下的命中值（可配剔�
 
 
 def outcome_value(p: dict[str, Any], neutral_prob: float | None = NEUTRAL_PROB) -> float | None:
-    """观点结果的概率化取值：win=1 / loss=0 / neutral=neutral_prob / 其余 None。"""
+    """观点结果的概率化取值：win=1 / loss=0 / neutral=neutral_prob / 其余 None。
+
+    neutral 方向回避判定终态（`status == "avoidance"`）按 `avoidance_status` 映射：
+    avoidance_win→1.0、avoidance_loss→0.0、avoidance_neutral→neutral_prob；
+    `avoidance_status IS NULL`（未判定）→ None 不参与。其余行为不变。
+    """
     status = p.get("status")
+    if status == "avoidance":
+        avoidance = p.get("avoidance_status")
+        if avoidance == "avoidance_win":
+            return 1.0
+        if avoidance == "avoidance_loss":
+            return 0.0
+        if avoidance == "avoidance_neutral" and neutral_prob is not None:
+            return float(neutral_prob)
+        return None
     if status == "resolved_win":
         return 1.0
     if status == "resolved_loss":

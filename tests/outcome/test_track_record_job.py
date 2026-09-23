@@ -394,6 +394,46 @@ def test_superseded_reports_scores(tmp_path):
     assert rows[old]["status"] == "resolved_loss"
 
 
+# ── Δ2 Task 5：superseded 与 horizon 路径共用 ±2% 中性带（原按 raw 符号三分）──
+
+
+def test_superseded_within_neutral_band_is_resolved_neutral(tmp_path):
+    """|raw| < 2% → resolved_neutral（不按符号三分；与 horizon 路径同口径）。"""
+    db = _db(tmp_path)
+    old = _insert(db, direction="long", created="2026-09-01T10:00:00")
+    _insert(db, direction="short", created="2026-09-03T10:00:00")  # 反向 → supersede
+    client = _StubClient({"600519": _kline([100, 101])})  # 100 → 101 = +1% 带内
+    result = settle_open_predictions(client=client, db_path=db)
+    assert result["superseded"] == 1 and result["errors"] == 0
+    row = {r["prediction_id"]: r for r in list_predictions(db_path=db)}[old]
+    assert row["status"] == "resolved_neutral"
+    assert row["resolution_rule"] == "superseded"
+
+
+def test_superseded_beyond_band_still_win(tmp_path):
+    """|raw| >= 2% 仍按方向判 win/loss（+3% → resolved_win）。"""
+    db = _db(tmp_path)
+    old = _insert(db, direction="long", created="2026-09-01T10:00:00")
+    _insert(db, direction="short", created="2026-09-03T10:00:00")
+    client = _StubClient({"600519": _kline([100, 103])})  # +3% 超带
+    result = settle_open_predictions(client=client, db_path=db)
+    assert result["superseded"] == 1 and result["errors"] == 0
+    row = {r["prediction_id"]: r for r in list_predictions(db_path=db)}[old]
+    assert row["status"] == "resolved_win"
+
+
+def test_superseded_within_band_for_short_is_neutral(tmp_path):
+    """short 方向对称：raw（已按 short 取负）落在带内 → resolved_neutral。"""
+    db = _db(tmp_path)
+    old = _insert(db, direction="short", created="2026-09-01T10:00:00")
+    _insert(db, direction="long", created="2026-09-03T10:00:00")  # 反向 → supersede
+    client = _StubClient({"600519": _kline([100, 101])})  # short raw = -(101/100-1) = -1%
+    result = settle_open_predictions(client=client, db_path=db)
+    assert result["superseded"] == 1
+    row = {r["prediction_id"]: r for r in list_predictions(db_path=db)}[old]
+    assert row["status"] == "resolved_neutral"
+
+
 def test_superseded_zero_entry_skips(tmp_path):
     """派生入场价 <= 0 → superseded 路径跳过(不写 resolved_neutral + 入场价 0)。"""
     db = _db(tmp_path)

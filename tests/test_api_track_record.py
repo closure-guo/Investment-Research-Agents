@@ -17,7 +17,8 @@ BASE = {
     "symbol_name": "贵州茅台",
     "direction": "long",
     "entry_price": 100.0,
-    "horizon_days": 252,
+    # 头条口径窗口（§1.8①：默认 T+20）；252 存量行由专门用例覆盖
+    "horizon_days": 20,
     "confidence": 0.8,
     "rationale_snapshot": {"action": "buy"},
     "created_at": "2026-09-01T10:00:00",
@@ -90,6 +91,67 @@ def test_overview_source_filter(monkeypatch, tmp_path):
     _insert(db, source_type="backtest")
     live = TestClient(app).get("/api/v1/track-record/overview", params={"source": "live"}).json()
     assert live["total"] == 1
+
+
+# ── delta update-decision-settlement-contract Task 5：overview 口径字段（additive）──
+
+
+def _avoid(db, pid, avoidance_status):
+    update_prediction_status(
+        pid,
+        {"status": "avoidance", "avoidance_status": avoidance_status},
+        db_path=db,
+    )
+
+
+def test_overview_caliber_fields_and_avoidance_threshold(monkeypatch, tmp_path):
+    """overview 追加 avoidance / caliber_horizon / legacy_settled；回避样本 <10 → 正确率置 null。"""
+    db = _use_db(monkeypatch, tmp_path)
+    for i in range(6):
+        _avoid(db, _insert(db, symbol=f"aw{i}.SH", direction="neutral"), "avoidance_win")
+    for i in range(3):
+        _avoid(db, _insert(db, symbol=f"al{i}.SH", direction="neutral"), "avoidance_loss")
+    data = TestClient(app).get("/api/v1/track-record/overview").json()
+    assert data["caliber_horizon"] == 20
+    assert data["avoidance"]["avoidance_win"] == 6
+    assert data["avoidance"]["avoidance_loss"] == 3
+    assert data["avoidance"]["settled"] == 9
+    assert data["avoidance"]["avoidance_rate"] is None  # settled<10 不展示（与胜率同门槛）
+    # neutral 回避判定不进 long/short 主指标
+    assert data["settled"] == 0 and data["win_rate"] is None
+    assert data["legacy_settled"] == 0
+
+
+def test_overview_avoidance_rate_shown_at_threshold(monkeypatch, tmp_path):
+    """回避样本 >=10 → 独立字段展示正确率，且不动 long/short 胜率。"""
+    db = _use_db(monkeypatch, tmp_path)
+    for i in range(7):
+        _avoid(db, _insert(db, symbol=f"w{i}.SH", direction="neutral"), "avoidance_win")
+    for i in range(3):
+        _avoid(db, _insert(db, symbol=f"l{i}.SH", direction="neutral"), "avoidance_loss")
+    data = TestClient(app).get("/api/v1/track-record/overview").json()
+    assert data["avoidance"]["settled"] == 10
+    assert data["avoidance"]["avoidance_rate"] == 0.7
+    assert data["settled"] == 0  # 不混入胜率(分母仍为 0)
+
+
+def test_overview_legacy_settled_discloses_cross_caliber(monkeypatch, tmp_path):
+    """头条口径限 T+20；252 存量已结算行经 legacy_settled 披露，不混入 headline settled。"""
+    db = _use_db(monkeypatch, tmp_path)
+    update_prediction_status(
+        _insert(db, symbol="new.SH", direction="long", horizon_days=20),
+        {"status": "resolved_win", "excess_return": 0.05},
+        db_path=db,
+    )
+    update_prediction_status(
+        _insert(db, symbol="old.SH", direction="long", horizon_days=252),
+        {"status": "resolved_win", "excess_return": 0.05},
+        db_path=db,
+    )
+    data = TestClient(app).get("/api/v1/track-record/overview").json()
+    assert data["caliber_horizon"] == 20
+    assert data["total"] == 1 and data["settled"] == 1  # 头条:仅 T+20
+    assert data["legacy_settled"] == 1  # 存量跨口径计数披露
 
 
 def test_predictions_list_default_all_statuses(monkeypatch, tmp_path):

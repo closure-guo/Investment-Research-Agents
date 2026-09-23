@@ -780,9 +780,15 @@ def prediction_stats(
     source_type: str | None = None,
     db_path: str | Path | None = None,
     version_seq: int | None = None,
+    horizon_days: int | None = None,
 ) -> dict[str, Any]:
-    """胜率/超额聚合。胜率只基于 resolved_win/resolved_loss;neutral/unresolvable 不进分母。
+    """胜率/超额聚合。胜率只基于 long/short 的 resolved_win/resolved_loss;
+    neutral/unresolvable 不进分母。avg_excess 人口 = long/short 三态
+    (resolved_win/loss/neutral,排除 unresolvable)——消除 ±2% 中性带截断偏差
+    (口径 metrics.md §1.8①);neutral 方向观点不属于主指标人口,一律排除。
 
+    horizon_days 缺省不过滤(全量存量);传值只统计该窗口(头条口径 DEFAULT_HORIZON_DAYS),
+    切点前后已结算行不混入同一读数(口径切点分段)。
     stage-c：version_seq 过滤用于分段封存（P6），缺省统计全部版本。
     """
     conn = _connect(db_path)
@@ -795,14 +801,18 @@ def prediction_stats(
         if version_seq is not None:
             cond += " AND version_seq=?"
             params.append(version_seq)
+        if horizon_days is not None:
+            cond += " AND horizon_days=?"
+            params.append(horizon_days)
         where = " WHERE 1=1" + cond
         src_cond = cond  # 除 COUNT(*) 无 WHERE 的查询外，条件部分相同
+        ls = " AND direction IN ('long','short')"  # 主指标人口限可执行决策(§1.8①)
         # where/src_cond 均为固定字面量拼装 + 值参数化
         q_total = f"SELECT COUNT(*) FROM predictions{where}"  # noqa: S608
         q_open = f"SELECT COUNT(*) FROM predictions WHERE status='open'{src_cond}"  # noqa: S608
-        q_win = f"SELECT COUNT(*) FROM predictions WHERE status='resolved_win'{src_cond}"  # noqa: S608
-        q_loss = f"SELECT COUNT(*) FROM predictions WHERE status='resolved_loss'{src_cond}"  # noqa: S608
-        q_avg = f"SELECT AVG(excess_return) FROM predictions WHERE status IN ('resolved_win','resolved_loss'){src_cond}"  # noqa: S608
+        q_win = f"SELECT COUNT(*) FROM predictions WHERE status='resolved_win'{ls}{src_cond}"  # noqa: S608
+        q_loss = f"SELECT COUNT(*) FROM predictions WHERE status='resolved_loss'{ls}{src_cond}"  # noqa: S608
+        q_avg = f"SELECT AVG(excess_return) FROM predictions WHERE status IN ('resolved_win','resolved_loss','resolved_neutral'){ls}{src_cond}"  # noqa: S608
         q_counts = f"SELECT status, COUNT(*) FROM predictions{where} GROUP BY status"  # noqa: S608
         total = int(conn.execute(q_total, params).fetchone()[0])
         open_count = int(conn.execute(q_open, params).fetchone()[0])
@@ -819,6 +829,45 @@ def prediction_stats(
             "win_rate": win_rate,
             "avg_excess": avg_excess,
             "status_counts": dict(conn.execute(q_counts, params).fetchall()),
+        }
+    finally:
+        conn.close()
+
+
+def avoidance_stats(
+    source_type: str | None = None,
+    db_path: str | Path | None = None,
+    version_seq: int | None = None,
+) -> dict[str, Any]:
+    """neutral 观点回避正确率：avoidance_win/(avoidance_win+avoidance_loss)。
+
+    avoidance_neutral 与未判定(avoidance_status IS NULL)不进分母、不计 settled;
+    分母为 0 → avoidance_rate=None。作为独立辅助指标(§1.8②),SHALL NOT 混入胜率。
+    """
+    conn = _connect(db_path)
+    try:
+        cond = ""
+        params: list[Any] = []
+        if source_type:
+            cond += " AND source_type=?"
+            params.append(source_type)
+        if version_seq is not None:
+            cond += " AND version_seq=?"
+            params.append(version_seq)
+        rows = conn.execute(
+            f"SELECT avoidance_status, COUNT(*) FROM predictions WHERE avoidance_status IS NOT NULL{cond} GROUP BY avoidance_status",  # noqa: S608
+            params,
+        ).fetchall()
+        counts = dict(rows)
+        wins = int(counts.get("avoidance_win", 0))
+        losses = int(counts.get("avoidance_loss", 0))
+        settled = wins + losses
+        return {
+            "avoidance_win": wins,
+            "avoidance_loss": losses,
+            "avoidance_neutral": int(counts.get("avoidance_neutral", 0)),
+            "settled": settled,
+            "avoidance_rate": round(wins / settled, 4) if settled else None,
         }
     finally:
         conn.close()
