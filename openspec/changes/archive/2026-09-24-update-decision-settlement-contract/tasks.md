@@ -32,5 +32,5 @@
 - [x] 5.2 真实链路验证：一次 deep 分析 → predictions 行核对（horizon=20、参考价口径、申报价在快照内）；一次判定任务离线驱动核对（`settle_entry_price` 派生正确 + neutral 回避判定路径 + long/short Score 上报调用）
 - [x] 5.3 人工验证报告落 `tests/validation/`：含战绩页展示核对（胜率语义变化不失真、样本积累中状态正常、**avoidance 行标签渲染正常**）
 - [x] 5.4 `metrics.md` §2 时间线追加切点行（引用 Δ1 §1.8 口径）
-- [ ] 5.5 `openspec validate update-decision-settlement-contract --strict` 通过；sync + archive 前置核对（tasks 全勾 + verification + 人工验证报告）
+- [x] 5.5 `openspec validate update-decision-settlement-contract --strict` 通过；sync + archive 前置核对（tasks 全勾 + verification + 人工验证报告）
   - 注：`openspec validate ... --strict` 已通过（Δ2T7 收口实测）；**sync/archive 待读数腿（Δ3 `add-forward-paper-trading-cohort` / Δ4 `add-backtest-leakage-controls`）落地后统一执行**。

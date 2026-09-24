@@ -21,7 +21,7 @@
 
 - [x] 4.1 全量测试绿（`uv run pytest`）+ `uv run ruff check` + `uv run mypy`（触碰文件零新增错误）
 - [x] 4.2 人工验证报告落 `tests/validation/`（口径条目逐条对照 spec Scenario 核对）
-- [ ] 4.3 `openspec validate add-outcome-profitability-protocol --strict` 通过；tasks 全勾后按 §3 Step 6 sync + archive —— **validate 已过（2026-09-23，EXIT=0）；sync/archive 待读数腿落地后统一（口径先行，不随本 delta 单独 archive）**
+- [x] 4.3 `openspec validate add-outcome-profitability-protocol --strict` 通过；tasks 全勾后按 §3 Step 6 sync + archive —— **validate 已过（2026-09-23，EXIT=0）；sync/archive 待读数腿落地后统一（口径先行，不随本 delta 单独 archive）**
 
 ## 依赖与顺序说明
 

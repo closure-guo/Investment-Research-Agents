@@ -61,6 +61,15 @@
 - **THEN** SHALL 存档并记 WARN，状态保持 open（判定不依赖参考价，结算时由行情派生 `settle_entry_price`）
 - **AND** 判定时行情仍不可得（长期无数据）SHALL 按 unresolvable 处理
 
+#### Scenario: 无可靠入场价存档不计分
+
+- **GIVEN** 某观点参考价不可得（quote 与 K 线均无）且判定时行情长期不可得
+- **WHEN** 判定任务处理该观点
+- **THEN** SHALL 落 `unresolvable`（存档、计入样本但不进入胜率与平均超额统计——`prediction_stats` 的 settled = win+loss，unresolvable 不进分母）
+- **AND** SHALL 记 WARN 日志
+
+> 归档门禁注记（2026-09-24）：本 Scenario 沿用归档前主规范的同名条目（archive 工具要求 MODIFIED 块覆盖现有全部 Scenario，不得静默丢弃）。**语义按 Δ2 两段式改写**：落库时不再直接判 `unresolvable`（见上一条「参考价不可得存档不阻断」——保持 open + WARN），只有判定时行情长期不可得才落 `unresolvable` 并不计分；「存档但不进入战绩统计」的结论仍成立（unresolvable 不进 settled 与 avg_excess 人口）。
+
 ### Requirement: 事后行情追踪
 
 系统 SHALL 运行日批判定任务（每个交易日收盘后），对所有 `open` 观点按 track-record 判定规则结算：**默认 horizon T+20 交易日**（配置项 `OUTCOME_DEFAULT_HORIZON_DAYS`；观点自带 horizon_days 则以其为准，上限 1 年）；方向相反或目标价不同的新观点触发旧观点立即结算（superseded）；long 区间超额 > +2% → resolved_win，< −2% → resolved_loss，±2% 内 → resolved_neutral；short 对称。任务 SHALL 幂等（重复执行不重复结算）且失败可重试。
