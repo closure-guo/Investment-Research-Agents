@@ -332,7 +332,8 @@ def build_conclusion(
     - 通路验证定位 → 无 skill / 赚钱能力结论句（无读数可下结论时保留原句）。
     - 探针超阈（可测且 downgraded）→ 「泄漏污染下的上界证据（真实 skill ≤ 读数）」。
     - 探针不可测 → 按通路验证处理（reason 写明「探针不可测」）。
-    - regime 覆盖受限 → 结论限定于已覆盖 regime，不外推。
+    - regime 覆盖受限 → 结论限定于已覆盖 regime，不外推（**降级句同样限定**：
+      上界证据仍是结论句，「不外推」限定不得因换用降级句式而丢失）。
     """
     if sanity != "valid":
         return INVALID_SANITY_CONCLUSION
@@ -352,6 +353,7 @@ def build_conclusion(
             reasons.append("探针不可测")
         suffix = f"（{'；'.join(reasons)}）" if reasons else ""
         return f"通路验证定位{suffix}：本批不产出 skill / 赚钱能力结论句，读数仅用于设施通路验证"
+    regime_suffix = _regime_suffix(regime_covered, regime_limited)
     if probe is not None and probe.get("downgraded"):
         rate = probe.get("direction_hit_rate")
         threshold = probe.get("threshold")
@@ -360,15 +362,17 @@ def build_conclusion(
         return (
             f"泄漏污染下的上界证据（真实 skill ≤ 读数）：{base_conclusion}；"
             f"探针方向命中率 {rate_text} > 阈值 {threshold_text}"
-            f"（n={probe.get('probe_n')}），不得单独作为赚钱能力主张"
+            f"（n={probe.get('probe_n')}），不得单独作为赚钱能力主张{regime_suffix}"
         )
-    sentence = base_conclusion
-    if regime_limited and regime_covered:
-        sentence += (
-            f"（本批仅覆盖 {', '.join(sorted({str(r) for r in regime_covered}))} regime，"
-            "结论不外推至未覆盖 regime）"
-        )
-    return sentence
+    return base_conclusion + regime_suffix
+
+
+def _regime_suffix(regime_covered: list[str] | tuple[str, ...], regime_limited: bool) -> str:
+    """regime 限定后缀；未受限或未覆盖 → 空串（不产出无意义的「仅覆盖」句）。"""
+    if not (regime_limited and regime_covered):
+        return ""
+    covered = ", ".join(sorted({str(r) for r in regime_covered}))
+    return f"（本批仅覆盖 {covered} regime，结论不外推至未覆盖 regime）"
 
 
 # ---------------------------------------------------------------------------
@@ -421,9 +425,20 @@ def _probe_lines(report: dict[str, Any]) -> list[str]:
     lines = [
         f"- 状态：{PROBE_STATE_TEXT.get(state, state)}",
         (
+            f"- 抽样标的数 probe_n："
+            f"{probe.get('probe_n') if probe.get('probe_n') is not None else NOT_PROVIDED}"
+            f"；题目构成 questions_per_ticker："
+            f"{probe.get('questions_per_ticker') if probe.get('questions_per_ticker') is not None else NOT_PROVIDED}"
+            "（方向 / 幅度桶 / 事件各一，主指标为方向题）"
+        ),
+        (
             f"- 方向命中率 direction_hit_rate：{_pct(probe.get('direction_hit_rate'))}"
-            f"（阈值 threshold：{_pct(probe.get('threshold'))}；"
-            f"probe_n={probe.get('probe_n') if probe.get('probe_n') is not None else NOT_PROVIDED}）"
+            f"（阈值 threshold：{_pct(probe.get('threshold'))}）"
+        ),
+        (
+            f"- 幅度桶命中率 magnitude_hit_rate：{_pct(probe.get('magnitude_hit_rate'))}"
+            f"；事件题命中率 event_hit_rate：{_pct(probe.get('event_hit_rate'))}"
+            "（辅证层，不计入主指标）"
         ),
         f"- 未知占比 unknown_ratio：{_pct(probe.get('unknown_ratio'))}",
     ]

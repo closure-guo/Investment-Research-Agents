@@ -38,7 +38,7 @@ from finance_agent.data.akshare_client import (  # noqa: E402
     SETTLEMENT_ADJUST,
     AKShareClient,
 )
-from finance_agent.outcome.settle import BENCHMARK_CODE  # noqa: E402
+from finance_agent.outcome.track_record.job import BENCHMARK_CODE  # noqa: E402
 
 CODES = ["002412", "600519", "300308"]  # 汉森制药 / 贵州茅台 / 中际旭创（同冒烟三标的）
 REGIME = "sideways"

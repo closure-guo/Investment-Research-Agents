@@ -234,3 +234,34 @@ class TestPerfTableAndConclusion:
         text = _render()
         assert "hfq" in text
         assert "非可执行" in text or "hold/watch" in text
+
+
+class TestProbeCompositionDisclosure:
+    """spec「探针执行与披露」要求报告含「抽样标的数 / **题目构成** / 记忆命中率 /
+    未知占比」。md 是落 `evals/backtest/results/` 的报告正文，故四者都须在 md 内。
+    变异实证：`_probe_lines` 去掉题目构成/幅度率/事件率两行 → 本用例 RED。"""
+
+    def test_md_discloses_composition_and_all_three_rates(self):
+        text = _render(
+            leakage_probe=_probe("measurable", rate=0.3, downgraded=False, window=["2023-01-05"])
+        )
+        assert "抽样标的数" in text and "10" in text
+        assert "题目构成" in text and "3" in text
+        assert "方向命中率" in text and "幅度桶命中率" in text and "事件题命中率" in text
+        assert "40%" in text  # magnitude_hit_rate
+        assert "50%" in text  # event_hit_rate
+
+
+class TestRenderSelfCheckWiring:
+    """渲染后自校是接线（不是装饰）：契约守卫抛错必须传出渲染函数。
+
+    变异实证：删除 `render_backtest_report_md` 末尾的 `assert_outcome_report(text)`
+    调用 → 本用例 RED（守卫被 patch 成抛错却无人调用）。"""
+
+    def test_self_check_failure_propagates(self, monkeypatch):
+        def _boom(text: str) -> None:
+            raise ValueError("契约守卫被触发")
+
+        monkeypatch.setattr("evals.backtest.report.assert_outcome_report", _boom)
+        with pytest.raises(ValueError, match="契约守卫被触发"):
+            _render()

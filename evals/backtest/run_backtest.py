@@ -45,7 +45,7 @@ from evals.causal_ablation.preregister import (
 )
 from evals.stats import paired_block_bootstrap_diff
 from finance_agent.data.akshare_client import SETTLEMENT_ADJUST
-from finance_agent.outcome.settle import BENCHMARK_CODE
+from finance_agent.outcome.track_record.job import BENCHMARK_CODE
 
 logger = logging.getLogger(__name__)
 

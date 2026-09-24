@@ -10,7 +10,7 @@
 - **知识泄漏探针**（ADDED）：正式批前对候选窗口抽样标的执行记忆探测（问模型决策日后 N 日的实际涨跌方向/幅度桶/重大事件，对照 akshare 真值），计算**记忆命中率**随报告披露；命中率超预登记阈值（建议 60%，owner 终裁）→ 该批结论 SHALL 降级为「泄漏污染下的上界证据」，SHALL NOT 单独作为赚钱能力主张；探针失败（拒答/不可解析）计未知占比并披露
 - **复权口径统一**（MODIFIED「绩效指标与基线对比」）：结算与回测的区间收益计算 SHALL 用**后复权**日 K（对齐 `decision-outcome`，消除两 spec 冲突，恢复 as-of 保真）；分析输入路径的复权口径不在本 delta 内（另行核对披露）
 - **regime 分层与干净窗口的冲突条款**（MODIFIED「分层市场状态抽样」）：干净窗口优先；窗口内无法满足三 regime 覆盖时，报告 SHALL 披露 regime 覆盖范围，结论 SHALL 限定于已覆盖 regime、SHALL NOT 外推
-- **批次预登记与报告生命周期**（ADDED）：正式回测批 SHALL 持有效预登记（Δ1 机制：样本量/MDE/窗口/探针阈值/成本分型）；报告落 `evals/backtest/results/` 并带 status 头（active/superseded-by，复用 `report_status.py` 校验）；存量 pilot-2023-shock.md 补 status 头与「深历史 = 泄漏风险」标注
+- **批次预登记与报告生命周期**（ADDED）：正式回测批 SHALL 持有效预登记（Δ1 机制 `OUTCOME_REQUIRED_FIELDS`：主指标/MDE/决策阈值/样本量依据/停止规则/成本分型/泄漏控制）；报告落 `evals/backtest/results/` 并带 status 头（active/superseded-by，复用 `report_status.py` 校验）；存量 pilot-2023-shock.md 补 status 头与「深历史 = 泄漏风险」标注
 
 ## Capabilities
 

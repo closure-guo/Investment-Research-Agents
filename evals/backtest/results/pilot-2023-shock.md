@@ -90,3 +90,10 @@ pilot 定位不要求）。
   add-backtest-leakage-controls）另行跑批。
 
 本节为另起段落的追加标注：**上文原文与全部数字一律保留、未作改写**。
+
+**过时表述指认（只指认，不改原文）**：上文「结算语义」一行称结算复用
+`outcome.settle.evaluate_decision`，描述的是本记录撰写时的旧结算引擎；该模块已废弃
+（delta `update-decision-settlement-contract`），回测结算已切到
+`outcome.track_record.judgment.resolve_prediction`（horizon + 区间超额 + ±2% 中性带，
+delta `add-backtest-leakage-controls`）。按「原文与数字保留」要求该行未改写，仅在此指认，
+以免读者据过时描述推断当前结算语义。

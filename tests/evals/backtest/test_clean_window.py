@@ -284,3 +284,67 @@ class TestBuildConclusionThreeStates:
         assert "仅覆盖" in sentence
         assert "sideways" in sentence
         assert "不外推" in sentence
+
+
+class TestTradingDayCaliber:
+    """干净窗口以**交易日**计（spec 条文），不是自然日。
+
+    判别性构造：基准帧里挖掉一段日期，使「自然日差 ≥ window_days」但
+    「交易日数 < window_days」——自然日实现会误判通过。变异实证：把
+    `_trading_days_between` 改成 `(as_of - decision).days` 后本用例 RED。
+    """
+
+    def test_calendar_days_pass_but_trading_days_fail(self):
+        # 决策日 2024-01-01；基准只在 01-02..01-06 有 5 个交易日，然后跳到 03-01
+        # 自然日差 = 60 天（≥20），交易日数 = 6（<20）→ 必须判不通过
+        bench = _benchmark(
+            ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-06", "2024-03-01"]
+        )
+        result = assert_clean_window(
+            ["2024-01-01"], as_of="2024-03-01", window_days=20, benchmark=bench
+        )
+        assert result["passed"] is False
+        assert "仅 6 个交易日" in result["reason"]
+
+    def test_calendar_days_fail_but_trading_days_pass(self):
+        # 反向构造：基准每个自然日都是交易日（含周末）→ 交易日数与自然日数一致；
+        # 此处只断言「交易日口径下按序列计数」——25 个交易日的连续序列必然通过
+        bench = _benchmark(_days("2024-01-01", 26))
+        result = assert_clean_window(
+            ["2024-01-01"], as_of="2024-01-26", window_days=20, benchmark=bench
+        )
+        assert result["passed"] is True
+        assert "最少 25" in result["reason"]
+
+
+class TestDowngradedConclusionKeepsRegimeLimit:
+    """降级句仍是结论句：regime 限定不得因换用降级句式而丢失（spec
+    「干净窗口下的覆盖限定」）。变异实证：降级分支去掉 regime 后缀 → 本用例 RED。"""
+
+    BASE = "无显著差异"
+
+    def test_downgraded_sentence_still_carries_regime_limit(self):
+        sentence = build_conclusion(
+            self.BASE,
+            batch_kind="formal",
+            clean_window={"passed": True, "reason": "ok"},
+            probe={"direction_hit_rate": 0.9, "downgraded": True, "threshold": 0.6, "probe_n": 12},
+            regime_covered=["sideways"],
+            regime_limited=True,
+        )
+        assert "上界证据" in sentence
+        assert "仅覆盖" in sentence
+        assert "sideways" in sentence
+        assert "不外推" in sentence
+
+    def test_downgraded_sentence_without_limit_has_no_regime_clause(self):
+        sentence = build_conclusion(
+            self.BASE,
+            batch_kind="formal",
+            clean_window={"passed": True, "reason": "ok"},
+            probe={"direction_hit_rate": 0.9, "downgraded": True, "threshold": 0.6, "probe_n": 12},
+            regime_covered=list(ALL_REGIMES),
+            regime_limited=False,
+        )
+        assert "上界证据" in sentence
+        assert "仅覆盖" not in sentence

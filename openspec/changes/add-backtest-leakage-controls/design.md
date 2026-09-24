@@ -33,7 +33,9 @@
 干净窗口（近端 ~1–3 个月）大概率只覆盖单一 regime，与「三 regime 各 ≥10 标的」冲突。取舍：宁可 regime 覆盖不全 + 结论限定（「本轮读数仅适用于震荡市」），不可为了分层去碰深历史（泄漏污染整批）。这与 `decision-backtest`「SHALL NOT 仅在单边行情样本上汇报绩效结论」的原始意图兼容——原意是防 cherry-pick 单边行情，披露 + 限定结论即满足；跨 regime 的完整拼图由 forward 腿随日历自然积累（cohort 跨越行情周期）。
 
 **D5 纪律机器全部复用，不另造。**
-预登记 = `evals/ablation/preregister/` 格式与解析；status 头 = `causal_ablation/report_status.py` 校验 + `docs/evals/README.md` 索引渲染；两句式结论 = Δ1 收口工具。回测报告模板加固定段落：探针读数 / 干净窗口判定结果 / regime 覆盖披露 / 预登记指针。
+预登记 = `evals/ablation/preregister/` 格式与解析（门禁字段 `OUTCOME_REQUIRED_FIELDS`）；status 头 = `causal_ablation/report_status.py` 校验 + `docs/evals/README.md` 索引渲染。回测报告模板加固定段落：探针读数 / 干净窗口判定结果 / regime 覆盖披露 / 预登记指针。
+
+**结论句纪律的实际落点（终审修正，2026-09-24）**：回测结论句由 `evals/backtest/report.py::build_conclusion` 单独实现（唯一生成点），合法形态三种——skill 句（含 regime 限定后缀）/ 探针超阈降级句「上界证据」/ 通路验证句。Δ1 的 outcome 两句式（显著方向=效应量+CI｜分辨率不足=MDE+扩样方向，`evals/outcome/conclusion.py`）**尚未接到回测结论句**：回测的 skill 句当前由 `_conclude(sharpe_ci)` 产出（超额 Sharpe 对比句），不经 `assert_outcome_sentence_legal` 校验。**首个正式批的预登记必须固定该批结论句的形态（含效应量与 CI/MDE）并接上 Δ1 守卫**——属 owner 待办，不在本 delta 实施内（本 delta 无正式批实跑，风险未落地）。
 
 ## Risks / Trade-offs
 

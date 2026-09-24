@@ -100,7 +100,7 @@
 
 ### Requirement: 回测批次预登记与报告生命周期
 
-正式回测批（非通路验证）SHALL 持有效预登记（沿用 `evals/ablation/preregister/` 门禁字段：主指标 / MDE / 样本量依据 / 决策窗口 / 探针阈值 / 停止规则 / 成本分型），无预登记 SHALL NOT 开跑正式批。批次报告 SHALL 落 `evals/backtest/results/` 并带生命周期 status 头（`active` 或 `superseded-by: <路径>`，复用 `causal_ablation/report_status.py` 校验，指针须可解析），并纳入 `docs/evals/README.md` 索引渲染。深历史批次（决策日早于干净窗口可及范围）SHALL 永久标注「通路验证 + 泄漏风险」定位；存量报告（pilot-2023-shock.md）SHALL 就地补 status 头与定位标注，原文与数字保留。
+正式回测批（非通路验证）SHALL 持有效预登记（沿用 `evals/ablation/preregister/` 的 outcome 门禁字段 `OUTCOME_REQUIRED_FIELDS`：主指标 / MDE / 决策阈值 / 样本量依据 / 停止规则 / 成本分型 / 泄漏控制；决策窗口与探针阈值在「泄漏控制」字段内声明），无预登记 SHALL NOT 开跑正式批。批次报告 SHALL 落 `evals/backtest/results/` 并带生命周期 status 头（`active` 或 `superseded-by: <路径>`，复用 `causal_ablation/report_status.py` 校验，指针须可解析），并纳入 `docs/evals/README.md` 索引渲染。深历史批次（决策日早于干净窗口可及范围）SHALL 永久标注「通路验证 + 泄漏风险」定位；存量报告（pilot-2023-shock.md）SHALL 就地补 status 头与定位标注，原文与数字保留。
 
 #### Scenario: 无预登记拒跑正式批
 
