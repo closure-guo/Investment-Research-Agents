@@ -3,7 +3,36 @@
 **日期**: 2026-09-23
 **验证人**: agent（机器项 + 离线链路）+ owner（LLM 端到端与战绩页人工核对待办）
 **关联 delta**: openspec/changes/update-decision-settlement-contract/
-**E2E 门禁**: 不适用（非交互类变更：前端仅 `PredictionStatus` 联合类型与状态标签/颜色映射小改，无新交互路径 / SSE / 状态流转；proposal「Impact」已声明）
+**E2E 门禁**: **适用**（本 delta 触及前端 UI：`frontend/src/types.ts` 的 `PredictionStatus` 联合类型 + `pages/trackRecord/predictionStatus.ts` 标签/颜色映射 + 两个页面引用改造）。按 `docs/project-workflow.md` §2「delta 涉及前端 UI … 即为交互类变更，走 §3 完整管线（含 §3.5 E2E 门禁）」，**无「纯标签小改」豁免**——原稿此处写「不适用」属自授豁免，已于统一收口轮（2026-09-24）修正为**已执行**：见下「E2E 门禁与人工验证（交互类）」。
+
+## E2E 门禁与人工验证（交互类，2026-09-24 补执行）
+
+**背景**：本 delta 的前端改动（新增 `avoidance` 终态与「回避」标签）属交互类变更，SOP §3.5 / §3.6 的 E2E 门禁与人工验证**适用**（此前被误标「不适用」，本轮补执行）。
+
+**① E2E 门禁（真实浏览器，TESTING=1 stub 后端 + vite dev，不 mock 业务接口）**
+
+```bash
+cd tests/e2e/playwright && npm ci && npx playwright test decisions.spec.ts --reporter=list
+# 3 passed (7.1s)
+#  ok 1 直达 /track-record 渲染页面并显示样本积累中，可返回聊天
+#  ok 2 折叠态侧边栏「决策战绩」入口跳转 /track-record 并渲染战绩页
+#  ok 3 旧 /decisions 路径重定向渲染战绩页
+```
+
+既有 `decisions.spec.ts` 覆盖战绩页的三条核心交互（入口跳转 / 直达渲染 / 旧路径重定向），在本 delta 的前端改动下**全绿**——页面交互无回归。该 spec 的既定分工是「数据行渲染/状态分色等细节由组件测试覆盖」（见 spec docstring），故状态标签渲染不新增 E2E 场景，改由下方人工验证核对。
+
+**② 人工验证（真实浏览器渲染，非组件测试）**：向 E2E 测试库（`data/test-e2e-sessions.db`，gitignored）灌入 3 条 `status='avoidance'`（`avoidance_status` 分别 win/loss/neutral）+ 3 条 `resolved_win/loss/neutral` 对照行，用 Playwright 打开 `/track-record` 实测渲染：
+
+| 行（实测 innerText） | 状态列渲染 | 判定 |
+|---|---|---|
+| `2026-09-13 … 600003.SH 看多 命中` | 命中（绿） | ✅ 对照正常 |
+| `2026-09-14 … 600004.SH 看多 未中` | 未中（红） | ✅ 对照正常 |
+| `2026-09-15 … 600005.SH 看多 中性` | 中性（次要灰） | ✅ 对照正常 |
+| `2026-09-10/11/12 … 600000/1/2.SH 中性 回避` ×3 | **回避（次要灰，与中性同族）** | ✅ **不渲染空白、未误标「不可判定」**（断言 `not.toContain('不可判定')` 通过） |
+
+同时实测「样本积累中（已判定 2 条，满 10 条解锁胜率）」正常显示（2 = 1 命中 + 1 未中 = 胜率分母 `win+loss`，与 §1.8④ 的 `MIN_SETTLED_FOR_WINRATE` 门槛一致；回避与中性行不计入胜率分母——语义正确）。渲染截图存 `/tmp/track-record-avoidance.png`（一次性验证产物，未入库）。
+
+**③ 口径披露的边界（如实记录）**：`caliber_horizon` / `legacy_settled` 是 `GET /api/v1/track-record/overview` 的 **additive API 字段**，前端**不渲染**（本 delta 的 Impact 明确前端仅做标签/类型映射小改）。故「口径披露可见」只在 API 层成立；本报告原 owner 待办里「页面上口径披露可见」一句超出本 delta 声明的前端范围，此处收敛为 API 字段存在（`tests/outcome/test_track_record_api.py` 覆盖）。跨口径（T+252 存量 vs T+20）读数不失真仍需 owner 以真实数据核对。
 
 ## 范围说明（读表前必读）
 
@@ -175,9 +204,9 @@
 
 - **LLM 端到端实跑**：真实 deep 分析 → `persist_prediction_from_accumulated` 落库 → `settle_open_predictions` 判定的全链路（含 Langfuse 真实 Score 写入与 trace 关联）。本报告已用离线脚本覆盖同一代码路径的契约，但真实模型输出的 `final_trade_decision` 形态（pydantic → dict、action 分布）与新窗口下首批真实读数的合理性仍需 owner 实跑。
 - **战绩页人工核对**（proposal「Impact」强制项）：
-  - 胜率语义变化（T+252 → T+20 短窗口）在页面上不失真、`caliber_horizon`/`legacy_settled` 口径披露可见；
-  - **avoidance 行标签渲染正常**（`PredictionStatus` 补 `avoidance` 成员与「回避」标签/颜色，防止已结算 neutral 行渲染空白）；
-  - 「样本积累中」状态（settled < 10）展示正常。
+  - ~~**avoidance 行标签渲染正常**~~ → **已于 2026-09-24 实测完成**（见上「E2E 门禁与人工验证（交互类）」②：3 条 avoidance 行渲染「回避」、不空白、未误标「不可判定」，对照行命中/未中/中性均正常）；
+  - ~~「样本积累中」状态（settled < 10）展示正常~~ → **已实测完成**（同上）；
+  - **仍待 owner**：胜率语义变化（T+252 → T+20 短窗口）在页面上不失真——需真实数据（含 T+252 存量行）才能核对跨口径读数；`caliber_horizon`/`legacy_settled` 为 API 字段，前端不渲染（见上 ③）。
 
 ## 异常记录
 
