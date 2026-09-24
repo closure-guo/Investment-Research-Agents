@@ -35,7 +35,7 @@
 **D5 纪律机器全部复用，不另造。**
 预登记 = `evals/ablation/preregister/` 格式与解析（门禁字段 `OUTCOME_REQUIRED_FIELDS`）；status 头 = `causal_ablation/report_status.py` 校验 + `docs/evals/README.md` 索引渲染。回测报告模板加固定段落：探针读数 / 干净窗口判定结果 / regime 覆盖披露 / 预登记指针。
 
-**结论句纪律的实际落点（终审修正，2026-09-24）**：回测结论句由 `evals/backtest/report.py::build_conclusion` 单独实现（唯一生成点），合法形态三种——skill 句（含 regime 限定后缀）/ 探针超阈降级句「上界证据」/ 通路验证句。Δ1 的 outcome 两句式（显著方向=效应量+CI｜分辨率不足=MDE+扩样方向，`evals/outcome/conclusion.py`）**尚未接到回测结论句**：回测的 skill 句当前由 `_conclude(sharpe_ci)` 产出（超额 Sharpe 对比句），不经 `assert_outcome_sentence_legal` 校验。**首个正式批的预登记必须固定该批结论句的形态（含效应量与 CI/MDE）并接上 Δ1 守卫**——属 owner 待办，不在本 delta 实施内（本 delta 无正式批实跑，风险未落地）。
+**结论句纪律的实际落点（终审修正，2026-09-24）**：回测结论句由 `evals/backtest/report.py::build_conclusion` 单独实现（唯一生成点），产出四种形态——sanity 不通过的覆盖句 / skill 句（含 regime 限定后缀）/ 探针超阈降级句「上界证据」/ 通路验证句。Δ1 的 outcome 两句式（显著方向=效应量+CI｜分辨率不足=MDE+扩样方向，`evals/outcome/conclusion.py`）**尚未接到回测结论句**：回测的 skill 句当前由 `_conclude(sharpe_ci)` 产出（超额 Sharpe 对比句），不经 `assert_outcome_sentence_legal` 校验。**首个正式批的预登记必须固定该批结论句的形态（含效应量与 CI/MDE）并接上 Δ1 守卫**——属 owner 待办，不在本 delta 实施内（本 delta 无正式批实跑，风险未落地）。
 
 ## Risks / Trade-offs
 
