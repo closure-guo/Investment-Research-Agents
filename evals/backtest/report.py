@@ -210,9 +210,6 @@ def aggregate_probes(
     states = [probe_state(p) for p in usable]
     rates = [p.get("direction_hit_rate") for p in usable]
     measurable_rates = [r for r in rates if isinstance(r, (int, float))]
-    unknown_ratios = [
-        p.get("unknown_ratio") for p in usable if isinstance(p.get("unknown_ratio"), (int, float))
-    ]
     if any(s == PROBE_UNMEASURABLE for s in states):
         # 不可测态：三率一并置 None（审查⑥）——「不可测」却带子读数会误导；
         # unknown_ratio 仍保留（未知占比正是不可测的证据）。
@@ -241,7 +238,7 @@ def aggregate_probes(
         "direction_hit_rate": direction_rate,
         "magnitude_hit_rate": magnitude_rate,
         "event_hit_rate": event_rate,
-        "unknown_ratio": max(unknown_ratios) if unknown_ratios else None,
+        "unknown_ratio": _max_optional(p.get("unknown_ratio") for p in usable),
         "threshold": usable[0].get("threshold"),
         "downgraded": downgraded,
         "probe_window": windows_list or None,
