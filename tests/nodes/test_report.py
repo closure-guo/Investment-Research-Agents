@@ -504,3 +504,38 @@ class TestTradeDecisionOperationalParams:
         assert trigger_line, "触发条件行缺失"
         assert "⑩ 条件10" in trigger_line[0]
         assert "(11) 条件11" in trigger_line[0]
+
+
+class TestPositionTierNormalization:
+    """report-decision-rendering「参数缺失时诚实标注」扩展：非法档位字面量归一（600515 none）。"""
+
+    def _render_position(self, position):
+        from finance_agent.nodes.report import _fmt_position
+
+        return _fmt_position(position)
+
+    def test_none_literal_renders_wei_tigong(self):
+        # 600515 实证：risk_judge 输出 position_size="none"，报告透传字面量
+        assert self._render_position("none") == "未提供"
+
+    def test_null_word_and_blank_renders_wei_tigong(self):
+        assert self._render_position("null") == "未提供"
+        assert self._render_position("   ") == "未提供"
+        assert self._render_position(None) == "未提供"
+
+    def test_legal_tiers_case_insensitive_pass_through(self):
+        assert self._render_position("light") == "light"
+        assert self._render_position("Light") == "Light"  # 大小写变体按原值渲染
+        assert self._render_position("moderate") == "moderate"
+        assert self._render_position("heavy") == "heavy"
+
+    def test_non_string_renders_wei_tigong(self):
+        assert self._render_position(123) == "未提供"
+
+    def test_decision_object_not_mutated(self):
+        # 归一只作用于渲染：原对象保留 "none"（落库/trace 可观测）
+        d = TradeDecision(action="watch", confidence=0.55, reasoning="r", position_size="none")
+        from finance_agent.nodes.report import _fmt_position
+
+        assert _fmt_position(d.position_size) == "未提供"
+        assert d.position_size == "none"

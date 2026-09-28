@@ -499,6 +499,21 @@ def _fmt_derived_metrics(action: str, entry: object, stop: object, target: objec
 _TRIGGER_MARKS = "①②③④⑤⑥⑦⑧⑨⑩"
 
 
+# 档位词表（trader.md position_size 档位；spec report-decision-rendering 2026-09 扩展）：
+# 词表外字面量（如 risk_judge 输出的 "none"）渲染归一为「未提供」，不回写决策对象
+_POSITION_TIERS = {"light", "moderate", "heavy"}
+
+
+def _fmt_position(value: object) -> str:
+    """仓位渲染：None/非字符串/纯空白/词表外字面量（大小写不敏感）一律「未提供」。"""
+    if not isinstance(value, str):
+        return "未提供"
+    stripped = value.strip()
+    if not stripped or stripped.lower() not in _POSITION_TIERS:
+        return "未提供"
+    return stripped
+
+
 def _fmt_reeval_triggers(triggers: object) -> str:
     """再评估触发条件渲染：编号条目；无有效条目 → 未申报（require-watch-hold-rationale）。"""
     items: list[str] = []
@@ -549,8 +564,9 @@ def _format_trade_decision(decision: TradeDecision | dict) -> str:
 
     lines = [f"- **方向**: {action}", f"- **置信度**: {confidence:.0%}"]
     # spec report-decision-rendering：仓位档位为必含字段——缺失如实「未提供」，
-    # 不得整行省略（#140 终审 C-4：与「0/缺失未提供」的价格行同款约定）
-    lines.append(f"- **仓位**: {position if position else '未提供'}")
+    # 不得整行省略（#140 终审 C-4：与「0/缺失未提供」的价格行同款约定）；
+    # 词表外字面量（如 "none"）同款归一，不透传
+    lines.append(f"- **仓位**: {_fmt_position(position)}")
     if action in ("buy", "sell"):
         lines.append(f"- **入场价**: {_fmt_price(entry)}")
         lines.append(f"- **止损价**: {_fmt_price(stop)}")
