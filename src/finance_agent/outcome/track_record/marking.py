@@ -29,6 +29,7 @@ from finance_agent.outcome.track_record.model import (
     upsert_equity_point,
     upsert_metrics_daily,
 )
+from finance_agent.outcome.track_record.reference_price import reference_price_ok
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,18 @@ def mark_open_predictions(
         sign = -1.0 if p["direction"] == "short" else 1.0
         benchmark_base = _bench_base(bench_by_date, created)
         if rows.empty:
+            result["skipped"] += 1
+            continue
+        # 参考价失效防护（incident 032 根因 B 存量）：entry 与首盯市收盘偏离超阈值
+        # 视参考价不可信，跳过不写 marks，供人工甄别（append-only 冻结语义不修 entry）。
+        first_close = float(rows.iloc[0]["收盘"])
+        if not reference_price_ok(float(entry), first_close):
+            logger.warning(
+                "参考价失效（entry=%s vs 首盯市收盘=%s 偏离超阈值），跳过 %s 供人工甄别",
+                entry,
+                first_close,
+                p["prediction_id"],
+            )
             result["skipped"] += 1
             continue
         for _, r in rows.iterrows():

@@ -324,6 +324,17 @@ class TestMarking:
         marks = list_daily_marks(prediction_id=pid, db_path=db)
         assert marks[0]["cum_return"] == pytest.approx(0.01)  # 101/100-1，而非 -0.01
 
+    def test_stale_reference_price_skipped(self, db):
+        """incident 032 根因 B 存量防护：entry 与首盯市收盘偏离 >30% → skipped 不写 marks。"""
+        klines = {"600519": _df(["2026-06-02", "2026-06-03"], [1316.01, 1309.3])}
+        bench = _df(["2026-06-01", "2026-06-02"], [3000.0, 3100.0])
+        client = FakeClient(klines, bench)
+        pid = _insert(db, entry_price=1800.0, created_at="2026-06-01T10:00:00")
+        result = mark_open_predictions(client=client, db_path=db)
+        assert result["skipped"] == 1
+        assert result["marked"] == 0
+        assert list_daily_marks(prediction_id=pid, db_path=db) == []
+
     def test_marking_uses_reference_price_caliber(self, db, fake_client):
         """盯市取数用默认 qfq（与存储参考价同尺度），不得传 hfq（口径混用禁令）。
 
