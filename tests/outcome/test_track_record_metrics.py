@@ -151,14 +151,110 @@ def _marks_fixture():
 class TestPortfolioReturns:
     def test_equal_weight_mean_and_missing_excluded(self):
         rets = daily_portfolio_returns(_marks_fixture())
-        # 06-02: (0.01+0.02)/2；06-03: 只有 p1 Δ0.01；06-04: p1 Δ0.01, p2 Δ0.02 → 0.015
-        assert rets["2026-06-02"] == pytest.approx(0.015)
+        # 新口径（incident 032 根因 C）：首盯市日贡献 0；06-03 只有 p1 Δ0.01；
+        # 06-04: p1 Δ0.01, p2 Δ0.02 → 0.015
+        assert rets["2026-06-02"] == pytest.approx(0.0)
         assert rets["2026-06-03"] == pytest.approx(0.01)
         assert rets["2026-06-04"] == pytest.approx(0.015)
 
     def test_empty_day_is_zero(self):
         rets = daily_portfolio_returns([])
         assert rets == {}
+
+
+class TestCalendarCaliber:
+    """incident 032 根因 C：首盯市日 0 收益 + 交易日历覆盖空仓日 + 年化 n=交易日数。"""
+
+    def test_first_mark_day_contributes_zero(self):
+        marks = [
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-02",
+                "cum_return": 0.05,
+                "benchmark_price": 3000.0,
+            },
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-03",
+                "cum_return": 0.08,
+                "benchmark_price": 3010.0,
+            },
+        ]
+        rets = daily_portfolio_returns(marks)
+        assert rets["2026-06-02"] == pytest.approx(0.0)
+        assert rets["2026-06-03"] == pytest.approx(0.03)
+
+    def test_calendar_fills_empty_days_with_zero(self):
+        marks = [
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-02",
+                "cum_return": 0.01,
+                "benchmark_price": 3000.0,
+            },
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-05",
+                "cum_return": 0.02,
+                "benchmark_price": 3010.0,
+            },
+        ]
+        cal = ["2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05"]
+        rets = daily_portfolio_returns(marks, calendar_dates=cal)
+        assert set(rets) == set(cal)
+        assert rets["2026-06-03"] == pytest.approx(0.0)
+        assert rets["2026-06-04"] == pytest.approx(0.0)
+
+    def test_annual_uses_calendar_n_not_marked_n(self):
+        marks = [
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-02",
+                "cum_return": 0.00,
+                "benchmark_price": 3000.0,
+            },
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-05",
+                "cum_return": 0.01,
+                "benchmark_price": 3010.0,
+            },
+        ]
+        cal = ["2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05"]
+        pm = compute_metrics_from_marks(marks, risk_free_rate=0.02, calendar_dates=cal)
+        expected = 1.01 ** (252 / 4) - 1  # n=4，SHALL NOT 按 2 个盯市日外推
+        assert pm.annual_return == pytest.approx(expected, abs=1e-6)
+
+    def test_benchmark_nav_advances_on_empty_days(self):
+        marks = [
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-02",
+                "cum_return": 0.0,
+                "benchmark_price": 3000.0,
+            },
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-05",
+                "cum_return": 0.01,
+                "benchmark_price": 3100.0,
+            },
+        ]
+        bench = {
+            "2026-06-02": 3000.0,
+            "2026-06-03": 3030.0,
+            "2026-06-04": 3060.0,
+            "2026-06-05": 3090.0,
+        }
+        pm = compute_metrics_from_marks(
+            marks,
+            calendar_dates=["2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05"],
+            benchmark_by_date=bench,
+        )
+        navs = {p["date"]: p["benchmark_nav"] for p in pm.nav_points}
+        assert navs["2026-06-02"] == pytest.approx(1.0)
+        assert navs["2026-06-03"] == pytest.approx(3030.0 / 3000.0)
+        assert navs["2026-06-05"] == pytest.approx(3090.0 / 3000.0)
 
 
 class TestNeutralExclusion:

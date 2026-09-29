@@ -64,13 +64,16 @@ class PortfolioMetrics:
 
 def daily_portfolio_returns(
     marks: list[dict[str, Any]],
+    calendar_dates: list[str] | None = None,
     exclude_prediction_ids: set[str] | None = None,
 ) -> dict[str, float]:
     """按日聚合组合收益：每观点日收益 = 当日 cum_return - 前一盯市日 cum_return。
 
-    首盯市日的日收益 = 当日 cum_return（相对入场日）。等权平均当日有盯市的
-    各观点；当日无任何盯市（空仓）记 0。exclude_prediction_ids 用于把 neutral
-    方向观点排除出组合聚合（incident 032 根因 A：回避决策不产生持仓损益）。
+    首盯市日贡献 0（现金口径）：入场→首盯市日的漂移不进组合净值（incident 032
+    根因 C），组合日收益纯盯市差分、对坏参考价免疫。等权平均当日有盯市的各观点。
+    传入 calendar_dates（基准交易日历）时序列覆盖首个盯市日以来全部交易日，无盯市
+    交易日（空仓/整体缺数据）记 0；缺省维持 marks-only 口径。
+    exclude_prediction_ids 把 neutral 方向观点排除出组合聚合（根因 A）。
     """
     excl = exclude_prediction_ids or set()
     by_pred: dict[str, list[tuple[str, float]]] = defaultdict(list)
@@ -88,11 +91,18 @@ def daily_portfolio_returns(
         daily: dict[str, float] = {}
         prev: float | None = None
         for d, cum in pts:
-            daily[d] = cum - prev if prev is not None else cum
+            daily[d] = cum - prev if prev is not None else 0.0
             prev = cum
         per_pred[pid] = daily
 
-    dates = sorted({d for pid in per_pred.values() for d in pid})
+    if calendar_dates:
+        all_marked = [d for dd in per_pred.values() for d in dd]
+        if not all_marked:
+            return {}
+        first_mark = min(all_marked)
+        dates = sorted({d for d in calendar_dates if d >= first_mark})
+    else:
+        dates = sorted({d for dd in per_pred.values() for d in dd})
     out: dict[str, float] = {}
     for d in dates:
         rets = [per_pred[pid][d] for pid in per_pred if d in per_pred[pid]]
@@ -129,19 +139,23 @@ def _cum_nav(daily_returns: dict[str, float]) -> dict[str, float]:
 def compute_metrics_from_marks(
     marks: list[dict[str, Any]],
     risk_free_rate: float = RISK_FREE_RATE,
+    calendar_dates: list[str] | None = None,
+    benchmark_by_date: dict[str, float] | None = None,
     exclude_prediction_ids: set[str] | None = None,
 ) -> PortfolioMetrics:
     """由 daily_marks 计算组合指标与双净值曲线。
 
-    净值口径（阶段 B）：agent 与 benchmark 双线均以首个盯市日为基日归一为
-    1.0（跟踪起点对齐，便于叠加对比）；超额语义由 marks.cum_excess（相对
-    各自入场日基期）承担，不入净值线。年化/回撤指标基于真实累积序列。
-    exclude_prediction_ids：neutral 方向观点排除出组合聚合（incident 032 根因 A）。
+    净值口径（incident 032 后）：agent 与 benchmark 双线以首个盯市日为基日归一
+    1.0；观点首盯市日贡献 0，组合日收益纯盯市差分（入场参考价不进净值）。
+    传入 calendar_dates（基准交易日历）时序列覆盖首个盯市日以来全部交易日，
+    空仓日记 0，年化/波动 n = 交易日数；基准净值取 benchmark_by_date 按日历推进
+    （缺失日沿用前值持平）；缺省退化为 marks-only 口径（基准取 marks 内
+    benchmark_price）。
     """
     excl = exclude_prediction_ids or set()
     if excl:
         marks = [m for m in marks if m["prediction_id"] not in excl]
-    rets = daily_portfolio_returns(marks)
+    rets = daily_portfolio_returns(marks, calendar_dates=calendar_dates)
     if not rets:
         return PortfolioMetrics()
 
@@ -150,8 +164,25 @@ def compute_metrics_from_marks(
     dates = sorted(agent_cum)
     first_agent = agent_cum[dates[0]]
     agent_nav = {d: agent_cum[d] / first_agent for d in dates}
-    bench_ret = _benchmark_returns(marks)
-    bench_cum = _cum_nav(bench_ret) if bench_ret else {}
+
+    bench_cum: dict[str, float] = {}
+    if benchmark_by_date:
+        base: float | None = None
+        last: float | None = None
+        for d in dates:
+            close = benchmark_by_date.get(d)
+            if close is not None and close > 0:
+                if base is None:
+                    base = close
+                    last = 1.0
+                else:
+                    last = close / base
+            # 基准收盘缺失的交易日沿用前值持平（净值不倒退、图线不断点）
+            if last is not None:
+                bench_cum[d] = last
+    else:
+        bench_ret = _benchmark_returns(marks)
+        bench_cum = _cum_nav(bench_ret) if bench_ret else {}
 
     n = len(dates)
     final_nav = agent_cum[dates[-1]]
@@ -198,10 +229,15 @@ def compute_metrics_from_marks(
     )
 
 
-def build_equity_curve_points(db_path: Any = None) -> list[dict[str, Any]]:
+def build_equity_curve_points(
+    db_path: Any = None,
+    calendar_dates: list[str] | None = None,
+    benchmark_by_date: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
     """读库内全部 daily_marks → 净值点序列（供 equity_curve 表与 API 共用）。
 
-    neutral 方向观点一律排除出组合聚合（incident 032 根因 A）。
+    calendar_dates/benchmark_by_date 由日批透传（基准交易日历与收盘）；缺省
+    退化为 marks-only 口径。neutral 方向观点一律排除（incident 032 根因 A）。
     """
     from finance_agent.outcome.track_record.model import (
         list_daily_marks,
@@ -210,10 +246,19 @@ def build_equity_curve_points(db_path: Any = None) -> list[dict[str, Any]]:
 
     marks = list_daily_marks(db_path=db_path)
     excl = prediction_ids_by_direction("neutral", db_path=db_path)
-    return compute_metrics_from_marks(marks, exclude_prediction_ids=excl).nav_points
+    return compute_metrics_from_marks(
+        marks,
+        calendar_dates=calendar_dates,
+        benchmark_by_date=benchmark_by_date,
+        exclude_prediction_ids=excl,
+    ).nav_points
 
 
-def compute_metrics_snapshot(db_path: Any = None) -> dict[str, Any]:
+def compute_metrics_snapshot(
+    db_path: Any = None,
+    calendar_dates: list[str] | None = None,
+    benchmark_by_date: dict[str, float] | None = None,
+) -> dict[str, Any]:
     """聚合 predictions 统计 + 组合指标 → agent_metrics_daily 行内容。
 
     头条口径按 `horizon_days=DEFAULT_HORIZON_DAYS` 过滤（与 overview 同口径），
@@ -229,7 +274,12 @@ def compute_metrics_snapshot(db_path: Any = None) -> dict[str, Any]:
 
     stats = prediction_stats(source_type=None, db_path=db_path, horizon_days=DEFAULT_HORIZON_DAYS)
     excl = prediction_ids_by_direction("neutral", db_path=db_path)
-    pm = compute_metrics_from_marks(list_daily_marks(db_path=db_path), exclude_prediction_ids=excl)
+    pm = compute_metrics_from_marks(
+        list_daily_marks(db_path=db_path),
+        calendar_dates=calendar_dates,
+        benchmark_by_date=benchmark_by_date,
+        exclude_prediction_ids=excl,
+    )
     return {
         "sample_size": stats["total"],
         "settled": stats["settled"],
