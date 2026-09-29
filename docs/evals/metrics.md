@@ -123,6 +123,20 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 
 首个预登记：`evals/ablation/preregister/2026-09-23-outcome-forward-and-backtest.md`（门禁字段：主指标 / MDE / 决策阈值 / 样本量依据 / 停止规则 / 成本分型 / 泄漏控制；解析见 `evals/causal_ablation/preregister.py::OUTCOME_REQUIRED_FIELDS`，与因果消融的差异 = 无 rubric、增成本分型与泄漏控制）。
 
+### 1.10 战绩组合盯市/净值口径（delta `update-track-record-data-integrity`，2026-09-29 登记）
+
+历史战绩页组合指标（净值曲线/年化/波动/夏普/回撤/风险分）的口径。口径变更 SHALL 先改本节再动代码。落地时 derived 表（daily_marks/equity_curve/agent_metrics_daily）全量重建，重建前读数以 incident 032 归因为准，SHALL NOT 作为基线引用。
+
+| 项 | 口径 |
+|---|---|
+| ① neutral 盯市符号 | neutral（hold/watch）的 `daily_marks.cum_return` 按多头口径记录（= 标的相对参考价走势，与回避判定引擎 `judgment` 同号），SHALL NOT 取反；long/short 维持现行方向符号（long 多头、short 取反） |
+| ② 组合人口 | 组合日收益/净值/风险指标聚合 SHALL 排除 neutral 观点的盯市记录——回避决策不产生持仓损益；long/short 按观点等权 1/N |
+| ③ 净值口径 | 观点在组合内的首盯市日贡献 0 收益（现金口径）；组合日收益仅由相邻盯市日 `cum_return` 差分构成；入场参考价 SHALL NOT 参与净值与指标计算（展示口径保留在 marks 与观点详情页）；agent 与基准双线均以首个盯市日为基日归一 1.0 |
+| ④ 交易日历 | 净值序列以基准指数日 K 的交易日历为骨架，覆盖首个盯市日以来全部交易日；空仓/整体缺数据交易日 agent 日收益记 0；基准净值按同一日历推进（基准收盘取自基准日 K）；基准行情不可得时降级 marks-only 口径并记 WARN |
+| ⑤ 年化/风险 | 年化 = `final_nav^(252/n) - 1`，n = 交易日数（含空仓日），SHALL NOT 按有盯市日期数外推；波动 = 全序列日收益总体标准差 ×√252；夏普 = (年化 − rf)/波动（rf 默认 2%，`TRACK_RISK_FREE_RATE` 可配）；最大回撤基于全序列 NAV；风险分公式不变（§同 track-record-metrics spec） |
+| ⑥ 参考价护栏 | 落库：quote 价与最近 K 线收盘偏离 > `TRACK_ENTRY_PRICE_MAX_DEVIATION`（默认 0.30，覆盖各板块涨跌幅限制）→ 拒绝采信 quote、降级 K 线收盘 + WARN；盯市：entry_price 与 created 后首个交易日收盘偏离 > 阈值 → skipped + WARN 不写 marks（append-only 冻结语义下不修存量 entry_price，供人工甄别） |
+| ⑦ as_of | 总览 `portfolio.as_of` = equity_curve 最新数据日期，SHALL NOT 用快照写入日期（metric_date）冒充数据日期 |
+
 ---
 
 ## 2. 时间线（每轮一行，收口时追加）

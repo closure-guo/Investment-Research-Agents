@@ -460,3 +460,15 @@ def test_avoidance_stats_source_and_version_filter(db):
     )
     live = avoidance_stats(source_type="live", db_path=db)
     assert live["avoidance_win"] == 1 and live["settled"] == 1
+
+
+def test_prediction_ids_by_direction(db):
+    """组合聚合排除 neutral 的取数辅助（incident 032 根因 A）。"""
+    from finance_agent.outcome.track_record.model import prediction_ids_by_direction
+
+    long_id = _insert(db, direction="long")
+    neutral_id = _insert(db, direction="neutral")
+    got = prediction_ids_by_direction("neutral", db_path=db)
+    assert got == {neutral_id}
+    assert prediction_ids_by_direction("long", db_path=db) == {long_id}
+    assert prediction_ids_by_direction("short", db_path=db) == set()

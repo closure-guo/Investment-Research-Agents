@@ -112,7 +112,9 @@ def mark_open_predictions(
             result["errors"] += 1
             continue
 
-        sign = 1.0 if p["direction"] == "long" else -1.0
+        # neutral 按 long 口径记录（与 judgment 回避判定同号；incident 032 根因 A：
+        # 旧代码 else -1.0 把 hold/watch 当空头，产生幻影空头损益）
+        sign = -1.0 if p["direction"] == "short" else 1.0
         benchmark_base = _bench_base(bench_by_date, created)
         if rows.empty:
             result["skipped"] += 1

@@ -74,3 +74,4 @@
 - [013](013-sse-concurrent-text-corruption-20260804.md) 并发 bug 用静态推理修不好（必须 E2E 复现 + 运行时证据）；测试/生产共用 SQLite 导致数据不可恢复 → 补并发 E2E + DB 环境变量隔离
 - [023](023-agui-channel-stale-specs-disconnect-leak.md) 带红合并 + 「retry 能过就算 flaky」的错误归因让 CI 确定性断裂隐形两天；UI 通道迁移必须带走旧 E2E；SSE 生成器状态落库需把 aclose/GeneratorExit 当一等断连路径测试
 - [031](031-test-db-leak-predictions-20260922.md) 测试泄漏生产库：假决策写进 predictions 66 行（8 天未发现）→ 测试隔离必须「默认安全」（conftest 全局兜底），旁路落库挂点在测试环境须指向临时库
+- [032](032-track-record-portfolio-metrics-corruption-20260929.md) 历史战绩组合指标失真（快照年化 +2853%）：neutral 幻影空头盯市 + 坏参考价无校验 + 年化 n 口径放大三缺陷叠加 → 盯市符号单点对齐、参考价双护栏、交易日历年化口径、指标量级合理性纳入健康检查

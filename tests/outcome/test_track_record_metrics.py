@@ -161,6 +161,60 @@ class TestPortfolioReturns:
         assert rets == {}
 
 
+class TestNeutralExclusion:
+    """incident 032 根因 A：neutral（hold/watch）盯市不得进组合净值/指标。"""
+
+    def test_neutral_marks_excluded_from_portfolio(self):
+        marks = [
+            {
+                "prediction_id": "n1",
+                "mark_date": "2026-06-02",
+                "cum_return": 0.05,
+                "benchmark_price": 3000.0,
+            },
+            {
+                "prediction_id": "n1",
+                "mark_date": "2026-06-03",
+                "cum_return": 0.10,
+                "benchmark_price": 3010.0,
+            },
+        ]
+        pm = compute_metrics_from_marks(marks, risk_free_rate=0.02, exclude_prediction_ids={"n1"})
+        assert pm.nav_points == []
+        assert pm.annual_return is None
+
+    def test_neutral_diff_not_in_portfolio_mean(self):
+        marks = [
+            {
+                "prediction_id": "n1",
+                "mark_date": "2026-06-02",
+                "cum_return": 0.50,
+                "benchmark_price": 3000.0,
+            },
+            {
+                "prediction_id": "n1",
+                "mark_date": "2026-06-03",
+                "cum_return": 0.40,
+                "benchmark_price": 3010.0,
+            },
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-02",
+                "cum_return": 0.01,
+                "benchmark_price": 3000.0,
+            },
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-03",
+                "cum_return": 0.02,
+                "benchmark_price": 3010.0,
+            },
+        ]
+        rets = daily_portfolio_returns(marks, exclude_prediction_ids={"n1"})
+        # 06-03 只含 p1 的 +0.01；n1 的 -0.10 幻影空头损益被排除
+        assert rets["2026-06-03"] == pytest.approx(0.01)
+
+
 class TestRiskScore:
     def test_observed_case_maps_to_max_risk(self):
         # 力鼎光电观测案例：回撤 41.2 / 波动 75.6 → 0.6*41.2+0.4*75.6 ≈ 55 → clip 10
@@ -262,6 +316,13 @@ class TestMarking:
         assert m["cum_return"] == pytest.approx(0.01)
         # 超额 = 股票收益 - 基准收益（基准基期 = entry 日 06-01 收盘 3000；落库 6 位小数）
         assert m["cum_excess"] == pytest.approx(0.01 - (3100.0 / 3000.0 - 1.0), abs=1e-6)
+
+    def test_neutral_marked_long_caliber(self, db, fake_client):
+        """incident 032 根因 A：neutral 盯市按多头口径（与回避判定同号），不取反。"""
+        pid = _insert(db, direction="neutral", created_at="2026-06-01T10:00:00")
+        mark_open_predictions(client=fake_client, db_path=db)
+        marks = list_daily_marks(prediction_id=pid, db_path=db)
+        assert marks[0]["cum_return"] == pytest.approx(0.01)  # 101/100-1，而非 -0.01
 
     def test_marking_uses_reference_price_caliber(self, db, fake_client):
         """盯市取数用默认 qfq（与存储参考价同尺度），不得传 hfq（口径混用禁令）。

@@ -62,15 +62,22 @@ class PortfolioMetrics:
     nav_points: list[dict[str, Any]] = field(default_factory=list)
 
 
-def daily_portfolio_returns(marks: list[dict[str, Any]]) -> dict[str, float]:
+def daily_portfolio_returns(
+    marks: list[dict[str, Any]],
+    exclude_prediction_ids: set[str] | None = None,
+) -> dict[str, float]:
     """按日聚合组合收益：每观点日收益 = 当日 cum_return - 前一盯市日 cum_return。
 
     首盯市日的日收益 = 当日 cum_return（相对入场日）。等权平均当日有盯市的
-    各观点；当日无任何盯市（空仓）记 0。
+    各观点；当日无任何盯市（空仓）记 0。exclude_prediction_ids 用于把 neutral
+    方向观点排除出组合聚合（incident 032 根因 A：回避决策不产生持仓损益）。
     """
+    excl = exclude_prediction_ids or set()
     by_pred: dict[str, list[tuple[str, float]]] = defaultdict(list)
     for m in marks:
         if m.get("cum_return") is None:
+            continue
+        if m["prediction_id"] in excl:
             continue
         by_pred[m["prediction_id"]].append((str(m["mark_date"]), float(m["cum_return"])))
     for pts in by_pred.values():
@@ -122,13 +129,18 @@ def _cum_nav(daily_returns: dict[str, float]) -> dict[str, float]:
 def compute_metrics_from_marks(
     marks: list[dict[str, Any]],
     risk_free_rate: float = RISK_FREE_RATE,
+    exclude_prediction_ids: set[str] | None = None,
 ) -> PortfolioMetrics:
     """由 daily_marks 计算组合指标与双净值曲线。
 
     净值口径（阶段 B）：agent 与 benchmark 双线均以首个盯市日为基日归一为
     1.0（跟踪起点对齐，便于叠加对比）；超额语义由 marks.cum_excess（相对
     各自入场日基期）承担，不入净值线。年化/回撤指标基于真实累积序列。
+    exclude_prediction_ids：neutral 方向观点排除出组合聚合（incident 032 根因 A）。
     """
+    excl = exclude_prediction_ids or set()
+    if excl:
+        marks = [m for m in marks if m["prediction_id"] not in excl]
     rets = daily_portfolio_returns(marks)
     if not rets:
         return PortfolioMetrics()
@@ -187,11 +199,18 @@ def compute_metrics_from_marks(
 
 
 def build_equity_curve_points(db_path: Any = None) -> list[dict[str, Any]]:
-    """读库内全部 daily_marks → 净值点序列（供 equity_curve 表与 API 共用）。"""
-    from finance_agent.outcome.track_record.model import list_daily_marks
+    """读库内全部 daily_marks → 净值点序列（供 equity_curve 表与 API 共用）。
+
+    neutral 方向观点一律排除出组合聚合（incident 032 根因 A）。
+    """
+    from finance_agent.outcome.track_record.model import (
+        list_daily_marks,
+        prediction_ids_by_direction,
+    )
 
     marks = list_daily_marks(db_path=db_path)
-    return compute_metrics_from_marks(marks).nav_points
+    excl = prediction_ids_by_direction("neutral", db_path=db_path)
+    return compute_metrics_from_marks(marks, exclude_prediction_ids=excl).nav_points
 
 
 def compute_metrics_snapshot(db_path: Any = None) -> dict[str, Any]:
@@ -199,15 +218,18 @@ def compute_metrics_snapshot(db_path: Any = None) -> dict[str, Any]:
 
     头条口径按 `horizon_days=DEFAULT_HORIZON_DAYS` 过滤（与 overview 同口径），
     避免日批快照把跨切点的 252 存量行混入同一读数（口径切点分段，metrics.md §1.9）。
+    组合指标聚合排除 neutral 方向观点（incident 032 根因 A）。
     """
     from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS
     from finance_agent.outcome.track_record.model import (
         list_daily_marks,
+        prediction_ids_by_direction,
         prediction_stats,
     )
 
     stats = prediction_stats(source_type=None, db_path=db_path, horizon_days=DEFAULT_HORIZON_DAYS)
-    pm = compute_metrics_from_marks(list_daily_marks(db_path=db_path))
+    excl = prediction_ids_by_direction("neutral", db_path=db_path)
+    pm = compute_metrics_from_marks(list_daily_marks(db_path=db_path), exclude_prediction_ids=excl)
     return {
         "sample_size": stats["total"],
         "settled": stats["settled"],

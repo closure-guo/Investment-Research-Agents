@@ -438,6 +438,18 @@ def list_daily_marks(
         conn.close()
 
 
+def prediction_ids_by_direction(direction: str, db_path: str | Path | None = None) -> set[str]:
+    """按方向取 prediction_id 集合（组合聚合排除 neutral 用，incident 032 根因 A）。"""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT prediction_id FROM predictions WHERE direction=?", (direction,)
+        ).fetchall()
+        return {r["prediction_id"] for r in rows}
+    finally:
+        conn.close()
+
+
 # ── equity_curve：组合净值（同日期覆盖；幂等）──
 def upsert_equity_point(
     curve_date: str,
