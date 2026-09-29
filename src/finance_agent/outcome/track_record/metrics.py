@@ -100,7 +100,8 @@ def daily_portfolio_returns(
         if not all_marked:
             return {}
         first_mark = min(all_marked)
-        dates = sorted({d for d in calendar_dates if d >= first_mark})
+        # 日历骨架之外保留 mark 日期：基准日 K 滞后/截断时个股新鲜 mark 不得静默丢弃
+        dates = sorted({d for d in calendar_dates if d >= first_mark} | set(all_marked))
     else:
         dates = sorted({d for dd in per_pred.values() for d in dd})
     out: dict[str, float] = {}

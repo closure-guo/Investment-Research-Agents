@@ -61,14 +61,30 @@ def _bench_base(bench_by_date: dict[str, float], entry_date: str) -> float | Non
 
 
 def _fetch_benchmark(client: Any, kline_days: int) -> pd.DataFrame | None:
-    """拉取并归一基准日 K；失败仅 WARN 返回 None（超额字段置空/日历降级）。"""
+    """拉取并归一基准日 K；失败/空结果仅 WARN 返回 None（超额置空/日历降级）。"""
     try:
         benchmark = client.fetch_index_kline(BENCHMARK_CODE, days=kline_days)
         if benchmark is not None and not benchmark.empty:
             return _normalize_dates(benchmark)
+        logger.warning("基准行情返回空,按无基准降级")
     except Exception as e:  # noqa: BLE001
         logger.warning("基准行情拉取失败,超额收益字段置空: %s", e)
     return None
+
+
+# 参考价防护仅对「created 后首个交易日」在近邻窗口内的观点生效（日历日）
+_GUARD_WINDOW_DAYS = 7
+
+
+def _within_guard_window(created: str, first_mark: str) -> bool:
+    """首盯日距 created 超窗（280 根 K 线窗口滑动的老龄 open 观点）→ 比对无意义。"""
+    try:
+        from datetime import date
+
+        delta = abs((date.fromisoformat(first_mark) - date.fromisoformat(created)).days)
+    except ValueError:
+        return False
+    return delta <= _GUARD_WINDOW_DAYS
 
 
 def mark_open_predictions(
@@ -129,8 +145,12 @@ def mark_open_predictions(
             continue
         # 参考价失效防护（incident 032 根因 B 存量）：entry 与首盯市收盘偏离超阈值
         # 视参考价不可信，跳过不写 marks，供人工甄别（append-only 冻结语义不修 entry）。
+        # 仅在首盯日临近 created 时比对——280 根窗口滑动的老龄观点首盯日远离
+        # created，收盘差异巨大是持仓期行情，不是坏参考价，不适用防护。
         first_close = float(rows.iloc[0]["收盘"])
-        if not reference_price_ok(float(entry), first_close):
+        if _within_guard_window(created, str(rows.iloc[0]["日期"])) and not reference_price_ok(
+            float(entry), first_close
+        ):
             logger.warning(
                 "参考价失效（entry=%s vs 首盯市收盘=%s 偏离超阈值），跳过 %s 供人工甄别",
                 entry,

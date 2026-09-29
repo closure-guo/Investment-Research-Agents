@@ -25,3 +25,10 @@ def test_env_override(monkeypatch):
 def test_nonpositive_reference_passes():
     """reference 非正视为不可校验（放行，由调用方另行兜底）。"""
     assert reference_price_ok(100.0, 0.0) is True
+
+
+def test_nonpositive_price_rejected():
+    """price 非正 → 拒绝（ingest 落入 kline 兜底）；reference 非正 → 不可校验放行。"""
+    assert reference_price_ok(0.0, 100.0) is False
+    assert reference_price_ok(-1.0, 100.0) is False
+    assert reference_price_ok(100.0, 0.0) is True

@@ -256,6 +256,27 @@ class TestCalendarCaliber:
         assert navs["2026-06-03"] == pytest.approx(3030.0 / 3000.0)
         assert navs["2026-06-05"] == pytest.approx(3090.0 / 3000.0)
 
+    def test_mark_dates_beyond_calendar_kept(self):
+        """审查 Fix：mark 日期超出基准日历（基准日 K 滞后）不得静默丢弃。"""
+        marks = [
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-02",
+                "cum_return": 0.0,
+                "benchmark_price": 3000.0,
+            },
+            {
+                "prediction_id": "p1",
+                "mark_date": "2026-06-08",
+                "cum_return": 0.01,
+                "benchmark_price": 3010.0,
+            },
+        ]
+        rets = daily_portfolio_returns(marks, calendar_dates=["2026-06-02", "2026-06-03"])
+        assert set(rets) == {"2026-06-02", "2026-06-03", "2026-06-08"}
+        assert rets["2026-06-03"] == pytest.approx(0.0)
+        assert rets["2026-06-08"] == pytest.approx(0.01)
+
 
 class TestNeutralExclusion:
     """incident 032 根因 A：neutral（hold/watch）盯市不得进组合净值/指标。"""
@@ -431,6 +452,21 @@ class TestMarking:
         assert result["marked"] == 0
         assert list_daily_marks(prediction_id=pid, db_path=db) == []
 
+    def test_aged_view_outside_kline_window_not_guarded(self, db):
+        """审查 Important#1：280 根窗口滑动后首盯日远离 created，参考价防护不适用。
+
+        老龄 open 观点（created 远早于窗口）的首盯市收盘本就与参考价差异巨大，
+        比对无意义——不跳过、正常盯市，否则合法持仓期涨幅会被误判为坏参考价。
+        """
+        klines = {"600519": _df(["2026-06-02", "2026-06-03"], [15.0, 15.3])}
+        bench = _df(["2026-06-01", "2026-06-02"], [3000.0, 3100.0])
+        client = FakeClient(klines, bench)
+        pid = _insert(db, entry_price=10.0, created_at="2025-06-01T10:00:00")
+        result = mark_open_predictions(client=client, db_path=db)
+        assert result["marked"] == 2
+        assert result["skipped"] == 0
+        assert len(list_daily_marks(prediction_id=pid, db_path=db)) == 2
+
     def test_marking_uses_reference_price_caliber(self, db, fake_client):
         """盯市取数用默认 qfq（与存储参考价同尺度），不得传 hfq（口径混用禁令）。
 
@@ -513,6 +549,18 @@ class TestEquityCurve:
         assert latest["sample_size"] == 1
         assert latest["settled"] == 0
         assert latest["risk_score"] is not None
+
+    def test_neutral_db_marks_excluded_from_curve(self, db, fake_client):
+        """端到端（审查 Minor#5）：库内仅 neutral 观点 marks → 净值表为空，不进组合。"""
+        _insert(db, direction="neutral", created_at="2026-06-01T10:00:00")
+        result = run_daily_marking(client=fake_client, db_path=db)
+        assert result["marked"] == 3  # neutral 照常盯市（详情页展示口径）
+        import sqlite3
+
+        conn = sqlite3.connect(db)
+        (n,) = conn.execute("SELECT COUNT(*) FROM equity_curve").fetchone()
+        conn.close()
+        assert n == 0  # 但不进组合净值
 
     def test_benchmark_nav_present(self, db, fake_client):
         _insert(db, created_at="2026-06-01T10:00:00")

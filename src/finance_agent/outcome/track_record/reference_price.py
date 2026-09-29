@@ -22,7 +22,13 @@ def max_reference_deviation() -> float:
 
 
 def reference_price_ok(price: float, reference: float) -> bool:
-    """|price/reference - 1| 未超阈值 → True。任一价非正视为不可校验（True）。"""
-    if reference <= 0 or price <= 0:
+    """|price/reference - 1| 未超阈值 → True。
+
+    price 非正 → False（不是可用价格，调用方应走兜底）；reference 非正 →
+    True（无法校验，放行由调用方另行兜底）。
+    """
+    if price <= 0:
+        return False
+    if reference <= 0:
         return True
     return abs(price / reference - 1.0) <= max_reference_deviation()

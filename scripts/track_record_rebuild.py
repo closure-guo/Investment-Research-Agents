@@ -1,7 +1,13 @@
 """wipe + 重建 daily_marks / equity_curve / agent_metrics_daily（delta update-track-record-data-integrity）。
 
-三张 derived 表可随时从 predictions + 行情重算；predictions / audit_log 不动。
-重算前自动备份 <db>.bak-rebuild。建议先拷贝生产库演练：
+三张 derived 表从 predictions + 行情重算；predictions / audit_log 不动。
+重算前自动备份 <db>.bak-rebuild-<时间戳>。
+
+⚠️ 可重算性边界：marking 仅盯 status=open 观点——wipe 后「已结算观点的历史
+marks」不可再生，净值历史将变为仅现存 open 观点的生存者截断序列。执行前确认
+库内已结算行（当前为 0，无实际损失）；未来有已结算数据时须先评估再执行。
+
+用法（先拷贝生产库演练）：
 
   cp data/sessions.db /tmp/sessions-rebuild-check.db
   uv run python scripts/track_record_rebuild.py --db-path /tmp/sessions-rebuild-check.db --yes
@@ -14,6 +20,7 @@ import os
 import shutil
 import sqlite3
 import sys
+from datetime import datetime
 
 from finance_agent.outcome.track_record.marking import run_daily_marking
 from finance_agent.outcome.track_record.model import (
@@ -46,7 +53,8 @@ def main() -> None:
             "拒绝执行：将清空 daily_marks/equity_curve/agent_metrics_daily，需 --yes 确认（建议先拷贝库演练）"
         )
     db = _resolve_db(args.db_path)
-    shutil.copy2(db, db + ".bak-rebuild")  # 重算前自动备份
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    shutil.copy2(db, f"{db}.bak-rebuild-{stamp}")  # 时间戳备份名，不覆盖历史备份
     init_track_record_tables(db)
     conn = sqlite3.connect(db)
     try:
