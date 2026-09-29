@@ -550,6 +550,16 @@ def get_latest_metrics(db_path: str | Path | None = None) -> dict[str, Any] | No
         conn.close()
 
 
+def latest_equity_date(db_path: str | Path | None = None) -> str | None:
+    """净值数据最新日期（总览 portfolio.as_of 用，incident 032 诚实性）。"""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute("SELECT MAX(curve_date) AS d FROM equity_curve").fetchone()
+        return row["d"] if row else None
+    finally:
+        conn.close()
+
+
 def insert_prediction(
     record: dict[str, Any], db_path: str | Path | None = None, status: str = "open"
 ) -> str:

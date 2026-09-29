@@ -211,6 +211,7 @@ def test_overview_portfolio_block_with_snapshot(monkeypatch, tmp_path):
         },
         db_path=db,
     )
+    upsert_equity_point("2026-09-04", agent_nav=1.0, benchmark_nav=1.0, db_path=db)
     data = TestClient(app).get("/api/v1/track-record/overview").json()
     p = data["portfolio"]
     assert p["available"] is True
@@ -218,6 +219,38 @@ def test_overview_portfolio_block_with_snapshot(monkeypatch, tmp_path):
     assert p["risk_score"] == 5
     assert p["risk_label"] == "中"
     assert p["as_of"] == "2026-09-04"
+
+
+def test_overview_portfolio_as_of_is_data_date(monkeypatch, tmp_path):
+    """incident 032 伴生发现：快照写入日 ≠ 数据日期时 as_of 取后者（诚实性）。
+
+    快照 metric_date=2026-09-28，但净值数据停在 2026-09-24（marking 断更）→
+    as_of SHALL 为 2026-09-24，SHALL NOT 冒称 09-28。
+    """
+    db = _use_db(monkeypatch, tmp_path)
+    upsert_metrics_daily(
+        "2026-09-28",
+        {"sample_size": 1, "settled": 0, "risk_score": 5, "risk_label": "中"},
+        db_path=db,
+    )
+    upsert_equity_point("2026-09-24", agent_nav=0.99, benchmark_nav=0.97, db_path=db)
+    data = TestClient(app).get("/api/v1/track-record/overview").json()
+    p = data["portfolio"]
+    assert p["available"] is True
+    assert p["as_of"] == "2026-09-24"
+
+
+def test_overview_portfolio_metrics_without_curve_is_unavailable(monkeypatch, tmp_path):
+    """只有指标快照、无任何净值数据 → available=false（无净值不伪称有组合）。"""
+    db = _use_db(monkeypatch, tmp_path)
+    upsert_metrics_daily(
+        "2026-09-28",
+        {"sample_size": 1, "settled": 0, "risk_score": 5, "risk_label": "中"},
+        db_path=db,
+    )
+    data = TestClient(app).get("/api/v1/track-record/overview").json()
+    assert data["portfolio"]["available"] is False
+    assert data["portfolio"]["as_of"] is None
 
 
 def test_equity_curve_empty(monkeypatch, tmp_path):
