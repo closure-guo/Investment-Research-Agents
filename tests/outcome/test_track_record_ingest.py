@@ -179,3 +179,62 @@ def test_ingest_direction_matches_shared_mapping(monkeypatch, action, expected):
     accumulated = {"final_trade_decision": {"action": action, "confidence": 0.7}}
     persist_prediction_from_accumulated(accumulated, "sess-map", "600519", "贵州茅台")
     assert captured["direction"] == expected
+
+
+def test_ingest_rejects_quote_deviating_beyond_threshold(tmp_path, monkeypatch, caplog):
+    """incident 032 根因 B：quote 与 kline 收盘偏离 >30% → 降级 kline 收盘 + WARN。
+
+    复现生产事故形状：茅台 quote=1800 vs 实际收盘 1330（偏离 35%）。
+    """
+    db = tmp_path / "bad.db"
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(db))
+    init_track_record_tables(db)
+    accumulated = {
+        "final_trade_decision": {"action": "buy", "confidence": 0.7},
+        "stock_quote": {"price": 1800.0},
+        "kline": [{"收盘": 1330.0}],
+    }
+    with caplog.at_level(logging.WARNING, logger="finance_agent.track_record.ingest"):
+        persist_prediction_from_accumulated(accumulated, "sess-bad", "600519", "贵州茅台")
+    conn = sqlite3.connect(db)
+    (entry,) = conn.execute("SELECT entry_price FROM predictions").fetchone()
+    conn.close()
+    assert entry == pytest.approx(1330.0)
+    assert any("交叉校验" in r.message for r in caplog.records)
+
+
+def test_ingest_keeps_quote_within_threshold(tmp_path, monkeypatch, caplog):
+    """quote 与 kline 收盘偏离在阈值内 → 现行 quote 优先语义保留。"""
+    db = tmp_path / "ok.db"
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(db))
+    init_track_record_tables(db)
+    accumulated = {
+        "final_trade_decision": {"action": "buy", "confidence": 0.7},
+        "stock_quote": {"price": 100.5},
+        "kline": [{"收盘": 100.0}],
+    }
+    with caplog.at_level(logging.WARNING, logger="finance_agent.track_record.ingest"):
+        persist_prediction_from_accumulated(accumulated, "sess-ok", "600519", "贵州茅台")
+    conn = sqlite3.connect(db)
+    (entry,) = conn.execute("SELECT entry_price FROM predictions").fetchone()
+    conn.close()
+    assert entry == pytest.approx(100.5)
+    assert not any("交叉校验" in r.message for r in caplog.records)
+
+
+def test_ingest_quote_without_kline_keeps_with_warn(tmp_path, monkeypatch, caplog):
+    """quote 可得但 K 线缺失（无法交叉校验）→ 保留 quote + WARN。"""
+    db = tmp_path / "nok.db"
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(db))
+    init_track_record_tables(db)
+    accumulated = {
+        "final_trade_decision": {"action": "buy", "confidence": 0.7},
+        "stock_quote": {"price": 1800.0},
+    }
+    with caplog.at_level(logging.WARNING, logger="finance_agent.track_record.ingest"):
+        persist_prediction_from_accumulated(accumulated, "sess-nok", "600519", "贵州茅台")
+    conn = sqlite3.connect(db)
+    (entry,) = conn.execute("SELECT entry_price FROM predictions").fetchone()
+    conn.close()
+    assert entry == pytest.approx(1800.0)
+    assert any("无法交叉校验" in r.message for r in caplog.records)

@@ -16,6 +16,7 @@ from finance_agent.outcome.track_record.judgment import (
     direction_for_action,
 )
 from finance_agent.outcome.track_record.model import insert_prediction
+from finance_agent.outcome.track_record.reference_price import reference_price_ok
 
 logger = logging.getLogger("finance_agent.track_record.ingest")
 
@@ -44,12 +45,26 @@ def persist_prediction_from_accumulated(
             return
         action = decision["action"]
         direction = direction_for_action(action)
-        entry_price = (accumulated.get("stock_quote") or {}).get("price")
-        if entry_price is None:
-            kline = accumulated.get("kline")
-            if kline is not None and len(kline) > 0:
-                last = kline.iloc[-1] if hasattr(kline, "iloc") else kline[-1]
-                entry_price = float(last["收盘"])
+        # 参考价护栏（incident 032 根因 B）：quote 与最近 K 线收盘交叉校验，
+        # 偏离超阈值 → 拒绝采信 quote、降级 K 线收盘；K 线缺失无法校验 → 保留 quote + WARN。
+        quote_price = (accumulated.get("stock_quote") or {}).get("price")
+        kline_close = _kline_last_close(accumulated.get("kline"))
+        entry_price: float | None = None
+        if quote_price is not None and kline_close is not None:
+            if reference_price_ok(float(quote_price), float(kline_close)):
+                entry_price = float(quote_price)
+            else:
+                logger.warning(
+                    "参考价交叉校验未过（quote=%s vs kline收盘=%s 偏离超阈值）→ 降级采用 K 线收盘",
+                    quote_price,
+                    kline_close,
+                )
+                entry_price = float(kline_close)
+        elif quote_price is not None:
+            logger.warning("参考价保留 quote=%s：K 线缺失无法交叉校验", quote_price)
+            entry_price = float(quote_price)
+        elif kline_close is not None:
+            entry_price = float(kline_close)
         status = "open"
         resolution_rule = None
         if entry_price is None:
@@ -88,6 +103,17 @@ def persist_prediction_from_accumulated(
         logger.info("prediction 已落库: %s %s status=%s", stock_code, action, status)
     except Exception:  # noqa: BLE001 - 旁路铁律:失败仅 ERROR 不阻断业务
         logger.exception("prediction 落库失败(不阻断业务)")
+
+
+def _kline_last_close(kline: Any) -> float | None:
+    """kline（DataFrame 或行序列）最新收盘；不可得 → None。"""
+    if kline is None or len(kline) == 0:
+        return None
+    last = kline.iloc[-1] if hasattr(kline, "iloc") else kline[-1]
+    try:
+        return float(last["收盘"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _now_iso() -> str:
