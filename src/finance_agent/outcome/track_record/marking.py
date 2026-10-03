@@ -220,6 +220,19 @@ def run_daily_marking(
             db_path=db_path,
         )
 
+    # update-risk-free-rate-source：指标快照前同步无风险利率（快照当轮即用新值）。
+    # 失败隔离：同步异常不阻断盯市/快照，快照侧走回退链（carry-forward/常数）。
+    rf_summary: dict[str, Any] = {"rf_stored": 0, "rf_failed": True}
+    try:
+        from finance_agent.outcome.track_record.risk_free import sync_risk_free_rates
+
+        rf_summary = {
+            "rf_stored": sync_risk_free_rates(client=client, db_path=db_path)["stored"],
+            "rf_failed": False,
+        }
+    except Exception as e:  # noqa: BLE001 - rf 缺失不得放大成盯市失败
+        logger.warning("无风险利率同步失败(回退链兜底): %s", e)
+
     metrics_date = persist_metrics_snapshot(
         db_path=db_path, client=client, kline_days=kline_days, benchmark=benchmark
     )
@@ -244,6 +257,7 @@ def run_daily_marking(
         **mark_result,
         "equity_points": len(points),
         "metrics_date": metrics_date,
+        **rf_summary,
         **index_summary,
     }
 

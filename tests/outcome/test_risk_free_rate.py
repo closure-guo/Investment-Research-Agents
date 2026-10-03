@@ -228,3 +228,68 @@ class TestSharpeNewCaliber:
         assert beta == pytest.approx(0.0, abs=1e-6)  # ra 恒定 → 与 rb 无协方差 → β=0（var(rb)>0）
         expected_alpha = (0.001 - 0.012 / 252) * 252
         assert alpha == pytest.approx(expected_alpha, abs=1e-4)
+
+
+class TestDailyBatchRfHook:
+    def _run(self, db, rf_client):
+        """一条 open 观点 + 合成个股/基准 K 跑日批（对齐既有 FakeClient 形态）。"""
+        import pandas as pd
+
+        from finance_agent.outcome.track_record.marking import run_daily_marking
+        from finance_agent.outcome.track_record.model import insert_prediction
+
+        insert_prediction(
+            {
+                "source_type": "live",
+                "symbol": "600519.SH",
+                "symbol_name": "茅台",
+                "direction": "long",
+                "entry_price": 100.0,
+                "target_price": 120.0,
+                "horizon_days": 252,
+                "confidence": 0.8,
+                "benchmark": "000300.SH",
+                "rationale_snapshot": {"markdown": "x"},
+                "created_at": "2026-09-01",
+            },
+            db_path=db,
+        )
+
+        dates = pd.bdate_range("2026-09-02", periods=30).strftime("%Y-%m-%d")
+        kline = pd.DataFrame({"日期": dates, "收盘": [100.0 + i for i in range(len(dates))]})
+        bench = pd.DataFrame({"日期": dates, "收盘": [3000.0 + i for i in range(len(dates))]})
+
+        class FakeClient:
+            def fetch_kline(self, code, days=280, **kw):
+                return kline
+
+            def fetch_index_kline(self, code, days=280, **kw):
+                return bench
+
+            fetch_bond_yield_curve = rf_client.fetch_bond_yield_curve
+
+        return run_daily_marking(client=FakeClient(), db_path=db)
+
+    def test_rf_synced_before_snapshot(self, db):
+        import pandas as pd
+
+        from finance_agent.outcome.track_record.model import list_risk_free_rates
+
+        class RfOk:
+            def fetch_bond_yield_curve(self, start_date, end_date):
+                return pd.DataFrame({"日期": ["2026-09-02", "2026-09-03"], "1年": [1.22, 1.23]})
+
+        result = self._run(db, RfOk())
+        assert result["rf_stored"] == 2
+        assert result["rf_failed"] is False
+        assert len(list_risk_free_rates(db_path=db)) == 2
+
+    def test_rf_failure_isolated(self, db):
+        class RfBoom:
+            def fetch_bond_yield_curve(self, start_date, end_date):
+                raise RuntimeError("chinabond down")
+
+        result = self._run(db, RfBoom())
+        assert result["rf_failed"] is True
+        assert result["marked"] > 0  # 盯市不受影响
+        assert result["metrics_date"]  # 快照照常落库
