@@ -900,7 +900,12 @@ class AKShareClient:
         track_record.risk_free 层负责，与本文件其余 fetch_* 返回原单位的约定一致）。
         仅取「中债国债收益率曲线」；空结果/调用失败返回 None。
         """
-        df = _call_ak(ak.bond_china_yield, start_date=start_date, end_date=end_date)
+        # chinabond 端点要求紧凑日期（无连字符）；本方法对外接受 ISO 格式
+        df = _call_ak(
+            ak.bond_china_yield,
+            start_date=start_date.replace("-", ""),
+            end_date=end_date.replace("-", ""),
+        )
         if df is None or df.empty:
             return None
         df = df[df["曲线名称"] == "中债国债收益率曲线"]

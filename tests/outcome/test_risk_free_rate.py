@@ -78,9 +78,17 @@ class TestFetchBondYieldCurve:
                 }
             )
 
-        monkeypatch.setattr(akshare_client.ak, "bond_china_yield", fake_bond_china_yield)
+        seen = []
+
+        def spy(start_date="20200204", end_date="20210124", **kw):
+            seen.append((start_date, end_date))
+            return fake_bond_china_yield(start_date, end_date, **kw)
+
+        monkeypatch.setattr(akshare_client.ak, "bond_china_yield", spy)
         client = akshare_client.AKShareClient()
+        # 接口契约：接受 ISO 日期，内部转紧凑格式（chinabond 端点要求无连字符）
         df = client.fetch_bond_yield_curve("2026-09-28", "2026-09-29")
+        assert seen == [("20260928", "20260929")]
         assert list(df["日期"]) == ["2026-09-28", "2026-09-29"]
         assert df["1年"].tolist() == [1.2257, 1.2197]
 
