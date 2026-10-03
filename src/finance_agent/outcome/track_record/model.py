@@ -183,6 +183,13 @@ CREATE TABLE IF NOT EXISTS index_closes (
   close      REAL NOT NULL,
   PRIMARY KEY (index_code, trade_date)
 );
+
+-- ── update-risk-free-rate-source ──
+CREATE TABLE IF NOT EXISTS risk_free_rates (
+  rate_date TEXT PRIMARY KEY,
+  rate      REAL NOT NULL,
+  source    TEXT NOT NULL
+);
 """
 
 
@@ -553,6 +560,49 @@ def list_index_closes(
                 (index_code, end),
             )
         return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+# ── risk_free_rates:无风险利率日频序列(update-risk-free-rate-source;夏普/α 消费)──
+def upsert_risk_free_rates(
+    rows: list[tuple[str, float, str]],
+    db_path: str | Path | None = None,
+) -> int:
+    """幂等写入日频无风险利率（rate_date, rate 年化小数, source）；同日覆盖。"""
+    if not rows:
+        return 0
+    conn = _connect(db_path)
+    try:
+        conn.executemany(
+            "INSERT OR REPLACE INTO risk_free_rates (rate_date, rate, source) VALUES (?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+
+def list_risk_free_rates(db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    """全部无风险利率记录，按 rate_date 升序。"""
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute("SELECT rate_date, rate, source FROM risk_free_rates ORDER BY rate_date")
+        return [
+            {"rate_date": str(r[0]), "rate": float(r[1]), "source": str(r[2])}
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def earliest_mark_date(db_path: str | Path | None = None) -> str | None:
+    """daily_marks 最早 mark_date；空表返回 None（sync 回填区间起点用）。"""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute("SELECT MIN(mark_date) FROM daily_marks").fetchone()
+        return str(row[0]) if row and row[0] else None
     finally:
         conn.close()
 
