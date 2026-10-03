@@ -157,3 +157,74 @@ class TestSyncRiskFreeRates:
 
         with pytest.raises(RuntimeError):
             rf_mod.sync_risk_free_rates(client=BoomClient(), db_path=db)
+
+
+class TestSharpeNewCaliber:
+    """夏普 = mean(r_t − rf_t/252)/std_pop(r_t − rf_t)×√252（手算对照）。"""
+
+    def _marks(self, rets):
+        """造 marks 并同步给出引擎视角的日收益序列（首日 0 + cum 差分）。"""
+        import itertools
+
+        cum, marks, cums = 1.0, [], []
+        for d, r in zip(itertools.count(1), rets):
+            cum *= 1.0 + r
+            cums.append(cum)
+            marks.append(
+                {
+                    "prediction_id": "p1",
+                    "mark_date": f"2026-09-{d:02d}",
+                    "cum_return": cum - 1.0,
+                    "benchmark_price": 3000.0,
+                }
+            )
+        # 引擎口径：首盯市日贡献 0（incident 032），其后 = cum 差分（含复利交叉项）
+        engine_rets = [0.0] + [cums[i] - cums[i - 1] for i in range(1, len(cums))]
+        return marks, engine_rets
+
+    def test_daily_rf_series_sharpe(self):
+        import math
+
+        from finance_agent.outcome.track_record.metrics import compute_metrics_from_marks
+
+        rets = [0.01, -0.02, 0.015, 0.005, -0.008]
+        rf = {f"2026-09-{i + 1:02d}": 0.012 for i in range(len(rets))}
+        marks, engine_rets = self._marks(rets)
+        pm = compute_metrics_from_marks(marks, rf_series=rf)
+        ex = [r - 0.012 / 252 for r in engine_rets]
+        mu = sum(ex) / len(ex)
+        sd = (sum((e - mu) ** 2 for e in ex) / len(ex)) ** 0.5
+        expected = mu / sd * math.sqrt(252)
+        assert pm.sharpe == pytest.approx(expected, abs=1e-6)
+        # 波动率口径不变（仍为引擎日收益序列的 std）
+        vol = (
+            sum((r - sum(engine_rets) / len(engine_rets)) ** 2 for r in engine_rets)
+            / len(engine_rets)
+        ) ** 0.5 * math.sqrt(252)
+        assert pm.volatility == pytest.approx(vol, abs=1e-5)
+
+    def test_constant_rf_still_new_formula(self):
+        import math
+
+        from finance_agent.outcome.track_record.metrics import compute_metrics_from_marks
+
+        rets = [0.01, -0.02, 0.015, 0.005, -0.008]
+        marks, engine_rets = self._marks(rets)
+        pm = compute_metrics_from_marks(marks, risk_free_rate=0.012)
+        ex = [r - 0.012 / 252 for r in engine_rets]
+        mu = sum(ex) / len(ex)
+        sd = (sum((e - mu) ** 2 for e in ex) / len(ex)) ** 0.5
+        assert pm.sharpe == pytest.approx(mu / sd * math.sqrt(252), abs=1e-6)
+
+    def test_alpha_uses_daily_rf(self):
+        """α = mean(ra − rf_d − β(rb − rf_d))×252，逐日 rf_t。"""
+        from finance_agent.outcome.track_record.metrics import _beta_alpha
+
+        dates = [f"2026-09-{i:02d}" for i in range(3, 43)]  # 40 对 ≥ 20
+        ra = dict.fromkeys(dates, 0.001)
+        rb = {d: (0.001 if i % 2 else -0.001) for i, d in enumerate(dates)}
+        rf_daily = dict.fromkeys(dates, 0.012 / 252)
+        beta, alpha = _beta_alpha(ra, rb, rf_daily)
+        assert beta == pytest.approx(0.0, abs=1e-6)  # ra 恒定 → 与 rb 无协方差 → β=0（var(rb)>0）
+        expected_alpha = (0.001 - 0.012 / 252) * 252
+        assert alpha == pytest.approx(expected_alpha, abs=1e-4)

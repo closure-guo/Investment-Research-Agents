@@ -4,7 +4,8 @@
 - 组合日收益：等权 1/N（当日有盯市的 N 条观点日收益均值；空仓记 0；
   缺数据观点当日不计入 N —— 停牌/无行情不按 0 惩罚）
 - 净值曲线：agent 净值（自 1.0 累积）与基准净值（同日期序列）
-- 指标：年化收益/波动率/夏普（无风险利率默认 2%，env TRACK_RISK_FREE_RATE 可配）/
+- 指标：年化收益/波动率/夏普（逐日 rf：中债国债 1Y 库内序列，回退链
+  carry-forward → 常数 TRACK_RISK_FREE_RATE，默认 2%；见 risk_free.py）/
   最大回撤/风险分 clip(round(0.6*dd% + 0.4*vol%), 1, 10)（映射表配置化）
 """
 
@@ -145,12 +146,13 @@ _BETA_MIN_PAIRS = 20
 def _beta_alpha(
     rets: dict[str, float],
     bench_ret: dict[str, float],
-    risk_free_rate: float,
+    rf_daily: dict[str, float],
 ) -> tuple[float | None, float | None]:
     """组合 β（OLS 斜率）与年化 Jensen α；重叠对 < 20 → (None, None)。
 
     首个共同日期剔除：组合首日收益是相对入场日的口径混合点，基准首日恒 0，
-    入对会污染斜率。α = (μa − rf/252 − β×(μb − rf/252))×252，rf 与夏普同源。
+    入对会污染斜率。α = mean(ra_t − rf_t − β×(rb_t − rf_t))×252，rf_t 逐日
+    （update-risk-free-rate-source，与夏普同源）。
     """
     dates = sorted(set(rets) & set(bench_ret))[1:]  # 剔除首个共同日
     if len(dates) < _BETA_MIN_PAIRS:
@@ -164,14 +166,17 @@ def _beta_alpha(
     if var <= 0:
         return None, None
     beta = cov / var
-    rf_d = risk_free_rate / 252
-    alpha = (mu_a - rf_d - beta * (mu_b - rf_d)) * 252
+    resid = [
+        rets[d] - rf_daily.get(d, 0.0) - beta * (bench_ret[d] - rf_daily.get(d, 0.0)) for d in dates
+    ]
+    alpha = sum(resid) / len(resid) * 252
     return round(beta, 6), round(alpha, 6)
 
 
 def compute_metrics_from_marks(
     marks: list[dict[str, Any]],
     risk_free_rate: float = RISK_FREE_RATE,
+    rf_series: dict[str, float] | None = None,
     calendar_dates: list[str] | None = None,
     benchmark_by_date: dict[str, float] | None = None,
     exclude_prediction_ids: set[str] | None = None,
@@ -184,6 +189,11 @@ def compute_metrics_from_marks(
     空仓日记 0，年化/波动 n = 交易日数；基准净值取 benchmark_by_date 按日历推进
     （缺失日沿用前值持平）；缺省退化为 marks-only 口径（基准取 marks 内
     benchmark_price）。
+
+    无风险利率口径（update-risk-free-rate-source）：rf_series 为 date→年化小数
+    的逐日序列（risk_free_series 已做库内回退链）；夏普 = mean(r_t − rf_t/252)
+    /std_pop(r_t − rf_t/252)×√252，α 逐日 rf_t。rf_series 缺省/未覆盖日期 →
+    常数 risk_free_rate 兜底。
     """
     excl = exclude_prediction_ids or set()
     if excl:
@@ -222,7 +232,13 @@ def compute_metrics_from_marks(
     else:
         bench_ret = _benchmark_returns(marks)
         bench_cum = _cum_nav(bench_ret) if bench_ret else {}
-    beta, jensen_alpha = _beta_alpha(rets, bench_ret, risk_free_rate)
+    # rf 逐日解析：序列未覆盖日期 → 常数兜底（库内回退链在 risk_free_series）
+    rf_annual = {
+        d: (rf_series[d] if rf_series is not None and d in rf_series else risk_free_rate)
+        for d in dates
+    }
+    rf_daily = {d: v / _TRADING_DAYS for d, v in rf_annual.items()}
+    beta, jensen_alpha = _beta_alpha(rets, bench_ret, rf_daily)
 
     n = len(dates)
     final_nav = agent_cum[dates[-1]]
@@ -236,9 +252,14 @@ def compute_metrics_from_marks(
         else None
     )
 
+    # 夏普：标准逐日超额定义 mean/std（总体）×√252（update-risk-free-rate-source）
     sharpe = None
-    if annual is not None and vol:
-        sharpe = (annual - risk_free_rate) / vol
+    if n > 1:
+        excess = [rets[d] - rf_daily[d] for d in dates]
+        mu_e = sum(excess) / n
+        sd_e = (sum((e - mu_e) ** 2 for e in excess) / n) ** 0.5
+        if sd_e > 0:
+            sharpe = mu_e / sd_e * math.sqrt(_TRADING_DAYS)
 
     drawdown = 0.0
     peak = 0.0
@@ -316,8 +337,15 @@ def compute_metrics_snapshot(
 
     stats = prediction_stats(source_type=None, db_path=db_path, horizon_days=DEFAULT_HORIZON_DAYS)
     excl = prediction_ids_by_direction("neutral", db_path=db_path)
+    marks = list_daily_marks(db_path=db_path)
+    # update-risk-free-rate-source：库内 rf 序列（空表 → risk_free_series 内部
+    # 回退常数 TRACK_RISK_FREE_RATE，快照照常产出）
+    from finance_agent.outcome.track_record.risk_free import risk_free_series
+
+    rf_series = risk_free_series(sorted({str(m["mark_date"]) for m in marks}), db_path=db_path)
     pm = compute_metrics_from_marks(
-        list_daily_marks(db_path=db_path),
+        marks,
+        rf_series=rf_series,
         calendar_dates=calendar_dates,
         benchmark_by_date=benchmark_by_date,
         exclude_prediction_ids=excl,
