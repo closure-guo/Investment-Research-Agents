@@ -684,6 +684,56 @@ def latest_equity_date(db_path: str | Path | None = None) -> str | None:
         conn.close()
 
 
+def list_metric_dates(db_path: str | Path | None = None) -> list[str]:
+    """agent_metrics_daily 全部 metric_date 升序（as-of 历史重算遍历用）。"""
+    conn = _connect(db_path)
+    try:
+        return [
+            str(r[0])
+            for r in conn.execute(
+                "SELECT metric_date FROM agent_metrics_daily ORDER BY metric_date"
+            )
+        ]
+    finally:
+        conn.close()
+
+
+def update_metrics_daily_columns(
+    metric_date: str,
+    columns: dict[str, float | None],
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """部分列 UPDATE agent_metrics_daily 指定行；返回前后对照 dict。
+
+    列名白名单由调用方约束（recompute_rf_metrics_history 仅传
+    sharpe/beta/jensen_alpha）；行不存在时原样返回不含对照。
+    """
+    if not columns:
+        return {"metric_date": metric_date}
+    conn = _connect(db_path)
+    try:
+        col_names = ", ".join(columns)
+        old = conn.execute(
+            f"SELECT {col_names} FROM agent_metrics_daily WHERE metric_date = ?",  # noqa: S608
+            (metric_date,),
+        ).fetchone()
+        if old is None:
+            return {"metric_date": metric_date}
+        sets = ", ".join(f"{c} = ?" for c in columns)
+        conn.execute(
+            f"UPDATE agent_metrics_daily SET {sets} WHERE metric_date = ?",  # noqa: S608
+            (*columns.values(), metric_date),
+        )
+        conn.commit()
+        row: dict[str, Any] = {"metric_date": metric_date}
+        for c, o in zip(columns, old, strict=True):
+            row[f"old_{c}"] = o
+            row[f"new_{c}"] = columns[c]
+        return row
+    finally:
+        conn.close()
+
+
 def insert_prediction(
     record: dict[str, Any], db_path: str | Path | None = None, status: str = "open"
 ) -> str:

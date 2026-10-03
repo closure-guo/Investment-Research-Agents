@@ -293,3 +293,62 @@ class TestDailyBatchRfHook:
         assert result["rf_failed"] is True
         assert result["marked"] > 0  # 盯市不受影响
         assert result["metrics_date"]  # 快照照常落库
+
+
+class TestRecomputeHistory:
+    def test_asof_updates_only_rf_columns(self, db):
+        import sqlite3
+
+        from finance_agent.outcome.track_record.metrics import (
+            compute_metrics_snapshot,
+            recompute_rf_metrics_history,
+        )
+        from finance_agent.outcome.track_record.model import (
+            insert_daily_mark,
+            insert_prediction,
+            upsert_metrics_daily,
+            upsert_risk_free_rates,
+        )
+
+        # 两条非 neutral 观点 × 22 个交易日（β/α 达 20 对门槛），基准逐日变
+        for d in range(1, 23):
+            day = f"2026-09-{(d + 7):02d}"  # 09-08..09-29
+            for pid in ("pA", "pB"):
+                insert_daily_mark(pid, day, 100.0 + d, 0.01 * d, None, 3000.0 + d, db_path=db)
+        insert_prediction(
+            {
+                "source_type": "live",
+                "symbol": "600519.SH",
+                "symbol_name": "茅台",
+                "direction": "long",
+                "entry_price": 100.0,
+                "target_price": 120.0,
+                "horizon_days": 252,
+                "confidence": 0.8,
+                "benchmark": "000300.SH",
+                "rationale_snapshot": {"markdown": "x"},
+                "created_at": "2026-09-01",
+            },
+            db_path=db,
+        )
+        # 常数时代旧快照（模拟 rf=2% 时写入的历史行；annual 为任意已知值）
+        old = compute_metrics_snapshot(db_path=db)
+        old["annual_return"] = 0.123456  # 口径未变列的原值，重算后必须保持
+        upsert_metrics_daily("2026-09-29", old, db_path=db)
+
+        upsert_risk_free_rates(
+            [(f"2026-09-{(d + 7):02d}", 0.0122, "chinabond-cgb-1y") for d in range(1, 23)],
+            db_path=db,
+        )
+        diffs = recompute_rf_metrics_history(db_path=db)
+        assert len(diffs) == 1
+        row = diffs[0]
+        assert row["metric_date"] == "2026-09-29"
+        assert row["old_sharpe"] != row["new_sharpe"]  # rf 2%→1.22% 必然改变夏普
+        conn = sqlite3.connect(db)
+        stored = conn.execute(
+            "SELECT annual_return, sharpe FROM agent_metrics_daily WHERE metric_date='2026-09-29'"
+        ).fetchone()
+        conn.close()
+        assert stored[0] == pytest.approx(0.123456)  # 未涉及列保持原值
+        assert stored[1] == pytest.approx(row["new_sharpe"], abs=1e-6)

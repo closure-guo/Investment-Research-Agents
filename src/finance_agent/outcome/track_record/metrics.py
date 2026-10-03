@@ -365,3 +365,47 @@ def compute_metrics_snapshot(
         "jensen_alpha": pm.jensen_alpha,
         "segment_json": "{}",
     }
+
+
+def recompute_rf_metrics_history(db_path: Any = None) -> list[dict[str, Any]]:
+    """rf 口径切换后重算 agent_metrics_daily 历史行（update-risk-free-rate-source）。
+
+    as-of 纪律：重算某 metric_date 行只用 mark_date ≤ 该日数据；基准收益取
+    marks 内 benchmark_price（marks-only 口径，不拉今日行情——as-of 保真）。
+    只 UPDATE sharpe/beta/jensen_alpha 三列（rf 相关）；年化/波动/回撤/风险分
+    口径未变，保留原值。返回逐行前后对照。
+    """
+    from finance_agent.outcome.track_record.model import (
+        list_daily_marks,
+        list_metric_dates,
+        prediction_ids_by_direction,
+        update_metrics_daily_columns,
+    )
+    from finance_agent.outcome.track_record.risk_free import risk_free_series
+
+    marks_all = list_daily_marks(db_path=db_path)
+    excl = prediction_ids_by_direction("neutral", db_path=db_path)
+    out: list[dict[str, Any]] = []
+    for md in list_metric_dates(db_path=db_path):
+        marks = [m for m in marks_all if str(m["mark_date"]) <= md]
+        rets = daily_portfolio_returns(marks, exclude_prediction_ids=excl)
+        bench_ret = _benchmark_returns(marks)
+        dates = sorted(rets)
+        rf_daily = {
+            d: v / _TRADING_DAYS for d, v in risk_free_series(dates, db_path=db_path).items()
+        }
+        n = len(dates)
+        sharpe: float | None = None
+        if n > 1:
+            excess = [rets[d] - rf_daily[d] for d in dates]
+            mu_e = sum(excess) / n
+            sd_e = (sum((e - mu_e) ** 2 for e in excess) / n) ** 0.5
+            if sd_e > 0:
+                sharpe = round(mu_e / sd_e * math.sqrt(_TRADING_DAYS), 6)
+        beta, alpha = _beta_alpha(rets, bench_ret, rf_daily)
+        out.append(
+            update_metrics_daily_columns(
+                md, {"sharpe": sharpe, "beta": beta, "jensen_alpha": alpha}, db_path=db_path
+            )
+        )
+    return out
