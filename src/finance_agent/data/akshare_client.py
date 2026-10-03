@@ -892,6 +892,28 @@ class AKShareClient:
         """沪深 300 日 K(fetch_index_kline 的 000300 特化,行为与原来一致)。"""
         return self.fetch_index_kline("000300", days=days)
 
+    def fetch_bond_yield_curve(self, start_date: str, end_date: str) -> pd.DataFrame | None:
+        """中债国债收益率曲线日频读数（update-risk-free-rate-source）。
+
+        源：中债估值中心（yield.chinabond.com.cn，经 ak.bond_china_yield），
+        非东财域。返回列 日期(str[:10])/1年(float, 百分数——年化小数转换由
+        track_record.risk_free 层负责，与本文件其余 fetch_* 返回原单位的约定一致）。
+        仅取「中债国债收益率曲线」；空结果/调用失败返回 None。
+        """
+        df = _call_ak(ak.bond_china_yield, start_date=start_date, end_date=end_date)
+        if df is None or df.empty:
+            return None
+        df = df[df["曲线名称"] == "中债国债收益率曲线"]
+        if df.empty:
+            return None
+        out = pd.DataFrame(
+            {
+                "日期": df["日期"].astype(str).str[:10],
+                "1年": df["1年"].astype(float),
+            }
+        )
+        return out.dropna(subset=["1年"]).sort_values("日期").reset_index(drop=True)
+
     @staticmethod
     def _parse_constituents(df: pd.DataFrame | None) -> list[dict[str, str]]:
         """从指数成分 DataFrame 提取 [{"ticker","name"}]。

@@ -57,3 +57,39 @@ class TestRiskFreeTable:
         insert_daily_mark("p1", "2026-09-10", 101.0, 0.01, None, 3100.0, db_path=db)
         insert_daily_mark("p1", "2026-09-11", 102.0, 0.02, None, 3110.0, db_path=db)
         assert earliest_mark_date(db_path=db) == "2026-09-10"
+
+
+class TestFetchBondYieldCurve:
+    def test_filters_gov_curve_and_normalizes(self, monkeypatch):
+        import pandas as pd
+
+        from finance_agent.data import akshare_client
+
+        def fake_bond_china_yield(start_date="20200204", end_date="20210124", **kw):
+            return pd.DataFrame(
+                {
+                    "曲线名称": [
+                        "中债中短期票据收益率曲线(AAA)",
+                        "中债国债收益率曲线",
+                        "中债国债收益率曲线",
+                    ],
+                    "日期": ["2026-09-28", "2026-09-28", "2026-09-29"],
+                    "1年": [1.5, 1.2257, 1.2197],
+                }
+            )
+
+        monkeypatch.setattr(akshare_client.ak, "bond_china_yield", fake_bond_china_yield)
+        client = akshare_client.AKShareClient()
+        df = client.fetch_bond_yield_curve("2026-09-28", "2026-09-29")
+        assert list(df["日期"]) == ["2026-09-28", "2026-09-29"]
+        assert df["1年"].tolist() == [1.2257, 1.2197]
+
+    def test_returns_none_when_source_fails(self, monkeypatch):
+        from finance_agent.data import akshare_client
+
+        def boom(*a, **kw):
+            raise RuntimeError("chinabond down")
+
+        monkeypatch.setattr(akshare_client.ak, "bond_china_yield", boom)
+        client = akshare_client.AKShareClient()
+        assert client.fetch_bond_yield_curve("2026-09-28", "2026-09-29") is None
