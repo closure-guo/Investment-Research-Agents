@@ -374,3 +374,49 @@ class TestContextLengthOverride:
         """请求与 env 均未配置 → registry 静态 max_context（openai-compatible 128000）。"""
         profile = resolve_profile(purpose="deep", llm_config=self._request())
         assert profile.capability.max_context == 128000
+
+
+class TestRequestCapabilityInference:
+    """#302：请求分支能力按模型名推断（与 env 分支同一实现）。
+
+    能力语义 SHALL 随模型走而非随配置来源漂移（llm-capability-probe 哲学：
+    能力=模型/端点事实）——同一 glm 模型走 env 解析能 tool_choice=required、
+    走请求级 llm_config 被守卫拒，是能力推断的双标。
+    """
+
+    def test_request_glm_prefixed_gets_required(self):
+        profile = resolve_profile(
+            purpose="deep",
+            llm_config={
+                "model": "openai/glm-5.3",
+                "baseUrl": "https://ark.example/api/v3",
+                "apiKey": "sk-req",
+            },
+            _env={},
+        )
+        assert profile.capability.tool_choice_required is True
+
+    def test_request_glm_unprefixed_also_inferred(self):
+        profile = resolve_profile(
+            purpose="deep",
+            llm_config={
+                "model": "glm-5.2",
+                "baseUrl": "https://ark.example/api/v3",
+                "apiKey": "sk-req",
+            },
+            _env={},
+        )
+        assert profile.capability.tool_choice_required is True
+
+    def test_request_deepseek_keeps_generic(self):
+        """非 glm 模型维持通用档（与 env 分支一致，不自作主张扩 deepseek）。"""
+        profile = resolve_profile(
+            purpose="deep",
+            llm_config={
+                "model": "deepseek/deepseek-chat",
+                "baseUrl": "https://api.deepseek.example/v1",
+                "apiKey": "sk-req",
+            },
+            _env={},
+        )
+        assert profile.capability.tool_choice_required is False
