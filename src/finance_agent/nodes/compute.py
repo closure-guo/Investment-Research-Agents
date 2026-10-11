@@ -538,7 +538,16 @@ def format_peer_comparison(state: AnalysisState, valuation_snapshot: dict | None
     ]
     for _, r in peer_df.iterrows():
         lines.append(_row(r.to_dict()))
-    if pe_ttm_fallback:
+    # 同业 PE 全缺 = 结构性事实（腾讯主源 _TENCENT_FIELD_IDX 有意不含 PE，
+    # issue #276）：披露缺失原因替代口径注——旧注在 peer PE 全缺时谎称
+    # 「对标股 PE 为行情快照口径」，违反 spec「如实呈现」。
+    peer_pe_all_missing = "PE" not in peer_df.columns or bool(peer_df["PE"].isna().all())
+    if peer_pe_all_missing:
+        note = "注：对标股 PE 因行情主源不含该字段而缺失（列显示「—」），跨标的 PE 对比不可用，不作 PE 对比结论。"
+        if pe_ttm_fallback:
+            note = "注：主标的 PE 为 TTM 推导口径；" + note[len("注：") :]
+        lines.append(note)
+    elif pe_ttm_fallback:
         lines.append(
             "注：主标的 PE 为 TTM 推导口径，对标股 PE 为行情快照口径，跨口径比较仅供参考。"
         )
