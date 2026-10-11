@@ -55,9 +55,14 @@ test.describe('消息操作条（复制/重试/点赞/点踩）', () => {
     await expect(last.getByTestId('message-actions')).toHaveCount(0)
 
     // hover → 挂载四图标按钮,顺序固定;这是最后一段 agent 输出 → 含重试
-    await last.hover()
+    // toPass 包裹 hover+断言（issue #312）：hover-only 悬浮层的挂载与鼠标位置
+    // 存在竞态（CI 慢机渲染滞后/滚动补偿移走指针）——重试竞态而不掩真回归
+    // （UI 真坏时 toPass 预算内恒不满足仍红）
     const lastActions = last.getByTestId('message-actions')
-    await expect(lastActions.locator('button')).toHaveCount(4)
+    await expect(async () => {
+      await last.hover()
+      await expect(lastActions.locator('button')).toHaveCount(4)
+    }).toPass({ timeout: 15_000 })
     const labels = await lastActions.locator('button').evaluateAll((bs) =>
       bs.map((b) => b.getAttribute('aria-label')),
     )
@@ -73,17 +78,21 @@ test.describe('消息操作条（复制/重试/点赞/点踩）', () => {
     const outputs = page.getByTestId('stream-output')
     await expect(outputs.count()).resolves.toBeGreaterThanOrEqual(2)
 
-    await outputs.nth(0).hover()
     const histActions = outputs.nth(0).getByTestId('message-actions')
-    await expect(histActions.locator('button')).toHaveCount(3)
+    await expect(async () => {
+      await outputs.nth(0).hover()
+      await expect(histActions.locator('button')).toHaveCount(3)
+    }).toPass({ timeout: 15_000 })
     const histLabels = await histActions.locator('button').evaluateAll((bs) =>
       bs.map((b) => b.getAttribute('aria-label')),
     )
     expect(histLabels).toEqual(['复制', '点赞', '点踩'])
 
-    await outputs.last().hover()
     const finalActions = outputs.last().getByTestId('message-actions')
-    await expect(finalActions.locator('button')).toHaveCount(4)
+    await expect(async () => {
+      await outputs.last().hover()
+      await expect(finalActions.locator('button')).toHaveCount(4)
+    }).toPass({ timeout: 15_000 })
     const finalLabels = await finalActions.locator('button').evaluateAll((bs) =>
       bs.map((b) => b.getAttribute('aria-label')),
     )

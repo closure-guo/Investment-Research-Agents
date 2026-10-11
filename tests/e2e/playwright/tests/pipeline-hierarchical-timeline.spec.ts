@@ -39,7 +39,9 @@ test.describe('管线分层时间轴（redesign-pipeline-hierarchical-timeline�
   test('1. 分层时间轴渲染 6 个 layer 标题', async ({ page }) => {
     await startAnalysis(page)
     const timeline = page.getByTestId('pipeline-timeline')
-    await expect(timeline).toBeVisible({ timeout: 60_000 })
+    // 120s（issue #312）：timeline 挂载点=send 后首个流事件，CI 慢机 vite 冷启动
+    // +stub 管线首事件可达 60-90s——环境慢不是功能坏（eval-ops 分区同款放宽先例）
+    await expect(timeline).toBeVisible({ timeout: 120_000 })
     await expect(timeline.getByText('PREP', { exact: true })).toBeVisible()
     await expect(timeline.getByText('Layer I', { exact: true })).toBeVisible()
     await expect(timeline.getByText('Layer II', { exact: true })).toBeVisible()
@@ -87,7 +89,9 @@ test.describe('管线分层时间轴（redesign-pipeline-hierarchical-timeline�
       .catch(() => false)
     await startAnalysis(page)
     const timeline = page.getByTestId('pipeline-timeline')
-    await expect(timeline).toBeVisible({ timeout: 60_000 })
+    // 120s（issue #312）：timeline 挂载点=send 后首个流事件，CI 慢机 vite 冷启动
+    // +stub 管线首事件可达 60-90s——环境慢不是功能坏（eval-ops 分区同款放宽先例）
+    await expect(timeline).toBeVisible({ timeout: 120_000 })
     if (!(await pingSeen)) {
       // 观察窗全程未见高亮 = 管线在观察建立前已完成（前端每用例全新页面，
       // 不存在跨用例残留运行）。此时必须看到完成态报告卡，证明管线跑完而非卡住
