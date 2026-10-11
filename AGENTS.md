@@ -72,7 +72,7 @@ cd frontend && npm test               # 前端测试
 ## 测试约束
 
 - E2E（真实浏览器）和集成测试（直连 API）分工明确，详见 `project-workflow.md` §5.6
-- 产物位置：fixtures → `tests/fixtures/`｜脚本 → `scripts/`（部署类）与 `tests/scripts/`（测试辅助）｜验证报告 → `tests/validation/`｜E2E 输出 → `tests/e2e/`｜报告 → `reports/`
+- 产物位置：fixtures → `tests/fixtures/`｜脚本 → `scripts/`（部署类）与 `tests/scripts/`（测试辅助）｜验证报告 → `tests/validation/`｜E2E 输出 → `tests/e2e/playwright/`｜报告 → `reports/`
 - 提示词权威源：`src/finance_agent/prompts/*.md`（git 跟踪）是唯一权威源，Langfuse 为部署产物快照；修改 prompt 后必须执行 `uv run python scripts/deploy_prompts.py` 发布，否则 eval 门禁拒绝运行（见 openspec specs/prompt-deploy-consistency）
 
 ---
