@@ -26,6 +26,7 @@ from finance_agent.llm.registry import (
     DEFAULT_PROVIDER_OPTIONS,
     PROVIDER_OPTIONS_SCHEMAS,
     REQUEST_OVERRIDABLE,
+    Capability,
     ModelProfile,
     get_profile_preset,
 )
@@ -174,6 +175,18 @@ def _merge_probe_facts(profile: ModelProfile) -> ModelProfile:
     return merge_probe_into_profile(profile, report)
 
 
+def _capability_for_model(model: str) -> Capability:
+    """按模型名推断请求能力（#302：env 与 request 分支共享的单一实现）。
+
+    glm 系 → ark-glm 实测能力档（tool_choice=required 支持，生产 ReAct
+    force_tool 轮依赖）；其余维持 openai-compatible 通用档。kimi 无 required
+    能力档，通用档即正确语义（guard 拒绝 required 是事实而非缺陷）。
+    """
+    if "glm" in model.lower():
+        return _PRESETS["ark-glm"].capability
+    return _PRESETS["openai-compatible"].capability
+
+
 def resolve_profile(
     *,
     purpose: Purpose = "deep",
@@ -279,7 +292,9 @@ def _resolve_profile_static(
             model=model,
             base_url=base_url,
             api_key=api_key,
-            capability=_PRESETS["openai-compatible"].capability,
+            # 能力按模型名推断（#302）：与 env 分支同一实现——能力语义随模型走
+            # 而非随配置来源漂移（llm-capability-probe 哲学：能力=模型/端点事实）
+            capability=_capability_for_model(model),
             default_params={},
             api_form=api_form,
             provider_options=_provider_options_from_request(provider, llm_config),
@@ -331,11 +346,7 @@ def _resolve_profile_static(
             "缺端点才是半套配置；apiKey 可省略（keyless 端点）"
         )
     model = _ensure_prefix(model, base_url)
-    cap = (
-        _PRESETS["ark-glm"].capability
-        if "glm" in model.lower()
-        else _PRESETS["openai-compatible"].capability
-    )
+    cap = _capability_for_model(model)
     return ModelProfile(
         name=f"env:{model}",
         provider=model.split("/", 1)[0],
