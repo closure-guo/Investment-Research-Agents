@@ -299,3 +299,4 @@ docker/clickhouse/users.d/default-user.xml
 
 # 本地验证运行产物（含 .env 密钥副本，严禁入库）
 .verify-*/
+data/charts/
