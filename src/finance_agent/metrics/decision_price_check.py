@@ -69,6 +69,16 @@ _ENUM_SPAN_PATTERNS = (
     re.compile(r"[（(]\s*\d{1,2}\s*[)）]"),
     re.compile(r"(?<![\d.])\d{1,2}[)）]"),
 )
+# 指数名整体排除（add-horizon-semantics E2E 实证，600519 10-11 实跑）：
+# 决策层周期契约注入后 reasoning 恒含「相对沪深300 超额收益」——300 被提为
+# 价位与近期低点 1170.28 偏差 74.37% → 打回重试也无法去掉（prompt 要求写
+# 考核基准）→ 报告阻断。量纲守卫 ±10 倍抓不住（300 vs 1170 = 3.9x），
+# 关键词窗抓不住（「沪深」不在 _NON_PRICE_KEYWORDS）。指数名前缀直接跟随
+# 的 2-4 位数字是指数点位而非个股股价；名称后隔开的真实价位不受豁免
+# （护栏测试 TestIndexNameFalsePositives.test_real_price_after_index_mention_still_checked 钉死）。
+_INDEX_NAME_PATTERN = re.compile(
+    r"(?:沪深|中证|上证|深证|北证|国证|恒生|纳斯达克|标普|道琼斯)\s?\d{2,4}"
+)
 # 数值后紧跟（可隔空格）即非价格量纲：百分比/倍率/比值/成交量/日期时间单位/均线
 # + 计数量词（fix-decision-price-enumerators：「3个月」「3成仓」的 3 不是股价；
 # 计量字后接真实价位的表述不存在，不伤及正常价位提取）+ 斜杠分数分子
@@ -295,12 +305,13 @@ def _alias_occurrences(text: str) -> list[tuple[int, int, str, str]]:
 
 
 def _exclusion_spans(text: str, aliases: list[tuple[int, int, str, str]]) -> list[tuple[int, int]]:
-    """数值提取排除区：点名指标 occurrence（MA60/60日均线的数字成分）+ 日期 + 枚举序号。"""
+    """数值提取排除区：点名指标 occurrence（MA60/60日均线的数字成分）+ 日期 + 枚举序号 + 指数名。"""
     spans = [(start, end) for start, end, _canonical, _key in aliases]
     for pattern in _DATE_PATTERNS:
         spans.extend((m.start(), m.end()) for m in pattern.finditer(text))
     for pattern in _ENUM_SPAN_PATTERNS:
         spans.extend((m.start(), m.end()) for m in pattern.finditer(text))
+    spans.extend((m.start(), m.end()) for m in _INDEX_NAME_PATTERN.finditer(text))
     return spans
 
 

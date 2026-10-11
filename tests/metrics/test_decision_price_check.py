@@ -809,3 +809,63 @@ class TestStructuredTriggerLevels:
         assert "22.61" in a["message"]
         assert "23.03" in a["message"]
         assert "已满足" in a["message"]
+
+
+# ── 600519 形态夹具（add-horizon-semantics E2E 实证）：近期低点 1170.28，
+# 现价 1420 ——「沪深300」的 300 被提为价位偏差 74.37% 阻断报告 ──
+TI_600519 = _indicators(
+    ma5=1425.0,
+    ma10=1418.0,
+    ma20=1405.0,
+    ma60=1380.0,
+    boll_upper=1470.0,
+    boll_middle=1415.0,
+    boll_lower=1360.0,
+)
+PL_600519 = {
+    "available": True,
+    "entry_ref": 1420.0,
+    "recent_high": 1560.0,
+    "recent_low": 1170.28,
+    "atr": 22.0,
+    "stop_band_long": {"low": 1370.0, "high": 1395.0},
+    "target_band_long": {"low": 1470.0, "high": 1520.0},
+    "full_band": [1345.0, 1580.0],
+}
+CLOSE_600519 = 1420.0
+
+
+class TestIndexNameFalsePositives:
+    """指数名数字不得按个股价位校验（add-horizon-semantics E2E 实证）。
+
+    决策层周期契约注入后，trader/risk_judge/FM reasoning 恒含
+    「相对沪深300 超额收益」——300 被提为价位与近期低点 1170.28 偏差
+    74.37%（|300-1170.28|/1170.28 精确吻合）→ 打回重试也无法去掉
+    （prompt 要求写考核基准）→ 报告阻断（600519 10-11 22:44 实跑
+    failure_reason 原文）。量纲守卫 ±10 倍抓不住（300 vs 1170 = 3.9x）。
+    """
+
+    def test_benchmark_name_number_not_treated_as_price(self):
+        """「沪深300 超额收益」的 300 不进价位校验，真实价位 1180 正常放行。"""
+        decision = _decision(
+            reasoning=(
+                "本决策按 T+20 个交易日相对沪深300 超额收益（±2% 中性带）考核，"
+                "催化剂在窗口内兑现：股价回踩 1180 一线企稳。"
+            )
+        )
+        anomalies = check_decision_prices(decision, TI_600519, PL_600519, CLOSE_600519)
+        assert anomalies == []
+
+    def test_other_index_prefixes_excluded(self):
+        """中证500/上证50 同族指数名一并豁免。"""
+        decision = _decision(reasoning="相对中证500 与上证50 的超额口径下，回踩 1180 一线企稳。")
+        anomalies = check_decision_prices(decision, TI_600519, PL_600519, CLOSE_600519)
+        assert anomalies == []
+
+    def test_real_price_after_index_mention_still_checked(self):
+        """护栏：指数名后隔开的真实价位仍须校验（排除区不得过宽）。"""
+        decision = _decision(reasoning="相对沪深300 超额考核；若跌破（1130.0）支撑则离场观望。")
+        anomalies = check_decision_prices(decision, TI_600519, PL_600519, CLOSE_600519)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert anomalies[0]["indicator"] == "近期低点"
