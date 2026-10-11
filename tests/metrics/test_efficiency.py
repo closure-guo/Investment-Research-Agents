@@ -199,3 +199,45 @@ class TestCalcEfficiency:
         assert source["2024"] == "official"
         # 2023: indicators 有数据 → official
         assert source["2023"] == "official"
+
+
+class TestFindIndicatorEmptyFrame:
+    """issue #243-2：无列空 DataFrame 不得抛 KeyError（_find_indicator 守卫）。"""
+
+    def test_columnless_empty_frame_returns_none(self):
+        import pandas as pd
+
+        from finance_agent.metrics.efficiency import _find_indicator
+
+        # fetch_indicators 失败降级返回 pd.DataFrame()（无列）时不得 KeyError
+        assert _find_indicator(pd.DataFrame(), "2024") is None
+
+    def test_empty_frame_with_date_column_returns_none(self):
+        import pandas as pd
+
+        from finance_agent.metrics.efficiency import _find_indicator
+
+        assert _find_indicator(pd.DataFrame({"日期": []}), "2024") is None
+
+    def test_calc_efficiency_with_columnless_indicators(self):
+        """calc_efficiency 收到无列空框应走 calc 降级而非崩溃。"""
+        import pandas as pd
+
+        bs = pd.DataFrame(
+            {
+                "报告日": ["20241231"],
+                "资产总计": [1000.0],
+                "应收账款": [40.0],
+                "应付账款": [60.0],
+                "存货": [100.0],
+            }
+        )
+        is_ = pd.DataFrame(
+            {
+                "报告日": ["20241231"],
+                "营业收入": [1000.0],
+                "营业成本": [600.0],
+            }
+        )
+        result = calc_efficiency(bs, is_, pd.DataFrame())
+        assert result["存货周转率_source"]["2024"] == "calc"

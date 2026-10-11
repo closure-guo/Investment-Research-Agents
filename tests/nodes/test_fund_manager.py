@@ -1,6 +1,7 @@
 """TDD tests for nodes/fund_manager.py — Layer V Fund Manager Agent。"""
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -234,3 +235,146 @@ def test_final_integrity_notes_empty_gate_note_skipped():
         "decision_price_gate": {"result": "pass", "note": ""},
     }
     assert final_integrity_notes(state) == []
+
+
+class TestFMGroundingSurface:
+    """add-fm-grounding-surface：FM 审批上下文三类 grounding 输入（非空才出现）。
+
+    消费 add-anchor-value-grounding 产出的 debate_anchor_checks 确定性信号
+    （断点 2 delta）+ 估值完整性 + 披露节原文；仲裁权保留（不改路由）。
+    """
+
+    def test_valuation_incompleteness_section(self):
+        state = _base_state() | {
+            "valuation_snapshot": {"missing_reasons": ["market_cap 缺失", "快照缺失"]}
+        }
+        ctx = _build_fund_manager_context(state)
+        assert "估值完整性标注" in ctx
+        assert "market_cap 缺失" in ctx and "快照缺失" in ctx
+
+    def test_valuation_section_absent_when_clean(self):
+        assert "估值完整性标注" not in _build_fund_manager_context(_base_state())
+        empty = _base_state() | {"valuation_snapshot": {"missing_reasons": []}}
+        assert "估值完整性标注" not in _build_fund_manager_context(empty)
+
+    def test_anchor_warning_lists_offenders(self):
+        checks = [
+            {
+                "role": "bull",
+                "round": 1,
+                "index": 2,
+                "kind": "data",
+                "anchors": ["fundamental.中报净利润同比"],
+                "anchor_statuses": ["resolved"],
+                "matched_via": ["field_ref"],
+                "echo_only_field_refs": [],
+                "status": "value_mismatch",
+                "anchored": True,
+            }
+        ]
+        ctx = _build_fund_manager_context(_base_state() | {"debate_anchor_checks": checks})
+        assert "辩论锚点告警" in ctx
+        assert "value_mismatch" in ctx and "fundamental.中报净利润同比" in ctx
+        assert "bull R1 #2" in ctx
+
+    def test_anchor_warning_absent_when_clean(self):
+        assert "辩论锚点告警" not in _build_fund_manager_context(_base_state())
+        clean = [
+            {
+                "role": "bull",
+                "round": 1,
+                "index": 1,
+                "kind": "data",
+                "anchors": ["technical_indicators.MA.5.-1"],
+                "anchor_statuses": ["resolved"],
+                "matched_via": ["field_ref"],
+                "echo_only_field_refs": [],
+                "status": "resolved",
+                "anchored": True,
+            }
+        ]
+        ctx = _build_fund_manager_context(_base_state() | {"debate_anchor_checks": clean})
+        assert "辩论锚点告警" not in ctx
+
+    def test_anchor_warning_covers_unresolved_and_echo_only(self):
+        checks = [
+            {
+                "role": "bear",
+                "round": 2,
+                "index": 1,
+                "kind": "inference",
+                "anchors": ["fundamental.中报净利润同比"],
+                "anchor_statuses": ["unresolved"],
+                "matched_via": [""],
+                "echo_only_field_refs": [],
+                "status": "unresolved",
+                "anchored": False,
+            },
+            {
+                "role": "bull",
+                "round": 1,
+                "index": 3,
+                "kind": "inference",
+                "anchors": ["fundamental.中报净利润同比"],
+                "anchor_statuses": ["resolved"],
+                "matched_via": ["echo"],
+                "echo_only_field_refs": ["fundamental.中报净利润同比"],
+                "status": "resolved",
+                "anchored": True,
+            },
+        ]
+        ctx = _build_fund_manager_context(_base_state() | {"debate_anchor_checks": checks})
+        assert "辩论锚点告警" in ctx
+        assert "unresolved" in ctx and "echo_only" in ctx
+
+    def test_anchor_warning_cap_five(self):
+        checks = [
+            {
+                "role": "bull",
+                "round": i + 1,
+                "index": 1,
+                "kind": "data",
+                "anchors": [f"bad.anchor.{i}"],
+                "anchor_statuses": ["unresolved"],
+                "matched_via": [""],
+                "echo_only_field_refs": [],
+                "status": "unresolved",
+                "anchored": False,
+            }
+            for i in range(6)
+        ]
+        ctx = _build_fund_manager_context(_base_state() | {"debate_anchor_checks": checks})
+        assert "另 1 条" in ctx
+        assert ctx.count("bad.anchor.") == 5
+
+    def test_disclosure_section_in_context(self):
+        state = _base_state() | {
+            "latest_period_snapshot": {
+                "报告日": "2026-06-30",
+                "期类型": "中报",
+                "毛利率(%)": None,
+            }
+        }
+        ctx = _build_fund_manager_context(state)
+        assert "最新报告期快照" in ctx
+        # 未配置的段不出现（非空才出现）
+        assert "估值完整性标注" not in ctx and "辩论锚点告警" not in ctx
+
+    def test_base_state_context_unchanged(self):
+        ctx = _build_fund_manager_context(_base_state())
+        assert "估值完整性标注" not in ctx and "辩论锚点告警" not in ctx
+        assert "交易决策" in ctx  # 既有段零回归
+
+
+class TestFMPromptPreApprovalClause:
+    """fund_manager.md 审批前核查条款（条件式，仲裁权保留）。"""
+
+    def test_prompt_has_preapproval_clause(self):
+        prompt = (
+            Path(__file__).resolve().parents[2] / "src/finance_agent/prompts/fund_manager.md"
+        ).read_text(encoding="utf-8")
+        assert "审批前核查" in prompt
+        assert "估值完整性标注" in prompt
+        assert "辩论锚点告警" in prompt
+        assert "数据口径披露" in prompt
+        assert "仲裁权" in prompt  # 条款不得禁止 approve

@@ -74,6 +74,9 @@ def _run_deep(inp: dict) -> dict:
     anchor = anchor_coverage(state.get("debate_anchor_checks") or [])
     return {
         "report": state.get("final_report"),
+        # ticker_match 输出侧是 input 回显（#55 文档化:管线无标的解析节点,
+        # initial_state 直注 stock_code,deep 维度退化 vacuous;query-only 模式
+        # 依赖尚不存在的解析节点,留待立项）
         "ticker": inp["stock_code"],
         "focus_summary": state.get("focus_summary") or "",
         "judge_vars": extract_judge_vars(state, query=inp.get("query", "")),

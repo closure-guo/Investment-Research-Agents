@@ -101,6 +101,16 @@ class TestApplyProviderOptions:
         with pytest.raises(ValidationError):
             apply_provider_options(_ark_glm(thinking="enabled"))
 
+    def test_unrecognized_provider_with_options_returns_empty(self):
+        """#76：schema 查无的 provider（如 openai/gpt-4o）provider_options 不消费 → {}。
+
+        识别锚点是 name/model 语义（ark/glm/kimi/k3），不是 provider=openai 本身——
+        换成无名 openai 模型后，携带的 options 一律不落请求。
+        """
+        p = _ark_glm(reasoning_effort="high")
+        p = dataclasses.replace(p, name="env:openai/gpt-4o", model="gpt-4o")
+        assert apply_provider_options(p) == {}
+
 
 class TestRawTimeoutInjection:
     """incident 016/017 卡死防护：调用方未传 timeout 时注入默认超时。"""

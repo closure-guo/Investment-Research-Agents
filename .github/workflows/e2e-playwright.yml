@@ -73,6 +73,15 @@ jobs:
         env:
           CI: "true"
 
+      # 评估运维分区（专属 config + 独立端口对 8005/5178 + 独立测试库）：
+      # 手动补跑用例服务端同步执行 20-60s，在默认套件并行会独占单进程后端致
+      # 流式用例随机红（issue #252）——物理隔离后默认套件恢复并行门禁
+      - name: Run Playwright E2E (eval-ops suite)
+        run: npx playwright test --config=playwright.eval-ops.config.ts
+        working-directory: tests/e2e/playwright
+        env:
+          CI: "true"
+
       # 时间序列 E2E（专属 config，STUB_SCENARIO=tool_call/pipeline，独立端口对）
       - name: Run Playwright E2E (timeline suite)
         run: npx playwright test --config=playwright.timeline.config.ts

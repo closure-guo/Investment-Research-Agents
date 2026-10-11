@@ -1,4 +1,10 @@
-"""decision_log DDL + CRUD:幂等建表、插入、open 查询、结算更新。"""
+"""decision_log DDL + CRUD:幂等建表、插入、open 查询、结算更新。
+
+#57 硬化回归:position_size 百分比串解析(子项2)、get_open_decisions 确定性序、
+mark_settled 行命中回报、updated_at 写入时刻语义(子项5)。
+"""
+
+from datetime import datetime
 
 import pytest
 
@@ -26,6 +32,20 @@ def _record(**overrides):
         "target_price": 1900.0,
         "confidence": 0.8,
         "position_size": 0.3,
+    }
+    base.update(overrides)
+    return base
+
+
+def _settled(**overrides):
+    base = {
+        "status": "hit_target",
+        "settled_at": "2026-08-12",
+        "settle_price": 1900.0,
+        "hold_days": 2,
+        "decision_return": 0.1176,
+        "benchmark_return": 0.01,
+        "decision_excess": 0.1076,
     }
     base.update(overrides)
     return base
@@ -132,3 +152,79 @@ class TestMarkSettled:
         assert row["settle_price"] == 1600.0
         assert row["hold_days"] == 2
         assert abs(row["decision_return"] - (-0.0588)) < 1e-9
+
+
+class TestPositionSizeParsing:
+    """#57 子项2:模型层 position_size 是 str|None(如 "30%"),REAL 列需解析为小数。
+
+    百分比串 → 小数("30%"→0.30);数值原样透传;不可解析字面量(档位词
+    "moderate"、乱码)→ NULL 存缺失,不以原串冒充数值。
+    """
+
+    def test_percent_string_parsed_to_fraction(self, db):
+        store.insert_decision(_record(position_size="30%"), db)
+        row = store.get_open_decisions(db)[0]
+        assert row["position_size"] is not None
+        assert abs(row["position_size"] - 0.30) < 1e-9
+
+    def test_plain_numeric_string_parsed(self, db):
+        store.insert_decision(_record(position_size="0.25"), db)
+        assert abs(store.get_open_decisions(db)[0]["position_size"] - 0.25) < 1e-9
+
+    def test_numeric_passthrough(self, db):
+        store.insert_decision(_record(position_size=0.25), db)
+        assert abs(store.get_open_decisions(db)[0]["position_size"] - 0.25) < 1e-9
+
+    def test_unparseable_string_stores_null(self, db):
+        store.insert_decision(_record(position_size="moderate"), db)
+        assert store.get_open_decisions(db)[0]["position_size"] is None
+
+    def test_none_stays_null(self, db):
+        store.insert_decision(_record(position_size=None), db)
+        assert store.get_open_decisions(db)[0]["position_size"] is None
+
+
+class TestOpenDecisionsDeterministicOrder:
+    """#57 子项5:结算 job 输入序须确定(按决策时间升序,先决策先结算)。"""
+
+    def test_open_decisions_ordered_by_timestamp_asc(self, db):
+        store.insert_decision(_record(decision_id="d_late", timestamp="2026-08-12T10:00:00"), db)
+        store.insert_decision(_record(decision_id="d_early", timestamp="2026-08-01T10:00:00"), db)
+        rows = store.get_open_decisions(db)
+        assert [r["decision_id"] for r in rows] == ["d_early", "d_late"]
+
+
+class TestMarkSettledRowcount:
+    """#57 子项5:0 行命中不得静默——返回是否命中(session_store 同款语义)。"""
+
+    def test_returns_true_on_hit(self, db):
+        store.insert_decision(_record(), db)
+        assert store.mark_settled("d_test001", _settled(), db) is True
+
+    def test_returns_false_on_missing_id(self, db):
+        assert store.mark_settled("d_nope", _settled(), db) is False
+
+
+class TestUpdatedAtWriteTime:
+    """#57 子项5:updated_at 是行写入时刻,不得复用决策时间/结算日期。"""
+
+    def test_insert_updated_at_is_write_time_not_decision_time(self, db):
+        store.insert_decision(_record(timestamp="2026-08-10T15:30:00"), db)
+        row = store.get_open_decisions(db)[0]
+        assert row["updated_at"] != "2026-08-10T15:30:00"
+        parsed = datetime.fromisoformat(row["updated_at"])
+        assert parsed.year >= 2026  # 可解析且为真实写入时刻
+
+    def test_mark_settled_updated_at_is_write_time_not_settle_date(self, db):
+        import sqlite3
+
+        store.insert_decision(_record(), db)
+        store.mark_settled("d_test001", _settled(settled_at="2026-08-12"), db)
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT updated_at FROM decision_log WHERE decision_id='d_test001'"
+        ).fetchone()
+        conn.close()
+        assert row["updated_at"] != "2026-08-12"
+        datetime.fromisoformat(row["updated_at"])

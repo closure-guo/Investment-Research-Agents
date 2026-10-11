@@ -3,13 +3,16 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
 /**
  * 评估运维分区 E2E 门禁（delta add-eval-ops-console，spec R7「评估运维分区前端」）
  *
- * 环境：`playwright.config.ts` 默认套件——TESTING=1 真后端（:8000）+ vite dev（:5173）。
+ * 环境：`playwright.eval-ops.config.ts` 专属套件（issue #252 物理隔离）——
+ * TESTING=1 真后端（:8005）+ vite dev（:5178）+ 专属测试库
+ * `data/test-e2e-eval-ops.db`。本套件手动补跑用例在服务端同步执行 20-60s，
+ * 在默认套件并行运行会独占单进程后端致流式用例随机红，故拆独立端口对。
  * **不 mock 任何业务接口**：`page.request` 只做「读真实状态」的复核（cohort 配置、运行历史），
  * 断言文本一律取自真实 DOM / 真实响应，不使用 `route.fulfill`。
  *
  * 环境前提（本套件不自行设置，若漂移会红）：
  * 1. TESTING=1 → 后端不启动调度器，`GET /api/v1/ops/jobs` 的 `scheduler_running` 恒为 false。
- * 2. `data/test-e2e-sessions.db`（gitignored 测试库）里 cohort 开关为默认「未开启」——
+ * 2. `data/test-e2e-eval-ops.db`（gitignored 专属测试库）里 cohort 开关为默认「未开启」——
  *    本套件全程不确认开启（取消路径），故不会自我污染；人工在测试库里点过「确认开启」后
  *    需删除该库再跑（cohort 已开启时「关闭时拒绝」用例自动 skip，见该用例注释）。
  *
@@ -18,7 +21,7 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
  * 故本套件不断言该状态，只断言终态与拒绝态。
  *
  * 超时预算（describe 级 120s）：ops 端点本身很快（实测单发与 12 并发均 ≈0.25s），
- * 但全量套件并行跑时本机/CI 资源被 20+ 个 spec（含 @live 流式套件）争抢，`page.goto`
+ * 但专属套件仍可能与 CI 上其他 config 步骤共享机器资源，`page.goto`
  * 冷启动 vite dev 的 ESM 模块图可达 20–30s——默认 30s 用例预算会把「环境慢」误报成
  * 「功能坏」。断言强度不变，只放大时间预算。
  */
@@ -50,8 +53,8 @@ type OpsRun = {
 /**
  * 打开设置中心「评估运维」分区（设置入口 = `/settings` 页面，与 add-agent-settings-center 同款）
  *
- * 分区可见等待放宽到 60s：全量套件并行跑时单 worker 后端被多 spec 并发打满、
- * vite dev 冷启动模块图变慢，`GET /api/v1/ops/jobs` 就绪可达 20–30s，此时分区停在
+ * 分区可见等待放宽到 60s：vite dev 冷启动模块图在 CI 共享资源下变慢，
+ * `GET /api/v1/ops/jobs` 就绪可达 20–30s，此时分区停在
  * 「评估运维加载中…」占位态（该占位态无 testid）——不是功能缺陷，是默认 expect 超时过紧。
  */
 async function openEvalOps(page: Page): Promise<void> {

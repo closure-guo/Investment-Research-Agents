@@ -186,6 +186,105 @@ def apply_pipeline_tool_event(
     return nextTimelines
 
 
+# ── 写放大治理（fix-timeline-write-amplification，issue #265 子项1，incident 039）──
+
+# thinking 洪峰期中间写自适应间隔三件套：间隔 = clamp(上次序列化字节数 ÷ 带宽上限,
+# 下限, 上限)。下限保持非洪峰期现状行为；上限封顶 refresh 恢复可见 staleness。
+TIMELINE_PERSIST_INTERVAL = 0.5  # 秒，下限
+TIMELINE_PERSIST_INTERVAL_MAX = 30.0  # 秒，上限
+TIMELINE_PERSIST_BW_CAP = 256 * 1024  # 写带宽上限（字节/秒）
+
+
+def timeline_persist_interval(payload_bytes: int) -> float:
+    """自适应中间写间隔：payload 越大间隔越长，写带宽有界（O(n²) 写放大根治）。"""
+    scaled = payload_bytes / TIMELINE_PERSIST_BW_CAP
+    return min(TIMELINE_PERSIST_INTERVAL_MAX, max(TIMELINE_PERSIST_INTERVAL, scaled))
+
+
+class NodeTimelineAccumulator:
+    """apply_pipeline_* 纯函数族的可变 O(1) 摊销实现（语义以纯函数为准）。
+
+    逐 token 调纯函数的代价是 O(n²)：每次全 dict 复制 + 全节点收口扫描 +
+    content 整串拼接。本类把 thinking 内容改为 parts 分片缓冲（append O(1)），
+    低频 tool/search/node_complete 事件物化后走既有纯函数再回填；
+    materialize() 产出与纯函数 fold 逐字节同构的结构（等价性测试钉死）。
+
+    不变量：任一时刻至多一个节点（最近收到 thinking token 的活动节点）存在
+    未收口 thinking 末段——纯函数「每 token 对其他所有节点 close_last_thinking」
+    与此等价（已 done 者幂等），故只需在节点切换时收口先前活动节点。
+    """
+
+    def __init__(self) -> None:
+        self._items: dict[str, list[dict]] = {}
+        self._active_node: str | None = None
+
+    def __bool__(self) -> bool:
+        """空值守卫：结束 flush 的 `if acc:` 判据（等价旧 `if nodeTimelines:`）。"""
+        return bool(self._items)
+
+    @staticmethod
+    def _close_last_thinking_mut(timeline: list[dict]) -> None:
+        last = timeline[-1] if timeline else None
+        if last and last.get("type") == "thinking" and last.get("done") is not True:
+            last["done"] = True
+
+    def add_thinking_token(self, node: str | None, token: str) -> None:
+        """O(1) 摊销追加：末项为 thinking（不看 done，镜像纯函数）则 parts.append。"""
+        nodeKey = node or ""
+        if self._active_node is not None and nodeKey != self._active_node:
+            prev = self._items.get(self._active_node)
+            if prev:
+                self._close_last_thinking_mut(prev)
+        self._active_node = nodeKey
+        current = self._items.setdefault(nodeKey, [])
+        last = current[-1] if current else None
+        if last and last.get("type") == "thinking":
+            last["parts"].append(token)
+        else:
+            current.append({"type": "thinking", "parts": [token], "done": False})
+
+    def apply_node_complete(self, node: str) -> None:
+        timeline = self._items.get(node)
+        if timeline is None:
+            return  # 镜像 apply_pipeline_node_complete：无该节点原样返回
+        self._close_last_thinking_mut(timeline)
+
+    def _apply_rare_event(self, node: str | None, event: dict) -> None:
+        """低频 tool/search 事件：物化该节点 → 纯函数 apply_chat_event → 回填缓冲。"""
+        nodeKey = node or ""
+        materialized = self._materialize_timeline(self._items.get(nodeKey, []))
+        updated = apply_chat_event(materialized, event)
+        self._items[nodeKey] = [self._rebuffer(item) for item in updated]
+
+    def apply_search_event(self, node: str | None, event: dict) -> None:
+        self._apply_rare_event(node, event)
+
+    def apply_tool_event(self, node: str | None, event: dict) -> None:
+        self._apply_rare_event(node, event)
+
+    @staticmethod
+    def _rebuffer(item: dict) -> dict:
+        if item.get("type") == "thinking":
+            rest = {k: v for k, v in item.items() if k not in ("type", "content")}
+            return {"type": "thinking", "parts": [item.get("content", "")], **rest}
+        return dict(item)
+
+    @staticmethod
+    def _materialize_timeline(timeline: list[dict]) -> list[dict]:
+        out: list[dict] = []
+        for item in timeline:
+            if item.get("type") == "thinking" and "parts" in item:
+                rest = {k: v for k, v in item.items() if k not in ("type", "parts", "content")}
+                out.append({"type": "thinking", "content": "".join(item["parts"]), **rest})
+            else:
+                out.append(dict(item))
+        return out
+
+    def materialize(self) -> dict[str, list[dict]]:
+        """产出与纯函数 fold 同构的 {node: [TimelineItem]}；不消耗内部缓冲。"""
+        return {node: self._materialize_timeline(tl) for node, tl in self._items.items()}
+
+
 def apply_chat_event(timeline: list[dict], event: dict) -> list[dict]:
     """将对话流 SSE 事件应用到 agentTimeline，返回新 list（不可变更新）。
 

@@ -108,7 +108,7 @@ services:
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-mysecret}
 
   clickhouse:
-    # 镜像必须固定版本（incident 027）：浮动 latest 曾无预警拉入 26.6.1，其新查询
+    # 镜像必须固定版本（incident 041）：浮动 latest 曾无预警拉入 26.6.1，其新查询
     # 分析器在 Langfuse scores 页查询形状（FINAL+JOIN+ORDER BY+LIMIT）上必然触发
     # NOT_FOUND_COLUMN_IN_BLOCK(Code 10)。固定 26.6.1 + 下方 users.d 回旧分析器。
     image: docker.io/clickhouse/clickhouse-server:26.6.1.1193

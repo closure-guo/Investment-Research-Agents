@@ -28,7 +28,6 @@ from finance_agent import session_store
 from finance_agent.agent_factory import _make_run_deep_analysis
 from finance_agent.harness import ActionType
 from finance_agent.stream_registry import registry
-from finance_agent.timeline_builder import apply_pipeline_thinking_token
 
 
 def _setup(tmp_path, monkeypatch, timeout_seconds: str) -> str:
@@ -87,19 +86,20 @@ async def test_scenario_a_graph_done_drain_lag_does_not_timeout(tmp_path, monkey
     monkeypatch.setattr("finance_agent.agent_factory._stream_graph", _flood_stream)
 
     # 红路径扳机（消费者同步处理段内扳机，必在后续预算检查之前生效）：
-    # 现实现对每个 thinking chunk 调 apply_pipeline_thinking_token 累积
-    # timeline——tail 前缀 token（排空段明细）首现时把假钟拨过预算线。
+    # 现实现经 NodeTimelineAccumulator.add_thinking_token 累积 timeline
+    # （fix-timeline-write-amplification 起纯函数逐 token 调用改为可变累加器）——
+    # tail 前缀 token（排空段明细）首现时把假钟拨过预算线。
     # 绿路径下 tail 明细在 timeline 累积前即被压缩，此扳机天然不触发。
-    real_apply = apply_pipeline_thinking_token
+    from finance_agent.timeline_builder import NodeTimelineAccumulator
 
-    def _arm_on_tail_token(node_timelines, node, token):
+    real_add = NodeTimelineAccumulator.add_thinking_token
+
+    def _arm_on_tail_token(self, node, token):
         if token.startswith("tail"):
             clock["offset"] = 1000.0
-        return real_apply(node_timelines, node, token)
+        return real_add(self, node, token)
 
-    monkeypatch.setattr(
-        "finance_agent.timeline_builder.apply_pipeline_thinking_token", _arm_on_tail_token
-    )
+    monkeypatch.setattr(NodeTimelineAccumulator, "add_thinking_token", _arm_on_tail_token)
 
     # 绿路径扳机：图完成后首个 tail_thinking 压缩丢弃时把假钟拨过预算线——
     # 排空期间若实现仍做预算检查必触发 TimeoutError（绿路径无检查，故无害）。

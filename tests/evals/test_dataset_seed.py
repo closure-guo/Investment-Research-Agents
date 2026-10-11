@@ -147,3 +147,19 @@ class TestSeed:
             result = seed(client=None)
         assert result["created"] == 0
         assert result["error"] is not None
+
+    def test_transient_get_failure_refetches_after_create(self):
+        """#56:get_dataset 瞬断 → create(按名 upsert,dataset 可能已存在且有
+        items)→ 必须重取 get_dataset 补 existing,防整批重复插入。"""
+
+        keys = [(it["input"]["query"], it["input"]["mode"]) for it in load_items(pool="baseline")]
+        client = MagicMock()
+        ds_full = MagicMock()
+        ds_full.items = [MagicMock(input={"query": q, "mode": m}) for (q, m) in keys]
+        # 首查瞬断;create 成功后重取返回「已全量存在」
+        client.get_dataset.side_effect = [ConnectionError("blip"), ds_full]
+        result = seed(client=client)
+        client.create_dataset.assert_called_once()
+        client.create_dataset_item.assert_not_called()
+        assert result["created"] == 0
+        assert result["skipped"] == len(keys)

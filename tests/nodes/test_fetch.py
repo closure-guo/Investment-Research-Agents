@@ -349,7 +349,11 @@ class TestFetchDataCoverageSources:
 
 
 class TestFetchPeersGuard:
-    """终审 I2：_fetch_peers 节点级守卫直测——未指定 peer_codes 不抓取；空表归一 None。"""
+    """终审 I2：_fetch_peers 节点级守卫直测；空表归一 None。
+
+    「未指定 peer_codes 不抓取」契约经 complete-peer-pipeline 收窄：无显式
+    列表时先走自动选取（行业成分 Top5 排除自身），成分不可得才保持不抓取。
+    """
 
     def test_no_peer_codes_no_fetch_call(self):
         from finance_agent.nodes.fetch import _fetch_peers
@@ -359,6 +363,10 @@ class TestFetchPeersGuard:
         class _Ak:
             def fetch_peer_data(self, codes):
                 calls.append(codes)
+                return None
+
+            def fetch_industry_constituents(self, industry):
+                # 自动选取不可得（接口失败降级 None）→ 保持不抓取
                 return None
 
         assert (

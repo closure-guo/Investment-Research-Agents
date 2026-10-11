@@ -7,11 +7,48 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+def _utc_now_iso() -> str:
+    """行写入时刻(updated_at 专用;不得复用决策时间/结算日期——语义不同源)。"""
+    return datetime.now(UTC).isoformat()
+
+
+def _parse_position_size(value: Any) -> float | None:
+    """position_size 归一为 REAL 小数(#57 子项2)。
+
+    模型层 position_size 是 str|None(如 "30%"):百分比串 → 小数("30%"→0.30),
+    数值/数值串透传;不可解析字面量(档位词 "moderate"、乱码)→ None 存缺失,
+    不以原串冒充数值(REAL 列对非数值串会原样存 TEXT,下游均值统计即踩雷)。
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        logger.warning("position_size 类型不支持(%r),按缺失落 NULL", value)
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            if text.endswith("%"):
+                return float(text[:-1]) / 100.0
+            return float(text)
+        except ValueError:
+            logger.warning("position_size 不可解析(%r),按缺失落 NULL", value)
+            return None
+    logger.warning("position_size 类型不支持(%r),按缺失落 NULL", value)
+    return None
+
 
 DECISION_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS decision_log (
@@ -66,9 +103,13 @@ def init_decision_log(db_path: str | Path | None = None) -> None:
 
 
 def insert_decision(record: dict[str, Any], db_path: str | Path | None = None) -> str:
-    """插入 open 决策,返回 decision_id(未提供则生成 uuid)。"""
+    """插入 open 决策,返回 decision_id(未提供则生成 uuid)。
+
+    position_size 经 _parse_position_size 归一为 REAL 小数(模型层是 str|None);
+    updated_at 为行写入时刻(#57:复用决策时间会丢「何时落库」语义)。
+    """
     decision_id = record.get("decision_id") or f"d_{uuid.uuid4().hex[:12]}"
-    now = record.get("updated_at") or record["timestamp"]
+    now = record.get("updated_at") or _utc_now_iso()
     conn = _connect(db_path)
     try:
         conn.execute(
@@ -90,7 +131,7 @@ def insert_decision(record: dict[str, Any], db_path: str | Path | None = None) -
                 record.get("stop_loss"),
                 record.get("target_price"),
                 record.get("confidence"),
-                record.get("position_size"),
+                _parse_position_size(record.get("position_size")),
                 now,
             ),
         )
@@ -180,10 +221,16 @@ def decision_stats(db_path: str | Path | None = None) -> dict[str, Any]:
 
 
 def get_open_decisions(db_path: str | Path | None = None) -> list[dict[str, Any]]:
-    """所有 status='open' 决策(结算 job 的输入)。"""
+    """所有 status='open' 决策(结算 job 的输入)。
+
+    按决策时间升序返回(#57:无序时结算顺序随查询计划漂移;同日并列按 rowid
+    兜底,保证逐行重放结果可复现)。
+    """
     conn = _connect(db_path)
     try:
-        rows = conn.execute("SELECT * FROM decision_log WHERE status='open'").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM decision_log WHERE status='open' ORDER BY timestamp ASC, rowid ASC"
+        ).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -191,11 +238,16 @@ def get_open_decisions(db_path: str | Path | None = None) -> list[dict[str, Any]
 
 def mark_settled(
     decision_id: str, settled: dict[str, Any], db_path: str | Path | None = None
-) -> None:
-    """写入结算结果。幂等由调用方保证(settled_at IS NULL 才调)。"""
+) -> bool:
+    """写入结算结果,返回是否命中行(#57:0 行命中——id 不存在或并发已结算——
+    此前静默吞掉,调用方无从感知;命中语义与 session_store 同款 rowcount>0)。
+
+    幂等由调用方保证(settled_at IS NULL 才调)。updated_at 记行写入时刻,
+    不复用 settle_date(一个是「哪天的价结算」,一个是「何时改了这行」)。
+    """
     conn = _connect(db_path)
     try:
-        conn.execute(
+        cursor = conn.execute(
             """UPDATE decision_log SET
                  status=?, settled_at=?, settle_price=?, hold_days=?,
                  decision_return=?, benchmark_return=?, decision_excess=?,
@@ -209,10 +261,11 @@ def mark_settled(
                 settled["decision_return"],
                 settled.get("benchmark_return"),
                 settled.get("decision_excess"),
-                settled["settled_at"],
+                _utc_now_iso(),
                 decision_id,
             ),
         )
         conn.commit()
+        return cursor.rowcount > 0
     finally:
         conn.close()

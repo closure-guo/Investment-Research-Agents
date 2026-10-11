@@ -227,6 +227,7 @@ FM 的 `confidence` 语义 SHALL 定义为「对本次裁决（approve/reject/re
 - **WHEN** FM reasoning 中出现改写上游指标名的表述（如上游为「DIF-DEA 柱」而 FM 写作「DCF 柱」），或把价位数值复述进百分比阈值清单（如把近期低点 6.12 复述为「单季净利降幅阈值 6.12」）
 - **THEN** 该失真 SHALL 经 judge 材料与 trace 可观测（FM 上下文中含上游原文，judge 变量含 FM reasoning 全文），供标注人按「真幻觉/复述失真」桶终裁
 - **AND** 管线 MUST NOT 因复述失真中断（语义级失真不由代码硬判定，锚定靠 prompt 保真约束 + 可观测性）
+
 ### Requirement: 报告基金经理决策章节展示操作定性
 
 report 节点拼装「基金经理决策」章节时，SHALL 在决策标注旁展示 FM 的 `action` 与 `confidence`（存在时），与裁决 action 并排，使「批准的是什么方案」直接可见。
@@ -341,6 +342,12 @@ Bull/Bear 辩论 SHALL 以既有 `key_arguments` 为编号锚点建立显式交�
 
 辩论与风控辩论节点 SHALL 在解析出 `DebateMessage` 后执行**确定性锚点校验**（零 LLM 调用）：`data` 型锚点复用引用校验器的 field_ref 解析器，解析得到非 None 值判 `resolved`，否则 `unresolved`；`event` 型锚点按既有回声源集合（`collect_text_sources`：`news_list` / `key_events` / `announcements` / `research_reports` / `share_unlock` / `block_trades`——与文本 claim 回声匹配同一实现）归一子串匹配，命中判 `resolved`；`inference` 型锚点先按 field_ref 解析、失败再按回声匹配；`data` / `event` 型零锚点判 `missing`；`inference` 型零锚点判 `none`（合法，计数）。校验结果 SHALL 写入 `AnalysisState` 中**已声明**的 channel `debate_anchor_checks`（append reducer）并落当前 span metadata。校验 SHALL fail-open：SHALL NOT 改变路由、SHALL NOT 阻断、SHALL NOT 触发重跑。
 
+每条检查记录 SHALL 为每锚点记录解析途径 `matched_via`（与 `anchors` 平行的列表：field_ref 命中记 `field_ref`、回声命中记 `echo`、未命中记空串），并 SHALL 记录 `echo_only_field_refs`（inference 型锚点中「field 形态（含 `.` 且首段为 state 现存根键）却仅经回声命中 resolved」的锚点子集）——锚点声明形态与实际证据来源错位的确定性信号。
+
+当论点存在任一经 field_ref 命中的锚点（`data` 或 `inference` 型）时，校验 SHALL 执行**数值溯源检查**：从论点 `text` 提取数值 token（排除标识符形态——ASCII 字母/数字相邻的 token 如 `MA5`/`R1`/`2024Q1`——与孤立年份形态），若文本含数值 token 且无一与任一命中值匹配（宽容匹配：原值 / ×100 百分数 / 两位舍入 / 绝对值，相对容差 0.5%——方向正确性归 judge，程序只判数字可溯源），该论点 `status` SHALL 判 `value_mismatch`（`anchored` 仍 true）；文本无数值 token、或任一 token 可溯源时 MUST NOT 判 `value_mismatch`。`event` 型与回声命中的锚点不在数值溯源范围（回声命中即子串命中，溯源由构造保证）。
+
+`anchor_stats` SHALL 在既有桶之外新增 `value_mismatch`（status=value_mismatch 的论点数）与 `field_ref_echo_only`（echo_only_field_refs 并集大小）两桶。全部新增信号 SHALL fail-open：SHALL NOT 改变路由、SHALL NOT 阻断、SHALL NOT 触发重跑。
+
 `rebuttal_to` 的 1-based 编号 SHALL 继续指向对方 `key_arguments` 的位置；对手可见的辩论历史编号行（「R{n} 论点: ①…」）SHALL 只渲染 `text`，SHALL NOT 在本变更中向对手暴露锚点。
 
 #### Scenario: 结构化论点解析
@@ -381,6 +388,47 @@ Bull/Bear 辩论 SHALL 以既有 `key_arguments` 为编号锚点建立显式交�
 - **WHEN** 某轮辩论全部论点 `anchored=false`（含全部 unresolved 或 missing）
 - **THEN** 图路由 SHALL 与变更前完全一致（进入下一轮 / research_manager / trader），SHALL NOT 重跑辩手、SHALL NOT 置阻断标记
 - **AND** 校验结果 SHALL 仍完整写入 `debate_anchor_checks` 与 span metadata
+
+#### Scenario: matched_via 解析途径记录
+
+- **WHEN** 论点 `kind="inference"`，`anchors=["technical_indicators.MA.5.-1", "拟回购不超过 10 亿元", "fundamental.不存在键.2024"]`，state 含 MA 序列与回购新闻
+- **THEN** 检查记录 `matched_via` SHALL 为 `["field_ref", "echo", ""]`（与 anchors 平行）
+- **WHEN** `kind="data"` 锚点命中
+- **THEN** `matched_via` SHALL 记 `field_ref`；`kind="event"` 锚点命中 SHALL 记 `echo`
+
+#### Scenario: 数值可溯源不误报
+
+- **GIVEN** state 中 `fundamental.中报净利润同比` 解析为 `-0.2401`，论点 text「中报净利同比下滑 24.01%，趋势延续」
+- **WHEN** 论点 `kind="data"`，`anchors=["fundamental.中报净利润同比"]`
+- **THEN** status SHALL 为 `resolved`（绝对值形态 + ×100 百分数形态匹配），MUST NOT 判 `value_mismatch`
+
+#### Scenario: 数值不可溯源判 value_mismatch
+
+- **GIVEN** state 中 `fundamental.中报净利润同比` 解析为 `-0.2401`，论点 text「净利同比下滑 8.06%，盈利恶化」（8.06 为季度链单季值，与锚定值不可对上）
+- **WHEN** 论点 `kind="data"`，`anchors=["fundamental.中报净利润同比"]`
+- **THEN** status SHALL 为 `value_mismatch`、`anchored` SHALL 仍为 true
+- **AND** `anchor_stats` 的 `value_mismatch` 桶 SHALL 计 1
+
+#### Scenario: 标识符与年份形态不触发数值溯源
+
+- **WHEN** 论点 text 为「MA5 上穿 MA20，R1 回应 2024 年报显示盈利改善」且存在 field 命中锚点（值 2.0）
+- **THEN** 数值 token 提取 SHALL 排除 `5`（左邻字母）、`20`（左邻字母）、`1`（左邻字母）、`2024`（孤立年份），status MUST NOT 判 `value_mismatch`
+- **WHEN** 文本无任何数值 token
+- **THEN** MUST NOT 判 `value_mismatch`
+
+#### Scenario: field 形态锚点仅回声命中计 field_ref_echo_only
+
+- **GIVEN** state 根键含 `fundamental`，`fundamental.中报净利润同比` 解析为 None（快照同比暂缺），`news_list` 含标题「中报净利润同比」（归一后为锚点归一形态的子串，回声命中）
+- **WHEN** 论点 `kind="inference"`，`anchors=["fundamental.中报净利润同比"]`
+- **THEN** 该锚点 SHALL 判 `resolved`、`matched_via` SHALL 记 `echo`
+- **AND** 检查记录 `echo_only_field_refs` SHALL 收录该锚点，`anchor_stats` 的 `field_ref_echo_only` 桶 SHALL 计 1
+- **AND** event 型回声锚（不含 `.`）与 field_ref 命中的锚点 SHALL NOT 计入该桶
+
+#### Scenario: 新增信号均不改变路由
+
+- **WHEN** 某轮辩论出现 `value_mismatch` 或 `field_ref_echo_only` 非零
+- **THEN** 图路由 SHALL 与信号全零时完全一致，SHALL NOT 重跑辩手、SHALL NOT 置阻断标记、SHALL NOT 改写辩论上下文
+- **AND** 信号 SHALL 完整写入 `debate_anchor_checks` 与 span metadata，供下游审批上下文消费
 
 #### Scenario: channel 声明与图通道契约
 
@@ -435,15 +483,53 @@ Bull/Bear 辩论 SHALL 以既有 `key_arguments` 为编号锚点建立显式交�
 
 - **WHEN** action 为 buy 或 sell
 - **THEN** 理由检查 SHALL 不要求 `inaction_reason`，价位必填校验语义 SHALL 保持不变
+
 ### Requirement: FM 审批对象完整性可见性
 
-FM 节点构建 LLM 上下文时，SHALL 包含终稿完整性检查的标注结果（`final_price_check` / `final_inaction_check` / 终稿再评估触发条件检查的 note，如「已打回仍未申报」），使 FM 在审批时能看到审批对象的结构完整性状态，MUST NOT 在不知情的情况下对结构不完整的方案作出完备性论断。报告「基金经理决策」节 SHALL 在 FM 审批意见之外并排渲染其审批对象携带的结构不完整标注（存在时），使「方案事实」与「FM 论断」的矛盾直接可见，MUST NOT 只呈现 FM 的完备性论断。
+FM 节点构建 LLM 上下文时，SHALL 包含终稿完整性检查的标注结果（`final_price_check` / `final_inaction_check` / 终稿再评估触发条件检查的 note，如「已打回仍未申报」），使 FM 在审批时能看到审批对象的结构完整性状态，MUST NOT 在不知情的情况下对结构不完整的方案作出完备性论断。
+
+FM 节点构建 LLM 上下文时，SHALL 额外包含以下三类 grounding 输入（各段非空才出现，MUST NOT 输出空段）：
+
+1. **估值完整性标注**：`valuation_snapshot.missing_reasons` 非空时，列出全部缺失原因，使 FM 知晓估值数据缺席（PE 缺失原因等）——估值相关论断缺乏确定性数据支撑。
+2. **辩论锚点告警**：`debate_anchor_checks` 的确定性汇总——`value_mismatch`（文本数字不可溯源）、`echo_only_field_refs`（field 形态锚仅回声命中）与 `data`/`event` 型 unresolved/missing 计数；违规项逐条列示（role/round/index/anchors/status，上限 5 条，超出部分计数汇总），全零 MUST NOT 出现该段。
+3. **数据口径披露原文**：`_format_freshness_section(state)` 的渲染结果整段注入（管线确定性计算的快照/估值/健康度/风险指标/价位参考），供 FM 交叉核对决策数字与确定性计算的一致性——口径冲突由 FM 审批语义层判断，MUST NOT 在程序层解析叙事文本做一致性比对。
+
+以上标注/告警/披露段 SHALL fail-open：MUST NOT 改变路由、MUST NOT 自动触发退回——FM 仲裁权保留（可见性义务优先），但 FM 提示词 SHALL 要求在 reasoning 中显式回应出现的标注/告警（为何放行或作为退回依据）。
+
+报告「基金经理决策」节 SHALL 在 FM 审批意见之外并排渲染其审批对象携带的结构不完整标注（存在时），使「方案事实」与「FM 论断」的矛盾直接可见，MUST NOT 只呈现 FM 的完备性论断。本变更的估值完整性标注/锚点告警仅进 FM 上下文，SHALL NOT 新增报告渲染（披露节原文已在报告内呈现）。
 
 #### Scenario: FM 上下文携带完整性标注
 
 - **WHEN** `final_trade_decision` 为 watch 且 `reeval_triggers` 经打回后仍缺失（携带「已打回仍未申报」标注），FM 节点构建上下文
 - **THEN** FM 的 LLM 上下文 SHALL 包含该标注原文
 - **AND** FM MUST NOT 因上下文含标注而被禁止 approve（仲裁权保留，可见性义务优先）
+
+#### Scenario: FM 上下文携带估值完整性标注
+
+- **GIVEN** `valuation_snapshot.missing_reasons` = ["market_cap 缺失", "快照缺失"]
+- **WHEN** FM 节点构建上下文
+- **THEN** FM 的 LLM 上下文 SHALL 含「估值完整性标注」段且列出两条缺失原因
+- **WHEN** `valuation_snapshot` 缺失或 `missing_reasons` 为空
+- **THEN** 上下文 MUST NOT 出现该段
+
+#### Scenario: FM 上下文携带辩论锚点告警
+
+- **GIVEN** `debate_anchor_checks` 含一条 `status="value_mismatch"` 记录（bull R1 #2，anchors=["fundamental.中报净利润同比"]）
+- **WHEN** FM 节点构建上下文
+- **THEN** FM 的 LLM 上下文 SHALL 含「辩论锚点告警」段且逐条列示该记录（role/round/index/anchors/status）
+- **AND** `debate_anchor_checks` 为空或全部信号为零时，上下文 MUST NOT 出现该段
+
+#### Scenario: FM 上下文携带数据口径披露原文
+
+- **WHEN** `_format_freshness_section(state)` 返回非 None，FM 节点构建上下文
+- **THEN** FM 的 LLM 上下文 SHALL 包含该披露节原文（确定性计算数字供交叉核对）
+- **AND** 返回 None 时上下文 MUST NOT 出现空段
+
+#### Scenario: 标注与告警不改变路由与仲裁权
+
+- **WHEN** 估值完整性标注、锚点告警、披露段任一非空
+- **THEN** 图路由 SHALL 与全空时完全一致，MUST NOT 自动退回或阻断
+- **AND** FM 仍可 approve（仲裁权保留）
 
 #### Scenario: 报告并排渲染不完整标注与 FM 论断
 
@@ -455,3 +541,4 @@ FM 节点构建 LLM 上下文时，SHALL 包含终稿完整性检查的标注结
 
 - **WHEN** `final_trade_decision` 通过全部完整性检查（无标注）
 - **THEN** 报告与 FM 上下文 SHALL 维持现状形态，MUST NOT 出现空标注行
+

@@ -120,7 +120,8 @@ class TestResolverMerge:
         assert profile.provider_options["reasoning_effort"] == "max"
 
     def test_request_non_whitelisted_key_rejected(self):
-        with pytest.raises((ValueError, TypeError)):
+        # #76 收紧：精确锁定 IncompleteLLMConfigError（原 (ValueError, TypeError) 元组）
+        with pytest.raises(IncompleteLLMConfigError):
             resolve_profile(
                 llm_config={
                     "model": "deepseek/deepseek-chat",
@@ -129,6 +130,21 @@ class TestResolverMerge:
                     "provider_options": {"organization": "x"},
                 }
             )
+
+    def test_env_non_deepseek_no_options(self):
+        """#76：env 分支非 deepseek/glm/kimi 模型 → provider_options 空直测。
+
+        此前仅请求级有直测（test_request_config_non_deepseek_no_options），
+        env 路径靠间接覆盖。
+        """
+        profile = resolve_profile(
+            _env={
+                "LLM_MODEL": "openai/gpt-4o",
+                "LLM_BASE_URL": "https://x/v1",
+                "LLM_API_KEY": "k",
+            }
+        )
+        assert profile.provider_options == {}
 
     def test_request_config_non_deepseek_no_options(self):
         profile = resolve_profile(
@@ -227,7 +243,8 @@ class TestResolverMerge:
         assert profile.provider_options == {"reasoning_effort": "max"}
 
     def test_request_ark_glm_non_whitelisted_provider_options_rejected(self):
-        with pytest.raises((ValueError, TypeError)):
+        # #76 收紧：精确锁定 IncompleteLLMConfigError
+        with pytest.raises(IncompleteLLMConfigError):
             resolve_profile(
                 llm_config={
                     "model": "glm-5.3",
@@ -236,6 +253,29 @@ class TestResolverMerge:
                     "provider_options": {"thinking": "enabled"},  # 不在白名单
                 }
             )
+
+
+class TestValidateOptionsReturnsValidated:
+    """#76：_validate_options 返回校验归一后的新 dict，不返回调用方入参别名。"""
+
+    def test_returns_validated_copy_not_input_alias(self):
+        from finance_agent.llm.resolver import _validate_options
+
+        options = {"thinking": "enabled"}
+        out = _validate_options("deepseek", options)
+        assert out == options
+        assert out is not options, "须返回校验产物拷贝——调用方后续 mutate 不得污染源 dict"
+
+    def test_unset_fields_not_materialized(self):
+        from finance_agent.llm.resolver import _validate_options
+
+        out = _validate_options("deepseek", {"thinking": "enabled"})
+        assert "reasoning_effort" not in out, "未显式设置的字段不得物化进结果"
+
+    def test_unknown_provider_passthrough(self):
+        from finance_agent.llm.resolver import _validate_options
+
+        assert _validate_options("anthropic", {"x": 1}) == {"x": 1}
 
 
 class TestKimiProviderOptions:

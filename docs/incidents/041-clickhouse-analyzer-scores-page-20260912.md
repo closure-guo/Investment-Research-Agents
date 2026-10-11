@@ -1,4 +1,4 @@
-# 027 — Langfuse Scores 页 internal server error：ClickHouse 26.6 新分析器在 scores 查询形状上必然崩溃
+# 041 — Langfuse Scores 页 internal server error：ClickHouse 26.6 新分析器在 scores 查询形状上必然崩溃
 
 **日期**: 2026-09-12
 **状态**: 已修复（enable_analyzer=0 + 镜像固定；UI 页面待 owner 刷新确认）
@@ -27,7 +27,7 @@ ORDER BY s.timestamp DESC LIMIT 50;   -- 有 LIMIT 才触发；无 LIMIT / 无 F
 
 | 方案 | 评估 |
 |---|---|
-| ✅ 默认 profile `enable_analyzer=0`（`docker/clickhouse/users.d/incident-027-legacy-analyzer.xml`） | 实测修复；语义回到 Langfuse 支持的 24.x 时代；不动镜像、不动数据、可秒级回滚 |
+| ✅ 默认 profile `enable_analyzer=0`（`docker/clickhouse/users.d/incident-041-legacy-analyzer.xml`） | 实测修复；语义回到 Langfuse 支持的 24.x 时代；不动镜像、不动数据、可秒级回滚 |
 | ✅ 镜像固定 `clickhouse-server:26.6.1.1193`（docker-compose.yml） | 杜绝下次 float 无预警拉入新版本 |
 | ❌ 降级 ClickHouse 镜像 | 数据目录已被 26.6.1 写了 3 周（官方不支持降级，part 格式风险）；且无降级必要——旧分析器路径已完全绕开 bug |
 

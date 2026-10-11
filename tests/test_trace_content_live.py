@@ -59,20 +59,42 @@ async def test_live_reasoning_streamed_in_thinking_mode():
         if resp.is_finished:
             finished = True
 
+    # #52 已知局限：is_finished 近恒真（截断收尾也置位），且实测正常 stop 终帧
+    # usage 亦为 None（usage 未随完成帧透出）——消费者侧无法区分「正常 stop」与
+    # 「截断收尾」，真正判别需客户端透出 finish_reason（挂账 issue）。
+    # 判别力暂由「reasoning 与正文均非空」承担：截断通常二者缺一。
     assert finished, "流未正常结束（未收到 is_finished）"
     assert "".join(reasoning_parts), "thinking 模式未产生 reasoning_content（真实 API 行为漂移）"
     assert "".join(text_parts), "未产生最终回答 content"
 
 
-def test_live_tool_calls_returned():
-    """真实 DeepSeek tool calling：complete_with_tools 返回结构含 tool_calls。
+def test_live_tool_calls_returned(monkeypatch):
+    """真实 GLM tool calling：complete_with_tools 返回结构含 tool_calls。
 
     对应 spec「LLM Generation 工具调用决策可观测」：complete_with_tools 走
     非流式 litellm.completion，返回完整 response，tool_calls 在
     choices[0].message.tool_calls（migrate-off-legacy-llm-shim Task 3：
     原 call_llm_with_tools 直调 gateway.complete_with_tools）。
+
+    #52 护栏：
+    - tool_choice=required（registry ark-glm capability 实测支持，生产 ReAct
+      force_tool 轮同款）——auto 下模型可直接回答不调工具，行为波动会被误报
+      成协议漂移。**走 env 解析而非请求级 llm_config**：resolver 请求分支恒用
+      openai-compatible 通用能力（tool_choice_required=False），env 分支才按
+      模型名推断 ark-glm 能力——本用例 monkeypatch 三个 LLM_* 变量、不传
+      llm_config，与生产 deep 路径（env profile）同形（请求分支能力推断缺口
+      另立 issue 挂账）。
+    - 同步调用超时护栏：raw_completion 未显式传 timeout 时注入
+      LLM_TIMEOUT_SECONDS（默认 300，incident 016/017 卡死防护）——本用例
+      收紧为 120s，夜挂 10 分钟的场景不再可能。
     """
     from finance_agent.llm.gateway import complete_with_tools
+
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("LLM_MODEL", _LIVE_MODEL)
+    monkeypatch.setenv("LLM_BASE_URL", _LLM_BASE_URL)
+    monkeypatch.setenv("LLM_API_KEY", _LLM_API_KEY)
+    monkeypatch.delenv("LLM_QUICK_MODEL", raising=False)
 
     tools = [
         {
@@ -91,15 +113,13 @@ def test_live_tool_calls_returned():
         }
     ]
 
-    # 请求级 llm_config：resolver 请求分支要求 baseUrl 齐备（网关迁移后不再由
-    # resolver 隐式补端点——测试显式补生产栈变量，与 judges._call_judge_llm 同款）
-    llm_config: dict = {"model": _LIVE_MODEL, "apiKey": _LLM_API_KEY, "baseUrl": _LLM_BASE_URL}
-
+    # env 解析（不传 llm_config）：resolver 环境分支按模型名推断 ark-glm 能力
+    # （tool_choice_required=True），请求分支恒用 openai-compatible 通用能力
+    # 会把 required 拒在守卫——详见本用例 docstring 与 #52 挂账 issue。
     resp = complete_with_tools(
         [{"role": "user", "content": "贵州茅台（600519）现在多少钱？请调用工具查询。"}],
         tools=tools,
-        tool_choice="auto",
-        llm_config=llm_config,
+        tool_choice="required",
     )
 
     message = resp.choices[0].message

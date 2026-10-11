@@ -65,6 +65,8 @@ TBD - created by archiving change add-chart-data-integrity. Update Purpose after
 
 图表对缺失数据的渲染 SHALL 分三级语义，任何一级 MUST NOT 将缺失渲染为 0：**单元格级**（热力图）缺数据渲染为缺失标注（掩膜/占位文本）；**序列级**部分缺失断开该点（不画柱/线段）；**序列级整体缺失**时呈现占位说明文案或跳过该图（对齐既有 contract_liab/debt_ratio 全缺跳过语义），MUST NOT 静默只渲染部分序列冒充完整对比图。
 
+占位说明 SHALL 区分「数据缺失」与「行业不适用」两类语义：银行业标的（`is_banking_industry` 判定，industry 经 `collect_chart_data` 携带）的毛利率与净利率子图在毛利率整体缺失时，占位文本 SHALL 为「银行业不适用毛利率口径（无营业成本概念）」类行业不适用表述，MUST NOT 误述为「利润率数据缺失」（银行数据没有缺失，是口径不适用）；非银行业整体缺失维持「数据缺失」类占位。
+
 #### Scenario: 热力图窗口外年份渲染缺失标注
 
 - **GIVEN** K 线仅覆盖近一年，热力图中 4 个年报行的窗口日期不在 K 线范围内
@@ -85,6 +87,19 @@ TBD - created by archiving change add-chart-data-integrity. Update Purpose after
 - **WHEN** 营收净利/现金流/总资产权益柱图渲染
 - **THEN** 该年 SHALL 无柱（NaN 断开），MUST NOT 画 0 高度柱冒充真实值
 
+#### Scenario: 银行业利润率图占位为行业不适用
+
+- **GIVEN** 银行业标的毛利率各年 None（银行报表无营业成本列，#240 断线修复后走占位分支）、chart_data 携带行业「银行」
+- **WHEN** 毛利率与净利率子图渲染
+- **THEN** 占位文本 SHALL 含「银行业不适用毛利率口径」
+- **AND** MUST NOT 出现「利润率数据缺失」类数据缺失误述
+
+#### Scenario: 非银行业整体缺失维持数据缺失占位
+
+- **GIVEN** 非银行业标的毛利率与净利率各年 None
+- **WHEN** 利润率子图渲染
+- **THEN** 占位文本 SHALL 维持「利润率数据缺失」现状形态
+
 ### Requirement: 图表金额单位一致
 
 以「亿元」标注轴的金额序列（营业收入、归母净利润、经营现金流净额、总资产、归母权益、合同负债）SHALL 以亿元为实际渲染单位（原始元 / 1e8），数据标签与坐标轴刻度同步换算，MUST NOT 出现原始元数值（如 1.6e11 量纲偏移）配「亿元」轴标。
@@ -95,4 +110,23 @@ TBD - created by archiving change add-chart-data-integrity. Update Purpose after
 - **WHEN** 现金流柱图渲染
 - **THEN** 柱值与数据标签 SHALL 为 1629.07（亿元）
 - **AND** 轴标保持「经营现金流净额（亿元）」
+
+### Requirement: 图表产物持久化存储
+
+管线生成的图表 PNG SHALL 写入持久化目录 `CHARTS_DIR`（环境变量，默认 `data/charts`）下按股票代码划分的子目录，MUST NOT 写入容器临时目录（`/tmp`）——`data/` 为 compose 卷挂载目录，图表 SHALL 跨容器重启存活，使历史会话按需重导出时图片源文件仍可得（#239 缺陷 A：/tmp 路径重启即失，重导出静默降级为无图产物）。`CHARTS_DIR` 覆盖语义与既有 `REPORTS_DIR` 注入惯例一致（E2E/测试隔离）。
+
+存量会话 `report_markdown` 中指向已消失 `/tmp` 路径的图片行，沿用 Markdown 导出「源文件缺失时优雅降级」既有语义（跳过图片行继续导出），本变更 MUST NOT 改写会话存储中的历史引用。
+
+#### Scenario: 图表写入持久目录且跨重启可得
+
+- **GIVEN** 后端容器完成一次深度分析（图表生成于 `data/charts/<code>/`）
+- **WHEN** 容器重启后对同一会话按需重导出
+- **THEN** 图片源文件 SHALL 仍存在，导出产物 SHALL 含全部图表
+- **AND** MUST NOT 出现静默删除图片行的无图产物
+
+#### Scenario: CHARTS_DIR 覆盖隔离
+
+- **GIVEN** E2E 门禁 webServer 注入 `CHARTS_DIR=<tmp>/charts`
+- **WHEN** stub 管线生成报告
+- **THEN** 图表 SHALL 写入注入目录，MUST NOT 污染检出工作树的 `data/charts`
 

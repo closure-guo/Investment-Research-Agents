@@ -5,6 +5,7 @@ WeasyPrint 系统库（pango/cairo）缺失时惰性导入失败，由调用方�
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from finance_agent.export.parser import parse_markdown
@@ -31,6 +32,16 @@ hr { border: none; border-top: 1px solid #ccc; margin: 12pt 0; }
 """
 
 
+def _inline_to_html(text: str) -> str:
+    """escape 后转内联样式（issue #239B）：`**bold**`→<strong>、`*italic*`→<em>。"""
+    from html import escape
+
+    escaped = escape(text)
+    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", escaped)
+    return escaped
+
+
 def _sections_to_html(markdown_text: str) -> str:
     from html import escape
 
@@ -39,12 +50,16 @@ def _sections_to_html(markdown_text: str) -> str:
         if sec.type == "heading":
             parts.append(f"<h{min(sec.level, 6)}>{escape(sec.text)}</h{min(sec.level, 6)}>")
         elif sec.type == "paragraph":
-            parts.append(f"<p>{escape(sec.text)}</p>")
+            parts.append(f"<p>{_inline_to_html(sec.text)}</p>")
+        elif sec.type == "list":
+            tag = "ol" if sec.ordered else "ul"
+            items = "".join(f"<li>{_inline_to_html(item)}</li>" for item in sec.items)
+            parts.append(f"<{tag}>{items}</{tag}>")
         elif sec.type == "table":
             rows_html = []
             for i, row in enumerate(sec.rows):
                 tag = "th" if i == 0 else "td"
-                cells = "".join(f"<{tag}>{escape(c)}</{tag}>" for c in row)
+                cells = "".join(f"<{tag}>{_inline_to_html(c)}</{tag}>" for c in row)
                 rows_html.append(f"<tr>{cells}</tr>")
             parts.append(f"<table>{''.join(rows_html)}</table>")
         elif sec.type == "separator":

@@ -38,11 +38,14 @@ def stratified_sample(
     per_regime: int = 10,
     window_days: int = 120,
     seed: int = 42,
+    min_decision_date: str | None = None,
 ) -> list[dict]:
     """滑窗扫描指数历史找三种 regime 窗口；每 regime 抽 per_regime 只标的 +
     决策日（窗口末日）。样本不足抛 ValueError。
 
     同 seed 完全可复现（抽样与窗口扫描均确定）。
+    min_decision_date（issue #172 深历史执法）：决策日早于该日的窗口跳过，
+    cutoff 之后凑不齐三 regime 按既有语义抛 ValueError（禁止单边汇报）。
     """
     dates = index_kline["日期"].astype(str).str[:10]
     n = len(index_kline)
@@ -50,10 +53,13 @@ def stratified_sample(
     found: dict[str, dict] = {}  # regime → {"end_idx", "decision_date"}
     step = max(1, window_days // 4)
     for end in range(window_days, n + 1, step):
+        decision_date = str(dates.iloc[end - 1])
+        if min_decision_date and decision_date < min_decision_date:
+            continue
         window = index_kline.iloc[end - window_days : end]
         regime = classify_regime(window)
         if regime not in found:
-            found[regime] = {"end_idx": end, "decision_date": str(dates.iloc[end - 1])}
+            found[regime] = {"end_idx": end, "decision_date": decision_date}
         if len(found) == 3:
             break
     missing = {"bull", "bear", "sideways"} - set(found)

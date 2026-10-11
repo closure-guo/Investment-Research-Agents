@@ -24,7 +24,7 @@ def _safe(val: object, default: float = 0.0) -> float:
 
 def _find_indicator(indicators: pd.DataFrame | None, year: str) -> pd.Series | None:
     """从 indicators 按年份匹配，返回对应行。"""
-    if indicators is None:
+    if indicators is None or indicators.empty or "日期" not in indicators.columns:
         return None
     match = indicators[indicators["日期"].astype(str).str[:4] == year]
     return match.iloc[0] if len(match) > 0 else None

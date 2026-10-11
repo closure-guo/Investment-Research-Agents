@@ -129,6 +129,9 @@ def init_db() -> None:
         ("citations", "ALTER TABLE sessions ADD COLUMN citations TEXT"),
         # 最近一次运行关联的 Langfuse trace（add-user-feedback）：反馈端点按 session 解析
         ("langfuse_trace_id", "ALTER TABLE sessions ADD COLUMN langfuse_trace_id TEXT"),
+        # 终稿决策 JSON（add-report-revision-view）：随 update_session_report 落库，
+        # 供同标的下一份报告的「距上次报告」增量摘要回溯；NULL = 无终稿/旧会话
+        ("final_trade_decision", "ALTER TABLE sessions ADD COLUMN final_trade_decision TEXT"),
     ]:
         with contextlib.suppress(sqlite3.OperationalError):
             conn.execute(ddl)
@@ -498,13 +501,20 @@ def update_session_report(
     duration_ms: int = 0,
     status: str = "completed",
     citations: list[dict] | None = None,
+    final_trade_decision: dict | None = None,
 ) -> bool:
     """更新 session 的报告数据和状态。
 
     用于管线启动时先创建 running session，完成后再回填报告。
     file_paths 记录报告文件产物路径（md/docx 等），供恢复会话还原导出入口。
     citations 为结构化引用数组（add-citation-display），None = 未校验（旧路径兼容）。
+    final_trade_decision 为终稿决策（add-report-revision-view）：真实管线中是
+    TradeDecision pydantic 对象，落库前统一 model_dump 成 dict 再 JSON 序列化
+    （直接 json.dumps 走 default=str 会落 repr 串，回溯侧不可解析——实跑实证）；
+    None 落 NULL——管线阻断/未审批时 MUST NOT 以 trader 层 plan 冒充终稿。
     """
+    if final_trade_decision is not None and hasattr(final_trade_decision, "model_dump"):
+        final_trade_decision = final_trade_decision.model_dump()
     conn = _get_db()
     cur = conn.execute(
         """
@@ -517,7 +527,8 @@ def update_session_report(
             file_paths = ?,
             duration_ms = ?,
             status = ?,
-            citations = ?
+            citations = ?,
+            final_trade_decision = ?
         WHERE session_id = ?
         """,
         (
@@ -530,12 +541,63 @@ def update_session_report(
             duration_ms,
             status,
             json.dumps(citations, ensure_ascii=False) if citations is not None else None,
+            json.dumps(final_trade_decision, ensure_ascii=False, default=str)
+            if final_trade_decision is not None
+            else None,
             session_id,
         ),
     )
     conn.commit()
     conn.close()
     return cur.rowcount > 0
+
+
+def get_previous_completed_session(stock_code: str, current_session_id: str | None) -> dict | None:
+    """回溯同标的上一份已完成报告（add-report-revision-view）。
+
+    返回最近一条 status='completed' 且非 current_session_id 的会话（created_at 降序），
+    携带增量摘要渲染所需的结构化字段子集：
+    session_id / created_at / final_trade_decision（解析后 dict，NULL 归一为 None）/
+    kpi（chart_data.kpi 关键指标子 dict）。
+    无符合条件的历史行返回 None。running/failed 会话 MUST NOT 被返回。
+    查询失败（DB 不可读等）降级返回 None 并按首份报告处理，不阻断管线。
+    """
+    try:
+        conn = _get_db()
+        row = conn.execute(
+            """
+            SELECT session_id, created_at, final_trade_decision, chart_data
+            FROM sessions
+            WHERE stock_code = ? AND status = 'completed' AND session_id <> ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (stock_code, current_session_id or ""),
+        ).fetchone()
+        conn.close()
+    except sqlite3.Error as exc:
+        logger.warning("回溯上一份报告查询失败，按首份报告处理: %s", exc)
+        return None
+    if row is None:
+        return None
+    decision = None
+    if row["final_trade_decision"]:
+        try:
+            decision = json.loads(row["final_trade_decision"])
+        except (json.JSONDecodeError, TypeError):
+            decision = None
+    kpi: dict = {}
+    if row["chart_data"]:
+        try:
+            kpi = json.loads(row["chart_data"]).get("kpi") or {}
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            kpi = {}
+    return {
+        "session_id": row["session_id"],
+        "created_at": row["created_at"],
+        "final_trade_decision": decision,
+        "kpi": kpi,
+    }
 
 
 def update_session_status(session_id: str, status: str, failure_reason: str | None = None) -> bool:
@@ -871,10 +933,19 @@ def update_pipeline_snapshot(session_id: str, snapshot: dict) -> bool:
 
 def update_pipeline_timelines(session_id: str, timelines: dict) -> bool:
     """持久化管线节点时序（JSON：{node: [TimelineItem]}）。返回是否更新到行。"""
+    return update_pipeline_timelines_json(session_id, json.dumps(timelines, ensure_ascii=False))
+
+
+def update_pipeline_timelines_json(session_id: str, payload_json: str) -> bool:
+    """以预序列化 JSON 写入管线时序（写放大治理，fix-timeline-write-amplification）。
+
+    调用方（两条管线消费路径）序列化一次并测得字节数——自适应中间写间隔的
+    输入（timeline_persist_interval），避免为测字节数重复 dumps。
+    """
     conn = _get_db()
     cur = conn.execute(
         "UPDATE sessions SET pipeline_timelines = ? WHERE session_id = ?",
-        (json.dumps(timelines, ensure_ascii=False), session_id),
+        (payload_json, session_id),
     )
     conn.commit()
     conn.close()

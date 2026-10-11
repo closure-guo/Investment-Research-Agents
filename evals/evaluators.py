@@ -6,8 +6,12 @@ from evals.sections import find_section
 
 
 def section_coverage(report: str | None, expected_output: dict) -> dict | None:
-    """必备章节覆盖率。expected 无 must_cover 时返回 None(不计入该维度)。"""
-    must_cover = expected_output.get("must_cover")
+    """必备章节覆盖率。expected 无 must_cover 时返回 None(不计入该维度)。
+
+    must_cover 先去重（#55）:重复的缺失项不得虚增分母压低覆盖率,缺失清单
+    亦不得重复罗列。
+    """
+    must_cover = list(dict.fromkeys(expected_output.get("must_cover") or []))
     if not must_cover:
         return None
     if report is None:
@@ -21,14 +25,33 @@ def section_coverage(report: str | None, expected_output: dict) -> dict | None:
     }
 
 
+_TICKER_SUFFIXES = (".SH", ".SZ", ".SS", ".BJ")
+
+
+def _normalize_ticker(ticker: str) -> str:
+    """比较归一（#55）:去首尾空白、大写、剥交易所后缀——后缀变体不误判 0 分。"""
+    t = ticker.strip().upper()
+    for suffix in _TICKER_SUFFIXES:
+        if t.endswith(suffix):
+            return t[: -len(suffix)]
+    return t
+
+
 def ticker_match(ticker: str | None, expected_output: dict) -> dict | None:
-    """标的解析正确性。expected 无 ticker 时返回 None。"""
+    """标的解析正确性。expected 无 ticker 时返回 None。比较经 _normalize_ticker 归一。
+
+    已知局限（#55 文档化）:deep 路径 output.ticker 回显 input.stock_code
+    （管线无标的解析节点,initial_state 直注 stock_code）——deep 维度退化为
+    vacuous,仅「expected 与回显不一致」与 quick 的 None→0.0 可被捕获;真正的
+    解析正确性需 query-only 模式（initial_state 不给 stock_code,依赖尚不存在
+    的解析节点）,留待立项。归一化使后缀/大小写变体不再误判。
+    """
     expected_ticker = expected_output.get("ticker")
     if not expected_ticker:
         return None
     if ticker is None:
         return {"name": "ticker_match", "value": 0.0, "comment": "未解析出标的"}
-    matched = ticker == expected_ticker
+    matched = _normalize_ticker(ticker) == _normalize_ticker(str(expected_ticker))
     return {
         "name": "ticker_match",
         "value": 1.0 if matched else 0.0,

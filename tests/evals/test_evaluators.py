@@ -85,6 +85,37 @@ class TestTickerMatch:
         assert ticker_match(None, {"ticker": "600519"})["value"] == 0.0
 
 
+class TestTickerMatchNormalization:
+    """#55:ticker_match 比较经归一（交易所后缀/空白/大小写）——后缀变体不再误判 0 分。"""
+
+    def test_suffix_variant_matches(self):
+        assert ticker_match("600519.SH", {"ticker": "600519"})["value"] == 1.0
+        assert ticker_match("600519", {"ticker": "600519.SH"})["value"] == 1.0
+
+    def test_case_and_whitespace_normalized(self):
+        assert ticker_match(" 600519.sh ", {"ticker": "600519"})["value"] == 1.0
+
+    def test_real_mismatch_still_zero(self):
+        assert ticker_match("000001.SZ", {"ticker": "600519.SH"})["value"] == 0.0
+
+
+class TestSectionCoverageDedup:
+    """#55:must_cover 重复项去重——重复的缺失项不得虚增分母压低覆盖率,
+    缺失清单亦不得重复罗列。"""
+
+    def test_duplicate_missing_counts_once(self):
+        # 「估值」缺失且重复:原实现分母 3、缺失 2 → 0.333;去重后 1/2=0.5
+        result = section_coverage("含风险提示章节", {"must_cover": ["估值", "估值", "风险提示"]})
+        assert result["value"] == 0.5
+        assert result["comment"] == "缺失章节: 估值"
+
+    def test_duplicate_found_scores_full(self):
+        result = section_coverage(
+            "有估值也有风险提示", {"must_cover": ["估值", "估值", "风险提示"]}
+        )
+        assert result["value"] == 1.0
+
+
 class TestNoLlmCall:
     def test_deterministic_evaluators_never_call_llm(self):
         # spec「确定性评估器 SHALL NOT 发起任何 LLM 调用」

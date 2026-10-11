@@ -44,7 +44,8 @@ def _effective_horizon(prediction: dict) -> int:
 
 
 def _bench_close_on_or_before(benchmark: pd.DataFrame, date: str) -> float | None:
-    eligible = benchmark[benchmark["日期"] <= date]
+    # #57:入口排序防御——不隐式依赖调用方升序,乱序输入按日期取最后收盘
+    eligible = benchmark[benchmark["日期"] <= date].sort_values("日期")
     if eligible.empty:
         return None
     return float(eligible.iloc[-1]["收盘"])

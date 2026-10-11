@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from finance_agent.outcome.settle import evaluate_decision
+from finance_agent.outcome.settle import _bench_close_on_or_before, evaluate_decision
 
 
 def _kline(rows: list[dict]) -> pd.DataFrame:
@@ -297,3 +297,27 @@ class TestDeferralPastMaxHoldDays:
         assert result.status == "hit_stop"
         assert result.settle_price == 85.0
         assert result.hold_days == 3  # > max_hold_days
+
+
+class TestBenchCloseSortGuard:
+    """#57 子项3:_bench_close_on_or_before 不得隐式依赖调用方排序——乱序输入
+    仍取「date 或之前最后一个收盘」(此前 iloc[-1] 拿到的是物理末行,乱序即错)。"""
+
+    def test_unsorted_benchmark_picks_latest_eligible(self):
+        bench = pd.DataFrame(
+            {
+                "日期": ["2026-08-11", "2026-08-01", "2026-08-12"],
+                "收盘": [2.0, 1.0, 3.0],
+            }
+        )
+        # 升序语义下 ≤08-11 的最后收盘是 08-11 的 2.0;乱序物理末行是 08-01 的 1.0
+        assert _bench_close_on_or_before(bench, "2026-08-11") == 2.0
+
+    def test_sorted_input_unchanged(self):
+        bench = pd.DataFrame(
+            {
+                "日期": ["2026-08-01", "2026-08-11", "2026-08-12"],
+                "收盘": [1.0, 2.0, 3.0],
+            }
+        )
+        assert _bench_close_on_or_before(bench, "2026-08-11") == 2.0

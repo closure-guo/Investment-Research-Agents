@@ -26,6 +26,7 @@ from finance_agent.llm.registry import (
     DEFAULT_PROVIDER_OPTIONS,
     PROVIDER_OPTIONS_SCHEMAS,
     REQUEST_OVERRIDABLE,
+    Capability,
     ModelProfile,
     get_profile_preset,
 )
@@ -83,11 +84,16 @@ def _resolve_from_env(
 
 
 def _validate_options(provider: str, options: dict[str, Any]) -> dict[str, Any]:
-    """有 schema 的 provider 走 pydantic 校验（未知 key / 非法值显式报错）。"""
+    """有 schema 的 provider 走 pydantic 校验（未知 key / 非法值显式报错）。
+
+    返回校验归一后的**新** dict（#76：不返回调用方入参别名——调用方后续
+    mutate 不污染源 dict；schema 后续若增强制转换/清洗，下游拿到的即归一
+    形态；未显式设置的字段不物化）。
+    """
     schema = PROVIDER_OPTIONS_SCHEMAS.get(provider)
     if schema is not None:
-        schema.model_validate(options)
-    return options
+        return schema.model_validate(options).model_dump(exclude_unset=True)
+    return dict(options)
 
 
 def _provider_options_from_request(provider: str, llm_config: dict[str, Any]) -> dict[str, Any]:
@@ -167,6 +173,18 @@ def _merge_probe_facts(profile: ModelProfile) -> ModelProfile:
     if report is None:
         return dataclasses.replace(profile, probe_required=True)
     return merge_probe_into_profile(profile, report)
+
+
+def _capability_for_model(model: str) -> Capability:
+    """按模型名推断请求能力（#302：env 与 request 分支共享的单一实现）。
+
+    glm 系 → ark-glm 实测能力档（tool_choice=required 支持，生产 ReAct
+    force_tool 轮依赖）；其余维持 openai-compatible 通用档。kimi 无 required
+    能力档，通用档即正确语义（guard 拒绝 required 是事实而非缺陷）。
+    """
+    if "glm" in model.lower():
+        return _PRESETS["ark-glm"].capability
+    return _PRESETS["openai-compatible"].capability
 
 
 def resolve_profile(
@@ -274,7 +292,9 @@ def _resolve_profile_static(
             model=model,
             base_url=base_url,
             api_key=api_key,
-            capability=_PRESETS["openai-compatible"].capability,
+            # 能力按模型名推断（#302）：与 env 分支同一实现——能力语义随模型走
+            # 而非随配置来源漂移（llm-capability-probe 哲学：能力=模型/端点事实）
+            capability=_capability_for_model(model),
             default_params={},
             api_form=api_form,
             provider_options=_provider_options_from_request(provider, llm_config),
@@ -326,11 +346,7 @@ def _resolve_profile_static(
             "缺端点才是半套配置；apiKey 可省略（keyless 端点）"
         )
     model = _ensure_prefix(model, base_url)
-    cap = (
-        _PRESETS["ark-glm"].capability
-        if "glm" in model.lower()
-        else _PRESETS["openai-compatible"].capability
-    )
+    cap = _capability_for_model(model)
     return ModelProfile(
         name=f"env:{model}",
         provider=model.split("/", 1)[0],

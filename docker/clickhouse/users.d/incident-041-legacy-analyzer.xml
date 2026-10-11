@@ -1,5 +1,5 @@
 <!--
-  incident 027（2026-09-12）：Langfuse Scores 页 internal server error。
+  incident 041（2026-09-12，原编号 027，2026-10-10 撞车消歧改号）：Langfuse Scores 页 internal server error。
 
   根因：ClickHouse 26.6 新查询分析器在「FINAL + JOIN + ORDER BY + LIMIT」形状
   （Langfuse scores.all 的查询形状）上必然抛 NOT_FOUND_COLUMN_IN_BLOCK(Code 10)，
@@ -8,7 +8,7 @@
   处置：默认 profile 回退旧分析器（26.6 仍支持，语义与 Langfuse 支持的 24.x
   时代一致），实测复现查询恢复返回；镜像另行固定 26.6.1.1193（见 docker-compose.yml），
   不做数据降级。若未来升级 ClickHouse，须先在该版本上回归 scores.all 查询形状
-  （tests/scripts 里可复用最小复现：docs/incidents/027-*.md）。
+  （tests/scripts 里可复用最小复现：docs/incidents/041-*.md）。
 -->
 <clickhouse>
     <profiles>

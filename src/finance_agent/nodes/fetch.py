@@ -126,6 +126,11 @@ def _stub_fetch_data(state: dict) -> dict[str, Any]:
         "benchmark_kline": _make_stub_kline(),
         "industry_pe": None,
         "quarterly_income": None,
+        # complete-peer-pipeline：自动选取使无显式 peer_codes 的真实路径常态产出
+        # peer_financials——stub 键集须同构（键集对齐守卫 TestStubRealKeysetParity
+        # 只比键名）。值置 None：stub 环境保持最小确定性内容，不因多出同业对照段
+        # 改变报告分段（message-actions 等按段数断言的 E2E 依赖内容稳定）
+        "peer_financials": None,
         # update-financial-freshness-and-valuation Task 4：最新报告期快照
         # （估值外的最新期关键科目 + 同比；失败降级空 dict，ERROR 日志见抓取循环特判）
         "latest_period_snapshot": {
@@ -380,7 +385,20 @@ def fetch_data(state: dict, cache=None, client=None, *, kline_days: int = 250) -
 
 def _fetch_peers(ak, code, state, industry_info):
     peer_codes = state.get("peer_codes")
-    if not peer_codes or not industry_info:
+    if not peer_codes:
+        # complete-peer-pipeline（issue #21 story 2）：无显式对标股时自动选取
+        # 行业成分市值 Top5（排除自身）；成分不可得/行业缺失 → 保持「不抓取」
+        # 降级（既有守卫测试钉住的契约收窄至此情形）。显式列表恒优先。
+        industry = (industry_info or {}).get("industry")
+        if not industry:
+            return None
+        constituents = ak.fetch_industry_constituents(industry)
+        if not constituents:
+            return None
+        peer_codes = [c["code"] for c in constituents if str(c.get("code")) != str(code)][:5]
+        if not peer_codes:
+            return None
+    if not industry_info:
         return None
     df = ak.fetch_peer_data(peer_codes)
     # clear-valuation-chain-debts D2：空表（全标的失败/无 PE/PB）归一 None，

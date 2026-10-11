@@ -963,17 +963,22 @@ def _latest_marks_for(
     conn = _connect(db_path)
     try:
         placeholders = ",".join("?" for _ in prediction_ids)
-        rows = conn.execute(
-            f"""
-            SELECT prediction_id, mark_date, cum_return, cum_excess FROM (
-                SELECT prediction_id, mark_date, cum_return, cum_excess,
-                       ROW_NUMBER() OVER (PARTITION BY prediction_id ORDER BY mark_date DESC) AS rn
-                FROM daily_marks WHERE prediction_id IN ({placeholders})
-            )
-            WHERE rn = 1
-            """,  # noqa: S608 — 占位符数量由 ids 长度生成，值全参数化
-            prediction_ids,
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT prediction_id, mark_date, cum_return, cum_excess FROM (
+                    SELECT prediction_id, mark_date, cum_return, cum_excess,
+                           ROW_NUMBER() OVER (PARTITION BY prediction_id ORDER BY mark_date DESC) AS rn
+                    FROM daily_marks WHERE prediction_id IN ({placeholders})
+                )
+                WHERE rn = 1
+                """,  # noqa: S608 — 占位符数量由 ids 长度生成，值全参数化
+                prediction_ids,
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # 部分初始化库（fixture/新副本）可能尚无 daily_marks 表——
+            # 生产 api 启动恒建表，读路径缺失视为无盯市（2026-10-10 main 红回归）
+            return {}
         return {
             r["prediction_id"]: {
                 "mark_date": r["mark_date"],

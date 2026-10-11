@@ -5,6 +5,11 @@
 > **边界说明**：本目录是系统性问题的复盘（为什么会出问题、如何防止再发），供团队长期参考避坑。
 > 单次变更的 archive 验收证据（测试是否通过、行为是否符合预期）请落 `tests/validation/`。
 > 一个 bug 若既是系统性问题又需验证报告，两边都放，incident 引用 validation，不重复内容。
+>
+> **编号消歧（2026-10-10，issue #180）**：027 与 032 曾被两起事故双占——prose/evals 文档中的
+> 「incident 027」「incident 032」全部指价位校验 state 键丢弃、战绩指标失真这两起（保留原号）；
+> ClickHouse 分析器崩溃改编 **041**、股票列表缓存毒化改编 **040**，伴生配置文件同步改名
+> （`incident-041-legacy-analyzer.xml`，目录级挂载改名即生效）。
 
 | 编号 | 日期       | 标题                                                                | 状态     |
 | ---- | ---------- | ------------------------------------------------------------------- | -------- |
@@ -14,6 +19,10 @@
 | [036](036-glm53-thinking-leak-delivery-contract-20261004.md) | 2026-10-04 | 换 glm-5.3 后「研究聚焦」泄露模型英文独白进交付物（max_tokens=400 被推理吃满截断 + verbatim 嵌入零校验 + raw_reasoning 回退坑）——纯文本交付物不在 llm-output-contract 覆盖内 | 已修复（#221 合并+部署+拓荆真实验证收口） |
 | [037](037-event-backlog-sqlite-transient-terminal-loss-20261004.md) | 2026-10-04 | 6 万 thinking_token 积压（15 分钟滞后）× SQLite 瞬断落在积压排空窗口——管线已完成但 UI 冻结、run_deep_analysis 返回空、聊天谎称无报告，R2+ 节点事件永久丢失（021 同族复发） | 已修复（#224 合并+部署+ReAct 真实验证收口；含 20:39 同型误判超时第二实例） |
 | [038](038-e2e-default-suite-hits-production-vite-proxy-20261007.md) | 2026-10-07 | E2E 默认套件整套路由经 vite 代理（默认 8000）打穿到生产容器：reuseExistingServer 只探活性复用生产后端，真实 LLM 建会话/触发深度分析，10-03 已有同型先例；predictions 零污染、33 垃圾会话已清 | 已处置（当晚清污+worktree config 补 VITE_API_TARGET；预防项待 issue：默认 config 显式代理+health 模式核验） |
+| [039](039-relay-lag-prereport-backlog-20261008.md) | 2026-10-08 | thinking 前置积压使压缩门槛（report_seen）永不生效——图已完成但终态推迟数小时、会话滞留 running 被重启 reconcile 补打 interrupted（021/037 同族第三发，茅台两会话实证；#224 治了终态落库可靠性未治排序） | 根因修复 PR #266（issue #265）；timeline O(n²) 写放大等三子项挂账 |
+| [040](040-stock-list-cache-poisoning-20260929.md) | 2026-09-29 | 股票列表缓存毒化——单次抓取失败清空进程内检索锚点，全股票「未找到」（原编号 032，2026-10-10 撞车消歧改号） | 已修复（失败不缓存 + 60s 冷却重试 + 有声失败） |
+| [041](041-clickhouse-analyzer-scores-page-20260912.md) | 2026-09-12 | ClickHouse 26.6 新分析器在 scores 查询形状(FINAL+JOIN+ORDER+LIMIT)上必然崩溃 — Scores 页 internal error 三周，公共 API 不受影响（原编号 027，2026-10-10 撞车消歧改号） | 已修复（enable_analyzer=0 + 镜像固定，UI 待 owner 确认） |
+| [042](042-timeline-lag-loss-20261011.md) | 2026-10-11 | 消费滞后丢落库时序——#266 压缩分支与 #304「flush 全量」规范矛盾（graph_done 置位≠消费者读完，积压 thinking 静默缺段；CI flake 取证揪出，1743/3000 精确反推） | 已修复（PR #307 附带 commit 871a31be，滞后回归测试钉死） |
 | 002  | 2026-05-26 | [报告准确性复盘：茅台 FA 分析偏差](002-report-accuracy-20260526.md) | 部分修复 |
 | 003  | 2026-06-03 | [股票名称获取失败 + NaN 处理缺陷](003-stock-name-and-na-handling-20260603.md) | 已修复   |
 | 004  | 2026-06-04 | [数据准确性系统性问题 — efficiency 年份错位 + ROE 口径 + LLM 自算](004-data-accuracy-20260604.md) | 已修复 |
@@ -39,11 +48,9 @@
 | 024  | 2026-09-06 | [App.tsx 流状态所有权分散 — StreamStore 结构性重构根治竞态土壤](024-stream-store-refactor-20260906.md) | 已修复   |
 | 025  | 2026-09-07 | [opencode zen/go 网关强制 x-opencode-session 头 — 离线 judge 链路全挂约两周](025-opencode-session-header-20260907.md) | 已修复   |
 | 026  | 2026-09-11 | [citation 门禁把校验器解析缺陷记成分析师引用错误并自动重跑分析师 — 39 FAIL 抽样无一真错、重试 100% 打在误报桶](026-citation-gate-misattribution-20260911.md) | 阶段 0–5 已实施，r4 验证通过，终裁待 owner |
-| 027  | 2026-09-12 | [ClickHouse 26.6 新分析器在 scores 查询形状(FINAL+JOIN+ORDER+LIMIT)上必然崩溃 — Scores 页 internal error 三周，公共 API 不受影响](027-clickhouse-analyzer-scores-page-20260912.md) | 已修复（enable_analyzer=0 + 镜像固定，UI 待 owner 确认） |
 | 028  | 2026-09-16 | [重算路由由 claim_type 自声明决定 — LLM 把自算值标 numerical 即可跳过重算（消融设施发现的第一个机制存在性缺口）](028-recompute-routing-claim-type-20260916.md) | 已修复（harden-recompute-routing 已归档；冻结重放 0/5→2/5，零新增误报） |
 | 029  | 2026-09-17 | [单点修复的收益在遥测里不可见——记账要「该分析师全 PASS」，改对也不计入](029-surgical-repair-accounting-scope-20260917.md) | 已登记（处置候选待 owner；A4 补测发现，改对 20/20 vs 记账 4/22） |
 | 030  | 2026-09-17 | [材料快照白名单漂移——compute 输出键丢 6/14，同一处第二次丢测量面](030-materials-snapshot-whitelist-drift-20260917.md) | 已修复（排除式 + 完整性守卫 + 回填 115 键 + 摘要回真） |
-| 032 | 2026-09-29 | [股票列表缓存毒化——单次抓取失败清空进程内检索锚点，全股票「未找到」](032-stock-list-cache-poisoning-20260929.md) | 已修复（失败不缓存 + 60s 冷却重试 + 有声失败） |
 
 ---
 
@@ -60,7 +67,7 @@
 - [006](006-citation-infinite-loop-20260716.md) 深度模式无响应 - citation 重试无限循环
 - [020](020-citation-contract-diseases-20260828.md) 考卷与答案册不同源：context 裁剪索引/中文词表/绝对容差 → 61% 假 FAIL；负索引约定 + 单一词表 + 相对容差，离线重判 41→5（残量全为真幻觉）
 - [022](022-citation-smoke-verify-20260830.md) 修复后多标的冒烟：稳态标的 2.2% FAIL 清零成疾；异动股暴露第四类契约疾病（技术 context 数组方向未声明 → LLM 期次错位，校验器裁决正确）
-- [027](027-clickhouse-analyzer-scores-page-20260912.md) 基础设施镜像浮动 tag 的教训：clickhouse `latest` 08-20 拉入 26.6.1 当日 Scores 页即挂（新分析器回归），因人工标注走离线导出三周未被发现；修法=默认 profile 回旧分析器+固定版本，无降级
+- [041](041-clickhouse-analyzer-scores-page-20260912.md) 基础设施镜像浮动 tag 的教训：clickhouse `latest` 08-20 拉入 26.6.1 当日 Scores 页即挂（新分析器回归），因人工标注走离线导出三周未被发现；修法=默认 profile 回旧分析器+固定版本，无降级
 - [026](026-citation-gate-misattribution-20260911.md) 020「考卷与答案册不同源」复发（日期显示格式/季度标签/单位量级/direction 符号字段）：FAIL 桶 100% 误报，重试只盯误报桶白烧 75 次生成并覆盖好报告；指标拆三报（真幻觉率/校验器误报率/结构不可验），处置对象必须匹配归因桶
 
 ### 决策校验与门禁
@@ -85,6 +92,7 @@
 - [021](021-deep-analysis-session-stuck.md) 深研管线「假卡死」— 事件落库限速终态迟到 + 管线超时空转
 - [037](037-event-backlog-sqlite-transient-terminal-loss-20261004.md) thinking_token 积压（15 分钟滞后）× SQLite 瞬断落在积压排空窗口——管线已完成但三界面三种说法，R2+ 节点事件永久丢失；终态事件不允许与批量 token 队列竞争
 - [038](038-e2e-default-suite-hits-production-vite-proxy-20261007.md) E2E 默认套件经 vite 代理（默认 8000）+ reuseExistingServer 打穿到生产后端——本机生产常驻时本地跑门禁必然命中；前端代理目标必须显式、复用前必须核验 TESTING 模式（031「默认不安全」主题的 E2E 侧变体）
+- [039](039-relay-lag-prereport-backlog-20261008.md) thinking 洪峰在 final_report 之前——压缩门槛以消费到 report chunk 为前提，在「消费滞后」这个优化目标场景下恰好失效；复现测试的流序必须取自生产 trace（既有场景 D 手造顺排流绕开了真实语序）
 
 ### 测试体系与开发流程
 

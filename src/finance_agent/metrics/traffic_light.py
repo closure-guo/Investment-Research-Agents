@@ -49,7 +49,7 @@ ABSOLUTE_THRESHOLDS: dict[str, tuple] = {
 
 # ── 行业阈值覆盖 ──
 # key 为行业名称子串（模糊匹配），值为 {指标名: 阈值三元组}
-INDUSTRY_OVERRIDES: dict[str, dict[str, tuple]] = {
+INDUSTRY_OVERRIDES: dict[str, dict[str, tuple | None]] = {
     "白酒": {
         "存货周转率": (0.5, 0.2, True),  # 基酒需 3-5 年陈酿，周转率天然低
     },
@@ -65,6 +65,59 @@ INDUSTRY_OVERRIDES: dict[str, dict[str, tuple]] = {
         "应付账款周转率": (4.5, 1.5, True),
     },
 }
+
+# ── 银行业口径覆盖（add-banking-industry-calibration，issue #241 一期）──
+# 校准锚点与分布论证见 delta design.md D4（光大 FY2025 实算 + 大行/股份行公开分布）。
+# None = 行业不适用排除：不参与评灯与评分（D1——银行风险约束是资本充足率，
+# 存款是经营原料而非杠杆风险；编造 93/96 类阈值才是拍脑袋）。
+_BANKING_OVERRIDES: dict[str, tuple | None] = {
+    # 偿债维度全部不适用（专项四指标二期接入）
+    "资产负债率": None,
+    "流动比率": None,
+    "速动比率": None,
+    "利息覆盖倍数": None,
+    "净债务/EBITDA": None,
+    # 盈利：ROE/ROA 换银行业阈值；毛利率数据天然缺失（无营业成本）；ROIC 不适用
+    # （银行投入资本即计息负债，倍数无判别意义）
+    "ROE": (13, 6, True),
+    "ROA": (0.9, 0.5, True),
+    "ROIC": None,
+    # 效率维度全部不适用（资产=贷款与投资，无经营循环）
+    "总资产周转率": None,
+    "存货周转率": None,
+    "应收账款周转率": None,
+    "应付账款周转率": None,
+    # OCF 衍生信号全部不适用（银行 OCF 含存贷款净进出）；保留 资本支出/折旧
+    "经营现金流/净利润": None,
+    "FCF": None,
+    "现金流覆盖比率": None,
+    "FCF收益率": None,
+    "留存现金流比率": None,
+}
+# 「银行」子串覆盖东财系全部银行行业名（国有大型银行/股份制银行/农商行…）；
+# 「货币金融服务」= cninfo 降级源形态——两键共享同一覆盖表对象
+INDUSTRY_OVERRIDES["银行"] = _BANKING_OVERRIDES
+INDUSTRY_OVERRIDES["货币金融服务"] = _BANKING_OVERRIDES
+
+BANKING_INDUSTRY_KEYS = ("银行", "货币金融服务")
+
+
+def is_banking_industry(industry: str | None) -> bool:
+    """银行业判定（GARP/图表/健康度共享，单一实现勿另写子串表）。"""
+    if not industry:
+        return False
+    return any(key in industry for key in BANKING_INDUSTRY_KEYS)
+
+
+def industry_excluded_metrics(industry: str | None) -> frozenset[str]:
+    """行业覆盖中值为 None（不适用）的指标集合。"""
+    if not industry:
+        return frozenset()
+    for key, overrides in INDUSTRY_OVERRIDES.items():
+        if key in industry:
+            return frozenset(m for m, t in overrides.items() if t is None)
+    return frozenset()
+
 
 LIGHT_ORDER = {"green": 0, "yellow": 1, "red": 2}
 
@@ -92,7 +145,7 @@ def _get_thresholds(metric_name: str, industry: str | None) -> tuple | None:
     return ABSOLUTE_THRESHOLDS.get(metric_name)
 
 
-def matched_industry_overrides(industry: str | None) -> dict[str, tuple]:
+def matched_industry_overrides(industry: str | None) -> dict[str, tuple | None]:
     """返回该行业命中的阈值覆盖指标集合（用于健康度口径披露）。"""
     if not industry:
         return {}
@@ -203,10 +256,19 @@ def assess_traffic_lights(
             all_years.update(metric_values.keys())
     sorted_years = sorted(all_years, reverse=True)
 
+    # 行业不适用排除（add-banking-industry-calibration D1）：override=None 的指标
+    # 对该行业无判别意义——绝对灯/变化率灯/final 全 None，MUST NOT 触发通用阈值
+    excluded = industry_excluded_metrics(industry)
+
     for dim_name, dim_metrics in metrics.items():
         result[dim_name] = {}
         for metric_name, year_values in dim_metrics.items():
             if metric_name.endswith("_source"):
+                continue
+            if metric_name in excluded:
+                result[dim_name][metric_name] = {
+                    year: {"absolute": None, "change": None, "final": None} for year in sorted_years
+                }
                 continue
             result[dim_name][metric_name] = {}
 
@@ -267,7 +329,15 @@ def compute_health_score(
     dimension_scores = {}
     red_metrics = []
 
+    # 行业不适用排除集：维度内全部指标被排除 → 维度剔除（满分缩放，
+    # add-banking-industry-calibration D2）；数据缺失维度不剔除（0 分是诚实信号）
+    excluded = industry_excluded_metrics(industry)
+
+    applicable_dims = 0
     for dim_name, dim_metrics in traffic_lights.items():
+        if dim_metrics and all(name in excluded for name in dim_metrics):
+            continue
+        applicable_dims += 1
         points = 0.0
         count = 0
         for metric_name, year_data in dim_metrics.items():
@@ -289,10 +359,15 @@ def compute_health_score(
             dimension_scores[dim_name] = 0.0
 
     total = sum(dimension_scores.values())
+    # 满分缩放：通用路径适用维度恒 4 → 100 分、阈值 85/60 零回归；
+    # 行业剔除维度后 rating 阈值按满分等比缩放（healthy ≥ 85%、caution ≥ 60%）
+    score_cap = dimension_weight * applicable_dims
+    healthy_line = 85 * score_cap / 100
+    caution_line = 60 * score_cap / 100
 
-    if total >= 85:
+    if total >= healthy_line:
         rating = "healthy"
-    elif total >= 60:
+    elif total >= caution_line:
         rating = "caution"
     else:
         rating = "warning"
@@ -302,6 +377,7 @@ def compute_health_score(
     return {
         "total": round(total, 1),
         "rating": rating,
+        "score_cap": score_cap,
         "dimensions": {k: round(v, 1) for k, v in dimension_scores.items()},
         "red_metrics": red_metrics,
         "industry_override": {

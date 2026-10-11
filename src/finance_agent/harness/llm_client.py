@@ -39,6 +39,48 @@ PYTHON_TYPE_TO_JSON: dict[str, str] = {
 }
 
 
+def _annotation_to_json_schema(annotation: Any) -> dict[str, Any]:
+    """把 Python 类型注解映射为 JSON Schema 片段。
+
+    泛型/Optional 解包（issue #277）：裸名内省对 list[str] | None 一律
+    fallback "string"，LLM 看到的类型与 docstring「列表」矛盾而高频传字符串。
+    Optional/Union 剥壳取非 None 成员；list/tuple/set → array（list 带 items）；
+    dict → object；未识别注解回退 string（兜底语义不变）。
+    """
+    import types as _types
+    import typing
+
+    origin = typing.get_origin(annotation)
+    if origin is typing.Union or origin is getattr(_types, "UnionType", None):
+        members = [a for a in typing.get_args(annotation) if a is not type(None)]
+        if len(members) == 1:
+            return _annotation_to_json_schema(members[0])
+        return {"type": "string"}
+    if origin is list:
+        args = typing.get_args(annotation)
+        items = _annotation_to_json_schema(args[0]) if args else {"type": "string"}
+        return {"type": "array", "items": items}
+    if origin in (tuple, set, frozenset):
+        return {"type": "array"}
+    if origin is dict:
+        return {"type": "object"}
+    if origin is not None:
+        return {"type": "string"}
+
+    name = getattr(annotation, "__name__", "") or ""
+    return {"type": PYTHON_TYPE_TO_JSON.get(str(name), "string")}
+
+
+def _resolve_annotations(func: Callable, sig: Any) -> dict[str, Any]:
+    """经 get_type_hints 解析字符串注解（future annotations 模块）；失败回退裸名。"""
+    import typing
+
+    try:
+        return typing.get_type_hints(func)
+    except Exception:
+        return {name: p.annotation for name, p in sig.parameters.items()}
+
+
 def build_schema_from_function(
     func: Callable,
     name: str | None = None,
@@ -61,6 +103,7 @@ def build_schema_from_function(
     import inspect
 
     sig = inspect.signature(func)
+    hints = _resolve_annotations(func, sig)
     doc = description or (func.__doc__ or "").strip().split("\n")[0].strip()
 
     properties: dict[str, Any] = {}
@@ -70,12 +113,11 @@ def build_schema_from_function(
         if param_name in ("self", "cls"):
             continue
 
-        # 解析类型注解
-        py_type = "str"
-        if param.annotation != inspect.Parameter.empty:
-            py_type = getattr(param.annotation, "__name__", str(param.annotation))
-
-        json_type = PYTHON_TYPE_TO_JSON.get(py_type, "string")
+        annotation = hints.get(param_name, param.annotation)
+        if annotation == inspect.Parameter.empty:
+            prop = {"type": "string"}
+        else:
+            prop = _annotation_to_json_schema(annotation)
 
         # 从 docstring 提取参数描述
         param_desc = ""
@@ -85,10 +127,7 @@ def build_schema_from_function(
                     param_desc = line.split(":", 1)[-1].split("--", 1)[-1].strip()
                     break
 
-        properties[param_name] = {
-            "type": json_type,
-            "description": param_desc or param_name,
-        }
+        properties[param_name] = {**prop, "description": param_desc or param_name}
 
         if param.default is inspect.Parameter.empty:
             required.append(param_name)

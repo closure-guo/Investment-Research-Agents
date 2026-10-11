@@ -51,6 +51,12 @@ logger = logging.getLogger(__name__)
 
 _MAX_ATTEMPTS = 3
 
+# #57 子项4:misfire 硬化。默认 misfire_grace_time=1s 下进程被冻结/重建略过
+# 触发时刻即整日丢批;job 幂等(次日补结),1h 宽限内补火安全;多次 miss 合并
+# 一次(coalesce),防追赶风暴。注:MemoryJobStore 重启后 job 重注册,该参数
+# 管的是进程活着但调度 loop 延迟的场景。
+_JOB_MISFIRE_KW: dict[str, Any] = {"misfire_grace_time": 3600, "coalesce": True}
+
 # 进程内 scheduler 句柄(单 worker 前提):reschedule_cohort / get_scheduler 用。
 _scheduler: BackgroundScheduler | None = None
 
@@ -178,6 +184,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         _cron_for("decision_settle_daily"),
         id="decision_settle_daily",
         replace_existing=True,
+        **_JOB_MISFIRE_KW,
     )
     # stage-b：先结算（16:00）再盯市（16:30）——已结算观点不再盯市；
     # 指标快照（16:35）独立任务，可手动重算
@@ -186,12 +193,14 @@ def start_scheduler() -> BackgroundScheduler | None:
         _cron_for("daily_marking"),
         id="daily_marking",
         replace_existing=True,
+        **_JOB_MISFIRE_KW,
     )
     scheduler.add_job(
         _metrics_job,
         _cron_for("metrics_snapshot"),
         id="metrics_snapshot",
         replace_existing=True,
+        **_JOB_MISFIRE_KW,
     )
     # stage-c：完整性校验（16:40）——快照哈希逐条比对，篡改写审计并告警
     scheduler.add_job(
@@ -199,6 +208,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         _cron_for("integrity_check"),
         id="integrity_check",
         replace_existing=True,
+        **_JOB_MISFIRE_KW,
     )
     # Δ3：cohort 盘后跑批（默认 18:00，晚于结算链路，避免与日批争资源）。
     # 注意：本 job 的**时刻**来自 ops_config（界面可改，改后 reschedule_cohort 即时
@@ -208,6 +218,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         _cron_for("cohort_batch"),
         id="cohort_batch",
         replace_existing=True,
+        **_JOB_MISFIRE_KW,
     )
     scheduler.start()
     _scheduler = scheduler

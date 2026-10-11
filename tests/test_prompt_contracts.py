@@ -381,3 +381,11 @@ class TestAnalystHorizonHint:
     @pytest.mark.parametrize("name", ANALYSTS)
     def test_horizon_hint_example_present(self, name):
         assert '"horizon_hint"' in _load(f"{name}.md")
+
+
+def test_fundamental_analyst_banking_cashflow_exemption():
+    """add-banking-industry-calibration：银行业 OCF 倍数与偿债阈值豁免指令。"""
+    prompt = (_PROMPTS_DIR / "fundamental_analyst.md").read_text(encoding="utf-8")
+    assert "金融业" in prompt or "银行业" in prompt
+    assert "不适用" in prompt
+    assert "MUST NOT" in prompt or "不得" in prompt

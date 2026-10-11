@@ -38,16 +38,18 @@ async def test_pipeline_thinking_writes_do_not_block_event_loop(tmp_path, monkey
     session_store.init_db()
     sid = session_store.create_session(stock_code="600449", stock_name="宁夏建材", status="running")
 
-    # 模拟 update_pipeline_timelines 慢写（SQLite 锁等待/磁盘 IO），每次 20ms
-    real_write = session_store.update_pipeline_timelines
+    # 模拟 update_pipeline_timelines_json 慢写（SQLite 锁等待/磁盘 IO），每次 20ms。
+    # （fix-timeline-write-amplification 起写入口统一切到预序列化 _json 变体，
+    #   dict 入口亦委托至此——探针钉在新接缝上）
+    real_write = session_store.update_pipeline_timelines_json
     write_count = {"n": 0}
 
-    def slow_write(session_id, timelines):
+    def slow_write(session_id, payload_json):
         write_count["n"] += 1
         time.sleep(0.02)
-        return real_write(session_id, timelines)
+        return real_write(session_id, payload_json)
 
-    monkeypatch.setattr(session_store, "update_pipeline_timelines", slow_write)
+    monkeypatch.setattr(session_store, "update_pipeline_timelines_json", slow_write)
     monkeypatch.setattr(
         "finance_agent.agent_factory._stream_graph",
         lambda initial_state, config=None, session_id=None: _thinking_heavy_stream(),

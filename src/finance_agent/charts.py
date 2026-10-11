@@ -17,6 +17,8 @@ matplotlib.use("Agg")  # 非交互后端，适配服务器环境
 import matplotlib.pyplot as plt
 import numpy as np
 
+from finance_agent.metrics.traffic_light import is_banking_industry
+
 logger = logging.getLogger(__name__)
 
 # ── 中文字体 ──
@@ -153,11 +155,23 @@ def _year_from_date(date_str) -> str:
     return str(date_str)[:4]
 
 
+def margin_placeholder_text(industry: str | None) -> str:
+    """利润率子图占位文本（add-banking-industry-calibration D7）。
+
+    占位语义区分「数据缺失」与「行业不适用」：银行毛利率 None 是口径不适用
+    （银行报表无营业成本概念），误述为数据缺失会误导读者以为数据管道缺数。
+    """
+    if is_banking_industry(industry):
+        return "银行业不适用毛利率口径（无营业成本概念）"
+    return "利润率数据缺失"
+
+
 def collect_chart_data(state: dict) -> dict:
     """从 state 提取结构化图表数据，返回 JSON-serializable dict。"""
     chart_data: dict = {
         "stock_code": state.get("stock_code", ""),
         "stock_name": state.get("stock_name", ""),
+        "industry": (state.get("industry_info") or {}).get("industry"),
         "annual": [],
         "growth": {"years": [], "revenue_growth": [], "profit_growth": []},
         "price": {"daily": [], "earnings_dates": [], "ma": {"ma5": [], "ma20": [], "ma60": []}},
@@ -263,7 +277,7 @@ def collect_chart_data(state: dict) -> dict:
     if decision_levels:
         chart_data["price"]["decision_levels"] = decision_levels
 
-    # ── 财报发布日期（从年报报告日推算）──
+    # ── 报告期截止日（利润表报告日，非披露日；标注措辞不得称「发布日」）──
     if income is not None and not income.empty:
         for d in income["报告日"]:
             date_str = str(d)
@@ -507,13 +521,13 @@ _TRIGGER_LEVEL_SPECS = (
 
 
 def _mark_earnings(ax, daily: list[dict], closes: list, earnings_dates: list[str]) -> None:
-    """财报发布日竖线标注（K 线/折线两形态共用）。"""
+    """报告期截止日竖线标注（K 线/折线两形态共用）。日期为报告期截止日而非披露日。"""
     for ed in earnings_dates:
         for i, d in enumerate(daily):
             if d["date"] == ed:
                 ax.axvline(x=i, color=_C_RED, linewidth=0.8, linestyle="--", alpha=0.5)
                 ax.annotate(
-                    "财报",
+                    "报告期止",
                     (i, closes[i]),
                     textcoords="offset points",
                     xytext=(5, 5),
@@ -637,7 +651,8 @@ def _chart_stock_price(data: dict, out: str) -> str | None:
     _style_ax(ax, "股价 K 线（MA5/20/60，虚线为决策价位）")
     ax.tick_params(labelbottom=False)
 
-    volumes = [d.get("volume") or 0 for d in daily]
+    # 缺失日断开（NaN），不画 0 高量柱冒充真实成交（chart-data-integrity 三级语义）
+    volumes = [np.nan if d.get("volume") is None else d["volume"] for d in daily]
     ax_vol.bar(x, volumes, width=candle_w, color=colors, alpha=0.7)
     ax_vol.set_ylabel("成交量", fontsize=9)
     ax_vol.set_xlabel("日期", fontsize=10)
@@ -801,13 +816,13 @@ def _chart_debt_ratio(data: dict, out: str) -> str | None:
 
 
 def _chart_heatmap(data: dict, out: str) -> str | None:
-    """P2: 财报发布窗口期股价变化热力图（行序时间升序，缺失格标注「缺」）。"""
+    """P2: 年报报告期窗口股价变化热力图（行序时间升序，缺失格标注「缺」）。锚点为报告期截止日。"""
     daily = data.get("price", {}).get("daily", [])
     earnings_dates = data.get("price", {}).get("earnings_dates", [])
     if len(earnings_dates) < 2 or len(daily) < 30:
         return None
 
-    # 计算每个财报日前后 N 天的收益率
+    # 计算每个报告期截止日前后 N 天的收益率
     windows = [-5, -1, 0, 1, 5, 10, 30]
     years_labels = []
     heatmap_data: list[list[float | None]] = []
@@ -863,7 +878,7 @@ def _chart_heatmap(data: dict, out: str) -> str | None:
     ax.set_yticks(range(len(years_labels)))
     ax.set_yticklabels(years_labels)
     ax.set_title(
-        "年报发布窗口期股价变化（%）", fontsize=13, fontweight="bold", color="#333", pad=12
+        "年报报告期窗口股价变化（%）", fontsize=13, fontweight="bold", color="#333", pad=12
     )
     # 标注数值；缺失格标注「缺」，MUST NOT 渲染为 0.0
     for i in range(len(years_labels)):
@@ -915,7 +930,7 @@ def _chart_dashboard(data: dict, out: str) -> str | None:
     gm = [a.get("gross_margin") for a in annual]
     nm = [a.get("net_margin") for a in annual]
     if _all_missing(gm) and _all_missing(nm):
-        _placeholder_text(ax, "利润率数据缺失")
+        _placeholder_text(ax, margin_placeholder_text(data.get("industry")))
         ax.set_xticks(range(len(years)))
         ax.set_xticklabels(years, fontsize=7)
     else:

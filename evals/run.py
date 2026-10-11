@@ -49,6 +49,9 @@ _JUDGE_DIMS = ["report_relevance", "debate_quality", "decision_grounding", "cons
 # 在 4/5 边界双峰翻转（同材料 n=13：4 分 7 次/5 分 6 次），与回归待测效应同阶。
 # 模块级常量便于 CLI 注入（main 的 --judge-repeats）与测试 monkeypatch。
 _JUDGE_REPEATS = 3
+# judge 全败的 CATEGORICAL 占位值（#54）：langfuse ScoreBody.value required，
+# None 会被 SDK 静默吞掉；改发字符串标记使失败维度在 dataset run/UI 可见。
+JUDGE_FAILURE_MARKER = "judge_parse_failed"
 # 本地 prompts/*.md（git 跟踪）是唯一权威源（模块级常量便于测试注入）
 _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "src/finance_agent/prompts"
 
@@ -199,12 +202,15 @@ def _judge_adapter(dimension: str):
         k = result.get("judge_repeats", _JUDGE_REPEATS)
         fails = result.get("judge_failures", 0)
         if result["score"] is None:
-            # score=null:K 次全部解析失败,记入失败率(已实测 langfuse 4.13
-            # Evaluation.value 接受 None,无需 _failed 占位 fallback)
+            # score=null:K 次全部解析失败。#54:必须发 CATEGORICAL 标记而非
+            # value=None——langfuse 4.13 ScoreBody.value 为 required(None 经
+            # pydantic ValidationError 被 SDK except Exception 吞掉,失败维度
+            # 从未真正进 dataset run,UI 无法区分「judge 失败」与「不适用」)。
+            # 均值/行汇总侧按非数值过滤(JUDGE_FAILURE_MARKER 不进均值)。
             return make_evaluation(
                 {
                     "name": dimension,
-                    "value": None,
+                    "value": JUDGE_FAILURE_MARKER,
                     "comment": f"[K={k} fail={fails or k}] {result['reason']}",
                 }
             )
@@ -267,7 +273,11 @@ def all_evaluators() -> list:
 
 def _rows_from_results(item_results: list) -> list[dict]:
     """实验结果 → 汇总行。skipped 取自 task 输出（harness 有意跳过的项带原因），
-    此前硬编码 None 使跳过项在汇总表里显示成「跑了但没分」。"""
+    此前硬编码 None 使跳过项在汇总表里显示成「跑了但没分」。
+
+    #54:scores 只收数值（CATEGORICAL judge 失败标记不进 scores）；judge_failures
+    数标记值（兼容 None——修复前产物）。
+    """
     rows = []
     for r in item_results:
         output = getattr(r, "output", None) or {}
@@ -277,21 +287,25 @@ def _rows_from_results(item_results: list) -> list[dict]:
                 "item": str(r.item.input.get("query")),
                 "mode": r.item.input.get("mode"),
                 "skipped": skipped or None,
-                "scores": {e.name: e.value for e in r.evaluations if e.value is not None},
-                "judge_failures": sum(1 for e in r.evaluations if e.value is None),
+                "scores": {
+                    e.name: e.value for e in r.evaluations if isinstance(e.value, (int, float))
+                },
+                "judge_failures": sum(
+                    1 for e in r.evaluations if e.value is None or e.value == JUDGE_FAILURE_MARKER
+                ),
             }
         )
     return rows
 
 
 def _mean_rows(rows: list[dict]) -> dict:
-    """各 Score 均值(None 不计入)+ judge 失败总数。"""
+    """各 Score 均值(None/非数值不计入)+ judge 失败总数。"""
     buckets: dict[str, list[float]] = {}
     failures = 0
     for row in rows:
         failures += row.get("judge_failures", 0)
         for name, value in (row.get("scores") or {}).items():
-            if value is not None:
+            if isinstance(value, (int, float)):
                 buckets.setdefault(name, []).append(float(value))
     means = {name: round(sum(vals) / len(vals), 4) for name, vals in buckets.items() if vals}
     means["judge_failures"] = failures

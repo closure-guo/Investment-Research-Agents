@@ -82,8 +82,12 @@ def _normalize_dates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _bench_close_on_or_before(benchmark: pd.DataFrame, date: str) -> float | None:
-    """基准在 date 或之前最后一个收盘(日期列须已归一化为 str)。"""
-    eligible = benchmark[benchmark["日期"] <= date]
+    """基准在 date 或之前最后一个收盘(日期列须已归一化为 str)。
+
+    #57:入口排序防御——升序本由 fetch_index_kline 保证,但本层不隐式依赖,
+    乱序输入也按日期取最后收盘(此前 iloc[-1] 拿物理末行,乱序即错)。
+    """
+    eligible = benchmark[benchmark["日期"] <= date].sort_values("日期")
     if eligible.empty:
         return None
     return float(eligible.iloc[-1]["收盘"])

@@ -123,6 +123,7 @@ def compute_metrics(state: AnalysisState) -> dict[str, Any]:
         latest_year,
         industry_pe_avg=(state.get("industry_pe") or {}).get("avg_pe"),
         latest_period_snapshot=state.get("latest_period_snapshot"),
+        industry=industry,
     )
 
     # ── 季度趋势 ──
@@ -359,6 +360,7 @@ def _try_garp(
     latest_year: str | None,
     industry_pe_avg: float | None = None,
     latest_period_snapshot: dict | None = None,
+    industry: str | None = None,
 ) -> dict | None:
     vs = valuation_snapshot or {}
     # PE 取 valuation_snapshot 已选好口径的值（static 优先，回落 PE_ttm；NaN 已守卫为 None）
@@ -389,6 +391,8 @@ def _try_garp(
         "PE_caliber": vs.get("PE_caliber"),
         "debt_ratio_period": debt_period,
         "roe_period": f"{latest_year}年报",
+        # 银行业负债率豁免判定（add-banking-industry-calibration D5）
+        "industry": industry,
     }
     return calc_garp(data)
 

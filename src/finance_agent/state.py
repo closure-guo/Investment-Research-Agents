@@ -150,6 +150,11 @@ class AnalysisState(TypedDict, total=False):
     risk_debate_history: Annotated[list[dict], add]
     final_trade_decision: dict  # TradeDecision 序列化
 
+    # add-report-revision-view：同标的上一份 completed 报告的回溯快照
+    # （session_store.get_previous_completed_session 产物，组合根注入；
+    # 未声明的键会被图入口静默丢弃——本地实跑实证），None = 首份报告
+    previous_report_snapshot: dict | None
+
     # Layer V: Fund Manager
     fund_manager_decision: Literal["approve", "reject", "return"]
     fund_manager_decision_reasoning: str  # FM 退回/批准理由（回路契约：未声明则被图合并丢弃）

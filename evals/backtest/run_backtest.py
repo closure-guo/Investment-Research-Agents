@@ -255,7 +255,11 @@ def run_backtest(
         regime_limited=regime_limited,
         batch_kind=batch_kind,
     )
-    positioning = resolve_positioning(batch_kind=batch_kind, clean_window=clean_window, probe=probe)
+    # 深历史执法（issue #172）：批内任一决策日早于切点 → 定位降 pathway
+    decision_dates = [str(item.get("decision_date", ""))[:10] for item in sample]
+    positioning = resolve_positioning(
+        batch_kind=batch_kind, clean_window=clean_window, probe=probe, decision_dates=decision_dates
+    )
     conclusion = build_conclusion(
         _conclude(sharpe_ci),
         batch_kind=batch_kind,
@@ -264,6 +268,7 @@ def run_backtest(
         sanity=sanity,
         regime_covered=regime_covered,
         regime_limited=regime_limited,
+        decision_dates=decision_dates,
     )
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -381,6 +386,11 @@ def main() -> None:
         default=str(MD_REPORT_DIR),
         help=f"md 报告落盘目录（默认 {MD_REPORT_DIR}；JSON 恒落 {JSON_REPORT_DIR}）",
     )
+    parser.add_argument(
+        "--min-decision-date",
+        default=None,
+        help="决策日下限（ISO YYYY-MM-DD；早于该日的 regime 窗口跳过，凑不齐三 regime 抛错）",
+    )
     args = parser.parse_args()
 
     from dotenv import load_dotenv
@@ -402,7 +412,12 @@ def main() -> None:
 
     client = AKShareClient()
     index_kline = client.fetch_index_kline(BENCHMARK_CODE, days=1500)
-    sample = stratified_sample(index_kline, args.codes, per_regime=args.per_regime)
+    sample = stratified_sample(
+        index_kline,
+        args.codes,
+        per_regime=args.per_regime,
+        min_decision_date=args.min_decision_date,
+    )
     klines = {
         code: client.fetch_kline(code, days=1500, adjust=SETTLEMENT_ADJUST) for code in args.codes
     }

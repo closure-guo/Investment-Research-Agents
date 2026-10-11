@@ -24,10 +24,8 @@ from typing import Any
 from finance_agent import session_store
 from finance_agent.stream_registry import registry as stream_registry
 from finance_agent.timeline_builder import (
-    apply_pipeline_node_complete,
-    apply_pipeline_search_event,
-    apply_pipeline_thinking_token,
-    apply_pipeline_tool_event,
+    NodeTimelineAccumulator,
+    timeline_persist_interval,
 )
 
 # 管线全局超时默认预算（raise-pipeline-timeout-default delta）：
@@ -358,8 +356,20 @@ class PipelineRunner:
         state = cls._running.get(session_id)
         tree = snapshot.get("layerTree") or build_layer_tree()
         # 管线节点时序（persist-full-session-timeline）：thinking_token 按 node 分组
-        # 持久化到 sessions.pipeline_timelines，写入节奏与 snapshot 一致（每相关事件一次）
-        nodeTimelines: dict[str, list[dict]] = {}
+        # 持久化到 sessions.pipeline_timelines，写入节奏与 snapshot 一致（每相关事件一次）。
+        # fix-timeline-write-amplification：可变累加器 O(1) 摊销（纯函数逐 token 是
+        # O(n²)，incident 039 放大器）；语义等价由 tests/test_timeline_accumulator.py 钉死。
+        timelineAcc = NodeTimelineAccumulator()
+        # 写放大治理：序列化一次并测字节数（自适应中间写间隔输入，design D2）
+        _lastPersistPayload = 0  # 首次写入前 0 → 下限 0.5s（现状冷启动行为）
+
+        def _dump_and_persist_timelines() -> int:
+            nonlocal _lastPersistPayload
+            payload = json.dumps(timelineAcc.materialize(), ensure_ascii=False)
+            session_store.update_pipeline_timelines_json(session_id, payload)
+            _lastPersistPayload = len(payload.encode("utf-8"))
+            return _lastPersistPayload
+
         # search/tool 事件不带 node 字段，归入「当前运行节点」：
         # node_start 置位、node_complete 清空（用户决策 2026-07-30）
         currentNode = ""
@@ -409,11 +419,11 @@ class PipelineRunner:
             except Exception:
                 logger.exception("终态发布失败 session=%s type=%s", session_id, ev.get("type"))
 
-        # thinking 高频时序写节流（对齐 agent_factory._background_consume 的
-        # TIMELINE_PERSIST_INTERVAL）：每 token 全量序列化写库既是 SQLite
-        # 锁竞争源也是 O(n²) 写放大；节点边界/结束时仍即时冲刷（下方分支）。
+        # thinking 高频时序写节流：自适应间隔（fix-timeline-write-amplification，
+        # 对齐 agent_factory._background_consume）——间隔随上次序列化字节数伸缩，
+        # 写带宽 ≤256KB/s 有界；每 token 全量序列化写库既是 SQLite 锁竞争源也是
+        # O(n²) 写放大；节点边界/结束时仍即时冲刷（下方分支）。
         lastTimelinePersist = 0.0
-        TIMELINE_PERSIST_INTERVAL = 0.5
         try:
             for sse_str in event_source():
                 # 取消检查：cancel() 置位后在下一次事件迭代前终止
@@ -469,27 +479,26 @@ class PipelineRunner:
                 eventType = event.get("type")
                 # 管线模式 thinking_token：node 字段缺失/空串归入 '' 键（与前端一致）
                 if eventType == "thinking_token":
-                    nodeTimelines = apply_pipeline_thinking_token(
-                        nodeTimelines, event.get("node") or "", event.get("token", "")
-                    )
+                    timelineAcc.add_thinking_token(event.get("node") or "", event.get("token", ""))
                     now_p = time.time()
-                    if now_p - lastTimelinePersist >= TIMELINE_PERSIST_INTERVAL:
+                    if now_p - lastTimelinePersist >= timeline_persist_interval(
+                        _lastPersistPayload
+                    ):
                         lastTimelinePersist = now_p
-                        session_store.update_pipeline_timelines(session_id, nodeTimelines)
+                        _dump_and_persist_timelines()
                 elif eventType in ("search_start", "search_result", "search_error"):
-                    nodeTimelines = apply_pipeline_search_event(nodeTimelines, currentNode, event)
-                    session_store.update_pipeline_timelines(session_id, nodeTimelines)
+                    timelineAcc.apply_search_event(currentNode, event)
+                    _dump_and_persist_timelines()
                 elif eventType in ("tool_call", "tool_result"):
-                    nodeTimelines = apply_pipeline_tool_event(nodeTimelines, currentNode, event)
-                    session_store.update_pipeline_timelines(session_id, nodeTimelines)
+                    timelineAcc.apply_tool_event(currentNode, event)
+                    _dump_and_persist_timelines()
                 elif eventType in ("node_start", "node_complete", "node_timing"):
                     if eventType == "node_start":
                         currentNode = event.get("node_id", "")
                     elif eventType == "node_complete":
-                        nodeTimelines = apply_pipeline_node_complete(
-                            nodeTimelines, event.get("node_id", "")
-                        )
-                        session_store.update_pipeline_timelines(session_id, nodeTimelines)
+                        timelineAcc.apply_node_complete(event.get("node_id", ""))
+                        # 节点边界即时冲刷（spec 同节奏锚点，不经自适应间隔）
+                        _dump_and_persist_timelines()
                         # 该节点完成即非当前运行节点；间隙事件归入 '' 键
                         if currentNode == event.get("node_id", ""):
                             currentNode = ""
@@ -523,9 +532,9 @@ class PipelineRunner:
         finally:
             # 节流可能跳过末尾 thinking chunk 的时序写，结束时补写完整时序
             # （对齐 agent_factory._background_consume 正常结束分支的 flush）
-            if nodeTimelines:
+            if timelineAcc:
                 try:
-                    session_store.update_pipeline_timelines(session_id, nodeTimelines)
+                    _dump_and_persist_timelines()
                 except Exception:  # noqa: S110 -- 补写失败不阻断终态发布
                     logger.warning("管线时序补写失败 session=%s", session_id)
             # 顺序不变量：先发布终态 done 并等其落库，再置 state.done（is_running=False）

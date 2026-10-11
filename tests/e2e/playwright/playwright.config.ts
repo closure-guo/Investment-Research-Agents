@@ -63,6 +63,10 @@ export default defineConfig({
     // 战绩页 track-record-*.spec.ts 造数会污染共享测试库的空态前提（decisions.spec 依赖），
     // 迁入 playwright.track-record.config.ts 独立测试库，见该文件头注释
     'track-record-*.spec.ts',
+    // eval-ops 手动补跑用例在服务端同步执行 20-60s（AKShare 重试退避），与本套件并行时
+    // 独占单进程后端+共享 SQLite 写窗口致流式用例随机红（issue #252，trace 实证）——
+    // 迁入 playwright.eval-ops.config.ts 专属端口对（8005/5178）物理隔离，默认套件恢复并行门禁
+    'eval-ops-console.spec.ts',
   ],
   timeout: 30_000,
   expect: { timeout: 5_000 },

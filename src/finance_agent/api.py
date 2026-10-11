@@ -47,6 +47,7 @@ from finance_agent.session_store import (  # noqa: E402
     create_session,
     delete_session,
     get_max_event_seq,
+    get_previous_completed_session,
     get_session,
     get_session_trace_id,
     get_terminal_event,
@@ -140,7 +141,7 @@ def resolve_reports_path(file_name: str) -> Path:
 
 
 # Initialize session DB
-init_db()
+# (统一由下方 _init_stores() 执行——import 期建表失败仅 ERROR 降级,见 #57)
 
 # 决策日志表(幂等建表,decision_log 与 sessions 同库;decision-outcome-tracking)
 # cohort 跑批记账表(delta add-forward-paper-trading-cohort;独立于 predictions)
@@ -179,10 +180,28 @@ from finance_agent.outcome.track_record.model import (  # noqa: E402
 )
 from finance_agent.outcome.track_record.segments import segment_all  # noqa: E402
 
-init_decision_log()
-init_predictions()
-init_track_record_tables()
-init_cohort_runs()
+
+def _init_stores() -> None:
+    """import 期建表:任一存储初始化失败仅 ERROR 降级,不阻断 API 启动(#57)。
+
+    DB 不可写时相关路由的写入本就有 per-call 兜底;import 期裸调用一旦抛错,
+    整个进程起不来,/api/health 与只读路由一并陪葬。降级启动 + 日志可见,
+    运维可据 ERROR 定位具体哪张库失败。
+    """
+    for label, init_fn in (
+        ("sessions", init_db),
+        ("decision_log", init_decision_log),
+        ("predictions", init_predictions),
+        ("track_record", init_track_record_tables),
+        ("cohort_runs", init_cohort_runs),
+    ):
+        try:
+            init_fn()
+        except Exception:
+            _logger.error("初始化 %s 存储失败(降级继续,写入有 per-call 兜底)", label, exc_info=True)
+
+
+_init_stores()
 
 # ── Node → Layer/Description mapping (shared with frontend) ──
 
@@ -1083,7 +1102,7 @@ def _run_graph_streaming(
 
         focus_value = derive_focus_from_query(req.query or "")
 
-    initial_state = {
+    initial_state: dict[str, Any] = {
         "stock_code": stock_code,
         "stock_name": stock_name or stock_code,
         "analysis_type": req.analysis_type or "comprehensive",
@@ -1127,6 +1146,14 @@ def _run_graph_streaming(
                 "timestamp": _now(),
             }
         )
+
+    # add-report-revision-view：管线启动时回溯同标的上一份 completed 报告注入 state，
+    # 供报告头「距上次报告」增量摘要渲染；None = 首份报告（含 DB 降级）。
+    # 新会话已置 running，查询按 status='completed' 过滤天然排除自身；
+    # 追问续跑（外部 session_id）按 id 显式排除
+    initial_state["previous_report_snapshot"] = get_previous_completed_session(
+        stock_code, session_id
+    )
 
     completed: set[str] = set()
     accumulated: dict = dict(initial_state)
@@ -1275,6 +1302,9 @@ def _run_graph_streaming(
                     file_paths=file_paths,
                     status="completed",
                     citations=citations,
+                    # add-report-revision-view：终稿决策随报告落库，供同标的下份报告
+                    # 「距上次报告」增量摘要回溯；无终稿（门禁阻断）时落 NULL
+                    final_trade_decision=accumulated.get("final_trade_decision"),
                 )
                 # 旁路落库批准的 TradeDecision(失败仅 ERROR,不阻断报告)
                 _persist_decision_log(accumulated, session_id, stock_code, stock_name_final)

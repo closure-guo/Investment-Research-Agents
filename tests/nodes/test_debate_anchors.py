@@ -90,6 +90,8 @@ class TestAnchorChecks:
             "unresolved": 0,
             "missing_required": 0,
             "unspecified": 0,
+            "value_mismatch": 0,
+            "field_ref_echo_only": 0,
         }
 
     def test_stats_split(self):
@@ -107,6 +109,8 @@ class TestAnchorChecks:
             "unresolved": 1,
             "missing_required": 1,
             "unspecified": 1,
+            "value_mismatch": 0,
+            "field_ref_echo_only": 0,
         }
 
 
@@ -160,6 +164,8 @@ class TestCheckRecordContract:
             "kind",
             "anchors",
             "anchor_statuses",
+            "matched_via",
+            "echo_only_field_refs",
             "status",
             "anchored",
         }
@@ -193,3 +199,213 @@ class TestCheckRecordContract:
             state,
         )
         assert [c["anchored"] for c in checks] == [True, True]
+
+
+class TestMatchedViaRecord:
+    """add-anchor-value-grounding：每锚点解析途径记录（与 anchors 平行）。"""
+
+    def test_inference_three_way_paths(self):
+        state = {
+            "technical_indicators": {"MA": {"5": [1.0, 2.0]}},
+            "news_list": [{"title": "公司公告拟回购不超过 10 亿元"}],
+        }
+        checks = check_argument_anchors(
+            _msg(
+                [
+                    {
+                        "text": "综合判断",
+                        "kind": "inference",
+                        "anchors": [
+                            "technical_indicators.MA.5.-1",
+                            "拟回购不超过 10 亿元",
+                            "fundamental.不存在键.2024",
+                        ],
+                    }
+                ]
+            ),
+            state,
+        )
+        assert checks[0]["matched_via"] == ["field_ref", "echo", ""]
+
+    def test_data_and_event_paths(self):
+        state = {"technical_indicators": {"MA": {"5": [1.0, 2.0]}}}
+        checks = check_argument_anchors(
+            _msg(
+                [
+                    {"text": "动能", "kind": "data", "anchors": ["technical_indicators.MA.5.-1"]},
+                ],
+                role="bull",
+            ),
+            state,
+        ) + check_argument_anchors(
+            _msg(
+                [{"text": "事件", "kind": "event", "anchors": ["拟回购"]}],
+                role="bear",
+            ),
+            {"news_list": [{"title": "拟回购"}]},
+        )
+        assert checks[0]["matched_via"] == ["field_ref"]
+        assert checks[1]["matched_via"] == ["echo"]
+
+
+class TestValueTracing:
+    """数值溯源：field 命中锚点的论点文本数字 SHALL 可溯源（宽容匹配，D3/D4）。"""
+
+    def test_percent_and_abs_forms_traceable(self):
+        state = {"fundamental": {"中报净利润同比": -0.2401}}
+        checks = check_argument_anchors(
+            _msg(
+                [
+                    {
+                        "text": "中报净利同比下滑 24.01%，趋势延续",
+                        "kind": "data",
+                        "anchors": ["fundamental.中报净利润同比"],
+                    }
+                ]
+            ),
+            state,
+        )
+        assert checks[0]["status"] == "resolved"
+
+    def test_untraceable_number_is_value_mismatch(self):
+        state = {"fundamental": {"中报净利润同比": -0.2401}}
+        checks = check_argument_anchors(
+            _msg(
+                [
+                    {
+                        "text": "净利同比下滑 8.06%，盈利恶化",
+                        "kind": "data",
+                        "anchors": ["fundamental.中报净利润同比"],
+                    }
+                ]
+            ),
+            state,
+        )
+        assert checks[0]["status"] == "value_mismatch"
+        assert checks[0]["anchored"] is True
+        assert anchor_stats(checks)["value_mismatch"] == 1
+
+    def test_identifier_and_year_tokens_not_claims(self):
+        # MA5/MA20/R1/2024 均非数值断言：文本唯一「数字」皆标识符 → 不判 mismatch
+        state = {"technical_indicators": {"MA": {"5": [1.0, 2.0]}}}
+        checks = check_argument_anchors(
+            _msg(
+                [
+                    {
+                        "text": "MA5 上穿 MA20，R1 回应 2024 年报显示盈利改善",
+                        "kind": "data",
+                        "anchors": ["technical_indicators.MA.5.-1"],
+                    }
+                ]
+            ),
+            state,
+        )
+        assert checks[0]["status"] == "resolved"
+
+    def test_no_numeric_tokens_no_mismatch(self):
+        state = {"fundamental": {"中报净利润同比": -0.2401}}
+        checks = check_argument_anchors(
+            _msg(
+                [
+                    {
+                        "text": "盈利能力恶化",
+                        "kind": "data",
+                        "anchors": ["fundamental.中报净利润同比"],
+                    }
+                ]
+            ),
+            state,
+        )
+        assert checks[0]["status"] == "resolved"
+
+    def test_inference_field_hit_also_traced(self):
+        state = {"fundamental": {"中报净利润同比": -0.2401}}
+        checks = check_argument_anchors(
+            _msg(
+                [
+                    {
+                        "text": "净利同比下滑 99.99%，不可修复",
+                        "kind": "inference",
+                        "anchors": ["fundamental.中报净利润同比"],
+                    }
+                ]
+            ),
+            state,
+        )
+        assert checks[0]["status"] == "value_mismatch"
+
+    def test_echo_hit_not_value_traced(self):
+        # 回声命中=子串命中即溯源，不在数值溯源范围
+        state = {"news_list": [{"title": "中报净利润同比 -24.01%，下滑扩大"}]}
+        checks = check_argument_anchors(
+            _msg(
+                [
+                    {
+                        "text": "中报净利润同比 -24.01%",
+                        "kind": "inference",
+                        "anchors": ["中报净利润同比"],
+                    }
+                ]
+            ),
+            state,
+        )
+        assert checks[0]["status"] == "resolved"
+
+
+class TestFieldShapedEchoOnly:
+    """field 形态锚仅靠回声 resolved → 锚点声明形态与证据来源错位的确定性信号。
+
+    回声判定是双向归一子串（a_norm in s or s in a_norm）：标题归一后须为锚点
+    归一形态的子串（短标题形态）。真实光大案例的完整标题并不回声命中——该案例
+    属「unresolved 且无消费面」形态，由 stats unresolved + 断点 3 的 FM 告警面承接。
+    """
+
+    def test_echo_only_field_ref_recorded_and_counted(self):
+        state = {
+            "fundamental": {"最新报告期快照": {"同比": None}},
+            "news_list": [{"title": "中报净利润同比"}],
+        }
+        checks = check_argument_anchors(
+            _msg(
+                [
+                    {
+                        "text": "可验证的持续趋势",
+                        "kind": "inference",
+                        "anchors": ["fundamental.中报净利润同比"],
+                    }
+                ]
+            ),
+            state,
+        )
+        assert checks[0]["anchor_statuses"] == ["resolved"]
+        assert checks[0]["matched_via"] == ["echo"]
+        assert checks[0]["echo_only_field_refs"] == ["fundamental.中报净利润同比"]
+        assert anchor_stats(checks)["field_ref_echo_only"] == 1
+
+    def test_event_echo_anchor_without_dot_not_counted(self):
+        state = {"news_list": [{"title": "拟回购不超过 10 亿元"}]}
+        checks = check_argument_anchors(
+            _msg([{"text": "利好", "kind": "inference", "anchors": ["拟回购不超过 10 亿元"]}]),
+            state,
+        )
+        assert checks[0]["status"] == "resolved"
+        assert checks[0]["echo_only_field_refs"] == []
+        assert anchor_stats(checks)["field_ref_echo_only"] == 0
+
+    def test_field_ref_hit_not_counted(self):
+        state = {"fundamental": {"中报净利润同比": -0.2401}}
+        checks = check_argument_anchors(
+            _msg(
+                [
+                    {
+                        "text": "趋势",
+                        "kind": "inference",
+                        "anchors": ["fundamental.中报净利润同比"],
+                    }
+                ]
+            ),
+            state,
+        )
+        assert checks[0]["matched_via"] == ["field_ref"]
+        assert checks[0]["echo_only_field_refs"] == []
+        assert anchor_stats(checks)["field_ref_echo_only"] == 0

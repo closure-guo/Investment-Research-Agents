@@ -470,6 +470,27 @@ class TestOpsWiring:
         assert _job_field(sched, "cohort_batch", "minute") == ["45"]
 
 
+class TestMisfireHardening:
+    """#57 子项4:进程沉睡/重启错过触发时刻 → 1h 宽限内补火,多次 miss 合并为一次。
+
+    默认 misfire_grace_time=1s 下,进程被冻结/重建略过 16:00 即整日丢批;
+    job 幂等(次日补结)所以宽限补火安全。五个日批 job 统一配置。
+    """
+
+    @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
+    @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
+    def test_all_jobs_have_misfire_grace_and_coalesce(self, mock_sched_cls):
+        sched = MagicMock()
+        mock_sched_cls.return_value = sched
+        start_scheduler()
+        ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
+        assert len(ids) == 5, ids
+        for call in sched.add_job.call_args_list:
+            job_id = call.kwargs.get("id")
+            assert call.kwargs.get("misfire_grace_time") == 3600, job_id
+            assert call.kwargs.get("coalesce") is True, job_id
+
+
 class TestRescheduleCohort:
     @patch.dict(os.environ, {"TESTING": "1"})
     def test_start_returns_none_and_handle_stays_empty(self):

@@ -93,8 +93,19 @@ def seed(
             ),
             metadata={"version": "v1", "pool": pool},
         )
-        # create_dataset 返回原始 Dataset API 类型(无 .items);新建库必为空,
-        # existing 保持空集即可,勿迭代其返回值。
+        # create_dataset 返回原始 Dataset API 类型(无 .items);勿迭代其返回值。
+        # #56:create 是按名 upsert——首查失败可能是网络瞬断,dataset 实际已存在
+        # 且已有 items,existing 保持空集继续会整批重复插入。create 成功后必须
+        # 重取 get_dataset 补 existing;重取仍失败则按空集继续(显式 warning)。
+        try:
+            dataset = client.get_dataset(dataset_name)
+            existing = {(it.input.get("query"), it.input.get("mode")) for it in dataset.items}
+        except Exception as refetch_err:
+            logger.warning(
+                "create 后重取 %s 失败,按空集继续(存在重复插入风险): %s",
+                dataset_name,
+                refetch_err,
+            )
     created = skipped = 0
     for item in items:
         key = (item["input"]["query"], item["input"]["mode"])

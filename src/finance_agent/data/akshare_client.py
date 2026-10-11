@@ -25,6 +25,20 @@ import akshare as ak
 import pandas as pd
 import requests
 
+from finance_agent.data.cache import get_shared_cache
+
+
+def _safe_float(val, default=None):
+    """宽容数值解析（charts._safe_float 同语义）：None/非法/NaN → default。"""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return default
+    if v != v:  # NaN
+        return default
+    return v
+
+
 logger = logging.getLogger(__name__)
 
 _SINA_MAX_RETRIES = 2
@@ -44,6 +58,10 @@ def _call_ak(func, *args, **kwargs):
     """带超时 + 重试的 AKShare 调用包装。
 
     超时或连接异常（含 RemoteDisconnected 限频）时重试，全部失败返回 None。
+    连接级不可达（Network is unreachable / Connection refused）不重试——
+    该类错误在单次调用的秒级窗口内不会自愈，重试只产生纯等待与日志噪声
+    （CI 断网窗口曾 60 次 Errno 101 × 线性退避把 stub 套件拖过 25m 墙钟，
+    issue #246）；跨调用的恢复由调用方冷却（60s）承担。
 
     注意：不能用 `with ThreadPoolExecutor(...) as pool`（退出时 shutdown(wait=True)
     会无限等待卡死的 AKShare 线程，超时形同虚设，泄漏线程打满 executor 池）。
@@ -67,8 +85,15 @@ def _call_ak(func, *args, **kwargs):
                 _AK_MAX_RETRIES,
             )
         except Exception as e:
-            # 捕获 RemoteDisconnected / ConnectionError 等网络异常，重试而非直接抛出
             pool.shutdown(wait=False, cancel_futures=True)
+            if _is_connection_unreachable(e):
+                logger.error(
+                    "AKShare 连接不可达（不重试）: %s: %s",
+                    getattr(func, "__name__", str(func)),
+                    type(e).__name__,
+                )
+                return None
+            # 捕获 RemoteDisconnected / ConnectionError 等网络异常，重试而非直接抛出
             logger.warning(
                 "AKShare 调用异常: %s: %s (attempt %d/%d)",
                 getattr(func, "__name__", str(func)),
@@ -84,6 +109,30 @@ def _call_ak(func, *args, **kwargs):
         getattr(func, "__name__", str(func)),
     )
     return None
+
+
+def _is_connection_unreachable(exc: BaseException) -> bool:
+    """连接级不可达判别：网络不可达 / 拒绝连接（含 cause 链上的底层 OSError）。"""
+    for e in [exc, *(_walk_causes(exc))]:
+        if isinstance(e, (ConnectionRefusedError, OSError)) and getattr(e, "errno", None) in (
+            101,
+            111,
+            113,
+        ):
+            return True
+        msg = str(e)
+        if "Network is unreachable" in msg or "Connection refused" in msg:
+            return True
+    return False
+
+
+def _walk_causes(exc: BaseException):
+    seen = set()
+    cur = exc.__cause__ or exc.__context__
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        yield cur
+        cur = cur.__cause__ or cur.__context__
 
 
 def _sina_report(stock: str, symbol: str) -> pd.DataFrame:
@@ -181,6 +230,8 @@ _PARENT_COL_CANDIDATES: dict[str, tuple[str, ...]] = {
     ),
     "归母所有者权益": (
         "归属于母公司股东权益合计",
+        "归属于母公司的股东权益合计",
+        "归属于母公司股东的权益合计",
         "归属于母公司股东的权益",
         "归属于母公司股东权益",
         "归属于母公司所有者权益合计",
@@ -191,9 +242,13 @@ _PARENT_COL_CANDIDATES: dict[str, tuple[str, ...]] = {
 }
 # 遗留列位回退：基于新浪接口旧版稳定列序（制造业模板），
 # 仅当列名归一化无法命中时使用（编码损坏场景）。
-_LEGACY_POSITION_MAP: dict[int, str] = {
-    50: "归母净利润",
-    137: "归母所有者权益",
+# 按报表类型标定（issue #238 上游归因）：50 是制造业「利润表」的归母净利润
+# 列位、137 是制造业「资产负债表」的归母权益列位——两表列位互不可用，
+# 跨表套用会把券商资产负债表第 50 列「资产总计」吞成「归母净利润」
+# （601066 六跑资产序列全 None 事故根因）。statement 未声明时不回退。
+_LEGACY_POSITION_MAP: dict[str, dict[int, str]] = {
+    "利润表": {50: "归母净利润"},
+    "资产负债表": {137: "归母所有者权益"},
 }
 
 
@@ -229,7 +284,7 @@ class AKShareClient:
     def _trim_years(self, df: pd.DataFrame, years: int = 5) -> pd.DataFrame:
         return df.head(years)
 
-    def _rename_parent_cols(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _rename_parent_cols(self, df: pd.DataFrame, statement: str | None = None) -> pd.DataFrame:
         """重命名归母口径列，解决终端编码不一致问题。
 
         解析策略（add-chart-data-integrity R1）：列名候选归一化匹配优先，
@@ -238,6 +293,11 @@ class AKShareClient:
         「归属于母公司股东的权益」在列 141；制造业模板列位 50/137 恰为
         真实列。按列位硬编码会把银行模板的「盈余公积转入」「未分配利润」
         错当归母口径（601818 ROE 27.98% 事故根因），故列位仅作最后回退。
+
+        列位回退按 statement 标定范围生效（利润表 50 / 资产负债表 137），
+        statement 未声明时不回退——跨表套用曾把券商资产负债表第 50 列
+        「资产总计」吞成「归母净利润」（issue #238 上游归因，601066 六跑
+        资产序列全 None）。券商权益列名变体已入候选清单，正常走列名命中。
 
         列名归一化：去除全部空白变体（半角/全角空格、不可见空白）后
         与候选列名精确匹配，兼容线上出现过的空白/编码差异形态。
@@ -267,10 +327,11 @@ class AKShareClient:
                     resolved[target] = True
                     break
 
-        if not all(resolved.values()):
-            # 列名归一化未全部命中（编码损坏等）→ 遗留列位回退
-            # （基于新浪接口旧版稳定列序，制造业模板验证可用）
-            for idx, new_name in _LEGACY_POSITION_MAP.items():
+        statement_map = _LEGACY_POSITION_MAP.get(statement) if statement else None
+        if statement_map and not all(resolved.values()):
+            # 列名归一化未全部命中（编码损坏等）→ 遗留列位回退，
+            # 仅套用本表标定的列位（基于新浪接口旧版稳定列序，制造业模板验证可用）
+            for idx, new_name in statement_map.items():
                 if resolved.get(new_name):
                     continue
                 if idx < len(cols):
@@ -291,7 +352,7 @@ class AKShareClient:
         stock = _add_prefix(stock_code)
         df = _sina_report(stock, "资产负债表")
         df = self._filter_annual(df)
-        df = self._rename_parent_cols(df)
+        df = self._rename_parent_cols(df, statement="资产负债表")
         self._check_min_years(df, stock_code)
         return self._trim_years(df, years)
 
@@ -299,7 +360,7 @@ class AKShareClient:
         stock = _add_prefix(stock_code)
         df = _sina_report(stock, "利润表")
         df = self._filter_annual(df)
-        df = self._rename_parent_cols(df)
+        df = self._rename_parent_cols(df, statement="利润表")
         self._check_min_years(df, stock_code)
         return self._trim_years(df, years)
 
@@ -400,6 +461,49 @@ class AKShareClient:
             logger.error("行业数据降级后仍缺失（名称/cninfo 均无返回）: %s", stock_code)
             self.sources_seen["industry"].update({"cninfo", "missing"})
         return result
+
+    def fetch_industry_constituents(self, industry_name: str) -> list[dict] | None:
+        """行业板块成分股（complete-peer-pipeline：无显式对标股时的自动选取输入）。
+
+        主源东方财富行业板块成分接口；走 _call_ak 既有超时/重试/不可达
+        fail-fast 包装。结果按总市值降序（code/name/total_mv），经共享缓存
+        （行业维度键，TTL 24h）避免同行业重复抓取；失败/空返回 None 且
+        MUST NOT 写缓存（optional 降级语义）。
+        """
+        if not industry_name:
+            return None
+        cache = get_shared_cache()
+        cache_key = f"industry_constituents:{industry_name}"
+        cached: list[dict] | None = cache.get(cache_key)
+        if cached:
+            return cached
+        df = _call_ak(ak.stock_board_industry_cons_em, symbol=industry_name)
+        if df is None or df.empty:
+            return None
+        code_col = next((c for c in ("代码", "code") if c in df.columns), None)
+        name_col = next((c for c in ("名称", "name") if c in df.columns), None)
+        mv_col = next((c for c in ("总市值", "total_mv") if c in df.columns), None)
+        if code_col is None or mv_col is None:
+            logger.warning("行业成分表缺代码/总市值列，按接口失败降级: %s", industry_name)
+            return None
+        rows: list[dict] = []
+        for _, r in df.iterrows():
+            code = str(r[code_col]).strip()
+            mv = _safe_float(r[mv_col])
+            if not code or mv is None or mv <= 0:
+                continue
+            rows.append(
+                {
+                    "code": code,
+                    "name": str(r[name_col]).strip() if name_col else "",
+                    "total_mv": mv,
+                }
+            )
+        if not rows:
+            return None
+        rows.sort(key=lambda x: -x["total_mv"])
+        cache.set(cache_key, rows, ttl_seconds=86400)
+        return rows
 
     @staticmethod
     def _quote_from_spot_df(df, stock_code: str) -> dict | None:
@@ -660,7 +764,7 @@ class AKShareClient:
         inc = _sina_report(stock, "利润表")
         if inc.empty:
             raise ValueError(f"股票 {stock_code} 利润表数据不可用")
-        inc = self._rename_parent_cols(inc).copy()
+        inc = self._rename_parent_cols(inc, statement="利润表").copy()
         inc["_ymd"] = inc["报告日"].map(self._compact_date)
         inc = inc.sort_values("_ymd", ascending=False).reset_index(drop=True)
         latest = inc.iloc[0]
@@ -724,6 +828,21 @@ class AKShareClient:
         if raw_np is not None and prior_np is not None and prior_np != 0:
             np_yoy = round((float(raw_np) / 1e8 - prior_np) / abs(prior_np) * 100, 2)
 
+        # 信用减值损失及同比（add-banking-industry-calibration，issue #241 一期）：
+        # 列存在即纳入（银行主诉求——净利波动的真实驱动「主动提储 vs 资产质量
+        # 恶化」可溯源；制造业同列亦受益），列/同期缺失缺席不占位。
+        # 同比沿用 #190 纪律：按原始元值对 _yi4 同比值计算，先 round 再算是错误顺序
+        prior_imp: float | None = None
+        if not prior_rows.empty:
+            prior_imp = _yi4(prior_rows.iloc[0].get("信用减值损失"))
+        raw_imp = latest.get("信用减值损失")
+        imp = self._yi(raw_imp)
+        if imp is not None and raw_imp is not None and prior_imp is not None and prior_imp != 0:
+            imp_yoy = round((float(raw_imp) / 1e8 - prior_imp) / abs(prior_imp) * 100, 2)
+            imp_extra: dict = {"信用减值损失": imp, "信用减值损失同比(%)": imp_yoy}
+        else:
+            imp_extra = {}
+
         # 资产负债表（取同一报告日；该期缺失取最新一期并标注）
         snap: dict = {
             "报告日": report_date,
@@ -741,6 +860,7 @@ class AKShareClient:
             "归母净利同比(%)": np_yoy,
             "missing": missing,
         }
+        snap.update(imp_extra)
 
         bs = _sina_report(stock, "资产负债表")
         if not bs.empty:

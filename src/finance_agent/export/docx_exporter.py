@@ -53,6 +53,11 @@ def markdown_to_docx(markdown_text: str, output_path: str, stock_name: str = "")
             _add_table(doc, sec.rows)
         elif sec.type == "paragraph":
             _add_paragraph(doc, sec.text)
+        elif sec.type == "list":
+            style = "List Number" if sec.ordered else "List Bullet"
+            for item in sec.items:
+                p = doc.add_paragraph(style=style)
+                _add_runs_with_inline(p, item)
         elif sec.type == "image":
             _add_image(doc, sec.image_path, sec.text)
         elif sec.type == "separator":
@@ -107,6 +112,14 @@ def _add_table(doc: Document, rows: list[list[str]]) -> None:  # pyrefly: ignore
 def _add_paragraph(doc: Document, text: str) -> None:  # pyrefly: ignore[not-a-type]
     """Add a paragraph with inline bold/italic formatting."""
     p = doc.add_paragraph()
+    _add_runs_with_inline(p, text)
+
+
+def _add_runs_with_inline(p, text: str) -> None:  # noqa: ANN001 - python-docx paragraph
+    """按 **bold**/*italic* 标记拆 run 追加（issue #239B 列表项复用）。
+
+    不成对的 `**` 保守按原文输出（与 parser.strip_md_inline 同口径）。
+    """
     # Split by **bold** and *italic* patterns
     # Process: **bold**, *italic*, regular text
     pattern = r"(\*\*[^*]+\*\*|\*[^*]+\*)"

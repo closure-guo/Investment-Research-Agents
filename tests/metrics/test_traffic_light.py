@@ -444,3 +444,126 @@ class TestCoverageFallthroughUncoveredMetric:
         assert _assess_absolute("ROE", 16.0, industry=None) == "green"
         assert _assess_absolute("ROE", 9.0, industry="半导体设备") == "yellow"
         assert _assess_absolute("ROE", 9.0, industry=None) == "yellow"
+
+
+# ── 银行业口径覆盖（add-banking-industry-calibration，issue #241）──
+
+
+class TestBankingIndustryCalibration:
+    """银行业阈值覆盖：不适用排除 + 换阈值 + 维度剔除满分缩放。
+
+    光大 601818 形态：负债率 91% 通用阈值恒红（死规则）、ROA 0.61% 通用阈值恒红、
+    OCF/净利 4.16 被当含金量信号——全部为银行商业模式误判。
+    """
+
+    @pytest.fixture
+    def bank_metrics(self):
+        return {
+            "solvency": {
+                "资产负债率": {"2024": 91.0, "2023": 91.5},
+                "流动比率": {"2024": None, "2023": None},
+                "速动比率": {"2024": None, "2023": None},
+            },
+            "profitability": {
+                "毛利率": {"2024": None, "2023": None},
+                "净利率": {"2024": 30.6, "2023": 29.8},
+                "ROE": {"2024": 9.0, "2023": 8.7},
+                "ROA": {"2024": 0.61, "2023": 0.58},
+                "ROIC": {"2024": 3.2, "2023": 3.1},
+            },
+            "efficiency": {
+                "总资产周转率": {"2024": 0.03, "2023": 0.03},
+                "存货周转率": {"2024": None, "2023": None},
+            },
+            "cashflow": {
+                "经营现金流/净利润": {"2024": 4.16, "2023": 3.9},
+                "资本支出/折旧": {"2024": 2.0, "2023": 1.8},
+            },
+        }
+
+    def test_is_banking_industry(self):
+        from finance_agent.metrics.traffic_light import is_banking_industry
+
+        assert is_banking_industry("银行") is True
+        assert is_banking_industry("国有大型银行") is True
+        assert is_banking_industry("货币金融服务") is True  # cninfo 降级形态
+        assert is_banking_industry("白酒") is False
+        assert is_banking_industry(None) is False
+
+    def test_bank_debt_ratio_excluded_not_red(self, bank_metrics):
+        """负债率 91% 对银行不适用：全 None，MUST NOT 用 (40, 65) 评红。"""
+        result = assess_traffic_lights(bank_metrics, industry="银行")
+        entry = result["solvency"]["资产负债率"]["2024"]
+        assert entry["absolute"] is None and entry["change"] is None
+        assert entry["final"] is None
+
+    def test_bank_roe_new_threshold(self, bank_metrics):
+        """ROE 9.0%：通用 (15, 8) 下黄（>8），银行业 (13, 6) 下仍黄——语义钉死。"""
+        result = assess_traffic_lights(bank_metrics, industry="银行")
+        assert result["profitability"]["ROE"]["2024"]["absolute"] == "yellow"
+
+    def test_bank_roa_new_threshold(self, bank_metrics):
+        """ROA 0.61%：通用 (10, 3) 恒红 → 银行业 (0.9, 0.5) 黄。"""
+        result = assess_traffic_lights(bank_metrics, industry="银行")
+        assert result["profitability"]["ROA"]["2024"]["absolute"] == "yellow"
+        # 非银行业同值仍红（零回归对照）
+        result_generic = assess_traffic_lights(bank_metrics)
+        assert result_generic["profitability"]["ROA"]["2024"]["absolute"] == "red"
+
+    def test_bank_ocf_multiple_excluded(self, bank_metrics):
+        """OCF/净利 4.16 对银行不适用——MUST NOT 产出绿灯被引为含金量高。"""
+        result = assess_traffic_lights(bank_metrics, industry="银行")
+        assert result["cashflow"]["经营现金流/净利润"]["2024"]["final"] is None
+
+    def test_bank_capex_dep_still_assessed(self, bank_metrics):
+        """资本支出/折旧不经 OCF——银行业保留评灯。"""
+        result = assess_traffic_lights(bank_metrics, industry="银行")
+        assert result["cashflow"]["资本支出/折旧"]["2024"]["final"] is not None
+
+    def test_non_bank_debt_ratio_unchanged(self, bank_metrics):
+        """非银行业负债率 91% 仍按通用阈值红（零回归）。"""
+        result = assess_traffic_lights(bank_metrics, industry="白酒")
+        assert result["solvency"]["资产负债率"]["2024"]["absolute"] == "red"
+
+    def test_bank_health_cap50_and_scaled_bands(self, bank_metrics):
+        """偿债/效率两维全排除 → 满分 50，rating 阈值缩放 42.5/30。"""
+        lights = assess_traffic_lights(bank_metrics, industry="银行")
+        health = compute_health_score(lights, "2024", industry="银行")
+        assert health["score_cap"] == 50
+        # 全绿形态：盈利（净利率/ROE/ROA 满灯）+ 现金流（资本支出/折旧）→ 50/50 → healthy
+        all_green = {
+            dim: {
+                name: {"2024": {"final": "green" if v is not None else None}}
+                for name, v in metrics.items()
+            }
+            for dim, metrics in bank_metrics.items()
+        }
+        health_green = compute_health_score(all_green, "2024", industry="银行")
+        assert health_green["score_cap"] == 50
+        assert health_green["total"] == 50.0
+        assert health_green["rating"] == "healthy"
+
+    def test_generic_health_cap100_unchanged(self, bank_metrics):
+        """非银行业满分恒 100、阈值恒 85/60（零回归）。"""
+        all_green = {
+            dim: {
+                name: {"2024": {"final": "green" if v is not None else None}}
+                for name, v in metrics.items()
+            }
+            for dim, metrics in bank_metrics.items()
+        }
+        health = compute_health_score(all_green, "2024")
+        assert health["score_cap"] == 100
+        assert health["rating"] == "healthy"
+
+    def test_data_missing_dim_not_excluded(self):
+        """数据缺失维度（非行业排除）不触发剔除：记 0 分、满分维持 100。"""
+        lights = {
+            "solvency": {"资产负债率": {"2024": {"final": None}}},
+            "profitability": {"净利率": {"2024": {"final": "green"}}},
+            "efficiency": {"总资产周转率": {"2024": {"final": None}}},
+            "cashflow": {"FCF": {"2024": {"final": "green"}}},
+        }
+        health = compute_health_score(lights, "2024", industry="白酒")
+        assert health["score_cap"] == 100
+        assert health["total"] == pytest.approx(50.0)

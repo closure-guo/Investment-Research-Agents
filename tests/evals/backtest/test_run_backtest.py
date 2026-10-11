@@ -472,7 +472,7 @@ class TestBatchKindDisclosures:
         monkeypatch.setattr(
             rb,
             "stratified_sample",
-            lambda ik, codes, per_regime: [
+            lambda ik, codes, per_regime, min_decision_date=None: [
                 {"code": "600000", "regime": "bull", "decision_date": "2024-01-01"}
             ],
         )
@@ -501,6 +501,9 @@ class TestBatchKindDisclosures:
 
     def test_formal_downgraded_probe_uses_upper_bound_sentence(self):
         sample, outcomes, klines = _batch_setup()
+        # 深历史执法（#172）：formal 定位断言需切点后决策日，否则强制 pathway
+        for item in sample:
+            item["decision_date"] = "2025-06-02"
         report = run_backtest(
             sample,
             klines,
@@ -553,6 +556,9 @@ class TestBatchKindDisclosures:
 
     def test_formal_clean_measurable_keeps_skill_positioning(self):
         sample, outcomes, klines = _batch_setup()
+        # 深历史执法（#172）：formal 定位断言需切点后决策日，否则强制 pathway
+        for item in sample:
+            item["decision_date"] = "2025-06-02"
         report = run_backtest(
             sample,
             klines,
@@ -626,7 +632,9 @@ class TestFetchCaliber:
                 return _kline([100.0] * 5)
 
         monkeypatch.setattr("finance_agent.data.akshare_client.AKShareClient", FakeClient)
-        monkeypatch.setattr(rb, "stratified_sample", lambda ik, codes, per_regime: [])
+        monkeypatch.setattr(
+            rb, "stratified_sample", lambda ik, codes, per_regime, min_decision_date=None: []
+        )
         monkeypatch.setattr(rb, "run_backtest", lambda *a, **k: {"ok": True})
         monkeypatch.chdir(tmp_path)  # 报告写盘落在 tmp（不污染仓库）
         monkeypatch.setattr(sys, "argv", ["run_backtest.py", "--codes", "600000", "600001"])
@@ -811,7 +819,7 @@ class TestTask3ReviewClosures:
         monkeypatch.setattr(
             rb,
             "stratified_sample",
-            lambda ik, codes, per_regime: [
+            lambda ik, codes, per_regime, min_decision_date=None: [
                 {"code": "600000", "regime": "bull", "decision_date": "2024-01-01"}
             ],
         )
@@ -849,7 +857,7 @@ class TestMainWritesMarkdown:
         monkeypatch.setattr(
             rb,
             "stratified_sample",
-            lambda ik, codes, per_regime: [
+            lambda ik, codes, per_regime, min_decision_date=None: [
                 {"code": "600000", "regime": "bull", "decision_date": "2024-01-01"}
             ],
         )

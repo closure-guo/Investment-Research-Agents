@@ -10,6 +10,7 @@ import pandas as pd
 
 from finance_agent.outcome.track_record.judgment import (
     Resolution,
+    _bench_close_on_or_before,
     _effective_horizon,
     day_master_ids,
     derive_attribution_date,
@@ -338,3 +339,16 @@ class TestDayMasterIds:
             self._p("b", "2026-10-09T10:00:00", symbol="000001.SZ"),
         ]
         assert day_master_ids(preds, self.CALENDAR) == {"a", "b"}
+
+
+class TestBenchCloseSortGuard:
+    """#57 子项3:track_record 判定侧同款函数同样不得隐式依赖基准排序。"""
+
+    def test_unsorted_benchmark_picks_latest_eligible(self):
+        bench = pd.DataFrame(
+            {
+                "日期": ["2026-08-11", "2026-08-01", "2026-08-12"],
+                "收盘": [2.0, 1.0, 3.0],
+            }
+        )
+        assert _bench_close_on_or_before(bench, "2026-08-11") == 2.0

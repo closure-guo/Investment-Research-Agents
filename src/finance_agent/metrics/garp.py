@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from finance_agent.metrics.traffic_light import is_banking_industry
+
 
 def _clean_num(v) -> float | None:
     """NaN 视同缺失：NaN 参与比较恒 False，会把缺数伪装成比较通过。
@@ -91,6 +93,13 @@ def calc_garp(data: dict) -> dict:
         failures.append("负债率 数据缺失（未参与比较）")
         details["负债率"] = None
         details["负债率_missing"] = True
+    elif is_banking_industry(data.get("industry")):
+        # 行业不适用（add-banking-industry-calibration D5）：银行以资本充足率为
+        # 核心约束，存款是经营原料而非杠杆风险——60% 制造业阈值对银行是死规则
+        # （91% 负债率恒败）。第三类分桶：退出 failures、保留数值可审计、
+        # MUST NOT 吞掉缺失分桶（上方 None 分支已先行）。
+        details["负债率"] = debt
+        details["负债率_行业不适用"] = True
     elif debt >= 0.60:
         failures.append("负债率 >= 60%")
         details["负债率"] = debt

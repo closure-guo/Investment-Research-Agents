@@ -74,7 +74,7 @@ describe('StockPriceChart K 线分支', () => {
     expect(seriesOf(opt).some((s) => s?.name === '成交量' && s?.type === 'bar')).toBe(true)
     expect(seriesOf(opt).filter((s) => typeof s?.name === 'string' && s.name.startsWith('MA')).length).toBe(3)
     const mlItems: any[] = candle.markLine.data
-    expect(mlItems.filter((i) => 'xAxis' in i).length).toBe(1) // 财报日
+    expect(mlItems.filter((i) => 'xAxis' in i).length).toBe(1) // 报告期截止日
     expect(mlItems.filter((i) => i?.yAxis === 11.2).length).toBe(1) // 入场
     expect(mlItems.filter((i) => i?.yAxis === 9.9).length).toBe(1) // 止损
     expect(mlItems.filter((i) => i?.yAxis === 12.5).length).toBe(1) // 目标

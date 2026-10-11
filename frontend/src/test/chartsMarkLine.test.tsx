@@ -65,7 +65,7 @@ describe('Charts markLine 不变量：data 每项必须带坐标字段', () => {
     }
   })
 
-  it('StockPriceChart 的 markLine.data 项均带 xAxis（财报日期标注）', () => {
+  it('StockPriceChart 的 markLine.data 项均带 xAxis（报告期截止日标注）', () => {
     render(<StockPriceChart data={baseData} />)
     const opt = captured[captured.length - 1] as any
     const items = markLineDataItems(opt)

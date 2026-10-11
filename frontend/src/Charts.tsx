@@ -232,7 +232,7 @@ export function StockPriceChart({ data }: { data: ChartData }) {
       series: [{ type: 'line', data: closes, itemStyle: { color: theme.brand }, areaStyle: { opacity: 0.08 }, symbol: 'none', markLine: { data: markLines, symbol: 'none' } }],
     }
     return (
-      <ChartCard title="股价趋势（红色虚线为年报发布日）" testId="chart-stock-price">
+      <ChartCard title="股价趋势（红色虚线为年报报告期截止日）" testId="chart-stock-price">
         <ReactECharts option={option} style={{ height: '300px' }} />
       </ChartCard>
     )
@@ -542,7 +542,7 @@ export function HeatmapChart({ data }: { data: ChartData }) {
   }
 
   return (
-    <ChartCard title="年报发布窗口期股价变化（%）">
+    <ChartCard title="年报报告期窗口股价变化（%）">
       <ReactECharts option={option} style={{ height: '300px' }} />
     </ChartCard>
   )

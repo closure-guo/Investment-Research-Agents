@@ -261,6 +261,10 @@ def aggregate_probes(
     }
 
 
+# 泄漏控制切点（metrics.md §2 Δ4）：深历史样本永久通路验证，不产 skill 结论
+DEEP_HISTORY_CUTOFF = "2025-01-01"
+
+
 def _max_optional(values: Any) -> float | None:
     nums = [v for v in values if isinstance(v, (int, float))]
     return max(nums) if nums else None
@@ -271,12 +275,17 @@ def resolve_positioning(
     batch_kind: str | None,
     clean_window: dict[str, Any] | None,
     probe: dict[str, Any] | None,
+    decision_dates: Any = None,
 ) -> str:
     """批次定位：skill（可产出 skill 结论句）或 pathway（通路验证，剥离 skill 句）。
 
     仅正式批 + 干净窗口通过 + 探针可测（rate 非 None）→ skill；其余（含探针超阈降级，
     仍属可下结论的上界证据）保持 skill，但由 `build_conclusion` 换用降级句式。
+    深历史执法（issue #172）：批内任一决策日早于 DEEP_HISTORY_CUTOFF → pathway，
+    优先级高于 formal/干净窗口/探针三件套。
     """
+    if decision_dates and any(str(d)[:10] < DEEP_HISTORY_CUTOFF for d in decision_dates):
+        return POSITIONING_PATHWAY
     if batch_kind != "formal":
         return POSITIONING_PATHWAY
     if clean_window is None or not clean_window.get("passed", False):
@@ -325,6 +334,7 @@ def build_conclusion(
     sanity: str = "valid",
     regime_covered: list[str] | tuple[str, ...] = (),
     regime_limited: bool = False,
+    decision_dates: Any = None,
 ) -> str:
     """结论句式唯一生成点。
 
@@ -337,12 +347,16 @@ def build_conclusion(
     """
     if sanity != "valid":
         return INVALID_SANITY_CONCLUSION
-    positioning = resolve_positioning(batch_kind=batch_kind, clean_window=clean_window, probe=probe)
+    positioning = resolve_positioning(
+        batch_kind=batch_kind, clean_window=clean_window, probe=probe, decision_dates=decision_dates
+    )
     if positioning == POSITIONING_PATHWAY:
         if base_conclusion == NO_SAMPLE_CONCLUSION:
             # 无读数可下结论：保持旧句（红线：样本积累中不得产出结论句）
             return base_conclusion
         reasons: list[str] = []
+        if decision_dates and any(str(d)[:10] < DEEP_HISTORY_CUTOFF for d in decision_dates):
+            reasons.append(f"深历史样本（决策日早于 {DEEP_HISTORY_CUTOFF}）")
         if batch_kind != "formal":
             reasons.append(f"batch_kind={batch_kind or 'pathway'}")
         elif clean_window is None or not clean_window.get("passed", False):

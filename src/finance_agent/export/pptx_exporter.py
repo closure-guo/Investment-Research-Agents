@@ -11,7 +11,7 @@ from pptx import Presentation
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 
-from finance_agent.export.parser import Section, parse_markdown, split_by_chapters
+from finance_agent.export.parser import Section, parse_markdown, split_by_chapters, strip_md_inline
 
 
 def markdown_to_pptx(markdown_text: str, output_path: str, stock_name: str = "") -> str:
@@ -94,9 +94,16 @@ def _add_chapter_slide(prs: Presentation, title: str, sections: list[Section]) -
             p.font.bold = True
         elif sec.type == "paragraph":
             p = body.add_paragraph()
-            p.text = sec.text
+            p.text = strip_md_inline(sec.text)
             p.level = 0
             p.font.size = Pt(14)
+        elif sec.type == "list":
+            # issue #239B：列表项缩进渲染，纯文本路径去内联标记
+            for item in sec.items:
+                p = body.add_paragraph()
+                p.text = strip_md_inline(item)
+                p.level = 1
+                p.font.size = Pt(12)
         elif sec.type == "image":
             _add_image_to_slide(slide, sec.image_path, sec.text)
         elif sec.type == "table":

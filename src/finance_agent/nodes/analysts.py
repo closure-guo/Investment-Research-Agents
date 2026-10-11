@@ -469,6 +469,20 @@ def macro_analyst(state: dict) -> dict:
     return {"analyst_reports": {"macro": _keep_valid_over_degraded(state, "macro", report)}}
 
 
+def _validation_warnings_section(state: dict) -> str | None:
+    """勾稽告警机生材料段（complete-peer-pipeline，issue #21 story 8）。
+
+    validation_financials 先于分析师运行，告警随 state 到达；非空时以独立
+    段注入 FA/MA context（原文逐条，不改写措辞），空列表不注入（不留空段）。
+    机生材料对齐公告/研报段先例：供交叉核对，SHALL NOT 计为分析师 claim。
+    """
+    warnings = state.get("validation_warnings") or []
+    if not warnings:
+        return None
+    lines = "\n".join(f"- {w}" for w in warnings)
+    return f"勾稽校验告警（机生，供交叉核对）:\n{lines}"
+
+
 def _build_macro_context(state: dict) -> str:
     """构建宏观分析的 LLM context。"""
     sections = []
@@ -476,6 +490,9 @@ def _build_macro_context(state: dict) -> str:
     stock_name = state.get("stock_name", "N/A")
     stock_code = state.get("stock_code", "N/A")
     industry = state.get("industry_info") or {}
+    warnings_section = _validation_warnings_section(state)
+    if warnings_section:
+        sections.append(warnings_section)
     industry_name = industry.get("name", "N/A")
     sections.append(f"股票: {stock_name}({stock_code}), 所属行业: {industry_name}")
 
@@ -565,6 +582,11 @@ def _build_fundamental_context(state: dict) -> str:
     hint = focus_hint(state)
     if hint:
         sections.append(hint)
+
+    # 勾稽告警机生材料段（complete-peer-pipeline：非空注入，空不注入）
+    warnings_section = _validation_warnings_section(state)
+    if warnings_section:
+        sections.append(warnings_section)
 
     # 公告与研报（add-analyst-data-coverage）
     announcements = state.get("announcements") or []

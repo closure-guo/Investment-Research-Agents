@@ -104,15 +104,19 @@ class TestNormalizationAndFallback:
         assert df["归母净利润"].tolist() == [168.0]
 
     def test_positional_fallback_when_names_corrupted(self, client):
-        """列名全部损坏（候选无一命中）→ 回退既有列位映射，兼容原修复场景。"""
+        """列名全部损坏（候选无一命中）→ 回退本表标定列位，兼容原修复场景。
+
+        列位按报表类型标定（issue #238：利润表 50 / 资产负债表 137，
+        跨表套用曾吞掉券商资产负债表「资产总计」），statement 未声明不回退。
+        """
         cols = [f"col_{i}" for i in range(140)]
         data = {c: [float(i)] for i, c in enumerate(cols)}
-        raw = pd.DataFrame(data)
-        df = client._rename_parent_cols(raw)
-        assert "归母净利润" in df.columns
-        assert "归母所有者权益" in df.columns
-        assert df["归母净利润"].tolist() == [50.0]
-        assert df["归母所有者权益"].tolist() == [137.0]
+        income = client._rename_parent_cols(pd.DataFrame(data), statement="利润表")
+        assert income["归母净利润"].tolist() == [50.0]
+        assert "归母所有者权益" not in income.columns
+        balance = client._rename_parent_cols(pd.DataFrame(data), statement="资产负债表")
+        assert balance["归母所有者权益"].tolist() == [137.0]
+        assert "归母净利润" not in balance.columns
 
     def test_standard_cols_present_is_noop(self, client):
         """已有规范列名时幂等不改写。"""

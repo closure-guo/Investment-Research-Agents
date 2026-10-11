@@ -261,7 +261,8 @@ class TestFormalGates:
             "stratified_sample",
             lambda *a, **k: (
                 order.append("sample")
-                or [{"code": "600000", "regime": "bull", "decision_date": "2024-03-01"}]
+                # 深历史执法（#172）：skill 定位断言需切点后决策日
+                or [{"code": "600000", "regime": "bull", "decision_date": "2025-06-02"}]
             ),
         )
         monkeypatch.setattr(

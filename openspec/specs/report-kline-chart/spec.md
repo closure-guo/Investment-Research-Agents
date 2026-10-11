@@ -29,14 +29,14 @@ TBD - created by archiving change update-price-chart-kline. Update Purpose after
 
 ### Requirement: K 线图双端渲染
 
-系统 SHALL 将报告股价图渲染为 K 线图，服务端 PNG 与前端交互图表 SHALL 消费同一份图表数据：蜡烛主图（开高低收）叠加 MA5/MA20/MA60 均线，成交量副图与蜡烛同日对齐；交易决策价位在场时 SHALL 渲染为水平参考线并带区分标签；涨跌配色 SHALL 遵循 A 股惯例（收阳为红系、收阴为绿系）；现行的财报发布日标注 SHALL 保留。
+系统 SHALL 将报告股价图渲染为 K 线图，服务端 PNG 与前端交互图表 SHALL 消费同一份图表数据：蜡烛主图（开高低收）叠加 MA5/MA20/MA60 均线，成交量副图与蜡烛同日对齐；交易决策价位在场时 SHALL 渲染为水平参考线并带区分标签；涨跌配色 SHALL 遵循 A 股惯例（收阳为红系、收阴为绿系）；报告期截止日标注 SHALL 保留，且双端标签与标题措辞 MUST 如实表述为「报告期截止」，MUST NOT 表述为「财报发布日」或「年报发布日」（数据源为利润表报告日即报告期截止日，非披露日）。
 
 #### Scenario: 服务端 PNG 蜡烛图
 
 - **GIVEN** 价格图表数据完整（OHLCV + 均线）
 - **WHEN** 生成报告图表 PNG
 - **THEN** 股价图 PNG 为蜡烛主图 + 成交量副图 + MA5/MA20/MA60 叠加
-- **AND** 财报发布日竖线标注保留
+- **AND** 报告期截止日竖线标注保留（注记「报告期止」）
 
 #### Scenario: 前端交互式 K 线
 

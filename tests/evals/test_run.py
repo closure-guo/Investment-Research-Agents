@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import evals.run
@@ -106,6 +107,47 @@ class TestMeanRows:
         means = _mean_rows(rows)
         assert means["a"] == 0.5
         assert means["b"] == 4.0  # None 不计入均值
+        assert means["judge_failures"] == 1
+
+
+class TestJudgeFailureCategorical:
+    """#54 观测层修复的配套语义：行侧 scores 只收数值、judge_failures 数
+    CATEGORICAL 标记；均值侧过滤非数值（str 进 float() 即崩）。"""
+
+    def _row_from_evals(self, evaluations):
+        from types import SimpleNamespace
+
+        item = SimpleNamespace(input={"query": "q", "mode": "deep"})
+        r = SimpleNamespace(item=item, output={}, evaluations=evaluations)
+        return evals.run._rows_from_results([r])[0]
+
+    def test_rows_scores_numeric_only_and_failures_count_marker(self):
+        from evals.run import JUDGE_FAILURE_MARKER
+
+        evals_ = [
+            SimpleNamespace(name="consistency", value=4.0),
+            SimpleNamespace(name="consistency", value=JUDGE_FAILURE_MARKER),
+            SimpleNamespace(name="citation_pass", value=0.8),
+        ]
+        row = self._row_from_evals(evals_)
+        assert row["scores"] == {"consistency": 4.0, "citation_pass": 0.8}
+        assert row["judge_failures"] == 1
+
+    def test_rows_legacy_none_value_still_counted(self):
+        evals_ = [SimpleNamespace(name="consistency", value=None)]
+        row = self._row_from_evals(evals_)
+        assert row["scores"] == {}
+        assert row["judge_failures"] == 1
+
+    def test_mean_rows_skips_non_numeric(self):
+        rows = [
+            {"scores": {"a": 1.0, "b": 4, "c": "judge_parse_failed"}, "judge_failures": 1},
+            {"scores": {"a": 3.0, "b": None}, "judge_failures": 0},
+        ]
+        means = _mean_rows(rows)
+        assert means["a"] == 2.0
+        assert means["b"] == 4.0  # None 不计入均值
+        assert "c" not in means  # CATEGORICAL 标记不进均值
         assert means["judge_failures"] == 1
 
 
@@ -432,7 +474,11 @@ class TestJudgeKMean:
         assert self._value(result) == 4.5
         assert "fail=1" in self._comment(result)
 
-    def test_all_failed_score_none_with_k_note(self, monkeypatch):
+    def test_all_failed_emits_categorical_marker(self, monkeypatch):
+        """#54:全败不再发 value=None(langfuse 4.13 ScoreBody.value required,
+        None 经 pydantic ValidationError 被 SDK 吞掉,失败维度从未进 dataset
+        run),改发 CATEGORICAL value=JUDGE_FAILURE_MARKER。"""
+
         def fake_mean(dim, variables, *, repeats):
             return {
                 "name": dim,
@@ -446,7 +492,8 @@ class TestJudgeKMean:
 
         monkeypatch.setattr(evals.run, "run_judge_mean", fake_mean)
         result = self._call(dim="consistency")
-        assert self._value(result) is None
+        assert self._value(result) == evals.run.JUDGE_FAILURE_MARKER
+        assert self._value(result) == "judge_parse_failed"
         comment = self._comment(result)
         assert "[K=3 fail=3]" in comment
         assert "parse_failed" in comment

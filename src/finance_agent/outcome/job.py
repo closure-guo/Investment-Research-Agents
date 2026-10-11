@@ -3,6 +3,10 @@
 幂等:mark_settled 前再查 settled_at IS NULL(spec「幂等结算」)。
 失败隔离:单决策拉取/评估异常仅跳过该决策(errors 计数),不中断整批
 (spec「行情缺失重试」、旁路铁律——job 不崩)。
+
+计数语义(#57 子项6):``stale`` 是 ``skipped`` 的子集(同一决策先记 stale 再记
+skipped),两者**非加和关系**,监控/告警消费时不得相加;幂等再查是 O(n²)
+(每决策落库前全量重查 open 集),日批规模 <100/天可接受,放量再优化。
 """
 
 from __future__ import annotations
@@ -169,7 +173,7 @@ def settle_open_decisions(
             if not current:
                 result["skipped"] += 1
                 continue
-            store.mark_settled(
+            if not store.mark_settled(
                 decision["decision_id"],
                 {
                     "status": settlement.status,
@@ -181,7 +185,11 @@ def settle_open_decisions(
                     "decision_excess": settlement.decision_excess,
                 },
                 db_path,
-            )
+            ):
+                # 前脚查到 open、落库却 0 行命中:并发轮已结算(#57:不再静默)
+                logger.warning("mark_settled 未命中行(并发已结算?): %s", decision["decision_id"])
+                result["skipped"] += 1
+                continue
             result["settled"] += 1
             result["scores_reported"] += report_outcome_scores(langfuse, decision, settlement)
         except Exception as e:

@@ -91,6 +91,36 @@ def fund_manager(state: dict) -> dict:
     return result
 
 
+def _anchor_warning_summary(checks: list[dict]) -> str | None:
+    """辩论锚点告警汇总（add-fm-grounding-surface）。
+
+    消费 add-anchor-value-grounding 的确定性信号：value_mismatch（文本数字
+    不可溯源）、unresolved/missing（锚点未解析，全 kind）、echo_only（field
+    形态锚仅回声命中）。逐条上限 5 条，超出计数汇总；全零不出段。
+    fail-open：告警不改变路由，仲裁权在 FM。
+    """
+    offenders: list[str] = []
+    for c in checks:
+        reasons: list[str] = []
+        if c.get("status") == "value_mismatch":
+            reasons.append("value_mismatch")
+        if c.get("status") in ("unresolved", "missing"):
+            reasons.append(str(c.get("status")))
+        if c.get("echo_only_field_refs"):
+            reasons.append("echo_only")
+        if not reasons:
+            continue
+        offenders.append(
+            f"{c.get('role')} R{c.get('round')} #{c.get('index')}：{'+'.join(reasons)}"
+            f"（锚点：{'、'.join(c.get('anchors') or [])}）"
+        )
+    if not offenders:
+        return None
+    shown = offenders[:5]
+    extra = f"\n- 另 {len(offenders) - 5} 条未列示" if len(offenders) > 5 else ""
+    return "辩论锚点告警（确定性校验，fail-open）：\n" + "\n".join(f"- {o}" for o in shown) + extra
+
+
 def _build_fund_manager_context(state: dict) -> str:
     """构建 Fund Manager 的 LLM context。"""
     sections = []
@@ -117,6 +147,29 @@ def _build_fund_manager_context(state: dict) -> str:
     if integrity:
         detail = "；".join(f"{label}——{note}" for label, note in integrity)
         sections.append(f"终稿完整性标注：{detail}")
+
+    # add-fm-grounding-surface：三类 grounding 输入（非空才出现，fail-open——
+    # 不改路由，仲裁权保留；spec「FM 上下文携带估值完整性标注/辩论锚点告警/数据口径披露原文」）
+    vsnap = state.get("valuation_snapshot")
+    missing_reasons = (vsnap or {}).get("missing_reasons") or []
+    if missing_reasons:
+        sections.append(
+            "估值完整性标注："
+            + "；".join(str(r) for r in missing_reasons)
+            + "（估值数据缺席，估值相关论断缺乏确定性数据支撑）"
+        )
+
+    anchor_section = _anchor_warning_summary(state.get("debate_anchor_checks") or [])
+    if anchor_section:
+        sections.append(anchor_section)
+
+    # 函数内导入：report.py 模块级导入本模块的 final_integrity_notes（渲染复用同一
+    # 收集器），此处模块级导入会成环；披露节渲染单一实现复用（勿复制）
+    from finance_agent.nodes.report import _format_freshness_section
+
+    disclosure = _format_freshness_section(state)
+    if disclosure:
+        sections.append(f"数据口径披露（确定性渲染，供交叉核对）：\n{disclosure}")
 
     # 风控指标
     risk = state.get("risk_metrics") or {}
