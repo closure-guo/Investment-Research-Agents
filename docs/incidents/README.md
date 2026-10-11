@@ -22,6 +22,7 @@
 | [039](039-relay-lag-prereport-backlog-20261008.md) | 2026-10-08 | thinking 前置积压使压缩门槛（report_seen）永不生效——图已完成但终态推迟数小时、会话滞留 running 被重启 reconcile 补打 interrupted（021/037 同族第三发，茅台两会话实证；#224 治了终态落库可靠性未治排序） | 根因修复 PR #266（issue #265）；timeline O(n²) 写放大等三子项挂账 |
 | [040](040-stock-list-cache-poisoning-20260929.md) | 2026-09-29 | 股票列表缓存毒化——单次抓取失败清空进程内检索锚点，全股票「未找到」（原编号 032，2026-10-10 撞车消歧改号） | 已修复（失败不缓存 + 60s 冷却重试 + 有声失败） |
 | [041](041-clickhouse-analyzer-scores-page-20260912.md) | 2026-09-12 | ClickHouse 26.6 新分析器在 scores 查询形状(FINAL+JOIN+ORDER+LIMIT)上必然崩溃 — Scores 页 internal error 三周，公共 API 不受影响（原编号 027，2026-10-10 撞车消歧改号） | 已修复（enable_analyzer=0 + 镜像固定，UI 待 owner 确认） |
+| [042](042-timeline-lag-loss-20261011.md) | 2026-10-11 | 消费滞后丢落库时序——#266 压缩分支与 #304「flush 全量」规范矛盾（graph_done 置位≠消费者读完，积压 thinking 静默缺段；CI flake 取证揪出，1743/3000 精确反推） | 已修复（PR #307 附带 commit 871a31be，滞后回归测试钉死） |
 | 002  | 2026-05-26 | [报告准确性复盘：茅台 FA 分析偏差](002-report-accuracy-20260526.md) | 部分修复 |
 | 003  | 2026-06-03 | [股票名称获取失败 + NaN 处理缺陷](003-stock-name-and-na-handling-20260603.md) | 已修复   |
 | 004  | 2026-06-04 | [数据准确性系统性问题 — efficiency 年份错位 + ROE 口径 + LLM 自算](004-data-accuracy-20260604.md) | 已修复 |
