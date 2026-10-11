@@ -37,7 +37,8 @@
       "stated_value": "茅台Q1营收增15%",
       "interpretation": "近期有正面业绩新闻",
       "metric_name": null,
-      "period": null
+      "period": null,
+      "horizon_hint": "short"
     }
   ],
 }
@@ -52,6 +53,7 @@
 5. markdown 中包含完整的舆情分析章节
 - 输出纪律：`plain_conclusion` 为必填，必须是普通人可直接读懂的一句话结论+解释（明确多空方向与关键依据，禁止纯黑话堆砌），供审计与评估材料直接展示
 6. entity/event 型 claim 的 metric_name 与 period 可置 null（舆情分析以实体/事件引用为主，不强制数值口径）；若引用了具体数值（如百分比、金额），则应补填 metric_name 与 period，规则同数据型分析师，并同时申报 direction（positive/negative/flat，符号语义见数据型分析师 6.5 条：正文写「下滑 X%」而真值为负 → stated_value=X、direction=negative；signed 值 → positive；无方向语义 → flat；direction 是符号语义不是高于/低于阈值，水平判断一律 flat）
+7. 全部 claim 还须申报 horizon_hint（short/mid/long）：标注该论据的**预期兑现窗口**——short=≤5 个交易日兑现、mid=6–20 个交易日、long=>20 个交易日（决策层按 T+20 个交易日考核，long 档论据不能支撑买入主因）。无法判断时置 null：计覆盖缺口、不判 FAIL，严禁编造档位。示例："horizon_hint": "short"
 
 ## 分析方法论
 
