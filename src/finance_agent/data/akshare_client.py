@@ -828,6 +828,21 @@ class AKShareClient:
         if raw_np is not None and prior_np is not None and prior_np != 0:
             np_yoy = round((float(raw_np) / 1e8 - prior_np) / abs(prior_np) * 100, 2)
 
+        # 信用减值损失及同比（add-banking-industry-calibration，issue #241 一期）：
+        # 列存在即纳入（银行主诉求——净利波动的真实驱动「主动提储 vs 资产质量
+        # 恶化」可溯源；制造业同列亦受益），列/同期缺失缺席不占位。
+        # 同比沿用 #190 纪律：按原始元值对 _yi4 同比值计算，先 round 再算是错误顺序
+        prior_imp: float | None = None
+        if not prior_rows.empty:
+            prior_imp = _yi4(prior_rows.iloc[0].get("信用减值损失"))
+        raw_imp = latest.get("信用减值损失")
+        imp = self._yi(raw_imp)
+        if imp is not None and raw_imp is not None and prior_imp is not None and prior_imp != 0:
+            imp_yoy = round((float(raw_imp) / 1e8 - prior_imp) / abs(prior_imp) * 100, 2)
+            imp_extra: dict = {"信用减值损失": imp, "信用减值损失同比(%)": imp_yoy}
+        else:
+            imp_extra = {}
+
         # 资产负债表（取同一报告日；该期缺失取最新一期并标注）
         snap: dict = {
             "报告日": report_date,
@@ -845,6 +860,7 @@ class AKShareClient:
             "归母净利同比(%)": np_yoy,
             "missing": missing,
         }
+        snap.update(imp_extra)
 
         bs = _sina_report(stock, "资产负债表")
         if not bs.empty:

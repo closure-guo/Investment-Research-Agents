@@ -329,3 +329,11 @@ class TestFundamentalPeerConsumption:
         text = _load("fundamental_analyst.md")
         assert "—" in text  # 缺失标记不得虚构补齐
         assert "口径" in text
+
+
+def test_fundamental_analyst_banking_cashflow_exemption():
+    """add-banking-industry-calibration：银行业 OCF 倍数与偿债阈值豁免指令。"""
+    prompt = (_PROMPTS_DIR / "fundamental_analyst.md").read_text(encoding="utf-8")
+    assert "金融业" in prompt or "银行业" in prompt
+    assert "不适用" in prompt
+    assert "MUST NOT" in prompt or "不得" in prompt

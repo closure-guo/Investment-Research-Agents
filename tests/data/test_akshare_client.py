@@ -1281,3 +1281,60 @@ class TestQuoteSourceCaliber:
         assert result["market_cap"] == pytest.approx(1869.91e8)  # 元（×1e8 归一）
         assert result["PB"] == 14.71  # 百度口径，与腾讯原样并存、不融合
         assert "PE" not in result
+
+
+class TestSnapshotCreditImpairment:
+    """add-banking-industry-calibration：快照增列信用减值损失及同比（列存在即纳入）。
+
+    光大 601818 形态：-24% 净利增长的真实驱动（信用减值 208.79 亿 vs 159.02 亿，
+    +31.3%）——快照不携带该列则报告无法回答「主动提储还是资产质量恶化」。
+    """
+
+    def _bank_inc_df(self):
+        return pd.DataFrame(
+            {
+                "报告日": ["20260630", "20250630", "20241231"],
+                "营业总收入": [13_620_000_000.0, 12_950_000_000.0, 26_400_000_000.0],
+                "营业成本": [None, None, None],
+                "归母净利润": [9_050_000_000.0, 11_540_000_000.0, 41_600_000_000.0],
+                "信用减值损失": [20_879_000_000.0, 15_902_000_000.0, 32_100_000_000.0],
+            }
+        )
+
+    def _bank_bs_df(self):
+        return pd.DataFrame(
+            {
+                "报告日": ["20260630"],
+                "资产总计": [770_000_000_000.0],
+                "负债合计": [700_000_000_000.0],
+            }
+        )
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_bank_snapshot_carries_credit_impairment(self, mock_ak, client):
+        mock_ak.stock_financial_report_sina.side_effect = lambda stock, symbol: (
+            self._bank_inc_df() if symbol == "利润表" else self._bank_bs_df()
+        )
+        snap = client.fetch_latest_period_snapshot("601818")
+        assert snap["信用减值损失"] == 208.79
+        # 同比按原始元值计算（#190 纪律）：(208.79 - 159.02)/159.02 = 31.30%
+        assert snap["信用减值损失同比(%)"] == 31.3
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_no_credit_impairment_column_absent(self, mock_ak, client):
+        inc = self._bank_inc_df().drop(columns=["信用减值损失"])
+        mock_ak.stock_financial_report_sina.side_effect = lambda stock, symbol: (
+            inc if symbol == "利润表" else self._bank_bs_df()
+        )
+        snap = client.fetch_latest_period_snapshot("601818")
+        assert "信用减值损失" not in snap
+        assert "信用减值损失同比(%)" not in snap
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_credit_impairment_no_prior_period_absent(self, mock_ak, client):
+        inc = self._bank_inc_df()[self._bank_inc_df()["报告日"] != "20250630"]
+        mock_ak.stock_financial_report_sina.side_effect = lambda stock, symbol: (
+            inc if symbol == "利润表" else self._bank_bs_df()
+        )
+        snap = client.fetch_latest_period_snapshot("601818")
+        assert "信用减值损失同比(%)" not in snap

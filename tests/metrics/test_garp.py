@@ -199,3 +199,58 @@ class TestCleanNumNumpyScalars:
         result = calc_garp(data)
         assert "负债率 数据缺失（未参与比较）" in result["failures"]
         assert result["details"]["负债率_missing"] is True
+
+
+# ── 银行业负债率豁免（add-banking-industry-calibration，issue #241）──
+
+
+class TestGARPBankingExemption:
+    """银行业负债率行业不适用：退出 failures、保留数值、不吞缺失分桶。"""
+
+    def test_bank_debt_ratio_industry_excluded(self):
+        from finance_agent.metrics.garp import calc_garp
+
+        result = calc_garp(
+            {
+                "PE": 5.0,
+                "industry_avg_PE": 6.0,
+                "net_profit_growth": 0.05,
+                "ROE": 0.09,
+                "debt_ratio": 0.91,
+                "industry": "银行",
+            }
+        )
+        assert not any("负债率" in f for f in result["failures"])
+        assert result["details"].get("负债率_行业不适用") is True
+        assert result["details"].get("负债率") == 0.91
+
+    def test_non_bank_debt_ratio_still_fails(self):
+        from finance_agent.metrics.garp import calc_garp
+
+        result = calc_garp(
+            {
+                "PE": 5.0,
+                "industry_avg_PE": 6.0,
+                "net_profit_growth": 0.05,
+                "ROE": 0.09,
+                "debt_ratio": 0.91,
+                "industry": "白酒",
+            }
+        )
+        assert "负债率 >= 60%" in result["failures"]
+
+    def test_bank_debt_nan_still_missing_bucket(self):
+        from finance_agent.metrics.garp import calc_garp
+
+        result = calc_garp(
+            {
+                "PE": 5.0,
+                "industry_avg_PE": 6.0,
+                "net_profit_growth": 0.05,
+                "ROE": 0.09,
+                "debt_ratio": float("nan"),
+                "industry": "银行",
+            }
+        )
+        assert "负债率 数据缺失（未参与比较）" in result["failures"]
+        assert result["details"].get("负债率_missing") is True

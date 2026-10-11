@@ -169,3 +169,69 @@ class TestRiskMetricsAndPriceLevelsDisclosure:
         section = _format_freshness_section(old_only)
         assert section is not None
         assert "波动率" not in section and "止损" not in section
+
+
+class TestBankingCalibrationRendering:
+    """add-banking-industry-calibration：健康度满分渲染 + 快照信用减值损失行。"""
+
+    def test_health_line_shows_cap_when_below_100(self):
+        state = {
+            "health_score": {
+                "total": 16.67,
+                "rating": "caution",
+                "score_cap": 50,
+                "industry_override": {"industry": "银行", "metrics": ["资产负债率", "ROA"]},
+            }
+        }
+        section = _format_freshness_section(state)
+        assert section is not None
+        assert "满分 50" in section
+
+    def test_health_line_unchanged_when_cap_100(self):
+        state = {
+            "health_score": {
+                "total": 55.0,
+                "rating": "caution",
+                "score_cap": 100,
+                "industry_override": {"industry": None, "metrics": []},
+            }
+        }
+        section = _format_freshness_section(state)
+        assert section is not None
+        assert "满分" not in section
+
+    def test_snapshot_line_appends_credit_impairment(self):
+        state = {
+            "latest_period_snapshot": {
+                "报告日": "2026-06-30",
+                "期类型": "中报",
+                "毛利率(%)": None,
+                "资产负债率(%)": 90.9,
+                "存货": None,
+                "合同负债": None,
+                "营收同比(%)": 5.2,
+                "归母净利同比(%)": -24.01,
+                "信用减值损失": 208.79,
+                "信用减值损失同比(%)": 31.3,
+            },
+        }
+        section = _format_freshness_section(state)
+        assert section is not None
+        assert "信用减值损失 208.79 亿（同比 31.3%）" in section
+
+    def test_snapshot_line_unchanged_without_credit_impairment(self):
+        state = {
+            "latest_period_snapshot": {
+                "报告日": "2026-06-30",
+                "期类型": "中报",
+                "毛利率(%)": 41.0,
+                "资产负债率(%)": 47.9,
+                "存货": 88.33,
+                "合同负债": 51.31,
+                "营收同比(%)": 49.06,
+                "归母净利同比(%)": 1324.1,
+            },
+        }
+        section = _format_freshness_section(state)
+        assert section is not None
+        assert "信用减值损失" not in section

@@ -17,6 +17,8 @@ matplotlib.use("Agg")  # 非交互后端，适配服务器环境
 import matplotlib.pyplot as plt
 import numpy as np
 
+from finance_agent.metrics.traffic_light import is_banking_industry
+
 logger = logging.getLogger(__name__)
 
 # ── 中文字体 ──
@@ -153,11 +155,23 @@ def _year_from_date(date_str) -> str:
     return str(date_str)[:4]
 
 
+def margin_placeholder_text(industry: str | None) -> str:
+    """利润率子图占位文本（add-banking-industry-calibration D7）。
+
+    占位语义区分「数据缺失」与「行业不适用」：银行毛利率 None 是口径不适用
+    （银行报表无营业成本概念），误述为数据缺失会误导读者以为数据管道缺数。
+    """
+    if is_banking_industry(industry):
+        return "银行业不适用毛利率口径（无营业成本概念）"
+    return "利润率数据缺失"
+
+
 def collect_chart_data(state: dict) -> dict:
     """从 state 提取结构化图表数据，返回 JSON-serializable dict。"""
     chart_data: dict = {
         "stock_code": state.get("stock_code", ""),
         "stock_name": state.get("stock_name", ""),
+        "industry": (state.get("industry_info") or {}).get("industry"),
         "annual": [],
         "growth": {"years": [], "revenue_growth": [], "profit_growth": []},
         "price": {"daily": [], "earnings_dates": [], "ma": {"ma5": [], "ma20": [], "ma60": []}},
@@ -916,7 +930,7 @@ def _chart_dashboard(data: dict, out: str) -> str | None:
     gm = [a.get("gross_margin") for a in annual]
     nm = [a.get("net_margin") for a in annual]
     if _all_missing(gm) and _all_missing(nm):
-        _placeholder_text(ax, "利润率数据缺失")
+        _placeholder_text(ax, margin_placeholder_text(data.get("industry")))
         ax.set_xticks(range(len(years)))
         ax.set_xticklabels(years, fontsize=7)
     else:

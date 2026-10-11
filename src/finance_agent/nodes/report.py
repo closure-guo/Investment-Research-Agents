@@ -197,6 +197,16 @@ def _format_freshness_section(state: dict) -> str | None:
                 note=missing_note,
             )
         )
+        # add-banking-industry-calibration D6：信用减值损失（列存在即纳入，快照行
+        # 内追加非新章节）——净利波动的真实驱动可溯源（银行主诉求：主动提储 vs
+        # 资产质量恶化）；字段缺席时零变化
+        imp = snap.get("信用减值损失")
+        imp_yoy = snap.get("信用减值损失同比(%)")
+        if imp is not None:
+            imp_seg = f"信用减值损失 {imp} 亿"
+            if imp_yoy is not None:
+                imp_seg += f"（同比 {imp_yoy}%）"
+            lines[-1] += f"、{imp_seg}"
 
     vsnap = state.get("valuation_snapshot")
     if vsnap:
@@ -224,8 +234,12 @@ def _format_freshness_section(state: dict) -> str | None:
             caliber_line = f"行业口径：{industry}（行业阈值覆盖：{'、'.join(metrics)}）"
         else:
             caliber_line = "通用口径（无行业阈值覆盖）"
+        # add-banking-industry-calibration D2：行业剔除维度后满分 <100，
+        # 不呈现满分会让读者按 100 分制误读（16.67/50 vs 16.67/100 语义完全不同）
+        cap = health.get("score_cap")
+        cap_note = f"，满分 {cap}" if isinstance(cap, (int, float)) and cap != 100 else ""
         lines.append(
-            f"- 财务健康度：{health.get('total')} 分（{health.get('rating')}），评分采用 {caliber_line}"
+            f"- 财务健康度：{health.get('total')} 分（{health.get('rating')}{cap_note}），评分采用 {caliber_line}"
         )
 
     # add-risk-metrics-disclosure（issue #242 断点 1）：风控链路确定性计算
