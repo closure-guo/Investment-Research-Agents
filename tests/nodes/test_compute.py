@@ -310,3 +310,80 @@ class TestFormatPeerComparison:
         assert "TTM" in text and "跨口径" in text
         target_row = next(line for line in text.splitlines() if "600519" in line)
         assert "21.5" in target_row
+
+
+class TestPeerPEMissingDisclosure:
+    """issue #276：腾讯主源 _TENCENT_FIELD_IDX 有意不含 PE → 同业行 PE 系统性
+    None；旧跨口径注在 peer PE 全缺时谎称「对标股 PE 为行情快照口径」——
+    违反 peer-comparison spec「如实呈现」。修复=按缺失形态给诚实披露。"""
+
+    def _pe_missing_peers(self):
+        return _peer_df(
+            [
+                {
+                    "name": "五粮液",
+                    "code": "000858",
+                    "PE": None,
+                    "PB": 3.2,
+                    "total_mv": 5000.0,
+                    "revenue_yoy": 7.1,
+                    "netprofit_yoy": 8.2,
+                    "gross_margin": 76.5,
+                    "report_period": "2026-06-30",
+                }
+            ]
+        )
+
+    def test_pe_ttm_fallback_with_peers_missing_honest_note(self):
+        """主标的回落 TTM + 同业 PE 全缺：MUST NOT 谎称对标股有行情快照口径 PE。"""
+        state = {
+            "stock_code": "600519",
+            "stock_name": "贵州茅台",
+            "peer_financials": self._pe_missing_peers(),
+            "latest_period_snapshot": {},
+        }
+        vs = {"PE": None, "PE_ttm": 21.5, "PB": 8.0, "market_cap": 18000.0}
+        text = format_peer_comparison(state, vs)
+        assert text is not None
+        assert "对标股 PE 为行情快照口径" not in text
+        assert "缺失" in text and "行情主源" in text
+
+    def test_peers_missing_without_fallback_still_disclosed(self):
+        """主标的 PE 在（他路来源）而同业 PE 全缺：仍须披露缺失原因。"""
+        state = {
+            "stock_code": "600519",
+            "stock_name": "贵州茅台",
+            "peer_financials": self._pe_missing_peers(),
+            "latest_period_snapshot": {},
+        }
+        vs = {"PE": 22.0, "PE_ttm": None, "PB": 8.0, "market_cap": 18000.0}
+        text = format_peer_comparison(state, vs)
+        assert text is not None
+        assert "行情主源" in text and "缺失" in text
+
+    def test_peers_present_keeps_original_note(self):
+        """同业 PE 在（如他源/未来字段扩展）：原跨口径注语义不变（零回归）。"""
+        state = {
+            "stock_code": "600519",
+            "stock_name": "贵州茅台",
+            "peer_financials": _peer_df(
+                [
+                    {
+                        "name": "五粮液",
+                        "code": "000858",
+                        "PE": 15.0,
+                        "PB": 3.2,
+                        "total_mv": 5000.0,
+                        "revenue_yoy": 7.1,
+                        "netprofit_yoy": 8.2,
+                        "gross_margin": 76.5,
+                        "report_period": "2026-06-30",
+                    }
+                ]
+            ),
+            "latest_period_snapshot": {},
+        }
+        vs = {"PE": None, "PE_ttm": 21.5, "PB": 8.0, "market_cap": 18000.0}
+        text = format_peer_comparison(state, vs)
+        assert text is not None
+        assert "跨口径" in text and "对标股 PE 为行情快照口径" in text
