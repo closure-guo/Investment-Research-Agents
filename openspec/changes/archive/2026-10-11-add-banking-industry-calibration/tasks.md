@@ -40,4 +40,4 @@
 - [x] 6.2 openspec validate --strict 通过（四 spec）
 - [x] 6.3 光大 601818 场景复核：fixtures 银行报表实算——GARP 不再恒败、健康度脱离通用压分（快照/健康度前后对照落 tests/validation 人工验证报告）
 - [ ] 6.4 合并后 prompt deploy（fundamental_analyst.md）
-- [ ] 6.5 issue #241 留评论：一期落地清单 + 二期（NIM/不良率/拨备覆盖率/资本充足率数据源探测）挂账
+- [x] 6.5 issue #241 留评论：一期落地清单 + 二期（NIM/不良率/拨备覆盖率/资本充足率数据源探测）挂账

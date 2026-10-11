@@ -32,6 +32,8 @@ compute 层 SHALL 在 `quote.PE` 缺失且 `market_cap` 可得时，按 TTM 口�
 
 估值组件（GARP、相对估值）在估值输入缺失时 SHALL 输出「数据缺失（未参与比较）」类诚实文案与 missing 标注，MUST NOT 将缺失渲染成比较失败。诚实分桶 SHALL 覆盖 GARP 全部四个输入（PE、净利润增长率、ROE、负债率）：任一输入为 None 或 NaN 时，对应项 SHALL 输出「<指标> 数据缺失（未参与比较）」并在 details 标注 `<指标>_missing`，MUST NOT 输出「<指标> <= 阈值」类伪比较文案，NaN MUST NOT 因比较恒 False 被伪装成通过。比较失败与数据缺失 SHALL 在 failures/details 中分桶可辨。诚实文案与 details 中内插的数值 SHALL 以亿元口径保留两位小数格式化，MUST NOT 输出未舍入浮点尾巴进入用户可见交付物。
 
+GARP SHALL 支持第三类分桶「行业不适用」：银行业标的（`is_banking_industry` 判定）的负债率 SHALL 退出 failures（不参与 60% 比较、不记 missing——数据真实存在），details SHALL 标注 `负债率_行业不适用=True` 并保留数值可审计；GARP 通过与否由其余三项输入判定。非银行业负债率比较语义不变。
+
 (Previously: 同文案与分桶要求，但未约束内插数值格式——`_derive_pe_ttm` 缺失原因串原样内插 float 导致「TTM 归母净利润(-13.060000000000002)非正」进入 2026-10-05 南方航空(600029) 报告口径披露节。)
 
 #### Scenario: GARP 无 PE 时报缺失而非伪失败
@@ -78,6 +80,14 @@ compute 层 SHALL 在 `quote.PE` 缺失且 `market_cap` 可得时，按 TTM 口�
 - WHEN `_derive_pe_ttm` 推导执行且 TTM 非正
 - THEN 缺失原因 SHALL 含「-13.06」
 - AND MUST NOT 含未舍入浮点尾巴（-13.060000000000002）
+
+#### Scenario: 银行业负债率行业不适用
+
+- GIVEN 银行业标的负债率 0.91（91%，通用阈值下恒判「负债率 >= 60%」失败）、行业信息为「银行」
+- WHEN GARP 筛选执行
+- THEN failures MUST NOT 含负债率项，MUST NOT 输出「负债率 >= 60%」
+- AND details SHALL 标注 `负债率_行业不适用=True` 且保留 负债率=0.91 数值可审计
+- AND GARP 通过与否 SHALL 仅由 PE/净利润增长率/ROE 三项判定
 
 ### Requirement: 估值数据注入分析师上下文
 
