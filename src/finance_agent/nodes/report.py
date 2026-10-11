@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import contextlib
 import os
-import tempfile
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from finance_agent.charts import collect_chart_data, generate_all_charts
@@ -589,6 +589,16 @@ def _build_focus_summary(state: dict, focus: str, focus_tags: list[str]) -> str:
 # ── 报告主函数 ──
 
 
+def _charts_dir(stock_code_safe: str) -> str:
+    """图表产物目录（add-chart-persistent-storage，issue #239A）。
+
+    CHARTS_DIR 环境变量（覆盖惯例同 REPORTS_DIR），默认 data/charts——data/ 为
+    compose 卷挂载目录，图表跨容器重启存活；/tmp 路径重启即失，使历史会话按需
+    重导出被 sanitize_missing_images 静默降级为无图产物（缺陷 A 根因）。
+    """
+    return str(Path(os.environ.get("CHARTS_DIR", os.path.join("data", "charts"))) / stock_code_safe)
+
+
 def generate_report(state: dict) -> dict:
     """汇总 5 层 Agent 输出，生成最终 Markdown 报告 + 图表数据。
 
@@ -611,7 +621,7 @@ def generate_report(state: dict) -> dict:
 
     # ── 生成 PNG 图表 ──
     stock_code_safe = "".join(c for c in stock_code if c.isalnum()) or "unknown"
-    charts_dir = os.path.join(tempfile.gettempdir(), "finance_charts", stock_code_safe)
+    charts_dir = _charts_dir(stock_code_safe)
     chart_paths = generate_all_charts(chart_data, charts_dir)
 
     all_chart_titles = [

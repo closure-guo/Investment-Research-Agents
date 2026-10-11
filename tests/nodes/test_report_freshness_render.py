@@ -4,6 +4,9 @@ spec industry-threshold-coverage「健康度评分行业口径披露」：报告
 读者可见评分所用口径——不能只依赖 LLM markdown 引用（三轮实跑证明其方差）。
 """
 
+import os
+from unittest.mock import patch
+
 from finance_agent.nodes.report import _format_freshness_section
 
 
@@ -235,3 +238,20 @@ class TestBankingCalibrationRendering:
         section = _format_freshness_section(state)
         assert section is not None
         assert "信用减值损失" not in section
+
+
+class TestChartPersistentStorage:
+    """add-chart-persistent-storage（issue #239A）：图表落持久卷路径。"""
+
+    def test_default_charts_dir_under_data(self):
+        from finance_agent.nodes.report import _charts_dir
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CHARTS_DIR", None)
+            assert _charts_dir("600519").replace("\\", "/") == "data/charts/600519"
+
+    def test_charts_dir_env_override(self):
+        from finance_agent.nodes.report import _charts_dir
+
+        with patch.dict(os.environ, {"CHARTS_DIR": "D:/e2e-isolated/charts"}):
+            assert _charts_dir("600519").replace("\\", "/") == "D:/e2e-isolated/charts/600519"
