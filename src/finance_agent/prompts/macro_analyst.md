@@ -35,7 +35,8 @@
       "stated_value": 100.5,
       "interpretation": "CPI 同比上涨 0.5%",
       "metric_name": "CPI",
-      "period": "2026-07"
+      "period": "2026-07",
+      "horizon_hint": "mid"
     }
   ],
 }
@@ -52,6 +53,7 @@
 6. context 中每个序列块开头的「# 序列语义」声明了排序方向与最新期位置，引用数值前先核对该声明
 9. 输出 JSON 的所有字段均为必填（含 markdown，完整章节正文写在其中），不得省略任何字段
 7. comparative/同比 claim 必须双端申报：field_ref_b 填基期字段路径、stated_value_b 填基期数值；未申报基期会被判 FAIL
+8. 全部 claim 还须申报 horizon_hint（short/mid/long）：标注该论据的**预期兑现窗口**——short=≤5 个交易日兑现、mid=6–20 个交易日、long=>20 个交易日（决策层按 T+20 个交易日考核，long 档论据不能支撑买入主因）。无法判断时置 null：计覆盖缺口、不判 FAIL，严禁编造档位。示例："horizon_hint": "mid"
 
 ## 分析方法论
 

@@ -331,6 +331,58 @@ class TestFundamentalPeerConsumption:
         assert "口径" in text
 
 
+# ---------------------------------------------------------------------------
+# 周期语义契约（add-horizon-semantics-to-decision-layer）
+# ---------------------------------------------------------------------------
+
+from finance_agent.prompts.contracts import HORIZON_CONTRACT  # noqa: E402
+
+DECISION_LAYER = ["trader", "risk_judge", "fund_manager"]
+
+
+class TestDecisionLayerHorizonContract:
+    """决策层三 prompt 携带同源周期契约段（共享片段、字面一致）。"""
+
+    @pytest.mark.parametrize("name", DECISION_LAYER)
+    def test_carries_shared_horizon_contract(self, name):
+        assert HORIZON_CONTRACT in _load(f"{name}.md")
+
+    def test_contract_states_assessment_window(self):
+        """契约段声明 T+20 考核口径（20 个交易日 / 沪深300 / ±2% 中性带）。"""
+        assert "20 个交易日" in HORIZON_CONTRACT
+        assert "沪深300" in HORIZON_CONTRACT
+        assert "±2%" in HORIZON_CONTRACT
+
+    def test_contract_buys_require_catalyst_path(self):
+        """buy 须说明催化剂在 20 个交易日内兑现。"""
+        assert "20 个交易日内兑现" in HORIZON_CONTRACT
+
+    def test_contract_long_arguments_not_primary(self):
+        """长线论据不得作买入主因，仅作安全垫或否决项。"""
+        assert "买入主因" in HORIZON_CONTRACT
+        assert "安全垫" in HORIZON_CONTRACT
+        assert "否决" in HORIZON_CONTRACT
+
+    def test_contract_literal_20_tied_to_config(self):
+        """字面 20 与 OUTCOME_DEFAULT_HORIZON_DAYS 联动声明存在。"""
+        assert "OUTCOME_DEFAULT_HORIZON_DAYS" in HORIZON_CONTRACT
+
+
+class TestAnalystHorizonHint:
+    """claim horizon_hint 申报纪律（可空申报，覆盖缺口不判 FAIL）。"""
+
+    @pytest.mark.parametrize("name", ANALYSTS)
+    def test_mandates_horizon_hint_declaration(self, name):
+        text = _load(f"{name}.md")
+        assert "horizon_hint" in text
+        assert "short" in text and "mid" in text and "long" in text
+        assert "覆盖缺口" in text
+
+    @pytest.mark.parametrize("name", ANALYSTS)
+    def test_horizon_hint_example_present(self, name):
+        assert '"horizon_hint"' in _load(f"{name}.md")
+
+
 def test_fundamental_analyst_banking_cashflow_exemption():
     """add-banking-industry-calibration：银行业 OCF 倍数与偿债阈值豁免指令。"""
     prompt = (_PROMPTS_DIR / "fundamental_analyst.md").read_text(encoding="utf-8")

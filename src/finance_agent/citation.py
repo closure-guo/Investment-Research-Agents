@@ -67,6 +67,12 @@ class Claim(BaseModel):
     # 方向语义（ROE/资产负债率等）。None = 旧格式未申报 → 校验器跳过方向检查并
     # 计覆盖缺口（与 metric_name/period 未申报的既有降级先例一致）。
     direction: Literal["positive", "negative", "flat"] | None = None
+    # add-horizon-semantics-to-decision-layer：论据预期兑现窗口（short=≤5 个交易日 /
+    # mid=6–20 / long=>20，决策层按 T+20 考核，long 档论据不作买入主因）。
+    # None = 未申报（旧格式）——校验器不消费该字段：不校验、不新增 FAIL 桶、
+    # 不计入 coverage_gap；未申报率由 eval 侧统计（与 metric_name/direction 的
+    # 「校验器跳过」先例不同：本字段是论据元数据，不是可验证引用维度）。
+    horizon_hint: Literal["short", "mid", "long"] | None = None
     # rework-citation-gate-attribution 阶段 4：由覆盖普查唯一匹配 state 条目自动合成的 claim
     auto: bool = False
 

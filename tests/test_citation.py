@@ -1301,3 +1301,47 @@ class TestClaimContractError:
         (r,) = verify_claims([claim], state)
         assert r.bucket in (None, "value_mismatch")  # 正常路径，非契约错误
         assert r.bucket != "claim_contract_error"
+
+
+class TestClaimHorizonHint:
+    """claim horizon_hint 可空申报（add-horizon-semantics-to-decision-layer）。
+
+    模型必须保留申报值；缺失/null 向后兼容；校验器不消费该字段——
+    判定与未加字段时完全一致，无新增 FAIL 桶。
+    """
+
+    def _payload(self, **kw):
+        base = {
+            "claim_type": "numerical",
+            "source_type": "data",
+            "field_ref": "solvency_metrics.资产负债率.2024",
+            "stated_value": 40.0,
+            "interpretation": "资产负债率为 40%，杠杆水平适中",
+        }
+        base.update(kw)
+        return base
+
+    def test_declared_value_preserved(self):
+        claim = Claim(**self._payload(horizon_hint="mid"))
+        assert claim.horizon_hint == "mid"
+
+    def test_missing_field_defaults_none(self):
+        assert Claim(**self._payload()).horizon_hint is None
+
+    def test_explicit_null_accepted(self):
+        assert Claim(**self._payload(horizon_hint=None)).horizon_hint is None
+
+    def test_invalid_value_rejected(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            Claim(**self._payload(horizon_hint="quarterly"))
+
+    def test_verifier_ignores_horizon_hint(self):
+        """校验器不消费 horizon_hint：status/coverage_gap/bucket 全一致。"""
+        state = {"solvency_metrics": {"资产负债率": {"2024": 40.0}}}
+        r_without = verify_claims([Claim(**self._payload())], state)[0]
+        r_with = verify_claims([Claim(**self._payload(horizon_hint="long"))], state)[0]
+        assert r_without.status == r_with.status == "PASS"
+        assert r_with.coverage_gap == r_without.coverage_gap
+        assert r_with.bucket == r_without.bucket
