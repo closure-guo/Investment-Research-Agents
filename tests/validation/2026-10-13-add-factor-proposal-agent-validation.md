@@ -6,6 +6,7 @@
 **执行环境**: worktree `D:\WorkSpace\finance_analysis_agent\.worktrees\screen-stack`
 **验证范围**: Task 1–4（合同校验 + repair 循环 → 用途注册 + 双档路由 → 跨桶 prompt + 软评分 → 真跑与部署收口）
 **全量回归时 HEAD**: `067c0119`（T1–T3 三个 feat 提交之上的工作区；此后仅新增本报告、真跑脚本与 tasks 回填，零 src 改动）
+**评审修正（第二轮）**: 见 §4（代码提交 `cac8cc2a`；7 项 review findings 逐条处置，含真跑重跑取证）
 
 > **边界声明（只记录实际发生）**：本 change 的 LLM 调用为**真跑可选**组件——单测全部经 stub client
 > （零网络，见 §0.1）；§1 的真跑使用宿主仓库 `.env` 的现有 provider 配置（Kimi k3-256k，endpoint
@@ -137,8 +138,8 @@ hypothesis 均为可检验的经济学表述而非同义反复。
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 真跑未触发 repair 路径（主动披露） | 已记录 | 57 条全部首轮通过合同校验（rejected=0、无修复轮），因此 **repair 与 `proposal_rejected` trace 标记未被真跑覆盖**；其行为由单测钉死（`tests/factors/test_propose.py`：`[坏,坏,好]` 第三次成功、`[坏,坏,坏]` 丢弃且 trace metadata 记 `proposal_rejected` 与逐条 raw+error、部分收编、非 JSON 响应计入修复）。真跑覆盖的是「正常路径」，不构成对 repair 的实证 |
-| Langfuse 离线 → trace metadata 未实证（主动披露） | 已记录 | `localhost:3000` 连接拒绝（§0.4）；`purpose_tag/mode/router/rejected` 的落点仅为**单测断言**（`tests/factors/test_propose.py::TestGatewayClient`、`TestTierRouting`）+ 真跑脚本落盘 JSON（同一 dict 内容）。Langfuse UI 侧不可取证 |
+| 真跑未触发 repair 路径（主动披露） | 已记录 | 首轮真跑（提交 `5ac4ad61` 前的运行）**未计数调用次数**，「57 条全部首轮通过」当时无取证；评审修正后脚本逐批计数并重跑（§4.2，提交 `cac8cc2a`）：两批 `complete_json_calls=1`、`first_round_pass=True` → 「首轮通过」由重跑直接取证。**repair 与 `proposal_rejected` trace 标记仍未被真跑覆盖**（两批均首轮足量通过）；其行为由单测钉死（`tests/factors/test_propose.py`：`[坏,坏,好]` 第三次成功、`[坏,坏,坏]` 丢弃且 trace metadata 记 `proposal_rejected` 与逐条 raw+error、修复轮少答/空答的草稿保留、部分收编、非 JSON 响应计入修复） |
+| Langfuse 离线 → trace metadata 未实证（主动披露） | 已记录 | `localhost:3000` 连接拒绝（§0.4）；`purpose_tag/mode/router/rejected` 的落点仅为**单测断言**（`tests/factors/test_propose.py::TestGatewayClient`、`TestTierRouting`）+ 真跑脚本落盘 JSON（同一 dict 内容）。评审修正 3 补上 best-effort 发射路径（`update_current_span`，未配置 → debug no-op）并由单测钉死（`TestTraceEmission` 3 例）；重跑中发射路径已执行但 Langfuse 主机拒连且无 active span → **UI 侧落库仍未取证**（§4.3） |
 | alignment 为 LLM 自评（口径注记） | 已钉住 | 分布 0.62–0.90（中位 0.82、方差 0.004），呈自评常见的「宽松 + 居中」形态（batch-2 全部落在 0.79–0.90）；**该分值不参与任何硬拒收**（P5 单测：0 分照常进入 proposals、越界收敛、非数值按未评分处理）；无人工标注校准前不得作为质量判据使用 |
 | 跨批重复表达式 2 条（主动披露） | 已记录 | `div(sub(close, low), sub(high, low))` 与 `ts_corr(rank(close), rank(volume), 10)` 在两批各出现一次；本 change **不做去重**（去重是因子库五道闸职责，属 `add-factor-library-and-monitor` 非目标；`factors/dsl.py::is_subtree_isomorphic` 已备好原语） |
 | 跨桶指令的引导强度（观察） | 已记录 | batch-1 动量桶占 70% 时为 0/25 动量提案（其余四桶 6/6/7/6）——显式指令生效且强度较高；是否「过度导向」属后续调参问题（spec 只要求「显式要求候选偏向其他桶」，已满足） |
@@ -169,3 +170,76 @@ hypothesis 均为可检验的经济学表述而非同义反复。
 - [ ] repair 路径与 `proposal_rejected` trace 标记的真跑实证（本轮 0 丢弃未覆盖；属 LLM 行为事件，需构造对抗输入或等待自然出现）
 - [ ] 跨批结构去重（非目标，移交 `add-factor-library-and-monitor`）
 - [ ] alignment 自评分值的人工标注校准（进入指标前必须过 AGENTS.md 的「分桶归因 + 逐条终裁」纪律）
+
+**评审修正（第二轮）**：7 项 review findings 已逐条处置（提交 `cac8cc2a`），证据与 open items 见 §4。
+
+## 4. 评审修正（review findings，第二轮）
+
+**代码提交**: `cac8cc2a`（`fix(factor-proposal): pin routed profile + always mark dropped drafts + top-up + trace emission (review findings)`）
+**纪律**: TDD 红→绿；除 §4.2 的真跑重跑（评审 finding 6a 的取证选项：逐批计数 + 重跑；另存 artifact 不覆盖首轮结果）外，全部零网络（stub / monkeypatch）。
+
+### 4.1 逐项处置
+
+| # | Finding | 处置与证据 |
+|---|---|---|
+| 1 | 路由 profile 与实际调用漂移（repro：`LLM_QUICK_MODEL=deepseek/deepseek-chat`、`LLM_MODEL=deepseek/deepseek-reasoner`、无 `LLM_BASE_URL` → broad 路由选 quick，实际调用回落 LLM_MODEL） | **实现「钉死 override」**（非 typed error 分支）：`gateway.complete_text` 新增 `profile: ModelProfile \| None = None`——显式给出则**跳过** purpose/preset/llm_config 解析，直接以该 profile 发起请求；`GatewayProposalClient` 把 `route_proposal_call` 选中的 profile 原样传入（原 `_gateway_selection` 的 preset/llm_config 拼装删除）。回归：`tests/factors/test_propose.py::TestGatewayClient::test_routed_profile_pinned_against_purpose_resolution_drift`（monkeypatch env 复现 review repro，断言钉死 deepseek-chat、非 reasoner）+ `tests/llm/test_gateway.py::TestCompleteTextProfileOverride`（传 profile 时 `resolve_profile` 零调用、请求 model=钉死 profile） |
+| 2 | 放弃的草稿必须始终被标记（repro：`StubClient([bad, {"proposals": []}])` 此前 0 proposals / 0 rejected / 无标记） | 待修复清单跨修复轮保留（key=raw payload 的 canonical JSON，`_merge_drafts` 去重、保留最新错误）：修复轮按位置应答本轮清单，未应答的尾部条目保留；空响应=终止信号，未收编条目全部落 `rejected`（raw + 最后错误）+ `proposal_rejected` 标记。回归：`TestDroppedDraftsAlwaysMarked::test_empty_repair_response_rejects_carried_draft`（repro 序列 → rejected==1、marker True、calls==2）+ `test_repair_response_shorter_than_pending_carries_tail`；既有 `[坏,坏,好]`/`[坏,坏,坏]` 用例断言**零改动**且保持绿 |
+| 3 | `proposal_rejected` 只随返回值流转、未落 Langfuse | **找到既有发射原语**：`langfuse_tracing.get_langfuse` + `update_current_span`（节点层同款用法，见 `nodes/debate.py`、`harness/loop.py`）。批次结束把 `trace_metadata` 以 `{"proposal_batch": ...}` best-effort 写入当前 span；Langfuse 未配置 → debug 日志 no-op（零网络）；发射抛错被兜底、不阻断业务。回归：`TestTraceEmission` 3 例（发射内容==返回值、未配置 no-op + debug、发射抛错批次照常返回） |
+| 4 | 路由候选未去重（fallback 链列 primary 自己） | `route_proposal_call` 候选按 (name, model, base_url) 去重后再 `select_profile`。回归：`TestRoutingCandidateDedupe` 2 例；真跑重跑路由 trace `fallback_chain` 由 `["env:openai/k3-256k"]` 变为 `[]`（§4.2） |
+| 5 | n 不足无补轮（top-up） | 首轮全数通过但条数 < n（未消耗修复轮）时补一轮：同一 base prompt + 缺口说明；`shortfall={"initial","final","top_up"}` 落 trace metadata。口径钉死：**已触发修复轮或已有弃收的批次不追量**——这是同时满足「review repro 序列 `[bad, 空回复]` 只有 2 次调用」与「既有 `[坏,坏,好]`/`[坏,坏,坏]` 行为不变」的唯一交集（超出该口径属待决策，见 §4.3）。回归：`TestBroadTopUp` 3 例（18→5, n=20 ⇒ 23 proposals + `{"initial":2,"final":0,"top_up":true}`；足量不补轮；补轮失败进 rejected 且 final 缺口如实记录） |
+| 6a | 「首轮通过」陈述无取证 | 真跑脚本包一层计数客户端，逐批统计 `complete_json` 调用（`complete_json_calls` / `first_round_pass` 落 JSON + 打印），并**重跑取证**（§4.2）：两批均 calls=1、first_round_pass=True。首轮（`5ac4ad61` 前）未计数，其「全部首轮通过」表述已按 §2 修订为「由重跑取证」 |
+| 6b | tasks.md 引用报告未含的全量回归 | 本轮实际执行 `uv run pytest tests/ -m "not live" -q`（12:50）并把逐字输出写入 §4.2；tasks.md 4.1 引用改为该实证（不再引用不存在的内容） |
+| 7 | Protocol 缝未标注 | `_run_proposal_batch` / `propose_broad_batch` / `propose_deep_improvement` 的 `client` 标注为 `ProposalLLMClient`（`GatewayProposalClient` 与测试 stub 结构一致）；`uv run mypy` 通过（§4.2） |
+
+### 4.2 命令证据（第二轮，当场跑、逐字记录）
+
+```
+$ uv run pytest tests/factors tests/llm -q
+1 failed, 490 passed in 13.52s
+（失败用例仍是既有环境 flake：tests/llm/test_resolver.py::TestContextLengthOverride::test_empty_follows_registry_default）
+
+$ uv run pytest tests/ -m "not live" -q
+FAILED tests/llm/test_resolver.py::TestContextLengthOverride::test_empty_follows_registry_default
+1 failed, 4968 passed, 6 skipped, 12 deselected, 30 warnings in 770.02s (0:12:50)
+
+$ uv run ruff check src/finance_agent/factors/propose.py src/finance_agent/llm/gateway.py \
+    tests/factors/test_propose.py tests/llm/test_gateway.py \
+    tests/validation/2026-10-13-add-factor-proposal-live-run.py
+All checks passed!
+
+$ uv run ruff format --check <同上 5 文件>
+5 files already formatted
+
+$ uv run mypy src/finance_agent/factors/propose.py src/finance_agent/llm/gateway.py
+Success: no issues found in 2 source files
+
+$ uv run python tests/validation/2026-10-13-add-factor-proposal-live-run.py \
+    --out tests/validation/2026-10-13-add-factor-proposal-live-run-review-fix.json
+路由决策（broad 档）： {"profile": "env:openai/k3-256k", "provider": "openai", "model": "openai/k3-256k",
+                      "capability": {"tools": "single", "json_schema": "json_mode"}, "fallback_chain": []}
+[batch-1（动量占优 70% → 跨桶引导）] 112.1s proposals=27 rejected=0 calls=1 first_round_pass=True
+  DSL=27/27 hypothesis=27/27 category={'价量': 7, '反转': 7, '流动性': 6, '波动率': 6, '动量': 1}
+  alignment={'0.9': 5, '0.8': 16, '0.7': 6}
+[batch-2（均衡采样）] 126.2s proposals=30 rejected=0 calls=1 first_round_pass=True
+  DSL=30/30 hypothesis=30/30 category={'动量': 7, '反转': 6, '波动率': 6, '流动性': 6, '价量': 5}
+  alignment={'0.9': 2, '0.8': 21, '0.7': 7}
+
+合计：proposals=57 rejected=0 批次失败=0
+明细已落：tests/validation/2026-10-13-add-factor-proposal-live-run-review-fix.json
+```
+
+全量回归唯一失败归因（实测复核，非推测）：宿主仓库 `.env` 含 `LLM_MAX_CONTEXT=256000`；套件中 `finance_agent.api` 在 import 期
+`load_dotenv()`（`src/finance_agent/api.py:29`）把它注入 `os.environ`，而
+`TestContextLengthOverride::test_empty_follows_registry_default` 直读真实环境 → 全套件内看到 256000 覆盖默认 128000。
+① 隔离复跑通过（0.05s）；② 用 `git stash` 撤掉本 change 的全部改动后 `uv run pytest tests/llm -q` 同样失败（357 passed / 1 failed）
+→ 既有环境性 flake，非本 change 引入。重跑真跑输出另存 `2026-10-13-add-factor-proposal-live-run-review-fix.json`，
+不覆盖首轮 artifact（`2026-10-13-add-factor-proposal-live-run.json`）。
+
+### 4.3 仍未闭环 / open items（第二轮）
+
+- **Langfuse 离线 → 发射落库未取证**：§4.1 #3 的发射路径由单测钉死；重跑期间 Langfuse 客户端已配置但主机拒连且无 active span
+  （SDK 输出 "No active span in current context ... skipped"，非异常）→ **UI 侧落库未验证**。恢复 Langfuse 后重跑一次即可闭环。
+- **真跑重跑的覆盖面**：两批首轮即 ≥n（calls=1）→ repair 路径、`proposal_rejected` 发射、top-up 补轮仍只由单测取证（§4.1 #2/#3/#5）。
+- **top-up 口径待决策**：「已触发修复轮/已有弃收的批次不追量」是同时满足 review repro 与既有用例的唯一交集；若评审认为
+  弃收批次也应追量（会改变既有 `[坏,坏,好]` 用例的调用次数），需作为行为变更单独裁决。
+- 语义一致性人工终审签字（首轮遗留，未变，见 §3 未执行项）。
