@@ -23,7 +23,7 @@
   日批先判当日是否在日历内，不在则跳过（不静默写错日期）。
 - D5 stale 判定：``expected = 日历中 <= now 的最后一个交易日``（无日历退化最近
   工作日）；``stale = last_error_date == 今天 或 (now >= 18:00 且 last_success_date
-  落后于 expected)``；从未成功且从未失败（fresh DB）不告警。
+  为空或落后于 expected)``；从未成功且从未失败（fresh DB）不告警。
 
 异常：``SnapshotError`` 基类；``SnapshotNotFreshError``（as_of 超出数据范围）；
 ``SnapshotEmptyError``（该日期无记录）。
@@ -220,7 +220,7 @@ def apply_rebase(
 ) -> int:
     """D1 rebase：该票 ``trade_date < before_date`` 的行 ``close_qfq × factor``。
 
-    ``close_raw`` 不动；返回实际更新行数（clamp 到 4 位小数与写入口径一致）。
+    ``close_raw`` 不动；返回实际更新行数（乘积四舍五入到 4 位小数，与写入口径一致）。
     """
     init_snapshot_db(db_path)
     conn = _connect(db_path)
