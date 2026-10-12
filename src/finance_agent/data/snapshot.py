@@ -39,6 +39,7 @@ import json
 import math
 import os
 import sqlite3
+from collections.abc import Iterable
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -197,6 +198,30 @@ def set_meta_many(mapping: dict[str, str], db_path: str | Path | None = None) ->
         conn.close()
 
 
+def delete_meta(keys: Iterable[str], db_path: str | Path | None = None) -> int:
+    """删除若干 meta 键（单事务一次删清，返回实际删除行数）。
+
+    成功路径清 ``last_error``/``last_error_date`` 用（T6 评审修正）：与
+    ``set_meta_many`` 的批量写配套，避免逐键删除时的中间态。
+    """
+    init_snapshot_db(db_path)
+    key_list = [str(key) for key in keys]
+    if not key_list:
+        return 0
+    placeholders = ", ".join("?" * len(key_list))
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            # placeholders 仅为 "?" 序列；键值全参数化
+            f"DELETE FROM snapshot_meta WHERE key IN ({placeholders})",  # noqa: S608
+            key_list,
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def get_meta(key: str, db_path: str | Path | None = None) -> str | None:
     """读取单个 meta 键；缺失返回 None（入口幂等建表，空库不抛错）。"""
     init_snapshot_db(db_path)
@@ -298,12 +323,24 @@ def apply_rebase(
         conn.close()
 
 
-def latest_snapshot_date(db_path: str | Path | None = None) -> str | None:
-    """快照表最新数据日期（``MAX(trade_date)``）；无行 → None。"""
+def latest_snapshot_date(
+    db_path: str | Path | None = None, *, before: str | None = None
+) -> str | None:
+    """快照表最新数据日期（``MAX(trade_date)``）；无行 → None。
+
+    ``before``（规范 ``YYYY-MM-DD``）只统计严格早于该日的行——日批在同日重跑时
+    取「上一交易日」行作 rebase 基准/停牌合成源，防止把当日已写行当作历史基准
+    而二次复权整段 qfq（T6 评审修正）。非规范日期 → ``SnapshotError``。
+    """
     init_snapshot_db(db_path)
+    sql = "SELECT MAX(trade_date) FROM market_snapshot"
+    params: list[Any] = []
+    if before is not None:
+        sql += " WHERE trade_date < ?"
+        params.append(_parse_date_param(before, param="before").isoformat())
     conn = _connect(db_path)
     try:
-        row = conn.execute("SELECT MAX(trade_date) FROM market_snapshot").fetchone()
+        row = conn.execute(sql, params).fetchone()
         return row[0] if row and row[0] is not None else None
     finally:
         conn.close()

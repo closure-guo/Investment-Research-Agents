@@ -27,6 +27,7 @@ from finance_agent.data.snapshot import (
     build_snapshot_rows,
     compute_rebase_factors,
     compute_snapshot_status,
+    delete_meta,
     get_all_meta,
     get_meta,
     get_security_master,
@@ -992,3 +993,28 @@ def test_read_bars_orders_by_date_and_code_and_never_past_as_of(tmp_path):
     # end == as_of == latest：包含边界行
     inclusive = read_bars(["600519"], "2026-10-01", "2026-10-10", as_of="2026-10-10", db_path=db)
     assert list(inclusive["trade_date"]) == ["2026-10-08", "2026-10-09", "2026-10-10"]
+
+
+def test_delete_meta_removes_keys_in_one_transaction(tmp_path):
+    """T6 评审修正：delete_meta 单事务删多键（成功路径清 last_error 用）。"""
+    db = tmp_path / "market_snapshot.db"
+    set_meta_many({"a": "1", "b": "2", "c": "3"}, db_path=db)
+
+    assert delete_meta(["a", "b"], db_path=db) == 2
+    assert get_all_meta(db_path=db) == {"c": "3"}
+
+    assert delete_meta(["missing"], db_path=db) == 0  # 缺失键不计、不抛
+    assert delete_meta([], db_path=db) == 0  # 空键集：无操作
+    assert get_all_meta(db_path=db) == {"c": "3"}
+
+
+def test_latest_snapshot_date_before_excludes_bound_date(tmp_path):
+    """同日重跑基线：``before`` 取严格早于该日的最大交易日（不含当日已写行）。"""
+    db = tmp_path / "market_snapshot.db"
+    write_snapshot_rows("2026-10-12", [_snapshot_row("2026-10-12", "600519")], db_path=db)
+    write_snapshot_rows("2026-10-13", [_snapshot_row("2026-10-13", "600519")], db_path=db)
+
+    assert latest_snapshot_date(db_path=db) == "2026-10-13"
+    assert latest_snapshot_date(db_path=db, before="2026-10-13") == "2026-10-12"
+    assert latest_snapshot_date(db_path=db, before="2026-10-12") is None
+    assert latest_snapshot_date(db_path=db, before="2026-10-14") == "2026-10-13"
