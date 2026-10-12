@@ -165,14 +165,14 @@ class TestCohortJobRegistration:
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
     @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
-    def test_registers_five_jobs_including_cohort_batch(self, mock_sched_cls):
+    def test_registers_six_jobs_including_cohort_batch(self, mock_sched_cls):
         os.environ.pop("COHORT_HOUR", None)
         os.environ.pop("COHORT_MINUTE", None)
         sched = MagicMock()
         mock_sched_cls.return_value = sched
         assert start_scheduler() is sched
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 5, ids
+        assert len(ids) == 6, ids
         assert ids[-1] == "cohort_batch"
         assert set(ids) == {
             "decision_settle_daily",
@@ -180,6 +180,7 @@ class TestCohortJobRegistration:
             "metrics_snapshot",
             "integrity_check",
             "cohort_batch",
+            "market_snapshot_daily",
         }
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
@@ -474,7 +475,7 @@ class TestMisfireHardening:
     """#57 子项4:进程沉睡/重启错过触发时刻 → 1h 宽限内补火,多次 miss 合并为一次。
 
     默认 misfire_grace_time=1s 下,进程被冻结/重建略过 16:00 即整日丢批;
-    job 幂等(次日补结)所以宽限补火安全。五个日批 job 统一配置。
+    job 幂等(次日补结)所以宽限补火安全。六个日批 job 统一配置。
     """
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
@@ -484,7 +485,7 @@ class TestMisfireHardening:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 5, ids
+        assert len(ids) == 6, ids
         for call in sched.add_job.call_args_list:
             job_id = call.kwargs.get("id")
             assert call.kwargs.get("misfire_grace_time") == 3600, job_id
@@ -527,3 +528,39 @@ class TestRescheduleCohort:
         finally:
             stop_scheduler(sched)
         assert get_scheduler() is None
+
+
+class TestSnapshotJobRegistration:
+    """add-market-snapshot T7：行情快照日批（15:30 mon-fri）注册与重试包装。"""
+
+    @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
+    @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
+    def test_registers_1530_monfri_cron(self, mock_sched_cls):
+        sched = MagicMock()
+        mock_sched_cls.return_value = sched
+        start_scheduler()
+        assert _job_field(sched, "market_snapshot_daily", "hour") == ["15"]
+        assert _job_field(sched, "market_snapshot_daily", "minute") == ["30"]
+        assert "mon-fri" in _job_field(sched, "market_snapshot_daily", "day_of_week")
+
+    @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
+    @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
+    @patch("finance_agent.outcome.scheduler.time.sleep")
+    def test_snapshot_job_uses_retry(self, mock_sleep, mock_sched_cls, tmp_path, monkeypatch):
+        """镜像 TestJobRetry：异常重试 3 次（2 次退避）且不上抛（旁路铁律）。"""
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "s.db"))
+        sched = MagicMock()
+        mock_sched_cls.return_value = sched
+        start_scheduler()
+        job_fn = _job_fn(sched, "market_snapshot_daily")
+        with patch(
+            "finance_agent.outcome.scheduler.run_market_snapshot_batch",
+            side_effect=RuntimeError("akshare down"),
+        ) as mock_batch:
+            job_fn()  # 不抛异常
+        assert mock_batch.call_count == 3
+        assert mock_sleep.call_count == 2
+        row = last_job_run("market_snapshot_daily", tmp_path / "s.db")
+        assert row["status"] == "failed" and row["kind"] == "scheduled"
+        assert "akshare down" in row["error"]
+        assert row["summary"] == {"attempts": 3, "retries": 2}

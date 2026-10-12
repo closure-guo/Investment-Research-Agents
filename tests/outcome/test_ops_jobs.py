@@ -33,8 +33,19 @@ from finance_agent.outcome.ops.model import (
 class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 5
+        assert len(JOB_IDS) == 6
         assert all(JOB_LABELS[jid] for jid in JOB_IDS)
+
+    def test_market_snapshot_schedule_spec_is_1530_monfri(self):
+        """add-market-snapshot：行情快照日批 15:30（mon-fri，Asia/Shanghai）逐字钉死。"""
+        assert SCHEDULES["market_snapshot_daily"] == {
+            "day_of_week": "mon-fri",
+            "hour": 15,
+            "minute": 30,
+            "timezone": "Asia/Shanghai",
+        }
+        assert JOB_IDS[0] == "market_snapshot_daily"  # 展示顺序 = 时刻顺序（15:30 最早）
+        assert JOB_LABELS["market_snapshot_daily"] == "行情快照"
 
     def test_settlement_chain_schedules_unchanged(self):
         """结算链四任务时刻固定（16:00/16:30/16:35/16:40，mon-fri，Asia/Shanghai）。"""

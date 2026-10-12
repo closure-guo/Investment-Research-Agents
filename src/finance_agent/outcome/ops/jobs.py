@@ -31,6 +31,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from finance_agent.data.snapshot_job import MARKET_SNAPSHOT_SCHEDULE, run_market_snapshot_batch
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.ops.model import (
     finish_job_run,
@@ -43,8 +44,9 @@ from finance_agent.outcome.track_record.model import integrity_check
 
 logger = logging.getLogger(__name__)
 
-# 任务全集(顺序 = 调度注册与状态接口的展示顺序)
+# 任务全集(顺序 = 调度注册与状态接口的展示顺序;按触发时刻升序)
 JOB_IDS: tuple[str, ...] = (
+    "market_snapshot_daily",
     "decision_settle_daily",
     "daily_marking",
     "metrics_snapshot",
@@ -53,6 +55,7 @@ JOB_IDS: tuple[str, ...] = (
 )
 
 JOB_LABELS: dict[str, str] = {
+    "market_snapshot_daily": "行情快照",
     "decision_settle_daily": "判定",
     "daily_marking": "盯市",
     "metrics_snapshot": "指标快照",
@@ -62,6 +65,7 @@ JOB_LABELS: dict[str, str] = {
 
 # 默认注册表。值都是无参调用(任务函数签名全为可选关键字参数)。
 JOB_FUNCS: dict[str, Callable[[], Any]] = {
+    "market_snapshot_daily": run_market_snapshot_batch,
     "decision_settle_daily": settle_open_predictions,
     "daily_marking": run_daily_marking,
     "metrics_snapshot": persist_metrics_snapshot,
@@ -70,10 +74,11 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
 }
 
 # 每 job 的 cron 规格:结算链四任务时刻固定(16:00/16:30/16:35/16:40,工作日);
-# cohort 项的 hour/minute 由 ``scheduler.start_scheduler``(启动时)与
-# ``scheduler.reschedule_cohort``(界面保存后)按 config 覆写——本字典是调度与
-# 状态接口共用的时刻快照。
+# 行情快照日批 15:30(收盘后,add-market-snapshot);cohort 项的 hour/minute 由
+# ``scheduler.start_scheduler``(启动时)与 ``scheduler.reschedule_cohort``(界面保存后)
+# 按 config 覆写——本字典是调度与状态接口共用的时刻快照。
 SCHEDULES: dict[str, dict[str, Any]] = {
+    "market_snapshot_daily": MARKET_SNAPSHOT_SCHEDULE,
     "decision_settle_daily": {
         "day_of_week": "mon-fri",
         "hour": 16,

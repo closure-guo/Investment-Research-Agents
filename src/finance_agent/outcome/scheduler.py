@@ -35,6 +35,7 @@ from typing import Any
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from finance_agent.data.snapshot_job import run_market_snapshot_batch
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.ops.jobs import (
     SCHEDULES,
@@ -120,6 +121,11 @@ def _mark_retries(outcome: dict[str, Any] | None) -> None:
         logger.exception("job_runs 重试计数落库失败 run_id=%s", run_id)
 
 
+def _snapshot_job() -> None:
+    """add-market-snapshot：全市场行情快照日批（15:30，收盘后；次日开盘前可读）。"""
+    _with_retry("market_snapshot_daily", "market snapshot", run_market_snapshot_batch)
+
+
 def _settle_job() -> None:
     _with_retry("decision_settle_daily", "prediction settle", settle_open_predictions)
 
@@ -179,6 +185,15 @@ def start_scheduler() -> BackgroundScheduler | None:
     cohort = get_cohort_settings()
     _apply_cohort_schedule(cohort["hour"], cohort["minute"])
     scheduler = BackgroundScheduler()
+    # add-market-snapshot：行情快照日批（15:30）先跑——结算/盯市链（16:00 起）
+    # 与快照解耦，互不阻塞；job 幂等（同日重跑不二次复权）。
+    scheduler.add_job(
+        _snapshot_job,
+        _cron_for("market_snapshot_daily"),
+        id="market_snapshot_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     scheduler.add_job(
         _settle_job,
         _cron_for("decision_settle_daily"),
@@ -223,8 +238,8 @@ def start_scheduler() -> BackgroundScheduler | None:
     scheduler.start()
     _scheduler = scheduler
     logger.info(
-        "decision settle scheduler 已启动(工作日 16:00);daily marking 16:30;"
-        "metrics snapshot 16:35;integrity check 16:40;"
+        "decision settle scheduler 已启动(market snapshot 15:30;decision settle 16:00);"
+        "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"
         "cohort batch %02d:%02d(开关关闭时记 skipped-disabled,零 LLM 调用)",
         cohort["hour"],
         cohort["minute"],
