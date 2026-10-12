@@ -7,11 +7,12 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import pytest
 
+from finance_agent.data.cache import DataCache
 from finance_agent.data.snapshot import (
     SnapshotEmptyError,
     SnapshotNotFreshError,
@@ -22,6 +23,7 @@ from finance_agent.data.snapshot import (
     apply_rebase,
     build_snapshot_rows,
     compute_rebase_factors,
+    compute_snapshot_status,
     get_all_meta,
     get_meta,
     get_security_master,
@@ -654,3 +656,137 @@ def test_security_master_upsert_roundtrip(tmp_path):
         [{"code": "600519", "name": None, "list_date": None}], db_path=db
     )
     assert get_security_master(db_path=db)["600519"]["name"] == "贵州茅台A"
+
+
+# ── Task 4: stale 状态纯函数 + 缓存 TTL 豁免契约 ─────────────────────────────
+
+# 固定日历（含 2026-10-08 四 / 10-09 五 / 10-12 一 / 10-13 二），避免测试依赖真实日历
+_CAL = '["2026-10-08", "2026-10-09", "2026-10-12", "2026-10-13"]'
+
+
+def test_status_fresh_db_not_stale():
+    """D5：fresh DB（无 last_attempt_at）不告警——即使时刻已过 18:00。"""
+    status = compute_snapshot_status({}, now=datetime(2026, 10, 13, 18, 30))
+
+    assert status == {
+        "latest_date": None,
+        "stale": False,
+        "message": None,
+        "last_error": None,
+        "last_error_date": None,
+    }
+
+
+def test_status_failed_today_stale():
+    """D5：last_error_date == 今天 → 立即 stale（早于 18:00 也告警）；文案逐字。"""
+    meta = {
+        "last_attempt_at": "2026-10-13T15:31:00",
+        "last_success_date": "2026-10-08",
+        "last_error": "boom",
+        "last_error_date": "2026-10-13",
+    }
+    status = compute_snapshot_status(meta, now=datetime(2026, 10, 13, 15, 40))
+
+    assert status["stale"] is True
+    assert status["message"] == "行情快照未更新（数据日期: 2026-10-08）"
+    assert status["latest_date"] == "2026-10-08"
+    assert status["last_error"] == "boom"
+    assert status["last_error_date"] == "2026-10-13"
+
+    never = {  # 从未成功过：latest 为 None → 无日期文案
+        "last_attempt_at": "2026-10-13T15:31:00",
+        "last_error": "boom",
+        "last_error_date": "2026-10-13",
+    }
+    status2 = compute_snapshot_status(never, now=datetime(2026, 10, 13, 15, 40))
+    assert status2["stale"] is True
+    assert status2["message"] == "行情快照未更新"
+    assert status2["latest_date"] is None
+
+
+def test_status_after_18_without_success_stale():
+    """D5：18:00 后 last_success_date 落后于日历 expected（含从未成功）→ stale。"""
+    base = {"last_attempt_at": "2026-10-13T15:31:00", "trade_calendar": _CAL}
+
+    never_success = compute_snapshot_status(base, now=datetime(2026, 10, 13, 18, 0))
+    assert never_success["stale"] is True
+    assert never_success["message"] == "行情快照未更新"
+
+    lagging = compute_snapshot_status(
+        {**base, "last_success_date": "2026-10-12"}, now=datetime(2026, 10, 13, 18, 0)
+    )
+    assert lagging["stale"] is True
+    assert lagging["message"] == "行情快照未更新（数据日期: 2026-10-12）"
+
+
+def test_status_before_18_pending_not_stale():
+    """D5：18:00 前当日批未完成（有 attempt、无 success）不算 stale。"""
+    meta = {"last_attempt_at": "2026-10-13T15:31:00", "trade_calendar": _CAL}
+    status = compute_snapshot_status(meta, now=datetime(2026, 10, 13, 17, 59))
+
+    assert status["stale"] is False
+    assert status["message"] is None
+
+
+def test_status_success_clears():
+    """D5：last_success_date == expected → 非 stale；历史错误字段仍如实回传。"""
+    meta = {
+        "last_attempt_at": "2026-10-13T15:31:00",
+        "last_success_date": "2026-10-13",
+        "last_error": "yesterday boom",
+        "last_error_date": "2026-10-12",
+        "trade_calendar": _CAL,
+    }
+    status = compute_snapshot_status(meta, now=datetime(2026, 10, 13, 18, 30))
+
+    assert status == {
+        "latest_date": "2026-10-13",
+        "stale": False,
+        "message": None,
+        "last_error": "yesterday boom",
+        "last_error_date": "2026-10-12",
+    }
+
+
+def test_status_no_calendar_weekday_fallback():
+    """D5 退化：无日历 → 工作日取今天；周末取最近工作日（周六 → 周五）。"""
+    weekend = {"last_attempt_at": "2026-10-17T15:31:00", "last_success_date": "2026-10-16"}
+    assert compute_snapshot_status(weekend, now=datetime(2026, 10, 17, 19, 0))["stale"] is False
+
+    weekend_old = {"last_attempt_at": "2026-10-17T15:31:00", "last_success_date": "2026-10-15"}
+    status = compute_snapshot_status(weekend_old, now=datetime(2026, 10, 17, 19, 0))
+    assert status["stale"] is True
+    assert status["message"] == "行情快照未更新（数据日期: 2026-10-15）"
+
+    weekday = {"last_attempt_at": "2026-10-13T15:31:00", "last_success_date": "2026-10-12"}
+    assert compute_snapshot_status(weekday, now=datetime(2026, 10, 13, 19, 0))["stale"] is True
+
+
+def test_cache_cleanup_does_not_touch_snapshot(tmp_path):
+    """cache-management delta：DataCache 过期清理/清空不触碰快照三表（TTL 豁免契约）。"""
+    db = tmp_path / "market_snapshot.db"
+    write_snapshot_rows(
+        "2025-06-30",
+        [_snapshot_row("2025-06-30", "600519"), _snapshot_row("2025-06-30", "000001")],
+        db_path=db,
+    )
+    upsert_security_master(
+        [{"code": "600519", "name": "贵州茅台", "list_date": "2001-08-27"}], db_path=db
+    )
+    set_meta("last_success_date", "2025-12-31", db_path=db)
+    before = {
+        table: _count(db, table)
+        for table in ("market_snapshot", "security_master", "snapshot_meta")
+    }
+
+    cache = DataCache(str(tmp_path / "cache.db"))
+    try:
+        cache.set("600519:quote", {"close": 1.0}, ttl_seconds=-10)  # 已过期
+        assert cache.get("600519:quote") is None  # 读取即触发该条 TTL 清理
+        cache.set("000001:quote", {"close": 2.0}, ttl_seconds=-10)
+        assert cache.clear_all() >= 1  # 全量清理
+    finally:
+        cache.close()
+
+    assert {table: _count(db, table) for table in before} == before  # 快照表行数不变
+    assert get_all_meta(db_path=db) == {"last_success_date": "2025-12-31"}  # meta 键不变

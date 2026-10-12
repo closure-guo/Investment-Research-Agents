@@ -35,10 +35,11 @@ outcome/store.py 同款（WAL + busy_timeout 短连接，DB 路径在调用期�
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -358,6 +359,84 @@ def get_security_master(db_path: str | Path | None = None) -> dict[str, dict]:
     finally:
         conn.close()
     return master
+
+
+# ── 状态纯函数（T4）：D5 stale 判定（无 IO；API 端点/前端横幅的文案唯一来源）──
+
+_STALE_MESSAGE = "行情快照未更新"
+_EXPECTED_AFTER = time(18, 0)
+
+
+def compute_snapshot_status(meta: dict[str, str], now: datetime | None = None) -> dict[str, Any]:
+    """按 D5 判定快照新鲜度，返回状态端点载荷。
+
+    - ``expected``：日历中 ``<= now.date()`` 的最后一个交易日；无日历/不可解析
+      退化「今天是工作日取今天，否则取最近工作日」（不识别节假日，可接受）；
+    - ``stale = last_error_date == 今天 或 (now >= 18:00 且 (从未成功 或
+      last_success_date < expected))``；
+    - 从未尝试（``last_attempt_at`` 不存在，fresh DB）→ 不告警（避免 dev/E2E
+      噪音；首次启用后失败即告警）；
+    - ``message`` 仅 stale 时非空：逐字「行情快照未更新（数据日期: {latest}）」；
+      ``latest`` 为 None 时退化为「行情快照未更新」。
+    """
+    now = now or datetime.now()
+    latest = meta.get("last_success_date") or None
+    last_error = meta.get("last_error") or None
+    last_error_date = meta.get("last_error_date") or None
+
+    def _payload(stale: bool) -> dict[str, Any]:
+        message = None
+        if stale:
+            message = f"{_STALE_MESSAGE}（数据日期: {latest}）" if latest else _STALE_MESSAGE
+        return {
+            "latest_date": latest,
+            "stale": stale,
+            "message": message,
+            "last_error": last_error,
+            "last_error_date": last_error_date,
+        }
+
+    if "last_attempt_at" not in meta:
+        return _payload(False)  # fresh DB：从未尝试，不告警
+    if last_error_date == now.date().isoformat():
+        return _payload(True)  # 当日失败：立即告警
+
+    if now.time() >= _EXPECTED_AFTER:
+        expected = _expected_trade_date(meta.get("trade_calendar"), now.date())
+        if latest is None or not _is_on_or_after(latest, expected):
+            return _payload(True)
+    return _payload(False)
+
+
+def _expected_trade_date(raw_calendar: str | None, today: date) -> date:
+    """日历中 ``<= today`` 的最后一个交易日；无日历/不可解析 → 最近工作日（D5 退化）。"""
+    if raw_calendar:
+        try:
+            decoded = json.loads(raw_calendar)
+        except (TypeError, ValueError):
+            decoded = None
+        dates: list[date] = []
+        if isinstance(decoded, list):
+            for item in decoded:
+                try:
+                    dates.append(date.fromisoformat(str(item)))
+                except ValueError:
+                    continue
+        candidates = [d for d in dates if d <= today]
+        if candidates:
+            return max(candidates)
+    day = today
+    while day.weekday() >= 5:  # 周六/周日回退至最近工作日
+        day -= timedelta(days=1)
+    return day
+
+
+def _is_on_or_after(value: str, expected: date) -> bool:
+    """数据日期 >= expected；不可解析 → False（按不新鲜告警，宁可多报不可漏报）。"""
+    try:
+        return date.fromisoformat(value) >= expected
+    except ValueError:
+        return False
 
 
 # ── 行构造纯函数（无 IO；输入 spot 均为 stock_zh_a_spot_em 原样 DataFrame） ──
