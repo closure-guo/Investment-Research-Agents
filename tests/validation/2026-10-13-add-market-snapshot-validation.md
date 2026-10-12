@@ -114,6 +114,23 @@ Running 3 tests using 1 worker
 5. **既有测试修改披露（偏离「既有测试无修改通过」红线之字面）**：T7 提交 `65b89fc8` 因 job 注册表 5→6 修改了两处既有测试的**计数类断言**——`tests/outcome/test_ops_jobs.py:36`（`len(JOB_IDS) == 5` → `== 6`）、`tests/outcome/test_scheduler.py`（`test_registers_five_jobs_including_cohort_batch` 更名为 `test_registers_six_jobs_including_cohort_batch`、两处 `len(ids) == 5` → `== 6`、id 集合补 `market_snapshot_daily`、docstring 五个→六个）。仓库先例：`tests/outcome/test_scheduler.py:83` 注释（`Δ3T5+add-market-snapshot T7：job 数增至 6，末次 add_job 不再是 settle——按 id 取，断言不变`）表明注册表上一次扩容（Δ3T5，增至 5）时同类计数断言亦按同一惯例同步更新。断言方向均为**增强**（新 id 必须存在、逐 id 触发时刻断言不变），非放宽；但按红线字面仍属偏离，建议人工复核确认此定性。
 6. **时效说明**：全部 live 探测发生在 2026-10-13 01:46–01:53（北京时），早于开盘也早于 15:30 生产时刻；即便当时拉取成功，spot 数据也非「当日收盘」，本报告未据此产出任何通过结论。
 
+### 6. 全量后端回归（补录，2026-10-13 02:0x）
+
+```
+$ uv run pytest tests/ -q -m "not live"
+1 failed, 4677 passed, 6 skipped, 12 deselected, 30 warnings in 760.79s (0:12:40)
+```
+
+唯一失败 = `tests/llm/test_resolver.py::TestContextLengthOverride::test_empty_follows_registry_default`：**宿主 `.env` 泄漏 `LLM_MAX_CONTEXT`（本机已启用 256000）导致的环境性失败，非本 change 引入**——① 单独运行该用例 `1 passed`（全量运行时受同进程环境污染）；② diff 不触碰 `llm/` 任何文件；③ 并行会话正在主检出同一测试上加 `_env={}` 隔离修复（`git diff tests/llm/test_resolver.py` 可见）。归因为既有环境问题，不阻塞本 change。
+
+`tests/scripts/`（含本 change 的回填脚本单测）与 `tests/e2e/` 不在 `pyproject.toml` 的默认收集范围（norecursedirs），本次已单独执行并记录于上。
+
+### 7. 归档执行记录
+
+- `openspec/changes/add-market-snapshot/` 已按程序指令（14 个 change 逐个 archive 后再进下一个）于 2026-10-13 执行 `openspec validate --strict`（valid）→ `openspec archive --yes`，落 `openspec/changes/archive/2026-10-12-add-market-snapshot/`；`openspec validate --all --strict` → **82 passed / 0 failed**。
+- 受阻的 live 验证项（本报告 #1/#2/#6）**不因此视为通过**；补验入口 = issue #325（对账脚本已就绪，固定种子 20261013）。tasks.md 对 4.2/4.3 均已逐条标注受阻与偏差事实。
+- 本报告第「结论」节中「不满足 archive 前置」的初判保留原文以留痕；实际归档是**按程序指令的显式决定**（该项受阻于宿主机网络而非代码），差异以本节为准。
+
 ## 结论
 
 - [ ] 全部通过，可 archive
