@@ -2,7 +2,9 @@
 
 Δ2 Task 6：结算切 track-record 同源判定（`judgment.resolve_prediction`），
 断言 `Resolution` → 下游既有契约键（settle_date/settle_price/decision_return/
-benchmark_return/decision_excess/decision_hit）的映射，以及派生入场价。
+benchmark_return/decision_excess/decision_hit）的映射。
+add-matching-engine T5：buy/sell 入场价改为 D+1 撮合成交价（开盘 ± 滑点），
+故夹具显式构造 D+1 bar（见 `_horizon_rows`/`_engine_rows`）。
 """
 
 from __future__ import annotations
@@ -14,6 +16,10 @@ import pandas as pd
 import pytest
 from evals.backtest.data_snapshot import SnapshotResult
 from evals.backtest.replay import direction_agreement
+
+# 回放撮合默认滑点：回放不传全市场成交额样本（market_amounts=None）→ 引擎取最保守档
+# = 全部档位中最大 slippage（默认配置 0.002）。本文件期望值一律按此手算。
+_DEFAULT_SLIPPAGE = 0.002
 
 
 def _kline(dates: list[str], closes: list[float]) -> pd.DataFrame:
@@ -29,7 +35,11 @@ def _kline(dates: list[str], closes: list[float]) -> pd.DataFrame:
 
 
 def _dated_kline(rows: list[tuple[str, float]]) -> pd.DataFrame:
-    """判定只读「日期/收盘」；OHLC 同值仅为形状完整。"""
+    """判定只读「日期/收盘」；OHLC 同值仅为形状完整。
+
+    add-matching-engine T5 后 buy/sell 用例的 D+1 行不得 OHLC 同值且涨跌幅 ≥ ±4.8%
+    （会被判一字板 → 未成交短路）；需要 D+1 可成交时用 `_ohlc_kline`/`_horizon_rows`。
+    """
     return pd.DataFrame(
         {
             "日期": [r[0] for r in rows],
@@ -39,6 +49,41 @@ def _dated_kline(rows: list[tuple[str, float]]) -> pd.DataFrame:
             "最低": [r[1] for r in rows],
         }
     )
+
+
+# 回放撮合默认滑点见文件头 `_DEFAULT_SLIPPAGE`（0.002，期望值手算基准）。
+
+
+def _ohlc_kline(rows: list[tuple[str, float, float, float, float]]) -> pd.DataFrame:
+    """逐行 (日期, 开盘, 最高, 最低, 收盘) 的 K 线。
+
+    撮合入场读「开盘」价基与「最高/最低」一字板位，不能用 OHLC 同值捷径
+    （同值 + 涨跌幅 ≥ 4.8% 会被判一字板 → 买单不成交）。
+    """
+    return pd.DataFrame(
+        {
+            "日期": [r[0] for r in rows],
+            "开盘": [r[1] for r in rows],
+            "最高": [r[2] for r in rows],
+            "最低": [r[3] for r in rows],
+            "收盘": [r[4] for r in rows],
+        }
+    )
+
+
+def _engine_rows(
+    d1_ohlc: tuple[float, float, float, float], *, exit_close: float = 10.3
+) -> list[tuple[str, float, float, float, float]]:
+    """决策日 2026-09-02（收盘 11.0）+ D+1 = 2026-09-03（给定 OHLC）+ 其后 20 个交易日。
+
+    horizon=20 且入场 = D+1 → 出场 = 2026-09-23（决策日后第 20 个交易日为 09-22，
+    两者不同，可判别入场是否已落在 D+1）。
+    """
+    rows = [("2026-09-02", 10.9, 11.2, 10.8, 11.0), ("2026-09-03", *d1_ohlc)]
+    rows += [
+        (f"2026-09-{d:02d}", exit_close, exit_close, exit_close, exit_close) for d in range(4, 24)
+    ]
+    return rows
 
 
 def _stub_graph(monkeypatch, decision: dict) -> None:
@@ -52,9 +97,24 @@ def _stub_graph(monkeypatch, decision: dict) -> None:
     monkeypatch.setattr(rp, "compute_metrics", lambda state: {})
 
 
-def _horizon_rows(entry_close: float, exit_close: float) -> list[tuple[str, float]]:
-    """决策日 2026-09-02 + 其后 20 个交易日（hold_days=20，出场日 2026-10-20）。"""
-    return [("2026-09-02", entry_close)] + [(f"2026-10-{d:02d}", exit_close) for d in range(1, 21)]
+def _horizon_rows(
+    entry_close: float, exit_close: float, *, side: str = "buy"
+) -> list[tuple[str, float]]:
+    """决策日 2026-09-02 + 次一交易日（D+1=2026-09-30，撮合入场日）+ 其后 20 个交易日。
+
+    hold_days=20 → 出场日仍为 2026-10-20（「入场日后第 horizon 个交易日」对齐）；
+    add-matching-engine T5 起 buy/sell 入场 = round(D+1 开盘 ×(1±滑点), 2)，故本夹具按默认
+    滑点（0.002）反推 D+1 开盘，使撮合成交价恰等于旧口径入场价（entry_close）——既有断言
+    零改动的关键：buy 10.98×1.002≈11.0；sell 11.02×0.998≈11.0。D+1 涨跌幅 ≈ ∓0.18%
+    （OHLC 同值也非一字板），普通日可成交。
+    """
+    rate = _DEFAULT_SLIPPAGE
+    d1_open = (
+        round(entry_close / (1 + rate), 2) if side == "buy" else round(entry_close / (1 - rate), 2)
+    )
+    return [("2026-09-02", entry_close), ("2026-09-30", d1_open)] + [
+        (f"2026-10-{d:02d}", exit_close) for d in range(1, 21)
+    ]
 
 
 class TestSettlementMapping:
@@ -74,7 +134,7 @@ class TestSettlementMapping:
         assert settlement["hold_days"] == 20
         assert settlement["decision_return"] == pytest.approx(12.1 / 11.0 - 1.0, abs=1e-6)
         assert settlement["decision_hit"] is True
-        # 入场基准由 K 线派生（决策日收盘），非存档参考价
+        # 入场为 D+1 撮合成交价（T5；本夹具 D+1 开盘 10.98 经 0.2% 滑点后恰为等值 11.0）
         assert result["entry_price"] == 11.0
 
     def test_replay_settlement_benchmark_missing_excess_is_none(self, monkeypatch):
@@ -133,7 +193,7 @@ class TestSettlementMapping:
     def test_replay_sell_maps_short_direction(self, monkeypatch):
         """sell → direction=short → 下跌（−10%）符号化为 +10% 收益 → resolved_win。"""
         _stub_graph(monkeypatch, {"action": "sell"})
-        kline = _dated_kline(_horizon_rows(11.0, 9.9))
+        kline = _dated_kline(_horizon_rows(11.0, 9.9, side="sell"))
         snap = SnapshotResult(state={"kline": kline}, metadata={})
         result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
 
@@ -160,9 +220,13 @@ class TestSettlementKlineCaliber:
         assert result["entry_price"] is None
 
     def test_resolution_none_keeps_no_settlement_shape(self, monkeypatch):
-        """未到 horizon（resolve_prediction → None）→ settlement/entry_price 均 None。"""
+        """已成交但 horizon 未到点（resolve_prediction → None）→ settlement/entry_price 均 None。
+
+        D+1 用带振幅的普通日（`_kline`，非 OHLC 同值）——否则会被判一字板短路，覆盖不到
+        「成交后未到点」这一分支（T5）。
+        """
         _stub_graph(monkeypatch, {"action": "buy"})
-        kline = _dated_kline([("2026-09-02", 11.0), ("2026-09-03", 12.0)])
+        kline = _kline(["2026-09-02", "2026-09-03"], [11.0, 12.0])
         snap = SnapshotResult(state={"kline": kline}, metadata={})
         result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
         assert result["settlement"] is None
@@ -241,7 +305,7 @@ class TestActionFallback:
         monkeypatch.setattr(rp, "build_variant_graph", lambda variant: PydanticDecisionGraph())
         monkeypatch.setattr(rp, "compute_metrics", lambda state: {})
 
-        def fake_resolve(prediction, kline, benchmark):
+        def fake_resolve(prediction, kline, benchmark, *, entry_override=None):
             captured["prediction"] = prediction
             return None
 
@@ -284,7 +348,7 @@ class TestFullBenchmarkChannel:
         monkeypatch.setattr(rp, "build_variant_graph", lambda variant: FakeGraph())
         monkeypatch.setattr(rp, "compute_metrics", lambda state: {})
 
-        def fake_resolve(prediction, kline, benchmark):
+        def fake_resolve(prediction, kline, benchmark, *, entry_override=None):
             captured["benchmark"] = benchmark
             return None
 
@@ -293,7 +357,8 @@ class TestFullBenchmarkChannel:
     def test_replay_decision_settles_against_full_benchmark(self, monkeypatch):
         captured: dict = {}
         self._fake_orchestration(monkeypatch, captured)
-        full_kline = _kline(["2025-01-13", "2025-01-14"], [10.0, 10.5])
+        # D+1=2025-01-15（普通日）→ 引擎成交后才会调 resolve_prediction（T5 入场引擎化）
+        full_kline = _kline(["2025-01-13", "2025-01-14", "2025-01-15"], [10.0, 10.5, 10.6])
         truncated_bench = _kline(["2025-01-13"], [3000.0])
         full_bench = _kline(["2025-01-13", "2025-01-20"], [3000.0, 3100.0])
         snap = SnapshotResult(
@@ -316,7 +381,8 @@ class TestFullBenchmarkChannel:
         captured: dict = {}
         self._fake_orchestration(monkeypatch, captured)
         truncated_bench = _kline(["2025-01-13"], [3000.0])
-        full_kline = _kline(["2025-01-13", "2025-01-14"], [10.0, 10.5])
+        # D+1=2025-01-15（普通日）→ 引擎成交后才会调 resolve_prediction（T5 入场引擎化）
+        full_kline = _kline(["2025-01-13", "2025-01-14", "2025-01-15"], [10.0, 10.5, 10.6])
         snap = SnapshotResult(
             state={
                 "kline": _kline(["2025-01-13", "2025-01-14"], [10.0, 10.5]),
@@ -398,3 +464,135 @@ class TestFirstReplayPassthrough:
         )
         assert out["entry_price"] is None
         assert out["action"] is None
+
+
+class TestEngineEntry:
+    """add-matching-engine T5：入场经撮合引擎（D+1 开盘 + 滑点 + 涨跌停约束）。
+
+    入场语义：决策在 D 收盘后产出 → 最早可执行价 = D+1 开盘；成交判定 = 引擎
+    `match_order`（整手/涨跌停/T+1 + 滑点取档）。fail-closed：一字板不可成交即记
+    「未成交」（settlement=None + unfilled_reason），不按涨停价假设成交。
+    """
+
+    def test_buy_entry_fills_at_next_day_open_with_slippage(self, monkeypatch):
+        _stub_graph(monkeypatch, {"action": "buy"})
+        kline = _ohlc_kline(_engine_rows((10.0, 10.6, 9.9, 10.2)))
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+
+        expected_fill = round(10.0 * (1 + _DEFAULT_SLIPPAGE), 2)  # 手算：10.00 × 1.002 = 10.02
+        assert expected_fill == 10.02
+        assert result["entry_price"] == expected_fill
+        assert result["fill"] == {
+            "price": 10.02,
+            "fee": 5.0,  # 佣金 max(5 元最低, 10.02×100×0.00025≈0.25) = 5.0；买入无印花税
+            "slippage_rate": _DEFAULT_SLIPPAGE,
+            "reference": "open",
+        }
+        # 出场 = D+1（2026-09-03）后第 20 个交易日 = 09-23；若仍按决策日入场则为 09-22
+        assert result["settlement"]["settle_date"] == "2026-09-23"
+        assert result["settlement"]["settle_price"] == 10.3
+
+    def test_sell_entry_fills_at_next_day_open_minus_slippage(self, monkeypatch):
+        """卖单：D+1 开盘 ×(1−滑点)；M6 视作已有隔日仓位（sellable=total=100）可卖。"""
+        _stub_graph(monkeypatch, {"action": "sell"})
+        kline = _ohlc_kline(_engine_rows((10.0, 10.6, 9.9, 9.2), exit_close=9.0))
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+
+        expected_fill = round(10.0 * (1 - _DEFAULT_SLIPPAGE), 2)  # 手算：10.00 × 0.998 = 9.98
+        assert expected_fill == 9.98
+        assert result["entry_price"] == expected_fill
+        assert result["fill"]["reference"] == "open"
+        # short：出场 9.0 → raw = −(9.0/9.98 − 1) ≈ +9.8% → resolved_win
+        assert result["settlement"]["status"] == "resolved_win"
+        assert abs(result["settlement"]["decision_return"] - (1 - 9.0 / 9.98)) < 1e-6
+
+    def test_buy_blocked_when_next_day_limit_up_sealed(self, monkeypatch):
+        """D+1 一字涨停（o=h=l=c 且较 prev_close +10%）→ 未成交，不按涨停价记成交。"""
+        _stub_graph(monkeypatch, {"action": "buy"})
+        kline = _ohlc_kline(_engine_rows((12.1, 12.1, 12.1, 12.1)))
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+
+        assert result["settlement"] is None
+        assert result["entry_price"] is None
+        assert result["unfilled_reason"] == "LIMIT_UP_UNFILLABLE"
+        assert "fill" not in result
+
+    def test_sell_blocked_when_next_day_limit_down_sealed(self, monkeypatch):
+        """D+1 一字跌停（较 prev_close −10%）→ 卖单未成交（涨跌停先于 T+1 裁决）。"""
+        _stub_graph(monkeypatch, {"action": "sell"})
+        kline = _ohlc_kline(_engine_rows((9.9, 9.9, 9.9, 9.9)))
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+
+        assert result["settlement"] is None
+        assert result["entry_price"] is None
+        assert result["unfilled_reason"] == "LIMIT_DOWN_UNFILLABLE"
+
+    def test_no_next_trading_day_keeps_legacy_no_settlement(self, monkeypatch):
+        """数据末尾（无 D+1）→ 既有「无结算」返回；未触引擎，无原因码/成交明细键。"""
+        _stub_graph(monkeypatch, {"action": "buy"})
+        kline = _ohlc_kline([("2026-09-02", 10.9, 11.2, 10.8, 11.0)])
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+
+        assert result["settlement"] is None
+        assert result["entry_price"] is None
+        assert "unfilled_reason" not in result and "fill" not in result
+
+    def test_neutral_action_does_not_touch_engine(self, monkeypatch):
+        """neutral（hold/watch）走既有派生入场路径，完全不触撮合引擎（计划 T5 行为 6）。"""
+        calls: list = []
+
+        def spy(*args, **kwargs):  # pragma: no cover - 被调用即用例失败
+            calls.append((args, kwargs))
+            raise AssertionError("neutral 决策不得调撮合引擎")
+
+        monkeypatch.setattr(rp, "match_order", spy)
+        _stub_graph(monkeypatch, {"action": "hold"})
+        kline = _dated_kline(_horizon_rows(11.0, 9.9))
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+
+        assert result["settlement"]["status"] == "avoidance_win"
+        assert result["entry_price"] == 11.0  # 派生入场（决策日收盘）语义不变
+        assert calls == [] and "fill" not in result
+
+    def test_missing_open_column_falls_back_to_close_reference(self, monkeypatch):
+        """缺「开盘」列 → 该行收盘作价基，披露 reference="close_fallback"。"""
+        _stub_graph(monkeypatch, {"action": "buy"})
+        kline = _ohlc_kline(_engine_rows((10.2, 10.6, 9.9, 10.2))).drop(columns=["开盘"])
+        snap = SnapshotResult(state={"kline": kline}, metadata={})
+        result = rp.replay_decision("600519", "2026-09-02", snapshot=snap, full_kline=kline)
+
+        expected_fill = round(10.2 * (1 + _DEFAULT_SLIPPAGE), 2)  # 手算：10.2 × 1.002 = 10.2204
+        assert expected_fill == 10.22
+        assert result["entry_price"] == expected_fill
+        assert result["fill"]["reference"] == "close_fallback"
+
+    def test_consistency_passthrough_discloses_unfilled_reason_and_fill(self, monkeypatch):
+        """原因码/成交明细须经 replay_with_consistency 透传（T6 聚合按原因码披露依赖）。"""
+        fill = {"price": 10.02, "fee": 5.0, "slippage_rate": _DEFAULT_SLIPPAGE, "reference": "open"}
+
+        def fake_replay(
+            code, decision_date, *, snapshot=None, client=None, full_kline=None, full_benchmark=None
+        ):
+            return {
+                "decision": {"action": "buy"},
+                "settlement": None,
+                "entry_price": None,
+                "action": "buy",
+                "decision_date": decision_date,
+                "snapshot_metadata": {},
+                "unfilled_reason": "LIMIT_UP_UNFILLABLE",
+                "fill": fill,
+            }
+
+        monkeypatch.setattr(rp, "replay_decision", fake_replay)
+        out = rp.replay_with_consistency(
+            "600519", "2026-09-02", n=1, snapshot=SnapshotResult(state={}, metadata={})
+        )
+        assert out["unfilled_reason"] == "LIMIT_UP_UNFILLABLE"
+        assert out["fill"] == fill
