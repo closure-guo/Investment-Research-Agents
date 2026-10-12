@@ -35,6 +35,7 @@ from finance_agent.data.snapshot import (
     latest_snapshot_date,
     read_bars,
     read_universe,
+    reset_snapshot_db,
     set_meta,
     set_meta_many,
     upsert_security_master,
@@ -1018,3 +1019,18 @@ def test_latest_snapshot_date_before_excludes_bound_date(tmp_path):
     assert latest_snapshot_date(db_path=db, before="2026-10-13") == "2026-10-12"
     assert latest_snapshot_date(db_path=db, before="2026-10-12") is None
     assert latest_snapshot_date(db_path=db, before="2026-10-14") == "2026-10-13"
+
+
+def test_reset_snapshot_db_clears_all_three_tables(tmp_path):
+    """T8 造数钩子：reset 清空快照三表，返回删除行数（其余库不受影响）。"""
+    db = tmp_path / "market_snapshot.db"
+    write_snapshot_rows("2026-10-13", [_snapshot_row("2026-10-13", "600519")], db_path=db)
+    upsert_security_master([{"code": "600519", "name": "贵州茅台"}], db_path=db)
+    set_meta_many({"last_success_date": "2026-10-13"}, db_path=db)
+
+    assert reset_snapshot_db(db_path=db) == 3  # 1 行快照 + 1 行主表 + 1 个 meta 键
+
+    assert latest_snapshot_date(db_path=db) is None
+    assert get_security_master(db_path=db) == {}
+    assert get_all_meta(db_path=db) == {}
+    assert reset_snapshot_db(db_path=db) == 0  # 幂等：空库再清为 0

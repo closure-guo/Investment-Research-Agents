@@ -34,6 +34,10 @@ DEFAULT_LLM_MODEL = "deepseek/deepseek-v4-pro"
 
 from finance_agent.data.cache import get_shared_cache  # noqa: E402
 from finance_agent.data.monitoring import get_monitor  # noqa: E402
+from finance_agent.data.snapshot import (  # noqa: E402
+    compute_snapshot_status,
+    get_all_meta,
+)
 from finance_agent.graph import build_5layer_graph  # noqa: E402
 from finance_agent.langfuse_tracing import get_langfuse  # noqa: E402
 from finance_agent.llm import LLMConfig  # noqa: E402
@@ -718,11 +722,18 @@ if TESTING:
         顶层可选 track_record（{equity_curve, index_closes, metrics_snapshot,
         predictions}）写战绩页造数表（add-index-performance-compare /
         add-portfolio-beta-alpha / add-prediction-pool-integrity），无需 chat_history
-        也可单独使用，且不创建会话。
+        也可单独使用，且不创建会话；
+        顶层可选 snapshot（dict：写 snapshot_meta 键）与 snapshot_reset（bool：先清
+        快照三表）造行情快照告警态（add-market-snapshot D6），同样无需 chat_history。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
         # track_record 造数块不受 chat_history 前置约束（track_record-only 造数合法）
-        if "chat_history" not in req and not isinstance(req.get("track_record"), dict):
+        if (
+            "chat_history" not in req
+            and not isinstance(req.get("track_record"), dict)
+            and not isinstance(req.get("snapshot"), dict)
+            and not req.get("snapshot_reset")
+        ):
             return {"status": "ok", "mode": "testing"}
         # add-index-performance-compare:战绩页 E2E 造数(equity_curve/index_closes
         # 写入真实存储层;SESSIONS_DB_PATH 已被 e2e webServer 指向独立测试库)。
@@ -818,6 +829,25 @@ if TESTING:
                             mk.get("cum_excess"),
                             mk.get("benchmark_price"),
                         )
+        # add-market-snapshot（D6/T8）：行情快照告警造态——可选先 reset（清三表）再写
+        # meta。两处都在**调用期**经 snapshot 模块 _default_db_path() 读
+        # SNAPSHOT_DB_PATH（导入期冻结会让 E2E 的 env 注入失效）。
+        if req.get("snapshot_reset"):
+            from finance_agent.data.snapshot import reset_snapshot_db
+
+            reset_snapshot_db()
+        snapshot_seed = req.get("snapshot")
+        if isinstance(snapshot_seed, dict) and snapshot_seed:
+            from zoneinfo import ZoneInfo
+
+            from finance_agent.data.snapshot import set_meta_many
+
+            snapshot_meta = {str(key): str(value) for key, value in snapshot_seed.items()}
+            # D5：fresh-DB 分支（无 last_attempt_at）不告警——造 stale 态必须补上
+            snapshot_meta.setdefault(
+                "last_attempt_at", datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+            )
+            set_meta_many(snapshot_meta)
         # track_record-only（含 {} 空 dict）造数后即返回占位响应，不落会话
         if "chat_history" not in req:
             return {"status": "ok", "mode": "testing"}
@@ -2767,6 +2797,32 @@ async def data_source_status() -> dict:
     """数据源状态：命中/未命中/失败计数 + 数据新鲜度列表。"""
     data = await asyncio.to_thread(get_shared_cache().stats)
     return {"monitor": get_monitor().snapshot(), "freshness": data}
+
+
+@app.get("/api/snapshot/status")
+async def snapshot_status() -> dict:
+    """行情快照新鲜度（add-market-snapshot D5；前端横幅 60s 轮询端点）。
+
+    **永不 500**（ops 纪律）：读库/解析任何异常 → 降级返回
+    ``last_error="status_unavailable"`` 且 ``stale=False``（宁可静默一轮，不打断
+    前端轮询循环）。正常载荷 ``{latest_date, stale, message, last_error,
+    last_error_date}``，文案由 ``compute_snapshot_status`` 逐字给定。
+    """
+
+    def _payload() -> dict:
+        return compute_snapshot_status(get_all_meta())
+
+    try:
+        return await asyncio.to_thread(_payload)
+    except Exception:
+        _logger.exception("快照状态读取失败，降级返回 status_unavailable")
+        return {
+            "latest_date": None,
+            "stale": False,
+            "message": None,
+            "last_error": "status_unavailable",
+            "last_error_date": None,
+        }
 
 
 # ── AG-UI 协议通道（add-assistant-ui-thread PoC，双轨隔离：仅挂载，不接入 registry）──

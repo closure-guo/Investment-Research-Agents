@@ -233,6 +233,23 @@ def get_meta(key: str, db_path: str | Path | None = None) -> str | None:
         conn.close()
 
 
+def reset_snapshot_db(db_path: str | Path | None = None) -> int:
+    """清空快照三表全部行（仅 TESTING 造数 / E2E 隔离用），返回删除行数。
+
+    不做 DROP：表结构保留（幂等建表本就在各入口），只删行。
+    """
+    init_snapshot_db(db_path)
+    conn = _connect(db_path)
+    try:
+        removed = conn.execute("DELETE FROM market_snapshot").rowcount
+        removed += conn.execute("DELETE FROM security_master").rowcount
+        removed += conn.execute("DELETE FROM snapshot_meta").rowcount
+        conn.commit()
+        return removed
+    finally:
+        conn.close()
+
+
 def get_all_meta(db_path: str | Path | None = None) -> dict[str, str]:
     """读取全部 meta 键值（状态判定纯函数的输入；入口幂等建表，空库返回 {}）。"""
     init_snapshot_db(db_path)
