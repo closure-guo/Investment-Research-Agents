@@ -42,6 +42,7 @@ import sqlite3
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -105,6 +106,20 @@ _SNAPSHOT_COLUMNS: tuple[str, ...] = (
     "list_date",
 )
 
+# read_bars 出口做数值强转的列（评审修正：NULL 混入时保持 float64，消费端不必逐格判型）
+_NUMERIC_SNAPSHOT_COLUMNS: tuple[str, ...] = (
+    "open",
+    "high",
+    "low",
+    "close_raw",
+    "close_qfq",
+    "volume",
+    "amount",
+    "pct_chg",
+    "prev_close",
+    "listed_days",
+)
+
 
 class SnapshotError(Exception):
     """快照库异常基类。"""
@@ -161,6 +176,27 @@ def set_meta(key: str, value: str, db_path: str | Path | None = None) -> None:
         conn.close()
 
 
+def set_meta_many(mapping: dict[str, str], db_path: str | Path | None = None) -> None:
+    """批量写入 snapshot_meta 键值（单事务单 commit，评审修正）。
+
+    成功路径一次落 ``last_success_date`` + 清 ``last_error`` 等键：逐键 ``set_meta``
+    会在两次提交之间产生「成功已写、错误未清」的中间态，状态端点可能闪告警横幅。
+    """
+    init_snapshot_db(db_path)
+    if not mapping:
+        return
+    conn = _connect(db_path)
+    try:
+        conn.executemany(
+            "INSERT INTO snapshot_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            list(mapping.items()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_meta(key: str, db_path: str | Path | None = None) -> str | None:
     """读取单个 meta 键；缺失返回 None（入口幂等建表，空库不抛错）。"""
     init_snapshot_db(db_path)
@@ -184,6 +220,23 @@ def get_all_meta(db_path: str | Path | None = None) -> dict[str, str]:
 
 
 # ── 写入与读取接口（T3）：幂等写 + as_of 防前视 + 空数据显式报错 ─────────────
+
+
+def _parse_date_param(value: Any, *, param: str) -> date:
+    """日期入参解析：严格 ``YYYY-MM-DD``；非规范/不可解析 → ``SnapshotError``（评审修正）。
+
+    严格性理由：日期列是 TEXT 且 SQL 用字符串比较，任何非规范形态（"2026-10-5"、
+    "20261012" 等）都会让字典序比较错位而静默读错窗口（前视泄漏风险）；这里一律
+    在入口 fail loud，SQL 参数只用 ``isoformat()`` 规范化后的值。
+    """
+    try:
+        parsed = date.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise SnapshotError(f"非规范日期（{param}）: {value!r}，须为 YYYY-MM-DD") from exc
+    if parsed.isoformat() != value:
+        # date.fromisoformat 在 3.11+ 也接受基本格式（20261012）等变体：拒绝非规范形态
+        raise SnapshotError(f"非规范日期（{param}）: {value!r}，须为 YYYY-MM-DD")
+    return parsed
 
 
 def write_snapshot_rows(
@@ -221,14 +274,23 @@ def apply_rebase(
     """D1 rebase：该票 ``trade_date < before_date`` 的行 ``close_qfq × factor``。
 
     ``close_raw`` 不动；返回实际更新行数（乘积四舍五入到 4 位小数，与写入口径一致）。
+    ``factor`` 必须有限且 > 0（评审修正）：NaN/0/负值会把整段历史 qfq 写成坏值
+    （静默数据事故）→ ``SnapshotError`` 拒绝；``before_date`` 须为规范日期。
     """
+    try:
+        invalid_factor = not math.isfinite(factor) or factor <= 0
+    except TypeError:  # 非数值 factor（None/str 等）
+        invalid_factor = True
+    if invalid_factor:
+        raise SnapshotError(f"非法 rebase factor: {factor!r}（须为有限正数）")
+    before = _parse_date_param(before_date, param="before_date")
     init_snapshot_db(db_path)
     conn = _connect(db_path)
     try:
         cur = conn.execute(
             "UPDATE market_snapshot SET close_qfq = ROUND(close_qfq * ?, 4) "
             "WHERE code = ? AND trade_date < ?",
-            (factor, code, before_date),
+            (factor, code, before.isoformat()),
         )
         conn.commit()
         return cur.rowcount
@@ -252,18 +314,23 @@ def read_universe(
 ) -> list[dict[str, Any]]:
     """``as_of`` 当日全市场快照行（R3 防前视）。
 
+    ``as_of`` 须为规范 ``YYYY-MM-DD``（评审修正：``date.fromisoformat`` 解析后按
+    date 对象比较，非规范 → ``SnapshotError``；SQL 参数用规范化字符串）。
     ``as_of > latest`` → ``SnapshotNotFreshError``（消息含最新数据日期，不返回
     任何记录）；该日无行（含空库）→ ``SnapshotEmptyError``（不静默返回他日
     数据）。``include_suspended=False`` 时剔除 ``is_suspended=1`` 的行（NULL
     状态视为未知，同样剔除）。返回按 code 升序。
     """
+    as_of_date = _parse_date_param(as_of, param="as_of")
     latest = latest_snapshot_date(db_path)
-    if latest is not None and as_of > latest:
-        raise SnapshotNotFreshError(f"快照最新数据日期为 {latest}，不接受 as_of={as_of}")
+    if latest is not None:
+        latest_date = _parse_date_param(latest, param="latest_snapshot_date")
+        if as_of_date > latest_date:
+            raise SnapshotNotFreshError(f"快照最新数据日期为 {latest}，不接受 as_of={as_of}")
     conn = _connect(db_path)
     try:
         sql = "SELECT * FROM market_snapshot WHERE trade_date = ?"
-        params: list[Any] = [as_of]
+        params: list[Any] = [as_of_date.isoformat()]
         if not include_suspended:
             sql += " AND is_suspended = 0"
         sql += " ORDER BY code"
@@ -285,19 +352,33 @@ def read_bars(
 ) -> pd.DataFrame:
     """区间日线读取（T3 双保险：``end > as_of`` 与 ``as_of > latest`` 均显式拒绝）。
 
-    返回列集合与表列一致（含双复权口径），按 ``(trade_date, code)`` 升序；
+    ``start``/``end``/``as_of`` 须为规范 ``YYYY-MM-DD``（评审修正：
+    ``date.fromisoformat`` 解析后按 date 对象比较，非规范 → ``SnapshotError``；
+    SQL 参数用规范化字符串，避免字典序比较错位导致前视泄漏）。
+    返回列集合与表列一致（含双复权口径），数值列经 ``pd.to_numeric(errors="coerce")``
+    强转（NULL 混入时保持 float64），按 ``(trade_date, code)`` 升序；
     区间/代码无行（含空库）→ ``SnapshotEmptyError``。
     """
-    if end > as_of:
-        raise SnapshotNotFreshError(f"end={end} 晚于 as_of={as_of}（禁止读取未来数据）")
+    start_date = _parse_date_param(start, param="start")
+    end_date = _parse_date_param(end, param="end")
+    as_of_date = _parse_date_param(as_of, param="as_of")
+    if end_date > as_of_date:
+        raise SnapshotNotFreshError(
+            f"end={end_date.isoformat()} 晚于 as_of={as_of_date.isoformat()}（禁止读取未来数据）"
+        )
     latest = latest_snapshot_date(db_path)
     if latest is None:
-        raise SnapshotEmptyError(f"快照库为空，区间无记录: {start}~{end}")
-    if as_of > latest:
+        raise SnapshotEmptyError(
+            f"快照库为空，区间无记录: {start_date.isoformat()}~{end_date.isoformat()}"
+        )
+    latest_date = _parse_date_param(latest, param="latest_snapshot_date")
+    if as_of_date > latest_date:
         raise SnapshotNotFreshError(f"快照最新数据日期为 {latest}，不接受 as_of={as_of}")
     normalized = [code for code in (_norm_code(c) for c in codes) if code]
     if not normalized:
-        raise SnapshotEmptyError(f"未指定有效查询代码: {start}~{end}")
+        raise SnapshotEmptyError(
+            f"未指定有效查询代码: {start_date.isoformat()}~{end_date.isoformat()}"
+        )
     placeholders = ", ".join("?" * len(normalized))
     conn = _connect(db_path)
     try:
@@ -305,13 +386,17 @@ def read_bars(
             # placeholders 仅为 "?" 序列；代码值全参数化
             f"SELECT * FROM market_snapshot WHERE code IN ({placeholders}) "  # noqa: S608
             "AND trade_date >= ? AND trade_date <= ? ORDER BY trade_date, code",
-            [*normalized, start, end],
+            [*normalized, start_date.isoformat(), end_date.isoformat()],
         ).fetchall()
         frame = pd.DataFrame([dict(row) for row in rows], columns=list(_SNAPSHOT_COLUMNS))
     finally:
         conn.close()
     if frame.empty:
-        raise SnapshotEmptyError(f"区间内无快照记录: {start}~{end}")
+        raise SnapshotEmptyError(
+            f"区间内无快照记录: {start_date.isoformat()}~{end_date.isoformat()}"
+        )
+    for col in _NUMERIC_SNAPSHOT_COLUMNS:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
     return frame
 
 
@@ -365,11 +450,29 @@ def get_security_master(db_path: str | Path | None = None) -> dict[str, dict]:
 
 _STALE_MESSAGE = "行情快照未更新"
 _EXPECTED_AFTER = time(18, 0)
+_BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _to_beijing(now: datetime | None) -> datetime:
+    """``now`` 归一到北京时区（评审修正）。
+
+    - ``None`` → 当前北京时间（``datetime.now(ZoneInfo("Asia/Shanghai"))``）；
+    - aware 输入 → ``astimezone`` 转北京（UTC 10:30 = 北京 18:30，D5 的 18:00
+      边界按北京时间判定）；
+    - naive 输入 → 视为已是北京时间本地墙钟（既有调用方惯例），不二次换算。
+    """
+    if now is None:
+        return datetime.now(_BEIJING_TZ)
+    if now.tzinfo is not None:
+        return now.astimezone(_BEIJING_TZ)
+    return now
 
 
 def compute_snapshot_status(meta: dict[str, str], now: datetime | None = None) -> dict[str, Any]:
     """按 D5 判定快照新鲜度，返回状态端点载荷。
 
+    - ``now`` 取北京时区（评审修正，经 ``_to_beijing``）：None → 当前北京时间；
+      aware 先转北京；naive 视为已是北京本地墙钟；
     - ``expected``：日历中 ``<= now.date()`` 的最后一个交易日；无日历/不可解析
       退化「今天是工作日取今天，否则取最近工作日」（不识别节假日，可接受）；
     - ``stale = last_error_date == 今天 或 (now >= 18:00 且 (从未成功 或
@@ -379,7 +482,7 @@ def compute_snapshot_status(meta: dict[str, str], now: datetime | None = None) -
     - ``message`` 仅 stale 时非空：逐字「行情快照未更新（数据日期: {latest}）」；
       ``latest`` 为 None 时退化为「行情快照未更新」。
     """
-    now = now or datetime.now()
+    now = _to_beijing(now)
     latest = meta.get("last_success_date") or None
     last_error = meta.get("last_error") or None
     last_error_date = meta.get("last_error_date") or None

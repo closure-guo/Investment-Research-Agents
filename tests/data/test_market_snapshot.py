@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -15,6 +17,7 @@ import pytest
 from finance_agent.data.cache import DataCache
 from finance_agent.data.snapshot import (
     SnapshotEmptyError,
+    SnapshotError,
     SnapshotNotFreshError,
     _connect,
     _norm_code,
@@ -32,6 +35,7 @@ from finance_agent.data.snapshot import (
     read_bars,
     read_universe,
     set_meta,
+    set_meta_many,
     upsert_security_master,
     write_snapshot_rows,
 )
@@ -790,3 +794,201 @@ def test_cache_cleanup_does_not_touch_snapshot(tmp_path):
 
     assert {table: _count(db, table) for table in before} == before  # 快照表行数不变
     assert get_all_meta(db_path=db) == {"last_success_date": "2025-12-31"}  # meta 键不变
+
+
+# ── 评审修正（2026-10-13）：北京时区 / 严格日期解析 / rebase 守卫 / meta 批量写 ──
+
+
+def test_status_aware_now_converted_to_beijing_time():
+    """评审修正：aware now 先转北京时区（10:30Z = 18:30 北京）→ 触发 18:00 后 stale 分支。
+
+    naive 输入视为已是北京时间（同墙钟同判定），不做二次换算。
+    """
+    meta = {
+        "last_attempt_at": "2026-10-12T15:31:00",
+        "last_success_date": "2026-10-09",
+        "trade_calendar": _CAL,
+    }
+    utc_now = datetime(2026, 10, 12, 10, 30, tzinfo=ZoneInfo("UTC"))
+
+    status = compute_snapshot_status(meta, now=utc_now)
+    assert status["stale"] is True
+    assert status["message"] == "行情快照未更新（数据日期: 2026-10-09）"
+
+    # naive 输入 = 已是北京本地时间：同墙钟 18:30 → 同判定
+    assert compute_snapshot_status(meta, now=datetime(2026, 10, 12, 18, 30))["stale"] is True
+    # 北京同日 15:31 尚未到 18:00 → 不 stale（时区换算不改变边界语义）
+    assert compute_snapshot_status(meta, now=datetime(2026, 10, 12, 15, 31))["stale"] is False
+
+
+def test_date_params_reject_non_canonical_values(tmp_path):
+    """评审修正：日期入参 date.fromisoformat 解析 + 严格 YYYY-MM-DD；非规范左 fail loud。"""
+    db = tmp_path / "market_snapshot.db"
+    write_snapshot_rows("2026-10-10", [_snapshot_row("2026-10-10", "600519")], db_path=db)
+    write_snapshot_rows("2026-10-12", [_snapshot_row("2026-10-12", "600519")], db_path=db)
+
+    with pytest.raises(SnapshotError) as exc:
+        read_bars(["600519"], "2026-10-01", "2026-10-12", as_of="2026-10-5", db_path=db)
+    assert "2026-10-5" in str(exc.value)  # 消息含坏值
+    assert "YYYY-MM-DD" in str(exc.value)
+
+    with pytest.raises(SnapshotError) as exc2:
+        read_universe("2026-10-5", db_path=db)
+    assert "2026-10-5" in str(exc2.value)
+
+    with pytest.raises(SnapshotError) as exc3:
+        read_bars(["600519"], "2026-10-5", "2026-10-12", as_of="2026-10-12", db_path=db)
+    assert "2026-10-5" in str(exc3.value)
+
+    with pytest.raises(SnapshotError) as exc4:
+        read_bars(["600519"], "2026-10-01", "2026-10-12", as_of="20261012", db_path=db)
+    assert "20261012" in str(exc4.value)
+
+    with pytest.raises(SnapshotError) as exc5:
+        apply_rebase("600519", 0.9, "2026-10-5", db_path=db)
+    assert "2026-10-5" in str(exc5.value)
+
+
+@pytest.mark.parametrize(
+    "factor", [0.0, -0.5, float("nan"), float("inf"), float("-inf"), None, "abc"]
+)
+def test_apply_rebase_rejects_invalid_factor(tmp_path, factor):
+    """评审修正：factor 必须有限且 > 0，否则 SnapshotError；坏 factor 不得落库。"""
+    db = tmp_path / "market_snapshot.db"
+    write_snapshot_rows("2026-10-09", [_snapshot_row("2026-10-09", "600519")], db_path=db)
+
+    with pytest.raises(SnapshotError) as exc:
+        apply_rebase("600519", factor, "2026-10-10", db_path=db)
+    assert "factor" in str(exc.value)
+
+    assert read_universe("2026-10-09", db_path=db)[0]["close_qfq"] == 10.5  # 未被修改
+
+
+def test_read_bars_coerces_numeric_columns_with_nulls(tmp_path):
+    """评审修正：read_bars 出口数值列 pd.to_numeric(errors="coerce")——NULL 混入仍是 float64。"""
+    db = tmp_path / "market_snapshot.db"
+    write_snapshot_rows(
+        "2026-10-09",
+        [
+            _snapshot_row("2026-10-09", "600519", listed_days=None, list_date=None),
+            _snapshot_row("2026-10-09", "000001", listed_days=100),
+        ],
+        db_path=db,
+    )
+
+    df = read_bars(["600519", "000001"], "2026-10-01", "2026-10-09", as_of="2026-10-09", db_path=db)
+
+    for col in (
+        "open",
+        "high",
+        "low",
+        "close_raw",
+        "close_qfq",
+        "volume",
+        "amount",
+        "pct_chg",
+        "prev_close",
+        "listed_days",
+    ):
+        assert df[col].dtype == "float64", col
+    assert len(df) == 2
+    assert df["listed_days"].isna().sum() == 1  # NULL 保留为 NaN，不丢行不编造
+
+
+def test_set_meta_many_batch_write(tmp_path):
+    """评审修正：set_meta_many 单事务批量写——写入后全部键一次可见，覆盖/空映射安全。"""
+    db = tmp_path / "market_snapshot.db"
+
+    set_meta_many({"last_success_date": "2026-10-13", "last_error": ""}, db_path=db)
+    assert get_all_meta(db_path=db) == {"last_success_date": "2026-10-13", "last_error": ""}
+
+    set_meta_many({"last_error": "boom", "last_error_date": "2026-10-13"}, db_path=db)
+    assert get_all_meta(db_path=db) == {
+        "last_success_date": "2026-10-13",
+        "last_error": "boom",
+        "last_error_date": "2026-10-13",
+    }
+
+    set_meta_many({}, db_path=db)  # 空映射：无操作不报错
+    assert len(get_all_meta(db_path=db)) == 3
+
+
+def test_status_no_calendar_sunday_monday_fallback():
+    """D5 退化补缺：周日 → 上周五；周一 → 周一本身（不得回退到上周五）。"""
+    sunday_fresh = {"last_attempt_at": "2026-10-18T15:31:00", "last_success_date": "2026-10-16"}
+    assert (
+        compute_snapshot_status(sunday_fresh, now=datetime(2026, 10, 18, 19, 0))["stale"] is False
+    )
+
+    sunday_stale = {"last_attempt_at": "2026-10-18T15:31:00", "last_success_date": "2026-10-15"}
+    status = compute_snapshot_status(sunday_stale, now=datetime(2026, 10, 18, 19, 0))
+    assert status["stale"] is True
+    assert status["message"] == "行情快照未更新（数据日期: 2026-10-15）"
+
+    monday_lagging = {"last_attempt_at": "2026-10-19T15:31:00", "last_success_date": "2026-10-16"}
+    monday_status = compute_snapshot_status(monday_lagging, now=datetime(2026, 10, 19, 19, 0))
+    assert monday_status["stale"] is True  # expected = 10-19 本身；上周五不算新鲜
+
+    monday_fresh = {"last_attempt_at": "2026-10-19T15:31:00", "last_success_date": "2026-10-19"}
+    assert (
+        compute_snapshot_status(monday_fresh, now=datetime(2026, 10, 19, 19, 0))["stale"] is False
+    )
+
+
+def test_rebase_factor_threshold_is_strict():
+    """D1 补缺：abs(k-1) > 1e-4 不取等号——恰在阈值不 rebase，超一个 ulp 才 rebase。"""
+    at_threshold = 1.0001  # 1e-4 阈值侧的最近 double（比阈值小约 1.1e-17）
+    above_threshold = math.nextafter(at_threshold, 2.0)
+    assert abs(at_threshold - 1.0) <= 1e-4 < abs(above_threshold - 1.0)  # 钉住边界两侧
+
+    spot = pd.DataFrame({"代码": ["600519", "000001"], "昨收": [at_threshold, above_threshold]})
+    prev_rows = {
+        "600519": {"close_raw": 1.0, "close_qfq": 1.0},
+        "000001": {"close_raw": 1.0, "close_qfq": 1.0},
+    }
+
+    factors = compute_rebase_factors(spot, prev_rows)
+
+    assert set(factors) == {"000001"}
+    assert factors["000001"] == pytest.approx(above_threshold)
+
+
+def test_rebase_skips_zero_basis_without_error():
+    """D1 补缺：历史 close_qfq == 0（坏数据）→ 跳过不除零、不返回。"""
+    spot = pd.DataFrame({"代码": ["600519"], "昨收": [5.0]})
+    prev_rows = {"600519": {"close_raw": 0.0, "close_qfq": 0.0}}
+
+    assert compute_rebase_factors(spot, prev_rows) == {}
+
+
+def test_read_bars_orders_by_date_and_code_and_never_past_as_of(tmp_path):
+    """read_bars 补缺：多票按 (trade_date, code) 升序；as_of 之后的行绝不返回。"""
+    db = tmp_path / "market_snapshot.db"
+    for trade_date in ("2026-10-08", "2026-10-09", "2026-10-10"):
+        write_snapshot_rows(
+            trade_date,
+            [_snapshot_row(trade_date, "600519"), _snapshot_row(trade_date, "000001")],
+            db_path=db,
+        )
+
+    df = read_bars(["600519", "000001"], "2026-10-01", "2026-10-09", as_of="2026-10-10", db_path=db)
+    assert list(zip(df["trade_date"], df["code"], strict=True)) == [
+        ("2026-10-08", "000001"),
+        ("2026-10-08", "600519"),
+        ("2026-10-09", "000001"),
+        ("2026-10-09", "600519"),
+    ]
+    assert max(df["trade_date"]) <= "2026-10-09"  # 表内 10-10 的行不出现在 end 窗口外
+
+    # as_of 早于表内最新数据（历史读取）：as_of 之后的行绝不返回
+    historical = read_bars(["600519"], "2026-10-01", "2026-10-09", as_of="2026-10-09", db_path=db)
+    assert list(historical["trade_date"]) == ["2026-10-08", "2026-10-09"]
+
+    # as_of 晚于表内最新数据 → 整体拒绝（消息含最新数据日期，不返回任何行）
+    with pytest.raises(SnapshotNotFreshError) as exc:
+        read_bars(["600519"], "2026-10-01", "2026-10-11", as_of="2026-10-11", db_path=db)
+    assert "2026-10-10" in str(exc.value)
+
+    # end == as_of == latest：包含边界行
+    inclusive = read_bars(["600519"], "2026-10-01", "2026-10-10", as_of="2026-10-10", db_path=db)
+    assert list(inclusive["trade_date"]) == ["2026-10-08", "2026-10-09", "2026-10-10"]
