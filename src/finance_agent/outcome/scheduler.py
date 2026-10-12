@@ -36,6 +36,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from finance_agent.data.snapshot_job import run_market_snapshot_batch
+from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.ops.jobs import (
     SCHEDULES,
@@ -126,6 +127,15 @@ def _snapshot_job() -> None:
     _with_retry("market_snapshot_daily", "market snapshot", run_market_snapshot_batch)
 
 
+def _factor_monitor_job() -> None:
+    """add-factor-library-and-monitor：因子衰减监控日批（15:45，快照之后）。
+
+    快照 15:30 先落库，监控据此构造面板记录上一交易日 IC 并判定滚动降级；
+    job 幂等（同日重跑覆盖同一 ``(factor, date)``），重试安全。
+    """
+    _with_retry("factor_decay_monitor", "factor decay monitor", run_factor_decay_monitor)
+
+
 def _settle_job() -> None:
     _with_retry("decision_settle_daily", "prediction settle", settle_open_predictions)
 
@@ -194,6 +204,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-factor-library-and-monitor：因子衰减监控（15:45）——快照（15:30）之后、
+    # 结算链（16:00 起）之前；读快照库 + 因子库，无 LLM 调用。
+    scheduler.add_job(
+        _factor_monitor_job,
+        _cron_for("factor_decay_monitor"),
+        id="factor_decay_monitor",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     scheduler.add_job(
         _settle_job,
         _cron_for("decision_settle_daily"),
@@ -238,7 +257,8 @@ def start_scheduler() -> BackgroundScheduler | None:
     scheduler.start()
     _scheduler = scheduler
     logger.info(
-        "decision settle scheduler 已启动(market snapshot 15:30;decision settle 16:00);"
+        "decision settle scheduler 已启动(market snapshot 15:30;factor decay monitor 15:45;"
+        "decision settle 16:00);"
         "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"
         "cohort batch %02d:%02d(开关关闭时记 skipped-disabled,零 LLM 调用)",
         cohort["hour"],

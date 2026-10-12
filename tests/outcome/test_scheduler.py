@@ -172,7 +172,7 @@ class TestCohortJobRegistration:
         mock_sched_cls.return_value = sched
         assert start_scheduler() is sched
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 6, ids
+        assert len(ids) == 7, ids  # 6 → 7：add-factor-library-and-monitor 增 factor_decay_monitor
         assert ids[-1] == "cohort_batch"
         assert set(ids) == {
             "decision_settle_daily",
@@ -181,6 +181,7 @@ class TestCohortJobRegistration:
             "integrity_check",
             "cohort_batch",
             "market_snapshot_daily",
+            "factor_decay_monitor",
         }
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
@@ -475,7 +476,7 @@ class TestMisfireHardening:
     """#57 子项4:进程沉睡/重启错过触发时刻 → 1h 宽限内补火,多次 miss 合并为一次。
 
     默认 misfire_grace_time=1s 下,进程被冻结/重建略过 16:00 即整日丢批;
-    job 幂等(次日补结)所以宽限补火安全。六个日批 job 统一配置。
+    job 幂等(次日补结)所以宽限补火安全。七个日批 job 统一配置。
     """
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
@@ -485,7 +486,7 @@ class TestMisfireHardening:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 6, ids
+        assert len(ids) == 7, ids  # 6 → 7：add-factor-library-and-monitor 增 factor_decay_monitor
         for call in sched.add_job.call_args_list:
             job_id = call.kwargs.get("id")
             assert call.kwargs.get("misfire_grace_time") == 3600, job_id

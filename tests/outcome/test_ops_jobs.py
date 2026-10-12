@@ -33,7 +33,7 @@ from finance_agent.outcome.ops.model import (
 class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 6
+        assert len(JOB_IDS) == 7  # 6 → 7：add-factor-library-and-monitor 增 factor_decay_monitor
         assert all(JOB_LABELS[jid] for jid in JOB_IDS)
 
     def test_market_snapshot_schedule_spec_is_1530_monfri(self):
