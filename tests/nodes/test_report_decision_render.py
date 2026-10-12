@@ -376,6 +376,66 @@ class TestSellTypeSplitRendering:
         md = _format_trade_decision(decision)
         assert "入场价" in md  # None → short 模板（历史兼容）
 
+    def test_short_renders_short_disclosure(self):
+        decision = TradeDecision.model_validate(
+            {
+                "action": "sell",
+                "confidence": 0.55,
+                "sell_type": "short",
+                "entry_price": 640.0,
+                "stop_loss": 700.0,
+                "target_price": 571.0,
+                "reasoning": "做空建仓",
+                "reeval_triggers": ["跌破 570 重估"],
+            }
+        )
+        md = _format_trade_decision(decision)
+        assert "做空披露" in md
+        assert "融资融券信用账户" in md
+        assert "A 股普通证券账户不可执行" in md
+
+    def test_legacy_none_sell_renders_short_disclosure(self):
+        """历史 None 形态同样按做空模板呈现——不披露即把不可执行结构呈现为可执行建议。"""
+        decision = TradeDecision.model_validate(
+            {
+                "action": "sell",
+                "confidence": 0.55,
+                "entry_price": 3.0,
+                "stop_loss": 3.1,
+                "target_price": 2.9,
+                "reasoning": "降低敞口",
+            }
+        )
+        md = _format_trade_decision(decision)
+        assert "做空披露" in md
+
+    def test_exit_does_not_render_short_disclosure(self):
+        decision = TradeDecision.model_validate(
+            {
+                "action": "sell",
+                "confidence": 0.55,
+                "sell_type": "exit",
+                "exit_schedule": "分两批减持",
+                "reasoning": "退出敞口",
+            }
+        )
+        md = _format_trade_decision(decision)
+        assert "做空披露" not in md
+
+    def test_buy_does_not_render_short_disclosure(self):
+        decision = TradeDecision.model_validate(
+            {
+                "action": "buy",
+                "confidence": 0.7,
+                "entry_price": 100.0,
+                "stop_loss": 92.0,
+                "target_price": 120.0,
+                "reasoning": "建仓",
+                "reeval_triggers": ["跌破 92"],
+            }
+        )
+        assert "做空披露" not in _format_trade_decision(decision)
+
 
 class TestWatchTriggerRendering:
     """add-watch-trigger-tracking：watch 触发位行/入池声明/数据真空提示。
