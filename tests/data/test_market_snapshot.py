@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+import sqlite3
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -915,6 +916,55 @@ def test_set_meta_many_batch_write(tmp_path):
     assert len(get_all_meta(db_path=db)) == 3
 
 
+def test_set_meta_many_delete_keys_removes_and_writes_in_one_call(tmp_path):
+    """评审修正 2：set_meta_many(delete_keys=...) 单事务「先删后写」。
+
+    成功路径一次调用同时清失败标记并写成功键——分两步会在两次提交之间产生
+    「成功已写、错误未清」的中间态，状态端点可能闪告警横幅。断言单次调用后的
+    终态即全部就位；空 delete_keys 不触碰既有键。
+    """
+    db = tmp_path / "market_snapshot.db"
+    set_meta_many(
+        {"last_error": "boom", "last_error_date": "2026-10-12", "last_success_date": "2026-10-09"},
+        db_path=db,
+    )
+
+    set_meta_many(
+        {"last_success_date": "2026-10-13", "last_attempt_at": "2026-10-13T15:31:00"},
+        db_path=db,
+        delete_keys=("last_error", "last_error_date"),
+    )
+    assert get_all_meta(db_path=db) == {
+        "last_success_date": "2026-10-13",
+        "last_attempt_at": "2026-10-13T15:31:00",
+    }
+
+    set_meta_many({"trade_calendar": "[]"}, db_path=db, delete_keys=())  # 空删除集：无操作
+    assert get_all_meta(db_path=db) == {
+        "last_success_date": "2026-10-13",
+        "last_attempt_at": "2026-10-13T15:31:00",
+        "trade_calendar": "[]",
+    }
+
+    set_meta_many({}, db_path=db, delete_keys=("trade_calendar", "missing"))  # 只删不写
+    assert get_all_meta(db_path=db) == {
+        "last_success_date": "2026-10-13",
+        "last_attempt_at": "2026-10-13T15:31:00",
+    }
+
+
+def test_set_meta_many_delete_keys_rolls_back_together(tmp_path):
+    """delete 与 insert 必须同一事务：插入失败（value NOT NULL）→ 删除一并回滚。"""
+    db = tmp_path / "market_snapshot.db"
+    set_meta_many({"last_error": "boom", "keep": "1"}, db_path=db)
+    before = get_all_meta(db_path=db)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        set_meta_many({"last_success_date": None}, db_path=db, delete_keys=("keep",))
+
+    assert get_all_meta(db_path=db) == before  # 删除未随半途失败落库
+
+
 def test_status_no_calendar_sunday_monday_fallback():
     """D5 退化补缺：周日 → 上周五；周一 → 周一本身（不得回退到上周五）。"""
     sunday_fresh = {"last_attempt_at": "2026-10-18T15:31:00", "last_success_date": "2026-10-16"}
@@ -1010,7 +1060,11 @@ def test_delete_meta_removes_keys_in_one_transaction(tmp_path):
 
 
 def test_latest_snapshot_date_before_excludes_bound_date(tmp_path):
-    """同日重跑基线：``before`` 取严格早于该日的最大交易日（不含当日已写行）。"""
+    """同日重跑基线：``before`` 取严格早于该日的最大交易日（不含当日已写行）。
+
+    非规范 ``before``（"20261013"、"2026-10-5"）→ ``SnapshotError``（评审修正：
+    日期入参一律严格 ``YYYY-MM-DD``，与读取接口同款 fail loud）。
+    """
     db = tmp_path / "market_snapshot.db"
     write_snapshot_rows("2026-10-12", [_snapshot_row("2026-10-12", "600519")], db_path=db)
     write_snapshot_rows("2026-10-13", [_snapshot_row("2026-10-13", "600519")], db_path=db)
@@ -1019,6 +1073,15 @@ def test_latest_snapshot_date_before_excludes_bound_date(tmp_path):
     assert latest_snapshot_date(db_path=db, before="2026-10-13") == "2026-10-12"
     assert latest_snapshot_date(db_path=db, before="2026-10-12") is None
     assert latest_snapshot_date(db_path=db, before="2026-10-14") == "2026-10-13"
+
+    with pytest.raises(SnapshotError) as exc:
+        latest_snapshot_date(db_path=db, before="20261013")
+    assert "20261013" in str(exc.value)
+    assert "YYYY-MM-DD" in str(exc.value)
+
+    with pytest.raises(SnapshotError) as exc2:
+        latest_snapshot_date(db_path=db, before="2026-10-5")
+    assert "2026-10-5" in str(exc2.value)
 
 
 def test_reset_snapshot_db_clears_all_three_tables(tmp_path):

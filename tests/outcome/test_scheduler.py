@@ -80,7 +80,7 @@ class TestStartGating:
         mock_sched_cls.return_value = sched
         result = start_scheduler()
         assert result is sched
-        # Δ3T5：job 数增至 5，末次 add_job 不再是 settle——按 id 取，断言不变
+        # Δ3T5+add-market-snapshot T7：job 数增至 6，末次 add_job 不再是 settle——按 id 取，断言不变
         # CronTrigger: 工作日 16:00（按字段断言，不锁 __str__ 形态）
         assert _job_field(sched, "decision_settle_daily", "hour") == ["16"]
         assert _job_field(sched, "decision_settle_daily", "minute") == ["0"]

@@ -177,22 +177,36 @@ def set_meta(key: str, value: str, db_path: str | Path | None = None) -> None:
         conn.close()
 
 
-def set_meta_many(mapping: dict[str, str], db_path: str | Path | None = None) -> None:
-    """批量写入 snapshot_meta 键值（单事务单 commit，评审修正）。
+def set_meta_many(
+    mapping: dict[str, str],
+    db_path: str | Path | None = None,
+    delete_keys: tuple[str, ...] = (),
+) -> None:
+    """批量写 + 可选同事务删 snapshot_meta 键（单事务单 commit，评审修正）。
 
-    成功路径一次落 ``last_success_date`` + 清 ``last_error`` 等键：逐键 ``set_meta``
-    会在两次提交之间产生「成功已写、错误未清」的中间态，状态端点可能闪告警横幅。
+    ``delete_keys`` 先删、``mapping`` 后写，同一连接同一提交；任一步失败整体回滚。
+    成功路径一次落 ``last_success_date`` 等并清 ``last_error``/``last_error_date``：
+    分两步（先 ``delete_meta`` 再写）会在两次提交之间产生「成功已写、错误未清」
+    的中间态，状态端点可能闪告警横幅。空 ``mapping`` 且空 ``delete_keys`` → 无操作。
     """
     init_snapshot_db(db_path)
-    if not mapping:
+    if not mapping and not delete_keys:
         return
     conn = _connect(db_path)
     try:
-        conn.executemany(
-            "INSERT INTO snapshot_meta (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            list(mapping.items()),
-        )
+        if delete_keys:
+            placeholders = ", ".join("?" * len(delete_keys))
+            conn.execute(
+                # placeholders 仅为 "?" 序列；键值全参数化
+                f"DELETE FROM snapshot_meta WHERE key IN ({placeholders})",  # noqa: S608
+                list(delete_keys),
+            )
+        if mapping:
+            conn.executemany(
+                "INSERT INTO snapshot_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                list(mapping.items()),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -201,8 +215,8 @@ def set_meta_many(mapping: dict[str, str], db_path: str | Path | None = None) ->
 def delete_meta(keys: Iterable[str], db_path: str | Path | None = None) -> int:
     """删除若干 meta 键（单事务一次删清，返回实际删除行数）。
 
-    成功路径清 ``last_error``/``last_error_date`` 用（T6 评审修正）：与
-    ``set_meta_many`` 的批量写配套，避免逐键删除时的中间态。
+    独立删键工具；日批成功路径已改用 ``set_meta_many(..., delete_keys=...)``
+    的「删+写」单事务（评审修正 2），本函数保留供只需删键的场景使用。
     """
     init_snapshot_db(db_path)
     key_list = [str(key) for key in keys]

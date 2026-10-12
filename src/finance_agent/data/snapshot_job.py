@@ -16,7 +16,8 @@
 7. master 刷新：名单为空或每周一 → ``fetch_listing_info`` + upsert；拉取失败只
    WARN，不失败整批；
 8. 成功 meta：``last_success_date`` / ``last_attempt_at`` / ``trade_calendar``
-   （本次拉到才写）一次批量写，并清 ``last_error``/``last_error_date``；
+   （本次拉到才写）与清 ``last_error``/``last_error_date`` 合并为**一次**
+   ``set_meta_many(..., delete_keys=...)``（单事务「先删后写」，无中间态）；
 9. 失败路径：2–8 任一步异常 → 写 ``last_error``/``last_error_date``/
    ``last_attempt_at`` 后**重抛**（交 ops ``run_job`` 记 failed、scheduler 重试；
    重试成功则 meta 被成功路径覆盖）。
@@ -41,7 +42,6 @@ from finance_agent.data.snapshot import (
     apply_rebase,
     build_snapshot_rows,
     compute_rebase_factors,
-    delete_meta,
     get_security_master,
     latest_snapshot_date,
     read_universe,
@@ -144,9 +144,9 @@ def run_market_snapshot_batch(
         }
         if calendar is not None:
             meta["trade_calendar"] = json.dumps(calendar)
-        # 先清失败标记再写成功键：避免「成功已写、错误未清」窗口内 D5 继续告警
-        delete_meta(_ERROR_META_KEYS, db_path=db_path)
-        set_meta_many(meta, db_path=db_path)
+        # 单次调用内「先删失败标记、后写成功键」（同一事务）：不得分两步提交，
+        # 否则中间态会让 D5 在成功已写入后继续按 last_error_date 告警
+        set_meta_many(meta, db_path=db_path, delete_keys=_ERROR_META_KEYS)
 
         return {
             "trade_date": trade_date,

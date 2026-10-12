@@ -525,7 +525,8 @@ class TestMarketSnapshotBatch:
             run_market_snapshot_batch(_D3, client=client, db_path=db)
 
         meta = get_all_meta(db)
-        assert meta["last_error_date"] == _D3
+        # 契约：失败标记取北京「今天」，与批参数 trade_date 无关（D5 按当日告警）
+        assert meta["last_error_date"] == _today_beijing()
         assert meta["last_error"] == "SnapshotError: 全市场行情拉取失败"
         assert "last_attempt_at" in meta
         assert "last_success_date" not in meta
