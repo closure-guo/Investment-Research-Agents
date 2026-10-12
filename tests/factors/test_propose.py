@@ -17,14 +17,19 @@ from __future__ import annotations
 
 import pytest
 
+from finance_agent.factors import propose
 from finance_agent.factors.propose import (
     CATEGORIES,
+    GatewayProposalClient,
     ProposalBatchResult,
     ProposalResponseError,
     propose_broad_batch,
     propose_deep_improvement,
+    route_proposal_call,
     validate_proposal_payload,
 )
+from finance_agent.llm.errors import UnsupportedCapabilityError
+from finance_agent.llm.types import Capability, ModelProfile
 
 HYPOTHESIS_OK = "短期均值回复效应：收盘价偏离其短期均值后存在回归倾向，成交量放大时更显著。"
 BAD_EXPRESSION = "unknown_op(close, 1)"
@@ -233,3 +238,171 @@ class TestRepairLoop:
         with pytest.raises(ValueError):
             propose_broad_batch(n=19, client=client, bucket_stats={}, operator_ic={})
         assert client.calls == []
+
+
+def _stub_capability(*, json_schema: str = "json_mode", max_output: int = 8192) -> Capability:
+    return Capability(
+        tools="single",
+        tool_choice_required=False,
+        streaming=True,
+        streaming_tool_calls=True,
+        json_schema=json_schema,  # type: ignore[arg-type]
+        supports_system_role=True,
+        reasoning_field=None,
+        reasoning_must_echo_on_tool=False,
+        reasoning_forced=False,
+        max_context=128000,
+        max_output=max_output,
+        extra_body_allowed=True,
+    )
+
+
+def _stub_profile(
+    name: str, *, json_schema: str = "json_mode", base_url: str | None = None
+) -> ModelProfile:
+    return ModelProfile(
+        name=name,
+        provider="openai",
+        model=f"openai/{name}",
+        base_url=base_url,
+        api_key=None,
+        capability=_stub_capability(json_schema=json_schema),
+    )
+
+
+class TestTierRouting:
+    """P1：broad→quick / deep→deep 的双档路由（PolicyRouter 调用点）。"""
+
+    def test_route_broad_prefers_quick_tier(self, monkeypatch):
+        seen = []
+
+        def fake_resolve(*, purpose, llm_config=None):
+            seen.append(purpose)
+            return _stub_profile(f"env:{purpose}")
+
+        monkeypatch.setattr(propose, "resolve_profile", fake_resolve)
+        result = route_proposal_call("broad")
+        assert result.primary.name == "env:quick"
+        assert [p.name for p in result.fallback_chain] == ["env:deep"]
+        assert seen == ["quick", "deep"]
+
+    def test_route_deep_prefers_deep_tier(self, monkeypatch):
+        seen = []
+
+        def fake_resolve(*, purpose, llm_config=None):
+            seen.append(purpose)
+            return _stub_profile(f"env:{purpose}")
+
+        monkeypatch.setattr(propose, "resolve_profile", fake_resolve)
+        result = route_proposal_call("deep")
+        assert result.primary.name == "env:deep"
+        assert [p.name for p in result.fallback_chain] == ["env:quick"]
+        assert seen == ["deep", "quick"]
+
+    def test_route_passes_request_config_to_both_tiers(self, monkeypatch):
+        seen = []
+        config = {"model": "m", "baseUrl": "http://llm.invalid"}
+
+        def fake_resolve(*, purpose, llm_config=None):
+            seen.append((purpose, llm_config))
+            return _stub_profile(f"env:{purpose}")
+
+        monkeypatch.setattr(propose, "resolve_profile", fake_resolve)
+        route_proposal_call("deep", llm_config=config)
+        assert seen == [("deep", config), ("quick", config)]
+
+    def test_route_unknown_mode_raises(self):
+        with pytest.raises(ValueError):
+            route_proposal_call("sideways")
+
+    def test_route_falls_to_deep_tier_when_quick_lacks_json(self, monkeypatch):
+        """能力不满足时切换至满足能力的候选（REQUIRED_CAPS 生效）。"""
+
+        def fake_resolve(*, purpose, llm_config=None):
+            if purpose == "quick":
+                return _stub_profile("quick-plain", json_schema="none")
+            return _stub_profile("deep-json")
+
+        monkeypatch.setattr(propose, "resolve_profile", fake_resolve)
+        result = route_proposal_call("broad")
+        assert result.primary.name == "deep-json"
+
+    def test_route_raises_typed_error_when_no_tier_satisfies_json(self, monkeypatch):
+        monkeypatch.setattr(
+            propose,
+            "resolve_profile",
+            lambda **kw: _stub_profile("no-json", json_schema="none"),
+        )
+        with pytest.raises(UnsupportedCapabilityError):
+            route_proposal_call("broad")
+
+    def test_batch_trace_metadata_carries_router_decision(self, monkeypatch):
+        monkeypatch.setattr(
+            propose, "resolve_profile", lambda **kw: _stub_profile("env:openai/main")
+        )
+        client = StubClient([_payload()])
+        result = propose_broad_batch(
+            n=20,
+            client=client,
+            llm_config={"model": "m", "baseUrl": "http://llm.invalid"},
+            bucket_stats={},
+            operator_ic={},
+        )
+        router = result.trace_metadata["router"]
+        assert router["profile"] == "env:openai/main"
+        assert router["capability"]["json_schema"] == "json_mode"
+
+
+class TestGatewayClient:
+    """默认客户端的 gateway 调用契约（monkeypatch，零网络）。"""
+
+    def _patch(self, monkeypatch, profile):
+        monkeypatch.setattr(propose, "resolve_profile", lambda **kw: profile)
+        captured: dict = {}
+
+        def fake_complete_text(messages, **kwargs):
+            captured["messages"] = messages
+            captured.update(kwargs)
+            return captured.get("text", '{"proposals": []}'), {}
+
+        monkeypatch.setattr(propose, "complete_text", fake_complete_text)
+        return captured
+
+    def test_pins_gateway_call_purpose_and_trace_metadata(self, monkeypatch):
+        profile = _stub_profile("env:openai/quick-x", base_url="http://llm.invalid")
+        captured = self._patch(monkeypatch, profile)
+        client = GatewayProposalClient(mode="broad")
+        payload = client.complete_json(
+            "PROMPT-文本", purpose="factor_proposal", metadata={"mode": "broad"}
+        )
+        assert payload == {"proposals": []}
+        assert captured["messages"] == [{"role": "user", "content": "PROMPT-文本"}]
+        assert captured["purpose"] == "factor_proposal"
+        # env 解析出的端点 profile → 请求级 llm_config 钉死本次调用
+        assert captured["llm_config"]["model"] == profile.model
+        assert captured["llm_config"]["baseUrl"] == "http://llm.invalid"
+        meta = captured["trace"]["metadata"]
+        assert meta["purpose_tag"] == "factor_proposal"
+        assert meta["mode"] == "broad"
+        assert meta["router"]["profile"] == profile.name
+
+    def test_preset_profile_pinned_via_preset_kwarg(self, monkeypatch):
+        profile = _stub_profile("deepseek-official", base_url=None)
+        captured = self._patch(monkeypatch, profile)
+        client = GatewayProposalClient(mode="deep")
+        client.complete_json("p", purpose="factor_proposal", metadata={})
+        assert captured["preset"] == "deepseek-official"
+        assert captured.get("llm_config") is None
+
+    def test_unparsable_gateway_text_raises_response_error(self, monkeypatch):
+        profile = _stub_profile("env:openai/quick-x", base_url="http://llm.invalid")
+        captured = self._patch(monkeypatch, profile)
+        captured["text"] = "这不是 JSON"
+        client = GatewayProposalClient(mode="broad")
+        with pytest.raises(ProposalResponseError) as exc_info:
+            client.complete_json("p", purpose="factor_proposal", metadata={})
+        assert exc_info.value.raw_text == "这不是 JSON"
+
+    def test_unknown_mode_rejected_at_construction(self):
+        with pytest.raises(ValueError):
+            GatewayProposalClient(mode="sideways")

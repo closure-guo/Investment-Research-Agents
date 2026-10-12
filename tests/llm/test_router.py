@@ -153,3 +153,31 @@ def test_router_result_is_frozen_dataclass() -> None:
     result = select_profile(purpose="react", candidates=[_profile("a")])
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.primary = _profile("b")  # type: ignore[misc]
+
+
+# ── add-factor-proposal-agent（T2 追加）：factor_proposal 用途注册与双档路由 ──
+
+
+def test_factor_proposal_required_caps_registered() -> None:
+    """新用途注册：JSON 结构化合同为硬要求（因子提案必须结构化输出）。"""
+    assert REQUIRED_CAPS["factor_proposal"] == {"json_schema": {"json_mode", "strict_schema"}}
+
+
+def test_factor_proposal_rejects_json_none_and_raises_when_exhausted() -> None:
+    """Scenario（llm-policy-router delta）：不满足能力的候选出局；链耗尽 typed error。"""
+    no_json = _profile("no_json", json_schema="none")
+    json_ok = _profile("json_ok", json_schema="json_mode")
+    with pytest.raises(UnsupportedCapabilityError):
+        select_profile(purpose="factor_proposal", candidates=[no_json])
+    result = select_profile(purpose="factor_proposal", candidates=[json_ok, no_json])
+    assert result.primary.name == "json_ok"
+    assert all(p.name != "no_json" for p in result.fallback_chain)
+
+
+def test_factor_proposal_preserves_input_order_for_tier_priority() -> None:
+    """双档路由依赖保序：候选序 [quick, deep] → primary=quick（不按 max_output 重排）。"""
+    quick = _profile("quick", json_schema="json_mode", max_output=16384)
+    deep = _profile("deep", json_schema="json_mode", max_output=4096)
+    result = select_profile(purpose="factor_proposal", candidates=[quick, deep])
+    assert result.primary.name == "quick"
+    assert [p.name for p in result.fallback_chain] == ["deep"]
