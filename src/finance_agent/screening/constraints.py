@@ -5,12 +5,21 @@
 - ``MIN_TRADING_DAYS``：上市交易天数下限——上市 < 60 个交易日的次新股剔除；
 - ``MIN_AVG_AMOUNT_20D``：近 20 日日均成交额下限（元）——低于即流动性不足；
 - ``MIN_LIQUIDITY_HISTORY_DAYS``：流动性判定所需的成交额历史长度（交易日）——
-  快照积累不足该长度时过滤层返回 ``DATA_MISSING``（fail-closed）。
+  快照积累不足该长度时 ``DATA_MISSING``（fail-closed）。
 
-过滤层在**调用期**读取 ``DEFAULT_THRESHOLDS`` 模块属性（见 ``filters.py`` F4
-口径），因此修改上方常量（或测试中 monkeypatch 本属性）即改变过滤行为，无需改
-任何其他文件。后续交易执行层的风控门禁 SHALL import 本模块复用约束定义，禁止
-复制常量到执行层代码。
+消费方（各字段去留精确到函数，避免误解）：
+
+- ``filter_universe`` 调用期读 ``DEFAULT_THRESHOLDS`` 的 ``min_trading_days`` /
+  ``min_avg_amount_20d``（模块属性可被 monkeypatch）；它**不读**
+  ``min_liquidity_history_days``——该函数只吃已算好的派生量（``CandidateRecord``）；
+- ``build_candidate_record`` 调用期读 ``DEFAULT_THRESHOLDS``（或显式
+  ``thresholds=`` 覆盖）的 ``min_liquidity_history_days``，经
+  ``avg_amount_20d(amounts, history_days=...)`` 决定均值窗口长度；``avg_amount_20d``
+  在 ``history_days=None`` 时调用期读本模块 ``MIN_LIQUIDITY_HISTORY_DAYS`` 常量。
+
+因此修改上方常量（或测试中 monkeypatch ``DEFAULT_THRESHOLDS`` /
+``MIN_LIQUIDITY_HISTORY_DAYS``）即改变过滤行为，无需改任何其他文件。后续交易执行层的
+风控门禁 SHALL import 本模块复用约束定义，禁止复制常量到执行层代码。
 """
 
 from __future__ import annotations

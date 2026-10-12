@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
+
 from finance_agent.screening import constraints
 from finance_agent.screening.constraints import (
     DEFAULT_THRESHOLDS,
@@ -475,3 +477,101 @@ def test_monkeypatch_does_not_leak_across_tests():
     """monkeypatch 撤销后行为回到默认口径（模块属性读取在调用期、无残留缓存）。"""
     assert FilterThresholds() == constraints.DEFAULT_THRESHOLDS
     assert filter_universe([_rec(avg_amount_20d=60_000_000.0)])[0].passed is True
+
+
+# ── Review 修复 A1：直接构造记录的非有限值 fail-closed ──────────────────────
+# 派生路径（trading_days_listed/avg_amount_20d）不会产出非有限值；但直接构造的
+# CandidateRecord 可携带 NaN/±inf。比较语义下 NaN < x 恒假、inf < x 恒假 → 旧实现
+# 会「通过」；非有限值不可信 → 一律 DATA_MISSING（与 None 同拦）。
+
+
+def test_nan_avg_direct_record_is_data_missing():
+    """avg_amount_20d=NaN 直接构造 → DATA_MISSING（不得因 NaN 比较恒假而漏过）。"""
+    decision = filter_universe([_rec(avg_amount_20d=float("nan"))])[0]
+    assert decision.passed is False
+    assert decision.reasons == (RejectReason.DATA_MISSING,)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_avg_direct_record_is_data_missing(bad: float):
+    """avg_amount_20d ∈ {NaN, +inf, −inf} → DATA_MISSING，且不产出 ILLIQUID。"""
+    decision = filter_universe([_rec(avg_amount_20d=bad)])[0]
+    assert decision.reasons == (RejectReason.DATA_MISSING,)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_days_direct_record_is_data_missing(bad: float):
+    """trading_days_listed ∈ {NaN, +inf, −inf} → DATA_MISSING，且不产出 IPO_RECENT。"""
+    decision = filter_universe([_rec(trading_days_listed=bad)])[0]
+    assert decision.reasons == (RejectReason.DATA_MISSING,)
+
+
+def test_non_finite_values_merge_missing_reason_in_order():
+    """非有限值与其他命中并存：DATA_MISSING 单次、按声明顺序排末位。"""
+    decision = filter_universe(
+        [_rec(is_st=True, trading_days_listed=float("inf"), avg_amount_20d=float("nan"))]
+    )[0]
+    assert decision.reasons == (RejectReason.ST_FLAG, RejectReason.DATA_MISSING)
+
+
+# ── Review 修复 A2：min_liquidity_history_days 生效（不再 no-op） ────────────
+
+
+def test_avg_amount_20d_history_days_parameter_makes_19_sufficient():
+    """history_days=19 → 19 个值即可判定（均值 10.0）；默认口径下同一输入仍 None。"""
+    amounts = [float(value) for value in range(1, 20)]
+    assert avg_amount_20d(amounts, history_days=19) == 10.0
+    assert avg_amount_20d(amounts) is None
+
+
+def test_avg_amount_20d_history_days_sets_window_length():
+    """history_days 同时决定窗口长度：25 个值 history_days=5 → 最后 5 个均值 23.0。"""
+    amounts = [float(value) for value in range(1, 26)]
+    assert avg_amount_20d(amounts, history_days=5) == 23.0
+
+
+def test_avg_amount_20d_history_days_non_positive_fail_closed():
+    """history_days ≤ 0 为无效配置 → None（fail-closed，不退回「全序列均值」）。"""
+    assert avg_amount_20d([1.0, 2.0], history_days=0) is None
+    assert avg_amount_20d([1.0, 2.0], history_days=-1) is None
+
+
+def test_avg_amount_20d_default_history_days_reads_module_constant(monkeypatch):
+    """history_days=None（默认）→ 调用期读 constraints.MIN_LIQUIDITY_HISTORY_DAYS。"""
+    monkeypatch.setattr(constraints, "MIN_LIQUIDITY_HISTORY_DAYS", 5)
+    assert avg_amount_20d([2.0] * 5) == 2.0
+    assert avg_amount_20d([2.0] * 4) is None
+
+
+def test_build_candidate_record_reads_default_thresholds_history_days(monkeypatch):
+    """monkeypatch DEFAULT_THRESHOLDS.min_liquidity_history_days=10 → 10 笔即出均额。"""
+    calendar = _calendar(60)
+    row = {"code": "000001", "list_date": calendar[0]}
+    short = [_THRESHOLD] * 10
+    monkeypatch.setattr(
+        constraints,
+        "DEFAULT_THRESHOLDS",
+        FilterThresholds(min_liquidity_history_days=10),
+    )
+    record = build_candidate_record(row=row, amounts=short, calendar=calendar, as_of=calendar[-1])
+    assert record.avg_amount_20d == _THRESHOLD
+    assert filter_universe([record])[0].passed is True
+
+
+def test_build_candidate_record_explicit_thresholds_history_days():
+    """显式 thresholds= 也生效（默认 20 笔不足 → None；显式 10 笔 → 值）。"""
+    calendar = _calendar(60)
+    row = {"code": "000001", "list_date": calendar[0]}
+    short = [_THRESHOLD] * 10
+    by_default = build_candidate_record(
+        row=row, amounts=short, calendar=calendar, as_of=calendar[-1]
+    )
+    assert by_default.avg_amount_20d is None
+    explicit = build_candidate_record(
+        row=row,
+        amounts=short,
+        calendar=calendar,
+        as_of=calendar[-1],
+        thresholds=FilterThresholds(min_liquidity_history_days=10),
+    )
+    assert explicit.avg_amount_20d == _THRESHOLD
