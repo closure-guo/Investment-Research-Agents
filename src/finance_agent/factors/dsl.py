@@ -25,6 +25,11 @@
 
 字段语义：``open/high/low/close/volume/amount`` 均为**前复权口径**（复权由数据层
 在写入快照前完成，DSL 层不感知，也不接受未复权数据）。
+
+**AST 来源不变量**：所有受支持的 AST 均由 ``parse()`` 产出（或其 ``serialize`` →
+``parse`` round-trip 结果）；``parse`` 保证 ``Call.args`` 非空（空参数列表在解析期
+即拒收）。AST 工具函数对不变量之外的防御性构造（如手工零参 ``Call``）仍给出全定义
+结果（``ast_depth(Call("add", ())) == 1``），但此类形态不属于支持面。
 """
 
 from __future__ import annotations
@@ -147,9 +152,13 @@ type AstNode = Field | Number | Call
 
 
 def ast_depth(node: AstNode) -> int:
-    """D3 深度口径：叶子（Field/Number）深度 1；Call = 1 + max(子节点深度)。"""
+    """D3 深度口径：叶子（Field/Number）深度 1；Call = 1 + max(子节点深度)。
+
+    全定义（total）：零参 ``Call``（``parse`` 不可能产出，见模块 docstring
+    「AST 来源不变量」）深度按 1 计，不抛裸 ``ValueError``。
+    """
     if isinstance(node, Call):
-        return 1 + max(ast_depth(arg) for arg in node.args)
+        return 1 + max((ast_depth(arg) for arg in node.args), default=0)
     return 1
 
 
@@ -358,12 +367,23 @@ def parse(expr: str, *, enforce_complexity: bool = True) -> AstNode:
     ``enforce_complexity=False`` **仅供工具与验证旁路**（如 Alpha101 公开公式的
     round-trip 核对——它们普遍超出上限）；**不得从提案（LLM 因子提案）路径传入
     False**，否则复杂度硬约束形同虚设。
+
+    错误契约恒为 ``ValueError`` 家族：深嵌套触发解释器递归栈溢出
+    （``RecursionError``）时转译为 ``FactorComplexityError``（消息形如
+    「表达式嵌套过深（> 上限 4 层）」），不泄漏 ``RecursionError``；该转译与
+    ``enforce_complexity`` 取值无关——``False`` 旁路只跳过上限检查，不豁免
+    解释器物理栈限。
     """
     if not expr.strip():
         raise DSLParseError("表达式为空", 0)
-    node = _Parser(_tokenize(expr)).parse_root()
-    if enforce_complexity:
-        _check_complexity(node)
+    try:
+        node = _Parser(_tokenize(expr)).parse_root()
+        if enforce_complexity:
+            _check_complexity(node)
+    except RecursionError as exc:
+        raise FactorComplexityError(
+            f"复杂度超限：表达式嵌套过深（> 上限 {MAX_AST_DEPTH} 层）"
+        ) from exc
     return node
 
 

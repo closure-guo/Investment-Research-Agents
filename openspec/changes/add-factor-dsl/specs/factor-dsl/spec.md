@@ -4,7 +4,7 @@
 
 ### Requirement: 因子表达式可解析契约
 
-系统 SHALL 提供因子 DSL 解析器，将字符串表达式解析为 AST；支持的算子集合 SHALL 显式枚举（初版：`ts_mean/ts_std/ts_corr/ts_rank/delta/rank/zscore/add/sub/mul/div/max/min/abs/log`），行情字段 SHALL 限定价量六字段且语义为前复权口径；任何不在枚举内的算子或字段 SHALL 在解析期报错。
+系统 SHALL 提供因子 DSL 解析器，将字符串表达式解析为 AST；支持的算子集合 SHALL 显式枚举（初版：`ts_mean/ts_std/ts_corr/ts_rank/delta/rank/zscore/add/sub/mul/div/max/min/abs/log`），行情字段 SHALL 限定价量六字段：`open/high/low/close/volume/amount`（均前复权口径）；任何不在枚举内的算子或字段 SHALL 在解析期报错。
 
 #### Scenario: 合法表达式解析
 

@@ -512,3 +512,48 @@ def test_isomorphic_mixed_association_and_numbers():
     a = parse("add(close, add(volume, 1))")
     b = parse("add(volume, add(1, close))")
     assert is_subtree_isomorphic(a, b) is True
+
+
+# ── Review 修复回归：深嵌套转译 / AST 工具全域性 / 规范化非源形态 ─────────────
+
+
+def test_pathological_nesting_raises_complexity_error_not_recursion_error():
+    """~2000 层嵌套：解释器 RecursionError 必须被转译为 FactorComplexityError。
+
+    parse 的错误契约是 ValueError 家族；深嵌套不得泄漏裸 ``RecursionError``
+    （``pytest.raises(FactorComplexityError)`` 本身即断言不是 RecursionError）。
+    """
+    expr = "abs(" * 2000 + "close" + ")" * 2000
+    with pytest.raises(FactorComplexityError) as excinfo:
+        parse(expr)
+    assert str(excinfo.value) == "复杂度超限：表达式嵌套过深（> 上限 4 层）"
+
+
+def test_normal_depth_violation_message_stays_verbatim():
+    """对照钉住：正常深度 5 超限路径消息逐字不变（嵌套转译不得污染该路径）。"""
+    with pytest.raises(FactorComplexityError) as excinfo:
+        parse("abs(rank(zscore(ts_mean(close, 10))))")
+    message = str(excinfo.value)
+    assert "深度 5 > 上限 4" in message
+    assert "嵌套过深" not in message
+
+
+def test_ast_depth_is_total_for_zero_arg_call():
+    """全域性：零参 Call（parse 不可能产出，防御性构造）深度为 1，不抛裸 ValueError。"""
+    assert ast_depth(Call("add", ())) == 1
+    assert ast_depth(Call("abs", (Call("add", ()),))) == 2
+
+
+def test_normalized_flat_form_is_not_a_parseable_source_form():
+    """负向钉住 normalize/serialize 边界：展平多参形态是比较/查重键，不可 parse 回读。
+
+    规范化输出超出 D2 元数表（``add`` 要求 2 参）→ 回读必抛元数 ``DSLParseError``；
+    round-trip 契约只对未规范化的 AST 成立。
+    """
+    flat = normalize(parse("add(add(close, open), volume)"))
+    assert serialize(flat) == "add(close,open,volume)"
+    with pytest.raises(DSLParseError) as excinfo:
+        parse(serialize(flat))
+    message = str(excinfo.value)
+    assert "需要 2 个参数" in message
+    assert "实际 3 个" in message
