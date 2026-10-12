@@ -28,8 +28,20 @@ from finance_agent.factors.dsl import (
     parse,
     serialize,
 )
-from finance_agent.factors.eval_engine import MarketPanel
-from finance_agent.factors.library import add_factor, list_active_factors, list_events, list_factors
+from finance_agent.factors.eval_engine import (
+    MarketPanel,
+    evaluate,
+    forward_returns,
+    rank_ic_series,
+)
+from finance_agent.factors.library import (
+    add_factor,
+    list_active_factors,
+    list_events,
+    list_factors,
+    list_ic_series,
+    record_ic,
+)
 from finance_agent.factors.validate import (
     AdmissionResult,
     GateResult,
@@ -37,8 +49,11 @@ from finance_agent.factors.validate import (
     admit_candidates,
     benjamini_hochberg_adjust,
     check_computability,
+    check_out_of_sample,
+    check_pool_increment,
     check_significance,
     check_single_factor,
+    train_validation_split,
 )
 
 _SEED_EXPRESSION = "ts_mean(close,10)"
@@ -559,3 +574,294 @@ def test_admit_candidates_fifty_random_expressions_admits_under_five(tmp_path):
     rejected = [result for result in results if result.status == "rejected"]
     assert len(rejected) == _NOISE_BATCH_SIZE - len(active)
     assert all(result.rejected_gate is not None for result in rejected)
+
+
+# ── 闸④ 池级增量 + 闸⑤ 样本外（E5/E6，T5） ─────────────────────────────────
+
+
+def _indexed_ic(values: np.ndarray, *, start: str = "2026-03-02") -> pd.Series:
+    """ndarray → 规范交易日索引的 IC 序列（升序、逐日）。"""
+    dates = [
+        (date.fromisoformat(start) + timedelta(days=offset)).isoformat()
+        for offset in range(values.size)
+    ]
+    return pd.Series(values, index=dates, dtype="float64")
+
+
+def _correlated_ic(base: np.ndarray, *, rho: float, seed: int) -> np.ndarray:
+    """与 ``base`` 的 Pearson 相关恰为 ``rho`` 的同长序列（正交化后按比例合成）。"""
+    rng = np.random.default_rng(seed)
+    a = base - base.mean()
+    a = a / np.sqrt((a**2).sum())
+    b = rng.normal(size=base.size)
+    b = b - b.mean()
+    b = b - (b * a).sum() * a  # 与 a 正交
+    b = b / np.sqrt((b**2).sum())
+    return rho * a + np.sqrt(1.0 - rho**2) * b
+
+
+def _pool_panel(
+    *,
+    dates: int = 60,
+    codes: int = 40,
+    seed: int = 777,
+    beta_volume: float = 0.03,
+    beta_amount: float = 0.0,
+    noise: float = 0.005,
+) -> MarketPanel:
+    """次日收益由 volume/amount 的横截面 zscore 驱动（系数可调）的合成面板。
+
+    ``beta_amount=0`` 时 amount 与收益无关（加入池只会稀释组合 IR → 闸④拒收）。
+    """
+    rng = np.random.default_rng(seed)
+    volume = rng.normal(size=(dates, codes))
+    amount = rng.normal(size=(dates, codes))
+    z_volume = (volume - volume.mean(axis=1, keepdims=True)) / volume.std(
+        axis=1, ddof=1, keepdims=True
+    )
+    z_amount = (amount - amount.mean(axis=1, keepdims=True)) / amount.std(
+        axis=1, ddof=1, keepdims=True
+    )
+    returns = np.zeros((dates, codes))
+    returns[1:] = (
+        beta_volume * z_volume[:-1]
+        + beta_amount * z_amount[:-1]
+        + noise * rng.normal(size=(dates - 1, codes))
+    )
+    close = 100.0 * np.cumprod(1.0 + returns, axis=0)
+    day_labels = [
+        (date(2026, 2, 2) + timedelta(days=offset)).isoformat() for offset in range(dates)
+    ]
+    code_labels = [f"p{index:03d}" for index in range(codes)]
+
+    def frame(values: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame(values, index=day_labels, columns=code_labels)
+
+    return MarketPanel(
+        fields={
+            "open": frame(close),
+            "high": frame(close),
+            "low": frame(close),
+            "close": frame(close),
+            "volume": frame(volume),
+            "amount": frame(amount),
+        }
+    )
+
+
+def _factor_ic(expression: str, panel: MarketPanel) -> pd.Series:
+    """表达式 → 该面板上的 IC 序列（与被测编排同一求值路径）。"""
+    return rank_ic_series(
+        evaluate(parse(expression), panel), forward_returns(panel.fields["close"])
+    )
+
+
+def _pool_row(factor_id: int, expression: str) -> dict:
+    """池行（与 library.list_factors 行同形的最小字段集）。"""
+    return {
+        "id": factor_id,
+        "expression": expression,
+        "ast_json": serialize(parse(expression)),
+        "category": "价量",
+        "status": "active",
+    }
+
+
+def test_check_pool_increment_redundant_with_pool_records_offender(tmp_path):
+    """|IC 相关| = 0.92 > 0.7 → REDUNDANT_WITH_POOL，detail 记相关对象 id 与 ρ。"""
+    db = _empty_db(tmp_path)
+    panel = _pool_panel()
+    factor_id = add_factor(
+        expression="volume",
+        hypothesis="测试用经济学假设：成交额与未来收益存在关系。",
+        category="价量",
+        status="active",
+        ast_json=serialize(parse("volume")),
+        db_path=db,
+    )
+    base = np.random.default_rng(31).normal(size=80)
+    pool_ic = _indexed_ic(base)
+    for trade_date, value in pool_ic.items():
+        record_ic(factor_id, str(trade_date), float(value), db_path=db)
+    candidate_ic = _indexed_ic(_correlated_ic(base, rho=0.92, seed=32))
+    result = check_pool_increment(
+        candidate_ic,
+        evaluate(parse("amount"), panel),
+        [_pool_row(factor_id, "volume")],
+        panel,
+        db_path=db,
+    )
+    assert result.gate == 4
+    assert result.passed is False
+    assert result.reason == ReasonCode.REDUNDANT_WITH_POOL
+    assert result.detail["duplicate_of"] == factor_id
+    assert result.detail["correlation"] == pytest.approx(0.92, abs=1e-9)
+    assert result.detail["threshold"] == pytest.approx(0.7)
+
+
+def test_check_pool_increment_redundancy_uses_panel_ic_when_pool_has_no_history(tmp_path):
+    """池内因子无落库 IC（本批次刚入库）→ 由面板现算 IC 做冗余比对（ρ=1 命中）。"""
+    db = _empty_db(tmp_path)
+    panel = _pool_panel()
+    factor_id = add_factor(
+        expression="volume",
+        hypothesis="测试用经济学假设：成交额与未来收益存在关系。",
+        category="价量",
+        status="active",
+        ast_json=serialize(parse("volume")),
+        db_path=db,
+    )
+    assert list_ic_series(factor_id, db_path=db) == []
+    result = check_pool_increment(
+        _factor_ic("volume", panel),
+        evaluate(parse("volume"), panel),
+        [_pool_row(factor_id, "volume")],
+        panel,
+        db_path=db,
+    )
+    assert result.passed is False
+    assert result.reason == "REDUNDANT_WITH_POOL"
+    assert result.detail["duplicate_of"] == factor_id
+    assert result.detail["correlation"] == pytest.approx(1.0)
+
+
+def test_check_pool_increment_rejects_no_pool_increment(tmp_path):
+    """候选对池组合无增量（噪声因子稀释组合 IR）→ NO_POOL_INCREMENT。"""
+    db = _empty_db(tmp_path)
+    panel = _pool_panel(beta_amount=0.0)
+    result = check_pool_increment(
+        _factor_ic("amount", panel),
+        evaluate(parse("amount"), panel),
+        [_pool_row(1, "volume")],
+        panel,
+        db_path=db,
+    )
+    assert result.passed is False
+    assert result.reason == ReasonCode.NO_POOL_INCREMENT
+    assert result.detail["increment"] <= 0.0
+    assert result.detail["ir_pool"] > result.detail["ir_pool_with_candidate"]
+    assert result.detail["pool_size"] == 1
+
+
+def test_check_pool_increment_accepts_positive_increment(tmp_path):
+    """候选给池组合带来正 IR 增量 → 通过；detail 必含 increment: float（E8 保种依赖）。"""
+    db = _empty_db(tmp_path)
+    panel = _pool_panel(beta_volume=0.02, beta_amount=0.02)
+    result = check_pool_increment(
+        _factor_ic("amount", panel),
+        evaluate(parse("amount"), panel),
+        [_pool_row(1, "volume")],
+        panel,
+        db_path=db,
+    )
+    assert result.passed is True
+    assert result.reason is None
+    increment = result.detail["increment"]
+    assert isinstance(increment, float)
+    assert increment > 0.0
+    assert result.detail["ir_pool_with_candidate"] == pytest.approx(
+        result.detail["ir_pool"] + increment, abs=1e-12
+    )
+
+
+def test_check_pool_increment_empty_pool_uses_candidate_ir(tmp_path):
+    """空池语义：增量 = IR(候选)（与闸②重复但保留判定）；负 IR 候选被拒。"""
+    db = _empty_db(tmp_path)
+    panel = _pool_panel()
+    candidate_ic = _factor_ic("volume", panel)
+    passed = check_pool_increment(
+        candidate_ic, evaluate(parse("volume"), panel), [], panel, db_path=db
+    )
+    assert passed.passed is True
+    assert passed.detail["pool_size"] == 0
+    assert passed.detail["ir_pool"] is None
+    assert passed.detail["increment"] == pytest.approx(passed.detail["ir_pool_with_candidate"])
+    assert passed.detail["increment"] > 0.0
+
+    rejected = check_pool_increment(
+        -candidate_ic.abs(), evaluate(parse("amount"), panel), [], panel, db_path=db
+    )
+    assert rejected.passed is False
+    assert rejected.reason == "NO_POOL_INCREMENT"
+    assert rejected.detail["increment"] <= 0.0
+
+
+# ── 闸⑤ 样本外复核（E6） ───────────────────────────────────────────────────
+
+
+def _split_probe(dates: list[str]) -> tuple[list[str], list[str]]:
+    """测试侧独立复核切分（不复用被测实现的期望生成）。"""
+    ordered = sorted(dates)
+    cut = int(len(ordered) * 0.7)
+    return ordered[:cut], ordered[cut:]
+
+
+def _oos_frames(*, dates: int = 200, codes: int = 40, mode: str, seed: int = 55):
+    """构造 (factor_values, fwd)：按日期段控制信号强度/符号。"""
+    rng = np.random.default_rng(seed)
+    factor = rng.normal(size=(dates, codes))
+    z = (factor - factor.mean(axis=1, keepdims=True)) / factor.std(axis=1, ddof=1, keepdims=True)
+    cut = int(dates * 0.7)
+    signal = z.copy()
+    if mode == "train_only":
+        signal[cut:] = 0.0
+    elif mode == "sign_flip":
+        signal[cut:] = -z[cut:]
+    returns = 0.03 * signal + 0.005 * rng.normal(size=(dates, codes))
+    labels = [(date(2026, 4, 1) + timedelta(days=offset)).isoformat() for offset in range(dates)]
+    code_labels = [f"o{index:03d}" for index in range(codes)]
+    values = pd.DataFrame(factor, index=labels, columns=code_labels)
+    fwd = pd.DataFrame(returns, index=labels, columns=code_labels)
+    return values, fwd
+
+
+def test_train_validation_split_partitions_dates_without_overlap():
+    """切分点不跨日：train/val 无交集、并集 = 全区间、均升序、前 70% 为训练段。"""
+    dates = [(date(2026, 4, 1) + timedelta(days=offset)).isoformat() for offset in range(61)]
+    train, val = train_validation_split(dates)
+    assert len(train) == 42 and len(val) == 19
+    assert set(train).isdisjoint(val)
+    assert sorted(train + val) == sorted(dates)
+    assert train == sorted(train) and val == sorted(val)
+    assert max(train) < min(val)  # 切点按日期序，不跨日
+    assert (train, val) == _split_probe(dates)
+
+
+def test_check_out_of_sample_passes_when_both_segments_strong():
+    """训练/验证两段皆强且同号 → 通过；detail 记切分区间与两段 ICIR。"""
+    values, fwd = _oos_frames(mode="both_strong")
+    result = check_out_of_sample(values, fwd)
+    assert result.gate == 5
+    assert result.passed is True
+    assert result.reason is None
+    assert result.detail["icir_val"] > 0.3
+    assert result.detail["train_days"] == 140 and result.detail["val_days"] == 60
+    assert result.detail["val_start"] > result.detail["train_end"]
+
+
+def test_check_out_of_sample_rejects_weak_validation_segment():
+    """训练段强、验证段无信号 → |ICIR_val| < 0.3 → OOS_FAILED。"""
+    values, fwd = _oos_frames(mode="train_only")
+    result = check_out_of_sample(values, fwd)
+    assert result.passed is False
+    assert result.reason == ReasonCode.OOS_FAILED
+    assert abs(result.detail["icir_val"]) < 0.3
+    assert result.detail["icir_train"] > 0.3
+
+
+def test_check_out_of_sample_rejects_sign_mismatch():
+    """验证段强但符号与训练段相反 → OOS_FAILED（|ICIR| 达标不等于通过）。"""
+    values, fwd = _oos_frames(mode="sign_flip")
+    result = check_out_of_sample(values, fwd)
+    assert result.passed is False
+    assert result.reason == "OOS_FAILED"
+    assert abs(result.detail["icir_val"]) > 0.3
+    assert result.detail["sign_train"] != result.detail["sign_val"]
+
+
+def test_check_out_of_sample_too_short_fails_closed():
+    """样本太短（验证段不足）→ OOS_FAILED（不因数据不足放行）。"""
+    values, fwd = _oos_frames(dates=1, mode="both_strong")
+    result = check_out_of_sample(values, fwd)
+    assert result.passed is False
+    assert result.reason == "OOS_FAILED"

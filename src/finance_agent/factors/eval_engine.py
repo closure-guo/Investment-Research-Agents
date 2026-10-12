@@ -175,8 +175,11 @@ def _cross_section_rank(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.rank(axis=1, pct=True)
 
 
-def _cross_section_zscore(frame: pd.DataFrame) -> pd.DataFrame:
-    """逐日横截面 (x − mean)/std（样本标准差 ddof=1；std=0 → NaN）。"""
+def cross_section_zscore(frame: pd.DataFrame) -> pd.DataFrame:
+    """逐日横截面 (x − mean)/std（样本标准差 ddof=1；std=0 → NaN）。
+
+    公开别名（闸④池组合构建复用同一口径；DSL ``zscore`` 算子即本函数）。
+    """
     return frame.sub(frame.mean(axis=1), axis=0).div(frame.std(axis=1, ddof=1), axis=0)
 
 
@@ -218,7 +221,7 @@ def _minimum(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
 
 _ELEMENTWISE_OPS: dict[str, Callable[..., pd.DataFrame]] = {
     "rank": _cross_section_rank,
-    "zscore": _cross_section_zscore,
+    "zscore": cross_section_zscore,
     "add": operator.add,
     "sub": operator.sub,
     "mul": operator.mul,

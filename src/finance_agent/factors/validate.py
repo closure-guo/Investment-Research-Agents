@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import enum
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,13 +55,16 @@ import pandas as pd
 
 from finance_agent.factors.constraints import (
     BH_FDR_Q,
+    MAX_IC_CORRELATION,
     MAX_MISSING_RATE,
     MIN_ABS_ICIR,
     PERMUTATION_N,
+    TRAIN_FRACTION,
 )
 from finance_agent.factors.dsl import parse, serialize
 from finance_agent.factors.eval_engine import (
     MarketPanel,
+    cross_section_zscore,
     evaluate,
     forward_returns,
     rank_ic_series,
@@ -71,6 +74,7 @@ from finance_agent.factors.library import (
     apply_bucket_quota,
     find_structural_duplicate,
     list_active_factors,
+    list_ic_series,
     set_pool_increment,
     set_status,
 )
@@ -150,15 +154,13 @@ def check_computability(factor_values: pd.DataFrame) -> GateResult:
 # ── 闸② 单因子检验（E3） ───────────────────────────────────────────────────
 
 
-def check_single_factor(ic: pd.Series) -> GateResult:
-    """闸②：``|ICIR| ≥ MIN_ABS_ICIR`` 且 ``|IC 均值| > 0``（ICIR = mean/std）。
+def _ic_stats(ic: pd.Series) -> tuple[float, float, float, int]:
+    """IC 序列统计量 ``(mean, std, icir, n_samples)``——闸②/闸④/闸⑤ 共用口径。
 
     NaN 不参与统计（逐日 NaN 即样本不足日，见 ``rank_ic_series``）；常量 IC
     （``max == min``）按口径记 std=0、ICIR=0（否则浮点残差 std≈1e-18 会算出
     5.9e15 量级的荒谬 ICIR 而过闸）；有效样本 < 2（std 不可定义）、std=0 或全
-    NaN → ICIR 记 0 → ``WEAK_ICIR``。均值条件取严格非零（``|mean| > 0``，不做数值
-    容差——显著性由闸③置换检验承担）。方向不约束（``|ICIR|``）：强负 IC 同样过
-    闸②，方向与稳健性由闸④⑤把关。
+    NaN → ICIR 记 0。ICIR = mean/std（std=0 → 0）。
     """
     valid = ic.dropna()
     n_samples = int(valid.size)
@@ -172,6 +174,24 @@ def check_single_factor(ic: pd.Series) -> GateResult:
     else:
         std = float(valid.std(ddof=1))
         icir = mean / std if std != 0.0 else 0.0
+    return mean, std, icir, n_samples
+
+
+def _sign(value: float) -> int:
+    """符号（±1）；NaN/0/非有限 → 0（调用方按「无符号可比」fail closed）。"""
+    if not math.isfinite(value) or value == 0.0:
+        return 0
+    return 1 if value > 0.0 else -1
+
+
+def check_single_factor(ic: pd.Series) -> GateResult:
+    """闸②：``|ICIR| ≥ MIN_ABS_ICIR`` 且 ``|IC 均值| > 0``（ICIR = mean/std）。
+
+    统计口径见 ``_ic_stats``（NaN 不计、常量 IC → ICIR 0、样本 < 2 → ICIR 0）。
+    均值条件取严格非零（``|mean| > 0``，不做数值容差——显著性由闸③置换检验
+    承担）。方向不约束（``|ICIR|``）：强负 IC 同样过闸②，方向与稳健性由闸④⑤把关。
+    """
+    mean, std, icir, n_samples = _ic_stats(ic)
     passed = math.isfinite(mean) and abs(mean) > 0.0 and abs(icir) >= MIN_ABS_ICIR
     return GateResult(
         gate=GATE_SINGLE_FACTOR,
@@ -271,7 +291,50 @@ def check_significance(ic_series_map: dict[str, pd.Series], *, seed: int) -> dic
     return results
 
 
-# ── TODO(T5) 占位桩：闸④ 池级增量与冗余 ─────────────────────────────────────
+# ── 闸④ 池级增量与冗余（E5） ────────────────────────────────────────────────
+
+# 冗余比对所需的最少共同有效交易日（2 点相关恒 ±1 → 会假阳性；5 点起才有意义）
+_MIN_REDUNDANCY_SAMPLES = 5
+
+
+def _aligned_pearson(left: pd.Series, right: pd.Series) -> float | None:
+    """两 IC 序列按共同日期对齐后的 Pearson 相关；样本不足/不可定义 → ``None``。"""
+    aligned = pd.concat([left.rename("candidate"), right.rename("pool")], axis=1).dropna()
+    if int(aligned.shape[0]) < _MIN_REDUNDANCY_SAMPLES:
+        return None
+    correlation = aligned["candidate"].corr(aligned["pool"])
+    if correlation is None or not math.isfinite(float(correlation)):
+        return None
+    return float(correlation)
+
+
+def _pool_ic_series(
+    row: dict[str, Any], panel: MarketPanel, fwd: pd.DataFrame, *, db_path: str | Path | None
+) -> pd.Series:
+    """池内因子的 IC 序列：优先落库序列（``factor_ic``），不足/缺失则由面板现算。
+
+    落库序列覆盖不足 ``_MIN_REDUNDANCY_SAMPLES`` 点（本批次刚入库、监控尚未跑过）
+    时回退现算——同一口径的同一量（逐日 RankIC），保证冗余检查不因落库时序漏检。
+    """
+    persisted = list_ic_series(int(row["id"]), db_path=db_path)
+    if persisted:
+        series = pd.Series(
+            {str(trade_date): float(value) for trade_date, value in persisted}, dtype="float64"
+        )
+        if int(series.dropna().size) >= _MIN_REDUNDANCY_SAMPLES:
+            return series
+    return rank_ic_series(evaluate(parse(str(row["expression"])), panel), fwd)
+
+
+def _composite_ic(values: list[pd.DataFrame], fwd: pd.DataFrame) -> pd.Series:
+    """池等权组合的 IC 序列：各因子逐日横截面 zscore 后等权平均 → 与远期收益 RankIC。
+
+    某因子某日 NaN（窗口不足等）不拖垮整个组合：当日组合 = 其余可用因子的等权均值
+    （逐格 NaN 仅当全池该格皆 NaN）。
+    """
+    stacked = pd.concat([cross_section_zscore(frame) for frame in values])
+    composite = stacked.groupby(level=0).mean()
+    return rank_ic_series(composite, fwd)
 
 
 def check_pool_increment(
@@ -282,38 +345,148 @@ def check_pool_increment(
     *,
     db_path: str | Path | None = None,
 ) -> GateResult:
-    """TODO(T5)：闸④占位桩——**恒通过**，待 T5 以冗余 + 池级 IR 增量替换。
+    """闸④：先冗余（|IC 相关| > ``MAX_IC_CORRELATION``）再池级 IR 增量（E5）。
 
-    真实实现（E5）：先查冗余（候选与池内任一因子 IC 序列 ``|Pearson ρ| >
-    MAX_IC_CORRELATION`` → ``REDUNDANT_WITH_POOL``，detail 记相关对象 id/code 与
-    ρ）；再算池等权组合（各因子逐日横截面 zscore 后等权平均）IR 增量
-    （``IR(池+候选) − IR(池)`` ≤ 0 → ``NO_POOL_INCREMENT``；空池时增量 = IR(候选)）。
-    **须在 ``detail`` 给出 ``increment: float``**（E8 保种排序依赖）。
-    ``pool`` = 调用时库内 active 因子行；``db_path`` 供读取池内因子 IC 序列。
+    冗余：候选 IC 序列与池内任一因子 IC 序列（落库优先、不足现算，见
+    ``_pool_ic_series``）在共同日期上 Pearson 相关，``|ρ| > 0.7`` →
+    ``REDUNDANT_WITH_POOL``，``detail`` 记 ``duplicate_of``（相关对象 id）、
+    ``correlation``（ρ）与 ``expression``；共同样本 < ``_MIN_REDUNDANCY_SAMPLES``
+    → 该对象跳过（2 点相关恒 ±1，不可信）。
+
+    增量：池等权组合 = 池各因子逐日横截面 zscore 后等权平均（E5 逐字）；
+    增量 = IR(池+候选) − IR(池) ≤ 0 → ``NO_POOL_INCREMENT``；**空池时增量 =
+    IR(候选)**（= 传入 ``candidate_ic`` 的 ICIR，与闸②重复但保留判定）。
+    两侧 IR 在**共同有效日期**上比较（口径一致，不拿不同样本量比高低）；
+    IR = mean/std（std=0 → 0，与闸②同口径）。``detail`` **必含**
+    ``increment: float``——E8 保种排序依赖它（编排写入 ``pool_increment``）。
     """
+    fwd = forward_returns(panel.fields["close"])
+    redundancy_checked: list[int] = []
+    redundancy_skipped: list[int] = []
+    for row in pool:
+        factor_id = int(row["id"])
+        pool_ic = _pool_ic_series(row, panel, fwd, db_path=db_path)
+        correlation = _aligned_pearson(candidate_ic, pool_ic)
+        if correlation is None:
+            redundancy_skipped.append(factor_id)
+            continue
+        redundancy_checked.append(factor_id)
+        if abs(correlation) > MAX_IC_CORRELATION:
+            return GateResult(
+                gate=GATE_POOL_INCREMENT,
+                passed=False,
+                reason=ReasonCode.REDUNDANT_WITH_POOL,
+                detail={
+                    "duplicate_of": factor_id,
+                    "expression": str(row.get("expression", "")),
+                    "correlation": correlation,
+                    "threshold": MAX_IC_CORRELATION,
+                    "pool_size": len(pool),
+                    "redundancy_checked": redundancy_checked,
+                    "redundancy_skipped": redundancy_skipped,
+                },
+            )
+
+    if pool:
+        pool_values = [evaluate(parse(str(row["expression"])), panel) for row in pool]
+        pool_ic_series = _composite_ic(pool_values, fwd)
+        combined_ic_series = _composite_ic([*pool_values, candidate_values], fwd)
+        common = pool_ic_series.dropna().index.intersection(combined_ic_series.dropna().index)
+        ir_pool: float | None = _ic_stats(pool_ic_series.loc[common])[2]
+        ir_combined = _ic_stats(combined_ic_series.loc[common])[2]
+        n_common_days = int(common.size)
+    else:
+        ir_pool = None
+        ir_combined = _ic_stats(candidate_ic)[2]
+        n_common_days = int(candidate_ic.dropna().size)
+    increment = ir_combined - (ir_pool if ir_pool is not None else 0.0)
+    passed = increment > 0.0
     return GateResult(
         gate=GATE_POOL_INCREMENT,
-        passed=True,
-        reason=None,
-        detail={"stub": "TODO(T5)", "pool_size": len(pool)},
+        passed=passed,
+        reason=None if passed else ReasonCode.NO_POOL_INCREMENT,
+        detail={
+            "increment": float(increment),
+            "ir_pool": ir_pool,
+            "ir_pool_with_candidate": float(ir_combined),
+            "pool_size": len(pool),
+            "n_common_days": n_common_days,
+            "redundancy_checked": redundancy_checked,
+            "redundancy_skipped": redundancy_skipped,
+        },
     )
 
 
-# ── TODO(T5) 占位桩：闸⑤ 样本外复核 ────────────────────────────────────────
+# ── 闸⑤ 样本外复核（E6） ───────────────────────────────────────────────────
+
+
+def train_validation_split(
+    dates: Iterable[Any], *, fraction: float = TRAIN_FRACTION
+) -> tuple[list[str], list[str]]:
+    """按日期排序切分训练/验证段（前 ``fraction`` 为训练段，切点不跨日）。
+
+    返回 ``(train_dates, val_dates)``：两段均升序、互不相交、并集 = 输入日期集合；
+    切点 ``int(len × fraction)``（两侧皆可能为空——由调用方 fail closed）。
+    """
+    ordered = sorted(str(value) for value in dates)
+    cut = int(len(ordered) * fraction)
+    return ordered[:cut], ordered[cut:]
 
 
 def check_out_of_sample(factor_values: pd.DataFrame, fwd: pd.DataFrame) -> GateResult:
-    """TODO(T5)：闸⑤占位桩——**恒通过**，待 T5 以训验切分复核替换。
+    """闸⑤：训验切分（``TRAIN_FRACTION``，切点不跨日）后验证段复核（E6）。
 
-    真实实现（E6）：按日期排序前 ``TRAIN_FRACTION`` 为训练段、后段为验证段
-    （切点不跨日）；验证段重算 IC 序列，``|ICIR_val| ≥ MIN_ABS_ICIR`` 且符号与
-    训练段一致 → 通过，否则 ``OOS_FAILED``。
+    两段各自重算 IC 序列（不跨区标准化、不做跨区信息借用）；通过条件：
+    ``|ICIR_val| ≥ MIN_ABS_ICIR`` **且** 验证段 IC 均值符号与训练段一致（且非 0）。
+    任一段无有效样本 / 训练段均值不可定义 → ``OOS_FAILED``（fail closed）。
+    ``detail`` 记两段区间、天数、ICIR 与符号（报告与审计用）。
     """
+    common = factor_values.index.intersection(fwd.index)
+    train_dates, val_dates = train_validation_split(common)
+    base: dict[str, Any] = {
+        "train_fraction": TRAIN_FRACTION,
+        "train_days": len(train_dates),
+        "val_days": len(val_dates),
+        "train_start": train_dates[0] if train_dates else None,
+        "train_end": train_dates[-1] if train_dates else None,
+        "val_start": val_dates[0] if val_dates else None,
+        "val_end": val_dates[-1] if val_dates else None,
+    }
+    if not train_dates or not val_dates:
+        return GateResult(
+            GATE_OUT_OF_SAMPLE,
+            False,
+            ReasonCode.OOS_FAILED,
+            {**base, "reason": "insufficient_dates", "min_abs_icir": MIN_ABS_ICIR},
+        )
+    train_mean, _, train_icir, _ = _ic_stats(
+        rank_ic_series(factor_values.loc[train_dates], fwd.loc[train_dates])
+    )
+    val_mean, _, val_icir, _ = _ic_stats(
+        rank_ic_series(factor_values.loc[val_dates], fwd.loc[val_dates])
+    )
+    sign_train = _sign(train_mean)
+    sign_val = _sign(val_mean)
+    passed = (
+        math.isfinite(val_icir)
+        and abs(val_icir) >= MIN_ABS_ICIR
+        and sign_val != 0
+        and sign_val == sign_train
+    )
     return GateResult(
         gate=GATE_OUT_OF_SAMPLE,
-        passed=True,
-        reason=None,
-        detail={"stub": "TODO(T5)"},
+        passed=passed,
+        reason=None if passed else ReasonCode.OOS_FAILED,
+        detail={
+            **base,
+            "mean_train": train_mean,
+            "mean_val": val_mean,
+            "icir_train": train_icir,
+            "icir_val": val_icir,
+            "sign_train": sign_train,
+            "sign_val": sign_val,
+            "min_abs_icir": MIN_ABS_ICIR,
+        },
     )
 
 
