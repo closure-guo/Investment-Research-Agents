@@ -1,7 +1,8 @@
-"""TDD tests for data/snapshot.py — 市场快照 schema/meta 与行构造纯函数。
+"""TDD tests for data/snapshot.py — 市场快照 schema/meta、行构造与读写/状态接口。
 
-覆盖 add-market-snapshot 计划 Task 1（schema/连接/meta 工具）与 Task 2
-（build_snapshot_rows / compute_rebase_factors）的验收行为。
+覆盖 add-market-snapshot 计划 Task 1（schema/连接/meta 工具）、Task 2
+（build_snapshot_rows / compute_rebase_factors）、Task 3（幂等写 + as_of 防前视
+读取）与 Task 4（stale 状态纯函数 + 缓存 TTL 豁免契约）的验收行为。
 """
 
 from __future__ import annotations
@@ -12,16 +13,25 @@ import pandas as pd
 import pytest
 
 from finance_agent.data.snapshot import (
+    SnapshotEmptyError,
+    SnapshotNotFreshError,
     _connect,
     _norm_code,
     _num,
     _text,
+    apply_rebase,
     build_snapshot_rows,
     compute_rebase_factors,
     get_all_meta,
     get_meta,
+    get_security_master,
     init_snapshot_db,
+    latest_snapshot_date,
+    read_bars,
+    read_universe,
     set_meta,
+    upsert_security_master,
+    write_snapshot_rows,
 )
 
 # Global Constraints 钉死的 market_snapshot 列集合（逐字，不得改名）。
@@ -442,3 +452,205 @@ def test_text_and_num_reject_missing_and_non_finite():
     assert _num(float("-inf")) is None
     assert _num("10.5") == 10.5
     assert _num("abc") is None
+
+
+# ── Task 3: 幂等写入 + as_of 防前视读取 ──────────────────────────────────────
+
+
+def _snapshot_row(trade_date: str, code: str, **overrides) -> dict:
+    """完整快照行（键与表列名一致），供写入接口测试复用。"""
+    row = {
+        "trade_date": trade_date,
+        "code": code,
+        "name": f"票{code}",
+        "open": 10.0,
+        "high": 11.0,
+        "low": 9.5,
+        "close_raw": 10.5,
+        "close_qfq": 10.5,
+        "volume": 1000.0,
+        "amount": 10500.0,
+        "pct_chg": 1.0,
+        "prev_close": 10.4,
+        "is_st": 0,
+        "is_suspended": 0,
+        "limit_up_sealed": 0,
+        "limit_down_sealed": 0,
+        "listed_days": 100,
+        "list_date": "2020-01-01",
+    }
+    row.update(overrides)
+    return row
+
+
+def _count(db_path, table: str) -> int:
+    assert table in {"market_snapshot", "security_master", "snapshot_meta"}
+    conn = _connect(db_path)
+    try:
+        return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+    finally:
+        conn.close()
+
+
+def test_write_idempotent_same_day(tmp_path):
+    """write_snapshot_rows：同日重复写行数不变；同票同日覆盖不产生新行。"""
+    db = tmp_path / "market_snapshot.db"
+    rows = [_snapshot_row("2026-10-10", "600519"), _snapshot_row("2026-10-10", "000001")]
+
+    assert write_snapshot_rows("2026-10-10", rows, db_path=db) == 2
+    assert write_snapshot_rows("2026-10-10", rows, db_path=db) == 2  # 幂等
+    assert _count(db, "market_snapshot") == 2
+    assert latest_snapshot_date(db_path=db) == "2026-10-10"
+
+    changed = [_snapshot_row("2026-10-10", "600519", close_raw=11.0, close_qfq=11.0)]
+    write_snapshot_rows("2026-10-10", changed, db_path=db)
+    assert _count(db, "market_snapshot") == 2  # INSERT OR REPLACE 覆盖
+    universe = read_universe("2026-10-10", db_path=db)
+    assert [r["close_raw"] for r in universe if r["code"] == "600519"] == [11.0]
+
+
+def test_read_universe_rejects_future_as_of(tmp_path):
+    """R3：as_of 晚于最新数据日期 → SnapshotNotFreshError（消息含最新日期），不返回记录。"""
+    db = tmp_path / "market_snapshot.db"
+    write_snapshot_rows("2026-10-10", [_snapshot_row("2026-10-10", "600519")], db_path=db)
+
+    with pytest.raises(SnapshotNotFreshError) as exc:
+        read_universe("2026-10-20", db_path=db)
+
+    assert "2026-10-10" in str(exc.value)  # 消息含最新数据日期
+    assert "2026-10-20" in str(exc.value)
+
+
+def test_read_universe_empty_day_raises(tmp_path):
+    """as_of 在数据范围内但该日无行 → SnapshotEmptyError（不静默返回他日数据）。"""
+    db = tmp_path / "market_snapshot.db"
+    write_snapshot_rows("2026-10-10", [_snapshot_row("2026-10-10", "600519")], db_path=db)
+
+    with pytest.raises(SnapshotEmptyError) as exc:
+        read_universe("2026-10-08", db_path=db)
+
+    assert "2026-10-08" in str(exc.value)
+
+
+def test_read_universe_delisted_symbol_history(tmp_path):
+    """R2：退市标的历史可查；其退市后的日期结果不含该票（当日有他行不报错）。"""
+    db = tmp_path / "market_snapshot.db"
+    write_snapshot_rows(
+        "2025-03-01",
+        [
+            _snapshot_row("2025-03-01", "000002", name="万科A"),
+            _snapshot_row("2025-03-01", "600519", name="贵州茅台"),
+        ],
+        db_path=db,
+    )
+    write_snapshot_rows(
+        "2025-09-01",
+        [
+            _snapshot_row("2025-09-01", "600519", name="贵州茅台"),
+            _snapshot_row("2025-09-01", "600520", name="停牌股", is_suspended=1),
+        ],
+        db_path=db,
+    )
+
+    early = read_universe("2025-03-01", db_path=db)
+    assert "000002" in {row["code"] for row in early}  # 退市前历史含 X
+
+    late = read_universe("2025-09-01", db_path=db)
+    assert {row["code"] for row in late} == {"600519", "600520"}  # 退市后不含 X
+
+    active_only = read_universe("2025-09-01", include_suspended=False, db_path=db)
+    assert {row["code"] for row in active_only} == {"600519"}
+
+
+def test_read_bars_window_and_guard(tmp_path):
+    """read_bars：区间按 (trade_date, code) 升序；end>as_of 与 as_of>latest 双保险拒绝。"""
+    db = tmp_path / "market_snapshot.db"
+    write_snapshot_rows("2026-10-08", [_snapshot_row("2026-10-08", "600519")], db_path=db)
+    write_snapshot_rows(
+        "2026-10-09",
+        [_snapshot_row("2026-10-09", "600519"), _snapshot_row("2026-10-09", "000001")],
+        db_path=db,
+    )
+    write_snapshot_rows("2026-10-10", [_snapshot_row("2026-10-10", "600519")], db_path=db)
+
+    df = read_bars(["600519"], "2026-10-08", "2026-10-09", as_of="2026-10-10", db_path=db)
+    assert list(df["trade_date"]) == ["2026-10-08", "2026-10-09"]
+    assert set(df["code"]) == {"600519"}
+    assert {"trade_date", "code", "close_raw", "close_qfq", "volume"} <= set(df.columns)
+    assert float(df.iloc[-1]["close_raw"]) == 10.5
+
+    with pytest.raises(SnapshotNotFreshError) as exc:
+        read_bars(["600519"], "2026-10-08", "2026-10-12", as_of="2026-10-10", db_path=db)
+    assert "2026-10-12" in str(exc.value)  # end 晚于 as_of：拒绝读未来
+
+    with pytest.raises(SnapshotNotFreshError) as exc2:
+        read_bars(["600519"], "2026-10-08", "2026-10-10", as_of="2026-10-20", db_path=db)
+    assert "2026-10-10" in str(exc2.value)  # as_of 超最新：消息含最新日期
+
+    with pytest.raises(SnapshotEmptyError):
+        read_bars(["999999"], "2026-10-08", "2026-10-10", as_of="2026-10-10", db_path=db)
+
+
+def test_apply_rebase_multiplies_history_only(tmp_path):
+    """apply_rebase：仅 trade_date < before_date 的行 close_qfq × k，close_raw 与他票不动。"""
+    db = tmp_path / "market_snapshot.db"
+    write_snapshot_rows(
+        "2026-10-09",
+        [
+            _snapshot_row("2026-10-09", "600519", close_raw=10.0, close_qfq=10.0),
+            _snapshot_row("2026-10-09", "000001", close_raw=20.0, close_qfq=20.0),
+        ],
+        db_path=db,
+    )
+    write_snapshot_rows(
+        "2026-10-10",
+        [_snapshot_row("2026-10-10", "600519", close_raw=10.2, close_qfq=10.2)],
+        db_path=db,
+    )
+    write_snapshot_rows(
+        "2026-10-12",
+        [_snapshot_row("2026-10-12", "600519", close_raw=9.0, close_qfq=9.0)],
+        db_path=db,
+    )
+
+    assert apply_rebase("600519", 0.9, "2026-10-12", db_path=db) == 2  # 10-09 / 10-10 两行
+
+    df = read_bars(["600519"], "2026-10-01", "2026-10-12", as_of="2026-10-12", db_path=db)
+    df = df.set_index("trade_date")
+    assert df.loc["2026-10-09", "close_qfq"] == pytest.approx(9.0)  # 10.0 × 0.9
+    assert df.loc["2026-10-09", "close_raw"] == pytest.approx(10.0)  # raw 不动
+    assert df.loc["2026-10-10", "close_qfq"] == pytest.approx(9.18)  # 10.2 × 0.9
+    assert df.loc["2026-10-12", "close_qfq"] == pytest.approx(9.0)  # 不早于 before_date：不动
+    assert df.loc["2026-10-12", "close_raw"] == pytest.approx(9.0)
+
+    other = read_bars(["000001"], "2026-10-01", "2026-10-09", as_of="2026-10-12", db_path=db)
+    assert float(other.iloc[0]["close_qfq"]) == pytest.approx(20.0)  # 他票不动
+
+
+def test_security_master_upsert_roundtrip(tmp_path):
+    """upsert/get_security_master：同 code 覆盖不重复；空字段不清空已有值。"""
+    db = tmp_path / "market_snapshot.db"
+    assert get_security_master(db_path=db) == {}  # 空库入口自建表
+
+    n = upsert_security_master(
+        [
+            {"code": "600519", "name": "贵州茅台", "list_date": "2001-08-27"},
+            {"code": "1", "name": "平安银行", "list_date": "1991-04-03"},  # 归一 000001
+        ],
+        db_path=db,
+    )
+    assert n == 2
+
+    upsert_security_master(
+        [{"code": "600519", "name": "贵州茅台A", "list_date": "2001-08-27"}], db_path=db
+    )
+    master = get_security_master(db_path=db)
+    assert set(master) == {"600519", "000001"}
+    assert master["600519"]["name"] == "贵州茅台A"
+    assert master["000001"] == {"name": "平安银行", "list_date": "1991-04-03"}
+    assert _count(db, "security_master") == 2
+
+    upsert_security_master(  # 新值缺失 → COALESCE 保留旧值
+        [{"code": "600519", "name": None, "list_date": None}], db_path=db
+    )
+    assert get_security_master(db_path=db)["600519"]["name"] == "贵州茅台A"

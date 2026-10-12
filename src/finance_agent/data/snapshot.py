@@ -38,7 +38,7 @@ from __future__ import annotations
 import math
 import os
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +81,28 @@ CREATE TABLE IF NOT EXISTS security_master (
   updated_at TEXT
 );
 """
+
+# market_snapshot 列顺序（写入/读取共用的唯一序列；列名与 Global Constraints 逐字一致）
+_SNAPSHOT_COLUMNS: tuple[str, ...] = (
+    "trade_date",
+    "code",
+    "name",
+    "open",
+    "high",
+    "low",
+    "close_raw",
+    "close_qfq",
+    "volume",
+    "amount",
+    "pct_chg",
+    "prev_close",
+    "is_st",
+    "is_suspended",
+    "limit_up_sealed",
+    "limit_down_sealed",
+    "listed_days",
+    "list_date",
+)
 
 
 class SnapshotError(Exception):
@@ -158,6 +180,184 @@ def get_all_meta(db_path: str | Path | None = None) -> dict[str, str]:
         return {row[0]: row[1] for row in rows}
     finally:
         conn.close()
+
+
+# ── 写入与读取接口（T3）：幂等写 + as_of 防前视 + 空数据显式报错 ─────────────
+
+
+def write_snapshot_rows(
+    trade_date: str, rows: list[dict], db_path: str | Path | None = None
+) -> int:
+    """幂等写入某一交易日的快照行（INSERT OR REPLACE），返回写入行数。
+
+    整批同一交易日：行内 trade_date 以参数为准（防止批内日期漂移）。
+    """
+    init_snapshot_db(db_path)
+    if not rows:
+        return 0
+    cols = ", ".join(_SNAPSHOT_COLUMNS)
+    placeholders = ", ".join("?" * len(_SNAPSHOT_COLUMNS))
+    payload = [
+        tuple(trade_date if col == "trade_date" else row.get(col) for col in _SNAPSHOT_COLUMNS)
+        for row in rows
+    ]
+    conn = _connect(db_path)
+    try:
+        conn.executemany(
+            # 列名/占位符均为模块常量生成，值全参数化（无外部拼接）
+            f"INSERT OR REPLACE INTO market_snapshot ({cols}) VALUES ({placeholders})",  # noqa: S608
+            payload,
+        )
+        conn.commit()
+        return len(payload)
+    finally:
+        conn.close()
+
+
+def apply_rebase(
+    code: str, factor: float, before_date: str, db_path: str | Path | None = None
+) -> int:
+    """D1 rebase：该票 ``trade_date < before_date`` 的行 ``close_qfq × factor``。
+
+    ``close_raw`` 不动；返回实际更新行数（clamp 到 4 位小数与写入口径一致）。
+    """
+    init_snapshot_db(db_path)
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE market_snapshot SET close_qfq = ROUND(close_qfq * ?, 4) "
+            "WHERE code = ? AND trade_date < ?",
+            (factor, code, before_date),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def latest_snapshot_date(db_path: str | Path | None = None) -> str | None:
+    """快照表最新数据日期（``MAX(trade_date)``）；无行 → None。"""
+    init_snapshot_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute("SELECT MAX(trade_date) FROM market_snapshot").fetchone()
+        return row[0] if row and row[0] is not None else None
+    finally:
+        conn.close()
+
+
+def read_universe(
+    as_of: str, *, include_suspended: bool = True, db_path: str | Path | None = None
+) -> list[dict[str, Any]]:
+    """``as_of`` 当日全市场快照行（R3 防前视）。
+
+    ``as_of > latest`` → ``SnapshotNotFreshError``（消息含最新数据日期，不返回
+    任何记录）；该日无行（含空库）→ ``SnapshotEmptyError``（不静默返回他日
+    数据）。``include_suspended=False`` 时剔除 ``is_suspended=1`` 的行（NULL
+    状态视为未知，同样剔除）。返回按 code 升序。
+    """
+    latest = latest_snapshot_date(db_path)
+    if latest is not None and as_of > latest:
+        raise SnapshotNotFreshError(f"快照最新数据日期为 {latest}，不接受 as_of={as_of}")
+    conn = _connect(db_path)
+    try:
+        sql = "SELECT * FROM market_snapshot WHERE trade_date = ?"
+        params: list[Any] = [as_of]
+        if not include_suspended:
+            sql += " AND is_suspended = 0"
+        sql += " ORDER BY code"
+        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+    finally:
+        conn.close()
+    if not rows:
+        raise SnapshotEmptyError(f"该日期无快照记录: {as_of}")
+    return rows
+
+
+def read_bars(
+    codes: list[str],
+    start: str,
+    end: str,
+    *,
+    as_of: str,
+    db_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """区间日线读取（T3 双保险：``end > as_of`` 与 ``as_of > latest`` 均显式拒绝）。
+
+    返回列集合与表列一致（含双复权口径），按 ``(trade_date, code)`` 升序；
+    区间/代码无行（含空库）→ ``SnapshotEmptyError``。
+    """
+    if end > as_of:
+        raise SnapshotNotFreshError(f"end={end} 晚于 as_of={as_of}（禁止读取未来数据）")
+    latest = latest_snapshot_date(db_path)
+    if latest is None:
+        raise SnapshotEmptyError(f"快照库为空，区间无记录: {start}~{end}")
+    if as_of > latest:
+        raise SnapshotNotFreshError(f"快照最新数据日期为 {latest}，不接受 as_of={as_of}")
+    normalized = [code for code in (_norm_code(c) for c in codes) if code]
+    if not normalized:
+        raise SnapshotEmptyError(f"未指定有效查询代码: {start}~{end}")
+    placeholders = ", ".join("?" * len(normalized))
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            # placeholders 仅为 "?" 序列；代码值全参数化
+            f"SELECT * FROM market_snapshot WHERE code IN ({placeholders}) "  # noqa: S608
+            "AND trade_date >= ? AND trade_date <= ? ORDER BY trade_date, code",
+            [*normalized, start, end],
+        ).fetchall()
+        frame = pd.DataFrame([dict(row) for row in rows], columns=list(_SNAPSHOT_COLUMNS))
+    finally:
+        conn.close()
+    if frame.empty:
+        raise SnapshotEmptyError(f"区间内无快照记录: {start}~{end}")
+    return frame
+
+
+def upsert_security_master(rows: list[dict], db_path: str | Path | None = None) -> int:
+    """证券主表 upsert（同 code 覆盖 name/list_date/updated_at），返回处理行数。
+
+    空 code 行跳过；新值为空（None）时保留已有值（COALESCE），避免部分拉取
+    失败把已知字段清空。
+    """
+    init_snapshot_db(db_path)
+    now_iso = datetime.now().isoformat()
+    payload = []
+    for row in rows:
+        code = _norm_code(row.get("code"))
+        if not code:
+            continue
+        payload.append((code, _text(row.get("name")), _text(row.get("list_date")), now_iso))
+    if not payload:
+        return 0
+    conn = _connect(db_path)
+    try:
+        conn.executemany(
+            "INSERT INTO security_master (code, name, list_date, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(code) DO UPDATE SET "
+            "name = COALESCE(excluded.name, security_master.name), "
+            "list_date = COALESCE(excluded.list_date, security_master.list_date), "
+            "updated_at = excluded.updated_at",
+            payload,
+        )
+        conn.commit()
+        return len(payload)
+    finally:
+        conn.close()
+
+
+def get_security_master(db_path: str | Path | None = None) -> dict[str, dict]:
+    """全量证券主表 ``{code: {"name","list_date"}}``（build_snapshot_rows 的 master 形状）。"""
+    init_snapshot_db(db_path)
+    conn = _connect(db_path)
+    try:
+        master = {
+            row["code"]: {"name": row["name"], "list_date": row["list_date"]}
+            for row in conn.execute("SELECT code, name, list_date FROM security_master").fetchall()
+        }
+    finally:
+        conn.close()
+    return master
 
 
 # ── 行构造纯函数（无 IO；输入 spot 均为 stock_zh_a_spot_em 原样 DataFrame） ──
