@@ -1,4 +1,5 @@
-"""五道闸准入管线（add-factor-library-and-monitor Task 3：闸①② + 编排骨架）。
+"""五道闸准入管线（add-factor-library-and-monitor Task 3：闸①② + 编排骨架；
+Task 4：闸③ 置换检验 + BH-FDR）。
 
 闸口定义（逐字，Global Constraints）：
 
@@ -15,11 +16,12 @@
 - **闸 5 样本外复核**：训验切分（``TRAIN_FRACTION``，切点不跨日）验证段
   ``|ICIR|`` 达标且符号一致 → 否则 ``OOS_FAILED``。
 
-**本任务（T3）实现闸①②与编排骨架**；闸③④⑤ 为显式 ``TODO(T4)``/``TODO(T5)``
-占位桩（恒通过、逐函数独立、可直接删除替换），编排对它们只依赖接口形状。
-占位桩期间只验收「编排形状 + 闸①②判定」，真实统计判定由 T4/T5 的测试覆盖。
+**T3 实现闸①②与编排骨架，T4 已把闸③占位桩替换为真实实现**；闸④⑤ 仍为显式
+``TODO(T5)`` 占位桩（恒通过、逐函数独立、可直接删除替换），编排对它们只依赖
+接口形状。占位桩期间只验收「编排形状 + 闸①②③判定」，真实统计判定由 T5 的
+测试覆盖。
 
-编排契约（T4/T5 替换占位桩时不得破坏）：
+编排契约（T5 替换占位桩时不得破坏）：
 
 - ``gates`` 记录该候选**实际执行过**的闸口结果（按执行顺序，含通过项）；
   ``rejected_gate`` = 被拒闸口编号（0–5），全部通过者为 ``None``；
@@ -43,13 +45,20 @@ from __future__ import annotations
 
 import enum
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
-from finance_agent.factors.constraints import MAX_MISSING_RATE, MIN_ABS_ICIR
+from finance_agent.factors.constraints import (
+    BH_FDR_Q,
+    MAX_MISSING_RATE,
+    MIN_ABS_ICIR,
+    PERMUTATION_N,
+)
 from finance_agent.factors.dsl import parse, serialize
 from finance_agent.factors.eval_engine import (
     MarketPanel,
@@ -178,27 +187,88 @@ def check_single_factor(ic: pd.Series) -> GateResult:
     )
 
 
-# ── TODO(T4) 占位桩：闸③ 置换检验 + BH-FDR ──────────────────────────────────
+# ── 闸③ 置换检验 + BH-FDR（E4） ─────────────────────────────────────────────
+
+
+def benjamini_hochberg_adjust(p_values: Mapping[str, float]) -> dict[str, float]:
+    """Benjamini-Hochberg step-up 调整 p 值（q 值；键集合与输入一致）。
+
+    调整口径：原 p 升序排序后 ``p_adj_(i) = min_{j ≥ i} (K · p_(j) / j)``
+    （后缀最小，K = 候选数）——结果在排序序上**单调不减**（BH step-up 的上凸包），
+    并与「拒绝所有 p_(i) ≤ (i/K)·q」的判定等价。调用方（``check_significance``）
+    以 ``BH_FDR_Q`` 比较（``p_adj > q`` → ``NOT_SIGNIFICANT``）。空输入 → 空输出。
+    并列 p 值按 ``(p, key)`` 稳定排序，结果确定（同输入同输出）。
+    """
+    if not p_values:
+        return {}
+    ordered = sorted(p_values, key=lambda key: (p_values[key], key))
+    total = len(ordered)
+    adjusted: dict[str, float] = {}
+    running = math.inf
+    for rank in range(total, 0, -1):
+        key = ordered[rank - 1]
+        running = min(running, p_values[key] * total / rank)
+        adjusted[key] = running
+    return adjusted
 
 
 def check_significance(ic_series_map: dict[str, pd.Series], *, seed: int) -> dict[str, GateResult]:
-    """TODO(T4)：闸③占位桩——**恒通过**，待 T4 以置换检验 + BH-FDR 替换。
+    """闸③：逐候选置换检验 + 同批次 BH-FDR（E4），``seed`` 固定时逐位可复现。
 
-    真实实现（E4）：对同批次各 IC 序列做 ``PERMUTATION_N`` 次「逐日横截面重排
-    因子值」置换；双侧 ``p = (1 + #{|perm_mean| ≥ |obs_mean|}) / (1 + N)``；
-    同批次 BH-FDR（``BH_FDR_Q``）校正后 ``p_adj > q`` → ``NOT_SIGNIFICANT``；
-    ``seed`` 固定时逐位可复现。**须为 ``ic_series_map`` 的每个键返回结果**
-    （编排按输入键取用）。
+    置换口径（接口只给 IC 序列——闸③ 的输入是各候选的逐日 IC，见模块 docstring
+    编排契约）：对每个候选的逐日 IC 做 ``PERMUTATION_N`` 次「逐日随机重排配对」的
+    条件随机化——横截面重排因子值后该日 IC 在零假设下以 0 为中心对称，逐日独立
+    随机化其符号即该零分布的置换实现（保留观测幅度 → 对强信号保守：观测幅度越大
+    越难被置换达到，不会放松判定）；置换统计量 = 逐日置换 IC 的均值，
+    ``p = (1 + #{|perm_mean| ≥ |obs_mean|}) / (1 + N)``（双侧）。
+    NaN 日不参与（与闸② ``dropna`` 同口径）；全 NaN / 空序列 → ``p = 1.0``
+    （fail closed）。同批次 p 值经 ``benjamini_hochberg_adjust`` 校正，
+    ``p_adj > BH_FDR_Q`` → ``NOT_SIGNIFICANT``。
+
+    ``seed`` 与候选在**排序键序**中的下标共同派生各候选独立的 ``Generator``
+    （``default_rng([seed, index])``）——同种子同键集合 → 逐位相同 p 值；键集合
+    变化不改变其它候选的抽样（下标按排序键序固定）。返回**每个输入键**一条结果。
     """
-    return {
-        key: GateResult(
+    if not ic_series_map:
+        return {}
+    keys = sorted(ic_series_map)
+    p_values: dict[str, float] = {}
+    details: dict[str, dict[str, Any]] = {}
+    for index, key in enumerate(keys):
+        valid = ic_series_map[key].dropna()
+        values = valid.to_numpy(dtype="float64")
+        n_samples = int(values.size)
+        observed_mean = float(values.mean()) if n_samples else math.nan
+        if n_samples == 0 or not math.isfinite(observed_mean):
+            count = PERMUTATION_N  # 无有效样本：恒不显著（fail closed）
+        else:
+            rng = np.random.default_rng([seed, index])
+            signs = (
+                rng.integers(0, 2, size=(PERMUTATION_N, n_samples)).astype("float64") * 2.0 - 1.0
+            )
+            perm_means = np.abs((signs * values).mean(axis=1))
+            count = int(np.count_nonzero(perm_means >= abs(observed_mean)))
+        p_values[key] = (1.0 + count) / (1.0 + PERMUTATION_N)
+        details[key] = {
+            "observed_mean": observed_mean,
+            "n_samples": n_samples,
+            "n_permutations": PERMUTATION_N,
+            "exceedances": count,
+            "seed": seed,
+            "method": "per_day_pairing_sign_randomization",
+        }
+    adjusted = benjamini_hochberg_adjust(p_values)
+    results: dict[str, GateResult] = {}
+    for key in keys:
+        p_adj = adjusted[key]
+        passed = p_adj <= BH_FDR_Q
+        results[key] = GateResult(
             gate=GATE_SIGNIFICANCE,
-            passed=True,
-            reason=None,
-            detail={"stub": "TODO(T4)", "seed": seed},
+            passed=passed,
+            reason=None if passed else ReasonCode.NOT_SIGNIFICANT,
+            detail={**details[key], "p_value": p_values[key], "p_adj": p_adj, "q": BH_FDR_Q},
         )
-        for key in ic_series_map
-    }
+    return results
 
 
 # ── TODO(T5) 占位桩：闸④ 池级增量与冗余 ─────────────────────────────────────

@@ -1,11 +1,10 @@
-"""factors/validate.py 单测（add-factor-library-and-monitor Task 3）。
+"""factors/validate.py 单测（add-factor-library-and-monitor Task 3；T4 增补闸③）。
 
 覆盖闸①（可计算性：全样本缺失率 ≤ ``MAX_MISSING_RATE``）与闸②（单因子检验：
-``|ICIR| ≥ MIN_ABS_ICIR`` 且 ``|IC 均值| > 0``，E3）、``admit_candidates`` 编排骨架
-（结构查重 → 闸①② → 闸③占位 → 闸④⑤占位 → 入库 active；顺序保持、被拒不入库）。
-
-闸③④⑤ 本任务为 ``TODO(T4)``/``TODO(T5)`` 占位桩（恒通过）；本测试只断言编排形状
-（闸编号序列、拒绝闸口编号），不断言占位桩内部。
+``|ICIR| ≥ MIN_ABS_ICIR`` 且 ``|IC 均值| > 0``，E3）、``admit_candidates`` 编排
+（结构查重 → 闸①②③④⑤ → 入库 active；顺序保持、被拒不入库），以及 T4 的闸③
+置换检验 + BH-FDR（同种子逐位可复现、强信号通过、纯噪声拒收、BH 单调性与手算
+对照、50 随机表达式批量注入入库 < 5）。
 
 合成面板：固定种子；「强因子」= 用 volume 承载次日收益信号，且 amount = volume ×
 (-1)^t（横截面秩与次日收益逐日反号 → IC 序列均值≈0、标准差≈1 → 闸②必拒）。
@@ -14,12 +13,21 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from itertools import pairwise
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from finance_agent.factors.dsl import parse, serialize
+from finance_agent.factors.dsl import (
+    AstNode,
+    Call,
+    Field,
+    Number,
+    is_subtree_isomorphic,
+    parse,
+    serialize,
+)
 from finance_agent.factors.eval_engine import MarketPanel
 from finance_agent.factors.library import add_factor, list_active_factors, list_events, list_factors
 from finance_agent.factors.validate import (
@@ -27,7 +35,9 @@ from finance_agent.factors.validate import (
     GateResult,
     ReasonCode,
     admit_candidates,
+    benjamini_hochberg_adjust,
     check_computability,
+    check_significance,
     check_single_factor,
 )
 
@@ -333,3 +343,219 @@ def test_admit_candidates_mixed_batch_preserves_order(tmp_path):
     assert results[0].gates[0].detail["duplicate_of"] == seeded
     assert results[3].factor_id is not None
     assert len(list_factors(db_path=db)) == 2  # 预置行 + 通过者
+
+
+# ── 闸③ 置换检验 + BH-FDR（E4，T4） ────────────────────────────────────────
+
+
+def _ic_series(values: list[float]) -> pd.Series:
+    """合成 IC 序列（索引为规范交易日；值与列表同序）。"""
+    dates = [
+        (date(2026, 1, 5) + timedelta(days=offset)).isoformat() for offset in range(len(values))
+    ]
+    return pd.Series(values, index=dates, dtype="float64")
+
+
+def _strong_ic_series(*, days: int = 80, mean: float = 0.08, noise: float = 0.01) -> pd.Series:
+    """强信号 IC 序列：均值远离 0、逐日波动小（置换零分布不可能达到观测均值）。"""
+    rng = np.random.default_rng(4242)
+    return _ic_series(list(mean + noise * rng.normal(size=days)))
+
+
+def _noise_ic_series(*, days: int = 80, noise: float = 0.15) -> pd.Series:
+    """纯噪声 IC 序列：均值≈0（单因子日 IC 抽样噪声量级 1/sqrt(40)≈0.16）。"""
+    rng = np.random.default_rng(20261014)
+    return _ic_series(list(noise * rng.normal(size=days)))
+
+
+def test_check_significance_same_seed_bitwise_reproducible():
+    """同种子两次运行：p 值逐位相等（==，非 approx）；不同种子改变置换抽样。"""
+    series_map = {"noise(a)": _noise_ic_series(), "noise(b)": _noise_ic_series(days=60)}
+    first = check_significance(series_map, seed=7)
+    second = check_significance(series_map, seed=7)
+    assert set(first) == set(series_map)
+    for key in series_map:
+        assert first[key].gate == 3
+        assert first[key].detail["p_value"] == second[key].detail["p_value"]  # 逐位
+        assert first[key].detail["p_adj"] == second[key].detail["p_adj"]
+        assert first[key].passed is second[key].passed
+    other = check_significance(series_map, seed=8)
+    assert any(
+        other[key].detail["p_value"] != first[key].detail["p_value"] for key in series_map
+    ), "换种子后置换抽样应改变 p 值（否则 seed 未真正参与）"
+
+
+def test_check_significance_strong_signal_passes():
+    """强信号 IC：置换零分布远达不到观测均值 → p = 1/(1+N)、p_adj ≤ q、通过。"""
+    result = check_significance({"strong": _strong_ic_series()}, seed=3)["strong"]
+    assert result.passed is True
+    assert result.reason is None
+    assert result.detail["p_value"] == pytest.approx(1.0 / (1.0 + 200))
+    assert result.detail["p_adj"] == pytest.approx(result.detail["p_value"])
+    assert result.detail["n_permutations"] == 200
+    assert result.detail["n_samples"] == 80
+    assert result.detail["observed_mean"] == pytest.approx(0.08, abs=0.01)
+
+
+def test_check_significance_pure_noise_rejected():
+    """纯噪声 IC（均值≈0，量级 = 逐日抽样噪声）→ p 大 → NOT_SIGNIFICANT。"""
+    result = check_significance({"noise": _noise_ic_series()}, seed=5)["noise"]
+    assert result.passed is False
+    assert result.reason == ReasonCode.NOT_SIGNIFICANT
+    assert result.detail["p_value"] > 0.1
+    assert result.detail["p_adj"] == pytest.approx(result.detail["p_value"])  # 单候选不校正
+
+
+def test_check_significance_all_nan_series_rejected():
+    """全 NaN IC 序列（无有效样本）→ p 记 1.0 → NOT_SIGNIFICANT（fail closed）。"""
+    result = check_significance({"empty": _ic_series([np.nan, np.nan])}, seed=1)["empty"]
+    assert result.passed is False
+    assert result.reason == "NOT_SIGNIFICANT"
+    assert result.detail["p_value"] == pytest.approx(1.0)
+    assert result.detail["n_samples"] == 0
+
+
+def test_check_significance_empty_map_returns_empty():
+    """空批次 → 空结果（BH 无输入）。"""
+    assert check_significance({}, seed=1) == {}
+
+
+def test_benjamini_hochberg_hand_computed_case():
+    """手算小样本对照（K=4）：调整 p 值 = 后缀最小值 K·p_(j)/j，排序序上单调不减。
+
+    原 p = {a:0.01, b:0.04, c:0.03, d:0.5} → 排序 (a, c, b, d)；
+    K·p/j = (0.04, 0.06, 0.0533…, 0.5)，取后缀最小 → (0.04, 0.0533…, 0.0533…, 0.5)
+    （c 被 b 的 0.0533 压住，正是 step-up 上凸包的体现）。
+    """
+    adjusted = benjamini_hochberg_adjust({"a": 0.01, "b": 0.04, "c": 0.03, "d": 0.5})
+    assert adjusted["a"] == pytest.approx(0.04)
+    assert adjusted["c"] == pytest.approx(4 * 0.04 / 3)
+    assert adjusted["b"] == pytest.approx(4 * 0.04 / 3)
+    assert adjusted["d"] == pytest.approx(0.5)
+    ordered = [adjusted[key] for key in ("a", "c", "b", "d")]
+    assert all(left <= right for left, right in pairwise(ordered))
+
+
+def test_benjamini_hochberg_monotone_over_fifty_p_values():
+    """50 个 p 值批量：调整值单调不减、≥ 原值、≤ 1（BH step-up 上凸包）。"""
+    rng = np.random.default_rng(99)
+    raw = {f"p{index:02d}": float(value) for index, value in enumerate(rng.uniform(size=50))}
+    adjusted = benjamini_hochberg_adjust(raw)
+    assert set(adjusted) == set(raw)
+    ordered_keys = sorted(raw, key=lambda key: raw[key])
+    ordered = [adjusted[key] for key in ordered_keys]
+    assert all(left <= right for left, right in pairwise(ordered))
+    assert all(adjusted[key] >= raw[key] - 1e-12 for key in raw)
+    assert all(0.0 <= adjusted[key] <= 1.0 for key in raw)
+
+
+def test_benjamini_hochberg_empty_and_single():
+    """边界：空输入 → 空输出；单候选调整值 = 原 p（K=1，无多重性）。"""
+    assert benjamini_hochberg_adjust({}) == {}
+    assert benjamini_hochberg_adjust({"only": 0.03})["only"] == pytest.approx(0.03)
+
+
+# ── 50 随机表达式批量注入（spec 场景：入库 < 5） ─────────────────────────────
+
+_NOISE_EXPRESSION_SEED = 20261015
+_NOISE_BATCH_SIZE = 50
+_RANDOM_OPS: tuple[str, ...] = (
+    "ts_mean",
+    "ts_std",
+    "ts_rank",
+    "delta",
+    "rank",
+    "zscore",
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "max",
+    "min",
+    "abs",
+    "log",
+)
+_RANDOM_FIELDS: tuple[str, ...] = ("open", "high", "low", "close", "volume", "amount")
+
+
+def _random_node(rng: np.random.Generator, depth: int = 0) -> AstNode:
+    """随机表达式节点（深度 ≤ 3、自由参数 ≤ 2、字段 ≤ 2——恒在复杂度上限内）。"""
+    if depth >= 2 or rng.random() < 0.45:
+        return Field(str(rng.choice(_RANDOM_FIELDS)))
+    op = str(rng.choice(_RANDOM_OPS))
+    if op in ("ts_mean", "ts_std", "ts_rank", "delta"):
+        return Call(op, (_random_node(rng, depth + 1), Number(int(rng.integers(2, 9)))))
+    if op == "ts_corr":  # 不在 _RANDOM_OPS 内，保留分支以便后续扩展
+        return Call(op, (_random_node(rng, depth + 1), _random_node(rng, depth + 1), Number(5)))
+    if op in ("rank", "zscore", "abs", "log"):
+        return Call(op, (_random_node(rng, depth + 1),))
+    return Call(op, (_random_node(rng, depth + 1), _random_node(rng, depth + 1)))
+
+
+def _random_expressions(count: int, *, seed: int) -> list[str]:
+    """生成 ``count`` 条**结构互不同构**的随机表达式（固定种子可复现）。
+
+    同构去重是必须的：``is_subtree_isomorphic`` 忽略数字取值，同形状表达式
+    （如 ``ts_mean(close,3)`` 与 ``ts_mean(close,7)``）会在闸 0 直接被查重拒收，
+    批量注入就测不到闸③。
+    """
+    rng = np.random.default_rng(seed)
+    expressions: list[str] = []
+    nodes: list[AstNode] = []
+    for _ in range(count * 200):
+        if len(expressions) >= count:
+            break
+        node = _random_node(rng)
+        if any(is_subtree_isomorphic(node, other) for other in nodes):
+            continue
+        nodes.append(node)
+        expressions.append(serialize(node))
+    assert len(expressions) == count, "随机表达式生成器未产出足量互不同构样本"
+    return expressions
+
+
+def _noise_market_panel(*, dates: int = 120, codes: int = 60, seed: int = 20261016) -> MarketPanel:
+    """纯噪声合成面板（价格随机游走、量额独立；零真实信号、零网络）。"""
+    rng = np.random.default_rng(seed)
+    returns = rng.normal(0.0, 0.02, size=(dates, codes))
+    close = 100.0 * np.cumprod(1.0 + returns, axis=0)
+    volume = rng.lognormal(0.0, 0.5, size=(dates, codes))
+    amount = volume * close * 100.0
+    day_labels = [
+        (date(2026, 1, 5) + timedelta(days=offset)).isoformat() for offset in range(dates)
+    ]
+    code_labels = [f"n{index:03d}" for index in range(codes)]
+
+    def frame(values: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame(values, index=day_labels, columns=code_labels)
+
+    return MarketPanel(
+        fields={
+            "open": frame(close),
+            "high": frame(close),
+            "low": frame(close),
+            "close": frame(close),
+            "volume": frame(volume),
+            "amount": frame(amount),
+        }
+    )
+
+
+def test_admit_candidates_fifty_random_expressions_admits_under_five(tmp_path):
+    """spec 场景：50 个随机表达式注入纯噪声面板（固定种子）→ 入库 active < 5。
+
+    闸③ 的 BH-FDR 只在闸①②存活者上校正（编排契约）；纯噪声面板上 50 条随机
+    表达式几乎全部止步闸②（|ICIR| ≥ 0.3 的抽样概率 ≈ 0.1%），入库数断言 < 5。
+    """
+    expressions = _random_expressions(_NOISE_BATCH_SIZE, seed=_NOISE_EXPRESSION_SEED)
+    candidates = [_candidate(expression, category="价量") for expression in expressions]
+    results = admit_candidates(
+        candidates, _noise_market_panel(), seed=_NOISE_EXPRESSION_SEED, db_path=_empty_db(tmp_path)
+    )
+    assert len(results) == _NOISE_BATCH_SIZE
+    active = [result for result in results if result.status == "active"]
+    assert len(active) < 5, [result.factor_id for result in active]
+    # 被拒者必带被拒闸口编号（spec：每个被拒因子记录被拒闸口）
+    rejected = [result for result in results if result.status == "rejected"]
+    assert len(rejected) == _NOISE_BATCH_SIZE - len(active)
+    assert all(result.rejected_gate is not None for result in rejected)
