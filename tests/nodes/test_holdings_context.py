@@ -4,9 +4,39 @@
 被等同于「未持有」——二者对方向可执行性的含义不同。
 """
 
+from __future__ import annotations
+
+import time
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
 from finance_agent.models import HoldingsContext
 from finance_agent.nodes._llm_utils import holdings_context_line, holdings_holds
 from finance_agent.state import AnalysisState
+
+# 三态 → 注入行固定前缀。Trader / Risk 两层共用同一 holdings_context_line 实现，
+# 任一层文案漂移都会被两侧表驱动用例同时拦下。
+_HOLDINGS_LINE_PREFIX: dict[bool | None, str] = {
+    True: "受众持仓: 已申报持有该标的",
+    False: "受众持仓: 已申报未持有该标的",
+    None: "受众持仓: 未申报",
+}
+
+# 三态 → (声明值, 期望 holds)：逐态断言，防止「未申报」被静默归一
+_HOLDS_ROUNDTRIP = [
+    pytest.param(True, True, id="declared-holding"),
+    pytest.param(False, False, id="declared-not-holding"),
+    pytest.param(None, None, id="undeclared"),
+]
+
+# 三态 → (声明值, 注入行固定前缀)
+_HOLDS_LINE_CASES = [
+    pytest.param(True, _HOLDINGS_LINE_PREFIX[True], id="declared-holding"),
+    pytest.param(False, _HOLDINGS_LINE_PREFIX[False], id="declared-not-holding"),
+    pytest.param(None, _HOLDINGS_LINE_PREFIX[None], id="undeclared"),
+]
 
 
 class TestHoldingsContextModel:
@@ -28,11 +58,15 @@ class TestStateDeclaration:
         assert "holdings_executability_check" in AnalysisState.__annotations__
 
     def test_holdings_context_in_graph_channels(self):
+        """本用例守的是 incident 027 的静默丢弃，不是 LangGraph API 契约。
+
+        （键是否在 AnalysisState.__annotations__ 已由 test_keys_declared 覆盖，
+        此处不重复；只有键进了图 channels 才不会被图合并丢掉。）
+        """
         from finance_agent.graph import build_5layer_graph
 
         graph = build_5layer_graph()
         for key in ("holdings_context", "holdings_executability_check"):
-            assert key in AnalysisState.__annotations__
             assert key in graph.channels
 
 
@@ -67,18 +101,178 @@ class TestHoldingsContextLine:
         assert holdings_holds({"holdings_context": {"holds": True}}) is True
         assert holdings_holds({}) is None
 
+    @pytest.mark.parametrize(
+        "state",
+        [
+            pytest.param({"holdings_context": None}, id="context-none"),
+            pytest.param({"holdings_context": {"holds": None}}, id="dict-holds-none"),
+            pytest.param({"holdings_context": {"holds": "yes"}}, id="non-bool-truthy-str"),
+        ],
+    )
+    def test_malformed_forms_render_undeclared_line(self, state):
+        """非 bool 值 ⇒ 未申报：缺键 / 显式 None / 误传非 bool 一律不得臆测持有与否。"""
+        line = holdings_context_line(state)
+        assert "受众持仓: 未申报" in line
+        # 且不得渲染成已申报文案
+        assert "已申报" not in line
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            pytest.param({"holdings_context": None}, id="context-none"),
+            pytest.param({"holdings_context": {"holds": None}}, id="dict-holds-none"),
+            pytest.param({"holdings_context": {"holds": "yes"}}, id="non-bool-truthy-str"),
+        ],
+    )
+    def test_non_bool_normalized_to_none(self, state):
+        """holdings_holds 返回类型契约为 bool | None（非 bool 值归一 None，不把 "yes" 传出去）。"""
+        assert holdings_holds(state) is None
+
+
+class _CapturingGraph:
+    """图替身：记录 graph.stream 收到的 initial_state，并按需产出 updates 流。"""
+
+    def __init__(self, chunks: list[Any] | None = None) -> None:
+        self.received_states: list[dict] = []
+        self._chunks = chunks or []
+
+    def stream(self, state: dict, config: dict | None = None, stream_mode: Any = None):  # noqa: ARG002
+        self.received_states.append(state)
+        yield from self._chunks
+
+
+def _run_graph_streaming_with(req: Any, fake_graph: _CapturingGraph) -> list[str]:
+    """在 Langfuse 关闭 + fake graph 下跑完 api._run_graph_streaming（同 tests/test_api_blocked_terminal.py）。"""
+    from finance_agent.api import _run_graph_streaming
+
+    with (
+        patch("finance_agent.langfuse_tracing.get_langfuse", return_value=None),
+        patch("finance_agent.langfuse_tracing.get_callback_handler", return_value=None),
+        patch("finance_agent.api.graph", fake_graph),
+    ):
+        return list(
+            _run_graph_streaming(
+                stock_code=req.stock_code,
+                stock_name="贵州茅台",
+                req=req,
+                analysis_id="a1",
+                start_time=time.time(),
+            )
+        )
+
+
+class TestRequestHoldingsIntake:
+    """spec Scenario：GIVEN 分析请求携带声明 WHEN 构建初始 state THEN 声明三态保真。"""
+
+    @pytest.mark.parametrize(("declared", "expected"), _HOLDS_ROUNDTRIP)
+    def test_declared_holdings_reaches_graph_initial_state(self, declared, expected):
+        from finance_agent.api import AnalyzeRequest
+
+        fake = _CapturingGraph()
+        req = AnalyzeRequest(stock_code="600519", query="分析贵州茅台", holdings=declared)
+        events = _run_graph_streaming_with(req, fake)
+
+        assert events, "SSE 事件流不应为空（确认真的跑进了图）"
+        assert len(fake.received_states) == 1
+        ctx = fake.received_states[0]["holdings_context"]
+        assert isinstance(ctx, HoldingsContext), "initial_state 必须携带 HoldingsContext 对象"
+        assert ctx.holds is expected
+
 
 class TestTraderContextInjection:
-    def test_trader_context_carries_holdings_line(self):
+    @pytest.mark.parametrize(("holds", "expected_line"), _HOLDS_LINE_CASES)
+    def test_trader_context_carries_holdings_line(self, holds, expected_line):
         from finance_agent.nodes.trader import _build_trader_context
 
-        ctx = _build_trader_context({"holdings_context": HoldingsContext(holds=False)})
-        assert "受众持仓: 已申报未持有该标的" in ctx
+        ctx = _build_trader_context({"holdings_context": HoldingsContext(holds=holds)})
+        assert expected_line in ctx
 
 
 class TestRiskContextInjection:
-    def test_risk_context_carries_holdings_line(self):
+    @pytest.mark.parametrize(("holds", "expected_line"), _HOLDS_LINE_CASES)
+    def test_risk_context_carries_holdings_line(self, holds, expected_line):
+        """三个风险辩论者共用 _build_risk_context——三态均须注入且不省略未申报行。"""
         from finance_agent.nodes.risk import _build_risk_context
 
-        ctx = _build_risk_context({"holdings_context": HoldingsContext(holds=True)})
-        assert "受众持仓: 已申报持有该标的" in ctx
+        ctx = _build_risk_context({"holdings_context": HoldingsContext(holds=holds)})
+        assert expected_line in ctx
+
+
+_FINAL_REPORT_CHUNK = (
+    "updates",
+    {
+        "generate_report": {
+            "final_report": "# 报告\n\n正文",
+            "chart_data": {},
+            "analyst_reports": {},
+        }
+    },
+)
+
+
+class TestReactPathHoldings:
+    """追问/复用旧会话的 ReAct 路径（build_agent → run_deep_analysis 工具）三态保真。
+
+    此前该路径 initial_state 不含 holdings_context：显式声明被静默降级为「未申报」，
+    恰好放行本变更要拦的情形（未持有受众仍输出 exit）。
+    """
+
+    @pytest.mark.parametrize(("declared", "expected"), _HOLDS_ROUNDTRIP)
+    async def test_build_agent_holdings_reaches_tool_initial_state(self, declared, expected):
+        from finance_agent.agent_factory import build_agent
+        from finance_agent.tool_registry import TOOL_RUN_DEEP_ANALYSIS
+
+        fake = _CapturingGraph([_FINAL_REPORT_CHUNK])
+        with (
+            # 预算派生会对真实 endpoint 做能力探测（延迟取决于本机网络，数秒~数十秒），
+            # 与 holdings 接线无关，stub 掉避免用例受网络抖动影响；
+            # 被测链路（build_agent → 工具闭包 → initial_state）保持真实
+            patch("finance_agent.agent_factory._build_context_budget", return_value=None),
+            patch("finance_agent.graph.build_5layer_graph", return_value=fake),
+        ):
+            agent = build_agent(mode="deep", api_key="test-key", holdings=declared)
+            tool_fn = agent.tools.tools[TOOL_RUN_DEEP_ANALYSIS]
+            async for _ in tool_fn(stock_code="600519", stock_name="贵州茅台"):
+                pass
+
+        assert len(fake.received_states) == 1
+        ctx = fake.received_states[0]["holdings_context"]
+        assert isinstance(ctx, HoldingsContext)
+        assert ctx.holds is expected
+
+    async def test_react_analysis_forwards_request_holdings_to_build_agent(self):
+        """api._run_react_analysis（追问入口）必须把 req.holdings 交给 build_agent。"""
+        from finance_agent.api import AnalyzeRequest, _run_react_analysis
+
+        captured: dict = {}
+
+        def fake_build_agent(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        async def fake_stream_agent_to_sse(agent, query, **kwargs):  # noqa: ARG001
+            return
+            yield  # pragma: no cover -- 空异步生成器（无事件即结束）
+
+        fake_registry = MagicMock()
+        fake_registry.publish = AsyncMock()
+        fake_registry.publish_many = AsyncMock()
+        fake_registry.publish_terminal = AsyncMock()
+
+        req = AnalyzeRequest(stock_code="600519", query="分析贵州茅台", holdings=False)
+        with (
+            patch("finance_agent.agent_factory.build_agent", new=fake_build_agent),
+            patch("finance_agent.agent_factory.stream_agent_to_sse", new=fake_stream_agent_to_sse),
+            patch("finance_agent.api.registry", fake_registry),
+        ):
+            await _run_react_analysis(
+                session_id="holdings-wiring-sess",
+                req=req,
+                analysis_id="a1",
+                start_time=time.time(),
+                display_name=None,
+                api_key=None,
+            )
+
+        assert captured["mode"] == "deep"
+        assert captured["holdings"] is False

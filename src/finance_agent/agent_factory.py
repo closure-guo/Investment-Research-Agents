@@ -28,6 +28,7 @@ from typing import Any
 from finance_agent.harness import Agent, PermissionMode
 from finance_agent.harness.context import ContextBudget
 from finance_agent.llm import LLMConfig
+from finance_agent.models import HoldingsContext
 from finance_agent.outcome.track_record.ingest import persist_prediction_from_accumulated
 from finance_agent.prompts.loader import PromptInfo, load_prompt_with_meta
 from finance_agent.tool_registry import (
@@ -571,6 +572,7 @@ def _make_run_deep_analysis(
     session_id: str | None = None,
     web_sources: list[dict] | None = None,
     llm_config: LLMConfig | None = None,
+    holdings: bool | None = None,
 ):
     """创建 run_deep_analysis 流式工具，注入配置闭包。
 
@@ -578,6 +580,8 @@ def _make_run_deep_analysis(
     的 peer_codes），其余参数通过闭包注入。
     返回一个异步生成器，yield StreamEvent（PROGRESS + TOOL_RESULT）。
     session_id 用于 Langfuse session 聚合与 trace 属性（ADR-0015）。
+    holdings：受众持仓三态声明（add-holdings-context，由请求透传），写入
+    initial_state["holdings_context"]——ReAct 路径不得静默降级为「未申报」。
     """
 
     # LLM 工具参数与闭包参数同名：闭包值另存，内层 peer_codes 为 LLM 显式传参
@@ -666,6 +670,9 @@ def _make_run_deep_analysis(
             "enable_web_search": enable_web_search,
             "api_key": api_key,
             "web_sources": web_sources or [],
+            # 受众持仓上下文（add-holdings-context）：始终写入（未申报即 holds=None）——
+            # ReAct 路径同样承载请求声明，省略会让决策层注入行静默失真
+            "holdings_context": HoldingsContext(holds=holdings),
             # 请求级 LLM 配置透传到管线节点（call_llm_streaming / call_llm）
             "llm_config": llm_config,
         }
@@ -1534,6 +1541,7 @@ def build_agent(
                     session_id=kwargs.get("session_id"),
                     web_sources=web_sources_collector,
                     llm_config=llm_config,
+                    holdings=kwargs.get("holdings"),
                 )
             ),
             name=TOOL_RUN_DEEP_ANALYSIS,

@@ -379,11 +379,15 @@ def focus_hint(state: dict) -> str:
 
 
 def holdings_holds(state: dict) -> bool | None:
-    """读取受众持仓三态（add-holdings-context）。HoldingsContext 对象与 dict 两形态兼容。"""
+    """读取受众持仓三态（add-holdings-context）。HoldingsContext 对象与 dict 两形态兼容。
+
+    契约：非 bool 值 ⇒ 未申报（None）。缺键、显式 None、以及误传的非 bool 值
+    （如字符串 "yes"）一律归为未申报——返回类型恒为 bool | None，调用方不得据此
+    臆测受众持有 / 未持有。
+    """
     ctx = state.get("holdings_context")
-    if isinstance(ctx, dict):
-        return ctx.get("holds")
-    return getattr(ctx, "holds", None)
+    holds = ctx.get("holds") if isinstance(ctx, dict) else getattr(ctx, "holds", None)
+    return holds if isinstance(holds, bool) else None
 
 
 def holdings_context_line(state: dict) -> str:
