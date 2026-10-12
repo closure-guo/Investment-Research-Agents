@@ -5,8 +5,10 @@
 
 - D1 复权基准（rebase）：日批写入当日行时 ``close_qfq == close_raw``（前复权
   以最新日为基准）；除权除息检测 ``k = 交易所昨收(spot prev_close) / 该票最近
-  一条历史行的 close_raw``，``abs(k-1) > 1e-4`` 时把该票**所有历史行**
-  ``close_qfq`` 乘 k（历史 close_raw 不动）；无历史行（新股次日）不做 rebase。
+  一条历史行的 close_qfq``（close_qfq 是受维护的当前基准序列，若用 close_raw
+  对已修订历史会二次复权：停牌股在除息后复牌时历史行已被前次 rebase 修订），
+  ``abs(k-1) > 1e-4`` 时把该票**所有历史行** ``close_qfq`` 乘 k（历史
+  close_raw 不动）；无历史行（新股次日）不做 rebase。
   只有统一基准的 qfq 才能让跨日收益率在除权日不跳变。
 - D2 停牌/缺行合成：spot 表（``stock_zh_a_spot_em``）不含停牌标的；「昨日有行、
   今日 spot 无、且非退市」的票合成为停牌行：``open=high=low=close_raw=昨行
@@ -70,7 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_market_snapshot_code_date
 CREATE INDEX IF NOT EXISTS idx_market_snapshot_date ON market_snapshot (trade_date);
 CREATE TABLE IF NOT EXISTS snapshot_meta (
   key   TEXT PRIMARY KEY,
-  value TEXT
+  value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS security_master (
   code       TEXT PRIMARY KEY,
@@ -122,7 +124,8 @@ def init_snapshot_db(db_path: str | Path | None = None) -> Path:
 
 
 def set_meta(key: str, value: str, db_path: str | Path | None = None) -> None:
-    """写入 snapshot_meta 键值（同键覆盖）。"""
+    """写入 snapshot_meta 键值（同键覆盖；入口幂等建表，与 ops/model 同款纪律）。"""
+    init_snapshot_db(db_path)
     conn = _connect(db_path)
     try:
         conn.execute(
@@ -136,7 +139,8 @@ def set_meta(key: str, value: str, db_path: str | Path | None = None) -> None:
 
 
 def get_meta(key: str, db_path: str | Path | None = None) -> str | None:
-    """读取单个 meta 键；缺失返回 None。"""
+    """读取单个 meta 键；缺失返回 None（入口幂等建表，空库不抛错）。"""
+    init_snapshot_db(db_path)
     conn = _connect(db_path)
     try:
         row = conn.execute("SELECT value FROM snapshot_meta WHERE key = ?", (key,)).fetchone()
@@ -146,7 +150,8 @@ def get_meta(key: str, db_path: str | Path | None = None) -> str | None:
 
 
 def get_all_meta(db_path: str | Path | None = None) -> dict[str, str]:
-    """读取全部 meta 键值（状态判定纯函数的输入）。"""
+    """读取全部 meta 键值（状态判定纯函数的输入；入口幂等建表，空库返回 {}）。"""
+    init_snapshot_db(db_path)
     conn = _connect(db_path)
     try:
         rows = conn.execute("SELECT key, value FROM snapshot_meta").fetchall()
@@ -200,8 +205,10 @@ def build_snapshot_rows(
 def compute_rebase_factors(spot: pd.DataFrame, prev_rows: dict[str, dict]) -> dict[str, float]:
     """按 D1 检测除权除息，返回需要 rebase 的 ``{code: k}``。
 
-    ``k = spot 昨收 / 该票最近历史行 close_raw``；仅当存在有效历史行且
-    ``abs(k-1) > 1e-4`` 时返回（无历史行的新股次日不设基准，避免误乘）。
+    ``k = spot 昨收 / 该票最近历史行 close_qfq``；仅当存在有效历史基准且
+    ``abs(k-1) > 1e-4`` 时返回（无历史行/历史行无 close_qfq 的新股次日不设
+    基准，避免误乘）。用 close_qfq 而非 close_raw 作基准：close_qfq 是受维护
+    的当前基准序列，对已修订历史用 close_raw 会二次复权。
     """
     factors: dict[str, float] = {}
     for _, raw in spot.iterrows():
@@ -209,7 +216,7 @@ def compute_rebase_factors(spot: pd.DataFrame, prev_rows: dict[str, dict]) -> di
         prev = prev_rows.get(code)
         if prev is None:
             continue
-        base = _num(prev.get("close_raw"))
+        base = _num(prev.get("close_qfq"))
         prev_close = _num(raw.get("昨收"))
         if base is None or base == 0 or prev_close is None:
             continue
@@ -288,30 +295,37 @@ def _synthesize_suspended_row(
 
 
 def _num(value: Any) -> float | None:
-    """spot/DB 原始值 → float；None/NaN/不可解析 → None（不编造数值）。"""
+    """spot/DB 原始值 → float；None/NaN/inf/不可解析 → None（不编造数值）。"""
     if value is None:
         return None
     try:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    if math.isnan(out):
+    if not math.isfinite(out):  # NaN / +inf / -inf 一律视为缺失
         return None
     return out
 
 
 def _text(value: Any) -> str | None:
-    """原始值 → 去空白字符串；None/NaN/空串 → None。"""
-    if value is None or (isinstance(value, float) and math.isnan(value)):
+    """原始值 → 去空白字符串；None/NaN/pd.NA/NaT/空串 → None（不产生 '<NA>'）。"""
+    if value is None:
         return None
+    try:
+        if pd.isna(value):  # 标量缺失（NaN/pd.NA/NaT）；array-like 走 except
+            return None
+    except (TypeError, ValueError):
+        pass
     text = str(value).strip()
     return text or None
 
 
 def _norm_code(value: Any) -> str:
-    """代码归一为 6 位列字符串（数字型输入补前导零）；空/NaN → ""。"""
+    """代码归一为 6 位列字符串（float 整数值去掉 ".0"；数字输入补前导零）；空/NaN → ""。"""
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return ""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)  # 600519.0 → "600519"（避免 ".0" 尾巴破坏代码列）
     code = str(value).strip()
     if code.isdigit() and len(code) < 6:
         code = code.zfill(6)

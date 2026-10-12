@@ -13,6 +13,9 @@ import pytest
 
 from finance_agent.data.snapshot import (
     _connect,
+    _norm_code,
+    _num,
+    _text,
     build_snapshot_rows,
     compute_rebase_factors,
     get_all_meta,
@@ -99,6 +102,22 @@ def test_meta_roundtrip(tmp_path):
     set_meta("last_success_date", "2026-10-14", db_path=db)  # 幂等覆盖
     assert get_meta("last_success_date", db_path=db) == "2026-10-14"
     assert len(get_all_meta(db_path=db)) == 2
+
+
+def test_meta_value_not_null_and_autocreate_on_fresh_db(tmp_path):
+    """FIX-4：value 列 NOT NULL；get_meta/get_all_meta 入口幂等建表（空库不抛错）。"""
+    fresh = tmp_path / "never_initialized.db"
+    assert get_all_meta(db_path=fresh) == {}  # 未 init 的路径：入口自建表后返回空
+    assert get_meta("last_success_date", db_path=fresh) is None
+
+    conn = _connect(fresh)
+    try:
+        notnull = {
+            row[1]: row[3] for row in conn.execute("PRAGMA table_info(snapshot_meta)").fetchall()
+        }
+        assert notnull["value"] == 1  # NOT NULL
+    finally:
+        conn.close()
 
 
 # ── Task 2: 行构造纯函数 ──────────────────────────────────────────────────────
@@ -356,7 +375,7 @@ def test_listed_days_and_unknown_list_date():
 
 
 def test_rebase_factor_detects_dividend():
-    """D1：k = spot 昨收 / 昨行 close_raw；仅 abs(k-1) > 1e-4 且有历史行才返回。"""
+    """D1（修订）：k = spot 昨收 / 昨行 close_qfq；仅 abs(k-1) > 1e-4 且有历史行才返回。"""
     spot = pd.DataFrame(
         {
             "代码": ["600519", "000001", "000002", "300750", "688981"],
@@ -364,10 +383,10 @@ def test_rebase_factor_detects_dividend():
         }
     )
     prev_rows = {
-        "600519": {"close_raw": 10.0},  # 10 → 9.0：k=0.9，除权除息
-        "000001": {"close_raw": 20.0},  # 昨收不变：无事件
-        "000002": {"close_raw": 10.0},  # k-1=5e-5 < 1e-4：低于检测阈值
-        "688981": {"close_raw": 30.0},  # spot 昨收 NaN：无法判定
+        "600519": {"close_raw": 10.0, "close_qfq": 10.0},  # 10 → 9.0：k=0.9，除权除息
+        "000001": {"close_raw": 20.0, "close_qfq": 20.0},  # 昨收不变：无事件
+        "000002": {"close_raw": 10.0, "close_qfq": 10.0},  # k-1=5e-5 < 1e-4：低于检测阈值
+        "688981": {"close_raw": 30.0, "close_qfq": 30.0},  # spot 昨收 NaN：无法判定
         # 300750 无历史行（新股次日）→ 不做 rebase
     }
 
@@ -375,3 +394,51 @@ def test_rebase_factor_detects_dividend():
 
     assert set(factors) == {"600519"}
     assert factors["600519"] == pytest.approx(0.9)
+
+
+def test_rebase_ignores_already_adjusted_basis():
+    """FIX-1：昨日 close_qfq 已是当前基准时不再重复复权（k == 1 不返回）。
+
+    场景：停牌股在除息后复牌，历史行已被前次 rebase 修订过（raw=10、qfq=9），
+    spot 昨收 9.0 与 close_qfq 一致 → 若误用 close_raw 会二次复权（k=0.9）。
+    """
+    spot = pd.DataFrame({"代码": ["600519"], "昨收": [9.0]})
+    prev_rows = {"600519": {"close_raw": 10.0, "close_qfq": 9.0}}
+
+    assert compute_rebase_factors(spot, prev_rows) == {}
+
+
+def test_rebase_skips_history_without_qfq_basis():
+    """FIX-1：历史行无 close_qfq（旧数据）→ 无当前基准可比，不返回（不编造 k）。"""
+    spot = pd.DataFrame({"代码": ["600519"], "昨收": [9.0]})
+    prev_rows = {"600519": {"close_raw": 10.0}}
+
+    assert compute_rebase_factors(spot, prev_rows) == {}
+
+
+def test_norm_code_normalizes_numeric_and_string_forms():
+    """FIX-2：float 整数值不带 ".0" 尾巴；数字串补足 6 位；缺值 → 空串。"""
+    assert _norm_code(600519.0) == "600519"
+    assert _norm_code("1") == "000001"
+    assert _norm_code(1) == "000001"
+    assert _norm_code("600519") == "600519"
+    assert _norm_code(float("nan")) == ""
+    assert _norm_code(None) == ""
+
+
+def test_text_and_num_reject_missing_and_non_finite():
+    """FIX-3：_text 对 None/NaN/pd.NA/空串返回 None；_num 对 inf/-inf 返回 None。"""
+    assert _text(None) is None
+    assert _text(float("nan")) is None
+    assert _text(pd.NA) is None
+    assert _text(pd.NaT) is None
+    assert _text("") is None
+    assert _text("   ") is None
+    assert _text(" 贵州茅台 ") == "贵州茅台"
+
+    assert _num(None) is None
+    assert _num(float("nan")) is None
+    assert _num(float("inf")) is None
+    assert _num(float("-inf")) is None
+    assert _num("10.5") == 10.5
+    assert _num("abc") is None
