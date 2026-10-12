@@ -1,5 +1,4 @@
-"""五道闸准入管线（add-factor-library-and-monitor Task 3：闸①② + 编排骨架；
-Task 4：闸③ 置换检验 + BH-FDR）。
+"""五道闸准入管线（add-factor-library-and-monitor T3–T5；本模块已全部实装）。
 
 闸口定义（逐字，Global Constraints）：
 
@@ -16,12 +15,10 @@ Task 4：闸③ 置换检验 + BH-FDR）。
 - **闸 5 样本外复核**：训验切分（``TRAIN_FRACTION``，切点不跨日）验证段
   ``|ICIR|`` 达标且符号一致 → 否则 ``OOS_FAILED``。
 
-**T3 实现闸①②与编排骨架，T4 已把闸③占位桩替换为真实实现**；闸④⑤ 仍为显式
-``TODO(T5)`` 占位桩（恒通过、逐函数独立、可直接删除替换），编排对它们只依赖
-接口形状。占位桩期间只验收「编排形状 + 闸①②③判定」，真实统计判定由 T5 的
-测试覆盖。
+实现沿革：T3 落闸①② + 编排骨架（③④⑤ 曾为占位桩），T4 替换闸③（置换 + BH-FDR），
+T5 替换闸④⑤（池级增量 + 样本外）——占位桩已全部删除，五道闸均为真实统计判定。
 
-编排契约（T5 替换占位桩时不得破坏）：
+编排契约（各任务替换实现时不得破坏）：
 
 - ``gates`` 记录该候选**实际执行过**的闸口结果（按执行顺序，含通过项）；
   ``rejected_gate`` = 被拒闸口编号（0–5），全部通过者为 ``None``；
@@ -34,8 +31,8 @@ Task 4：闸③ 置换检验 + BH-FDR）。
   ``rejected_gate=0``，``gates`` 末尾追加第二次 gate=0 记录）→ ``add_factor``
   （candidate）+ ``set_status(active)`` + 闸④ detail 的 ``increment`` 写
   ``pool_increment`` + ``apply_bucket_quota``（E8）；
-- ``check_pool_increment`` 的真实实现**必须在 ``GateResult.detail`` 给出
-  ``increment: float``**（池级 IR 增量）——E8 保种排序依赖 ``factors.pool_increment``；
+- ``check_pool_increment`` **必须在 ``GateResult.detail`` 给出 ``increment: float``**
+  （池级 IR 增量）——E8 保种排序依赖 ``factors.pool_increment``；
 - 候选表达式经 ``dsl.parse``（默认复杂度硬约束）解析；解析/复杂度失败直接抛错
   （提案路径已保证合法，编排不吞错）；
 - 面板须含 ``close`` 字段（``forward_returns`` 输入；面板六字段契约）。
@@ -211,20 +208,21 @@ def check_single_factor(ic: pd.Series) -> GateResult:
 
 
 def benjamini_hochberg_adjust(p_values: Mapping[str, float]) -> dict[str, float]:
-    """Benjamini-Hochberg step-up 调整 p 值（q 值；键集合与输入一致）。
+    """Benjamini-Hochberg step-up 调整 p 值（q 值；键集合与输入一致，上限截到 1.0）。
 
-    调整口径：原 p 升序排序后 ``p_adj_(i) = min_{j ≥ i} (K · p_(j) / j)``
-    （后缀最小，K = 候选数）——结果在排序序上**单调不减**（BH step-up 的上凸包），
-    并与「拒绝所有 p_(i) ≤ (i/K)·q」的判定等价。调用方（``check_significance``）
-    以 ``BH_FDR_Q`` 比较（``p_adj > q`` → ``NOT_SIGNIFICANT``）。空输入 → 空输出。
-    并列 p 值按 ``(p, key)`` 稳定排序，结果确定（同输入同输出）。
+    调整口径：原 p 升序排序后 ``p_adj_(i) = min(1, min_{j ≥ i} (K · p_(j) / j))``
+    （后缀最小 + 截到 1，K = 候选数）——结果在排序序上**单调不减**（BH step-up 的
+    上凸包），并与「拒绝所有 p_(i) ≤ (i/K)·q」的判定等价。调用方
+    （``check_significance``）以 ``BH_FDR_Q`` 比较（``p_adj > q`` → ``NOT_SIGNIFICANT``）；
+    截顶不影响判定（原值 > 1 时本就 > q），只为报告/审计给出规范 q 值。
+    空输入 → 空输出。并列 p 值按 ``(p, key)`` 稳定排序，结果确定（同输入同输出）。
     """
     if not p_values:
         return {}
     ordered = sorted(p_values, key=lambda key: (p_values[key], key))
     total = len(ordered)
     adjusted: dict[str, float] = {}
-    running = math.inf
+    running = 1.0
     for rank in range(total, 0, -1):
         key = ordered[rank - 1]
         running = min(running, p_values[key] * total / rank)
