@@ -976,3 +976,16 @@ class TestUnfilledDisclosure:
         report = run_backtest(sample, klines, replay_fn=_fake_replay(outcomes))
         assert report["unfilled_counts"] == {}
         assert "未成交笔数按原因码披露、不计入收益序列" in report["methodology"]["unfilled"]
+
+    def test_methodology_declares_cost_caliber_and_md_renders_it(self):
+        """评审修正 A2：methodology.costs 逐字口径 + 进 md（口径只在 JSON 不算披露）。"""
+        from evals.backtest.report import render_backtest_report_md
+
+        sample, outcomes, klines = _batch_setup()
+        report = run_backtest(sample, klines, replay_fn=_fake_replay(outcomes))
+        expected = "成交价含滑点；佣金/印花税逐笔记入 fill.fee，收益序列暂不折算费用"
+        assert report["methodology"]["costs"] == expected
+        md = render_backtest_report_md(report, name="cost-caliber")
+        assert expected in md
+        # 未成交计数键恒在（本批为空 → 「无」），md 与 JSON 同源披露
+        assert "未成交笔数（按原因码）：无" in md

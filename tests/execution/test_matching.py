@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from finance_agent.execution.matching import (
@@ -178,6 +179,24 @@ def test_fill_price_falls_back_to_most_conservative_tier_without_market_amounts(
     # 成交价 = round(100.0 × (1 + 0.002), 2) = 100.2
     assert result.fill_price == 100.2
     assert result.slippage_rate == 0.002
+
+
+def test_market_amounts_numpy_array_is_samples_not_missing():
+    """评审修正 A3：numpy 数组样本按数组取档——非空数组不得因真值歧义按缺失处理。
+
+    变异实证：`if amount is None or not market_amounts:` 对多元素 numpy 数组抛
+    "truth value of an array ... is ambiguous" → 本用例 RED。
+    """
+    result = match_order(
+        Order(code="600519", side="buy", qty=100),
+        _make_bar(open_=100.0, amount=900.0),
+        config=_CONFIG,
+        market_amounts=np.array(_MARKET_AMOUNTS),
+    )
+    # 分位 = count(样本 <= 900)/10 = 0.9 → 高档 0.0005；成交价 = round(100.0×1.0005, 2)
+    assert result.slippage_rate == 0.0005
+    assert result.fill_price == 100.05
+    assert result.reason is None and result.filled_qty == 100
 
 
 # ── 费用（M5）────────────────────────────────────────────────────────────────

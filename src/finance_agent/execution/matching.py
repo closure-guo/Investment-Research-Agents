@@ -161,8 +161,10 @@ def slippage_rate_for_amount(
       ``slippage_rate`` 最大者（默认配置 = 首档 0.002）。计划 M4 的括号「末档 =
       最大 slippage」在逐字配置（末档 quantile_max=1.0、滑点 0.0005）下不自洽，
       本实现以「最保守 = 最大 slippage」语义为准（回测宁可高估成本、不美化收益）。
+      空样本判定用 ``is None``/``len(...) == 0``（不依赖真值）：numpy 数组样本
+      不得因真值歧义被当作缺失（评审修正 A3）。
     """
-    if amount is None or not market_amounts:
+    if amount is None or market_amounts is None or len(market_amounts) == 0:
         return max(tier.slippage_rate for tier in config.slippage_tiers)
     quantile = sum(1 for sample in market_amounts if sample <= amount) / len(market_amounts)
     for tier in config.slippage_tiers:

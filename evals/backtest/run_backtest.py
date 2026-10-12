@@ -319,6 +319,7 @@ def run_backtest(
                 "unfilled_counts（范围 = 一致率达标、进入绩效循环的标的）"
             ),
             "daily_returns": "单笔结算收益摊到持有期逐日；基线为 T-1 信号 T 生效的逐日仓位收益",
+            "costs": "成交价含滑点；佣金/印花税逐笔记入 fill.fee，收益序列暂不折算费用",
             "adjust": (
                 "结算/回测区间收益走后复权（hfq，SETTLEMENT_ADJUST，Δ4 Task 1 统一）；"
                 "指数无复权概念，基准取原始点位"
