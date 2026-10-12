@@ -1,4 +1,4 @@
-"""screening/filters.py L1 硬过滤单测（add-screening-filters Task 1）。
+"""screening/filters.py L1 硬过滤单测（add-screening-filters Task 1–2）。
 
 计划 docs/superpowers/plans/2026-10-13-add-screening-filters.md 关键设计决策：
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from finance_agent.screening import constraints
 from finance_agent.screening.constraints import (
     DEFAULT_THRESHOLDS,
     MIN_AVG_AMOUNT_20D,
@@ -414,3 +415,63 @@ def test_build_candidate_record_short_amounts():
     assert record.trading_days_listed == 60
     assert record.avg_amount_20d is None
     assert filter_universe([record])[0].reasons == (RejectReason.DATA_MISSING,)
+
+
+# ── Task 2: 常量单点修改场景（F4） ───────────────────────────────────────────
+
+
+def test_default_thresholds_override_changes_liquidity_behavior(monkeypatch):
+    """monkeypatch 模块属性 DEFAULT_THRESHOLDS（80M）→ 60M 均额标的从通过变 ILLIQUID。"""
+    record = _rec(avg_amount_20d=60_000_000.0)
+    assert filter_universe([record])[0].passed is True  # 默认 50M 阈值下通过
+
+    monkeypatch.setattr(
+        constraints,
+        "DEFAULT_THRESHOLDS",
+        FilterThresholds(min_avg_amount_20d=80_000_000.0),
+    )
+    decision = filter_universe([record])[0]
+    assert decision.reasons == (RejectReason.ILLIQUID,)
+
+
+def test_default_thresholds_override_changes_ipo_boundary(monkeypatch):
+    """monkeypatch 模块属性 DEFAULT_THRESHOLDS（61 日）→ 60 日标的从通过变 IPO_RECENT。"""
+    record = _rec(trading_days_listed=60)
+    assert filter_universe([record])[0].passed is True
+
+    monkeypatch.setattr(
+        constraints,
+        "DEFAULT_THRESHOLDS",
+        FilterThresholds(min_trading_days=61),
+    )
+    decision = filter_universe([record])[0]
+    assert decision.reasons == (RejectReason.IPO_RECENT,)
+
+
+def test_explicit_thresholds_parameter_wins_over_module_default(monkeypatch):
+    """显式 thresholds= 参数覆盖模块默认（反向钉住读取优先级）。"""
+    monkeypatch.setattr(
+        constraints,
+        "DEFAULT_THRESHOLDS",
+        FilterThresholds(min_avg_amount_20d=80_000_000.0),
+    )
+    record = _rec(avg_amount_20d=60_000_000.0)
+    assert filter_universe([record])[0].reasons == (RejectReason.ILLIQUID,)  # 模块默认已改
+
+    explicit = FilterThresholds()  # 类默认值在导入期绑定 = 原口径常量
+    assert filter_universe([record], thresholds=explicit)[0].passed is True
+
+
+def test_thresholds_override_applies_to_all_rules():
+    """显式阈值同时作用于上市天数与流动性两条规则。"""
+    explicit = FilterThresholds(min_trading_days=100, min_avg_amount_20d=1e9)
+    decisions = filter_universe(
+        [_rec(trading_days_listed=99, avg_amount_20d=999_999_999.0)], thresholds=explicit
+    )
+    assert decisions[0].reasons == (RejectReason.IPO_RECENT, RejectReason.ILLIQUID)
+
+
+def test_monkeypatch_does_not_leak_across_tests():
+    """monkeypatch 撤销后行为回到默认口径（模块属性读取在调用期、无残留缓存）。"""
+    assert FilterThresholds() == constraints.DEFAULT_THRESHOLDS
+    assert filter_universe([_rec(avg_amount_20d=60_000_000.0)])[0].passed is True
