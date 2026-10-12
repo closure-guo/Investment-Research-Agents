@@ -653,7 +653,9 @@ def _build_risk_context(state: dict) -> str:
     if hint:
         sections.append(hint)
 
-    # 受众持仓上下文（add-holdings-context）：三态均注入（同 Trader 层，两层不得漂移）
+    # 受众持仓上下文（add-holdings-context）：三态均注入（同 Trader 层，两层不得漂移）。
+    # 注意本函数由激进/保守/中性三个风险辩论者与 risk_judge 共用——该行会同时进入
+    # 三方辩论 context，排查 context 内容时不要只盯着 risk_judge
     sections.append(holdings_context_line(state))
 
     # Trader 方案
