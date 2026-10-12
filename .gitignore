@@ -249,6 +249,8 @@ cache.db*
 **/sessions.db-wal
 **/sessions.db-shm
 data/test-e2e-sessions.db*
+# 行情快照告警横幅 E2E 独立测试库（playwright.config.ts 注入 SNAPSHOT_DB_PATH）
+data/test-e2e-snapshot.db*
 # 跑赢指数对比 E2E 专属测试库（playwright.track-record.config.ts 注入）
 data/test-e2e-track-record.db*
 data/test-e2e-eval-ops.db*

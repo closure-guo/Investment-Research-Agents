@@ -86,7 +86,7 @@ export default defineConfig({
       // SESSIONS_DB_PATH 指向独立测试库：与生产 data/sessions.db 共用同一文件时，
       // 两个后端进程并发写会导致 SQLite 主库被 WAL 帧覆盖而彻底损坏（不可恢复）
       command: 'uv run uvicorn finance_agent.api:app --port 8000',
-      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', REPORTS_DIR: 'tmp/e2e-reports-8000' },
+      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', REPORTS_DIR: 'tmp/e2e-reports-8000' },
       url: 'http://localhost:8000/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
