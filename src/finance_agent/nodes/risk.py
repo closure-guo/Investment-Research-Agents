@@ -194,7 +194,8 @@ def _reaffirm_decision_semantics(
     if hy["flip"]:
         prior_action = _DIRECTION_ACTION.get(str(hy["prior_direction"]), "watch")
         # 维持前判到执行动作时：反方向价位不可信清空（交既有价位完整性打回补报）；
-        # sell_type 维持语义中性默认 short（清空会撞后续 sell_type 申报打回的级联）
+        # sell_type 维持可执行默认 exit（add-holdings-context：原为 short——与生产
+        # 分型语义相反，且 A 股散户普遍不可执行）
         update: dict = {
             "action": prior_action,
             "position_size": None,
@@ -204,7 +205,7 @@ def _reaffirm_decision_semantics(
             "exit_schedule": None,
         }
         if prior_action == "sell":
-            update["sell_type"] = "short"
+            update["sell_type"] = "exit"
         else:
             update["sell_type"] = None
         decision = decision.model_copy(update=update)
@@ -286,7 +287,8 @@ def risk_judge(state: dict) -> dict:
     )
     # sell 分型申报（update-sell-action-typing，#188）：sell 缺 sell_type → 打回申报
     # 一次；申报 exit → 价位豁免（final_price_missing 分型分支生效，免去无意义价位
-    # 打回）；仍缺 → 默认 short（保守，与现行建仓模板语义一致）+ 如实标注。
+    # 打回）；仍缺 → 默认 exit（add-holdings-context 可执行默认：原为 short，与
+    # 生产分型语义相反且 A 股散户普遍不可执行）+ 如实标注。
     # 判定在价位完整性检查之前（design：打回预算不叠加，先定型再验参数）
     if (
         str(getattr(decision, "action", "")) == "sell"
@@ -313,8 +315,8 @@ def risk_judge(state: dict) -> dict:
             str(getattr(decision, "action", "")) == "sell"
             and getattr(decision, "sell_type", None) is None
         ):
-            decision = decision.model_copy(update={"sell_type": "short"})
-            _sell_type_note = "sell_type 未申报，默认 short 模板（如实标注）"
+            decision = decision.model_copy(update={"sell_type": "exit"})
+            _sell_type_note = "sell_type 未申报，默认 exit（可执行默认，如实标注）"
         else:
             _sell_type_note = "打回后已申报 sell_type"
     else:
@@ -324,11 +326,22 @@ def risk_judge(state: dict) -> dict:
     final_price_check: dict = {"result": "pass", "note": _sell_type_note}
     _missing = final_price_missing(decision)
     if _missing:
-        retry_context = (
-            f"{context}\n\n【价位完整性打回】{'buy' if decision.action == 'buy' else 'sell'}"
-            f"决策必须结构化申报数值价位，缺失：{'、'.join(_missing)}。"
-            "请重新输出补全 entry_price/stop_loss/target_price 的完整决策 JSON（继承或显式改写 Trader 价位均可，但必须以结构化字段申报）。"
-        )
+        if "exit_schedule" in _missing:
+            # 分型分支（add-holdings-context）：exit 形态缺减仓节奏时 MUST 要节奏，
+            # 沿用建仓价位措辞会要求补 entry/stop/target 来满足 exit 校验（自相矛盾）
+            retry_context = (
+                f"{context}\n\n【减仓节奏申报打回】终稿 sell_type 为 exit（持有者减仓），"
+                "必须申报 exit_schedule 减仓节奏，当前缺失：exit_schedule。请重新输出"
+                "补全 exit_schedule（一句话写清批次与触发，如「分两批：现价减半、"
+                "跌破600清仓」）的完整决策 JSON。若受众并未持有该标的（无敞口可退），"
+                "请改为 watch 并申报 inaction_reason 与 reeval_triggers。"
+            )
+        else:
+            retry_context = (
+                f"{context}\n\n【价位完整性打回】{'buy' if decision.action == 'buy' else 'sell'}"
+                f"决策必须结构化申报数值价位，缺失：{'、'.join(_missing)}。"
+                "请重新输出补全 entry_price/stop_loss/target_price 的完整决策 JSON（继承或显式改写 Trader 价位均可，但必须以结构化字段申报）。"
+            )
         data = call_llm_for_json(
             retry_context,
             system=system,

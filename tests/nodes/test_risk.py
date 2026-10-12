@@ -798,7 +798,8 @@ def _sell_untyped_json(prices: bool = True) -> str:
 
 class TestSellTypeDeclarationLoop:
     """update-sell-action-typing（#188）：sell 缺 sell_type → 打回申报一次；
-    申报 exit → 价位豁免生效；仍缺 → 默认 short + final_check 如实标注。"""
+    申报 exit → 价位豁免生效；仍缺 → 默认 exit（add-holdings-context 可执行默认，
+    原为 short）+ final_check 如实标注。"""
 
     def _base_state(self) -> dict:
         return {
@@ -821,15 +822,43 @@ class TestSellTypeDeclarationLoop:
         assert "sell_type" in mock_llm.call_args_list[1].args[0]
 
     @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
-    def test_untyped_sell_defaults_short_after_retry(self, mock_llm):
-        """打回申报仍缺 → 默认 short 模板 → 价位齐全（stub 带价位）→ 放行 + 标注。"""
-        mock_llm.side_effect = [_sell_untyped_json(), _sell_untyped_json()]
+    def test_untyped_sell_defaults_exit_after_retry(self, mock_llm):
+        """打回申报仍缺 → 默认 exit（可执行默认）→ 减仓节奏已带 → 放行 + 如实标注。"""
+        untyped_with_schedule = {
+            "action": "sell",
+            "confidence": 0.5,
+            "reasoning": "看空",
+            "position_size": "light",
+            "exit_schedule": "分两批：现价减半、跌破 600 清仓",
+            "reeval_triggers": ["重新站上 660 恢复持有"],
+        }
+        mock_llm.side_effect = [
+            _sell_untyped_json(),  # 第一次：未申报 sell_type（带建仓价位形态）
+            json.dumps(untyped_with_schedule, ensure_ascii=False),  # 打回后仍缺，但带减仓节奏
+        ]
         result = risk_judge(self._base_state())
-        assert mock_llm.call_count == 2
+        assert mock_llm.call_count == 2  # 节奏齐备 → 不再触发第二次打回
         decision = result["final_trade_decision"]
-        assert decision.sell_type == "short"  # 默认推导落回决策对象
+        assert decision.sell_type == "exit"  # 默认推导落回决策对象
         note = result["final_price_check"]["note"]
-        assert "默认 short" in note or "未申报" in note
+        assert "默认 exit" in note
+
+    @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
+    def test_untyped_sell_missing_schedule_retries_for_schedule_not_prices(self, mock_llm):
+        """默认 exit 后若 exit_schedule 也缺，打回必须要求减仓节奏而非建仓价位。"""
+        mock_llm.return_value = _sell_untyped_json()  # 两次均未申报 sell_type；价位齐全但无节奏
+        risk_judge(self._base_state())
+        assert mock_llm.call_count == 3  # 分型打回 + 默认 exit 后的减仓节奏打回
+        retry_prompts = [
+            c.args[0] if c.args else c.kwargs.get("context", "") for c in mock_llm.call_args_list
+        ]
+        # 「减仓节奏」在分型打回说明里也出现（exit 语义描述）——真正钉死新分支的是
+        # 节奏打回的段头标记：旧默认 short 下该段永不出现（价位齐全直接放行）
+        assert any("减仓节奏申报打回" in p for p in retry_prompts), "打回未要求 exit_schedule"
+        assert any("减仓节奏" in p for p in retry_prompts), "打回未要求 exit_schedule"
+        assert not any("补全 entry_price/stop_loss/target_price" in p for p in retry_prompts), (
+            "exit 形态不应要求补建仓价位"
+        )
 
     @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
     def test_typed_sell_no_extra_retry(self, mock_llm):
@@ -955,16 +984,15 @@ class TestDecisionHysteresis:
                 },
                 ensure_ascii=False,
             ),
-            # 维持前判 sell（sell_type 默认 short、价位清空）→ 价位完整性打回第三段
+            # 维持前判 sell（add-holdings-context：sell_type 默认 exit、价位清空）→
+            # 减仓节奏缺失触发打回第三段
             json.dumps(
                 {
                     "action": "sell",
                     "confidence": 0.6,
                     "position_size": "light",
-                    "sell_type": "short",
-                    "entry_price": 645.0,
-                    "stop_loss": 700.0,
-                    "target_price": 571.0,
+                    "sell_type": "exit",
+                    "exit_schedule": "现价减半，跌破 570 清仓",
                     "reasoning": "维持前判（无证据增量）",
                     "reeval_triggers": ["跌破 570 重估"],
                 },
@@ -974,10 +1002,15 @@ class TestDecisionHysteresis:
         result = risk_judge(
             self._state("看空", [{"date": "2026-10-01", "direction": "short", "confidence": 0.6}])
         )
-        assert mock_llm.call_count == 3  # 滞回打回 + 维持前判后价位完整性打回
+        assert mock_llm.call_count == 3  # 滞回打回 + 维持前判后减仓节奏打回
+        # 第三段打回要求的是减仓节奏（exit 形态），而非建仓价位
+        assert "减仓节奏申报打回" in mock_llm.call_args_list[2].args[0]
         decision = result["final_trade_decision"]
         assert decision.action == "sell"  # 维持前判
-        assert decision.entry_price == 645.0  # 价位经完整性打回重新申报
+        assert decision.sell_type == "exit"  # 维持前判落回可执行默认（不再默认 short）
+        assert decision.exit_schedule == "现价减半，跌破 570 清仓"  # 节奏经打回重新申报
+        assert decision.entry_price is None  # exit 形态不再要求建仓价位
+        assert result["final_price_check"]["note"] == "打回后已申报"
         hy = result["decision_hysteresis"]
         assert hy["flip"] is True
         assert "维持前判" in hy["applied"]
