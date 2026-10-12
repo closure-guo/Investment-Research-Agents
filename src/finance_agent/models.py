@@ -206,7 +206,8 @@ class TradeDecision(BaseModel):
     # sell 分型（update-sell-action-typing，#188）：exit=持有者减仓/退出敞口（申报
     # exit_schedule 减仓节奏，无新建仓参数，重新介入条件走 reeval_triggers）；
     # short=做空建仓（沿用 entry/stop/target 必填模板）。None=未申报/历史形态，
-    # 校验层打回申报，仍缺默认按 short 处理（保守，与现行模板语义一致）
+    # 校验层打回申报，仍缺默认按 exit 处理（add-holdings-context 可执行默认：原为
+    # short，与生产分型语义相反且 A 股散户普遍不可执行）
     sell_type: Literal["exit", "short"] | None = None
     exit_schedule: str | None = None
 
@@ -247,8 +248,8 @@ class TradeDecision(BaseModel):
     @classmethod
     def _normalize_sell_type(cls, value: object) -> object:
         """sell_type 归一（update-sell-action-typing）：大小写/同义词容错——
-        减仓/退出族→exit、做空族→short；未识别杂值归 None（走默认 short 模板
-        路径，不抛异常炸管线——申报约束由 risk_judge 校验层承担）。
+        减仓/退出族→exit、做空族→short；未识别杂值归 None（不抛异常炸管线——
+        申报约束由 risk_judge 校验层承担，打回后仍缺默认 exit）。
         非 sell 动作上的取值由 model_validator 归 None（防 LLM 在 buy 上塞值）。
         """
         if not isinstance(value, str):

@@ -276,3 +276,214 @@ class TestReactPathHoldings:
 
         assert captured["mode"] == "deep"
         assert captured["holdings"] is False
+
+
+class TestNotHoldingExitGate:
+    """holds=False + sell/exit → 打回重申一次 → 仍犯降级 watch（复用滞回归一模式）。"""
+
+    def _state(self, holds):
+        from finance_agent.nodes.risk import risk_judge  # noqa: F401
+
+        return {
+            "holdings_context": HoldingsContext(holds=holds),
+            "trader_plan": {
+                "action": "sell",
+                "confidence": 0.5,
+                "reasoning": "看空",
+                "sell_type": "exit",
+                "exit_schedule": "现价清仓",
+            },
+            "analyst_reports": {},
+        }
+
+    def test_not_holding_exit_retries_once_then_downgrades(self, monkeypatch):
+        from finance_agent.nodes import risk as risk_mod
+
+        calls: list[str] = []
+
+        def _fake_llm(context, **kwargs):
+            calls.append(context)
+            # reeval_triggers / trigger_low 是夹具中性字段（同 test_risk._sell_untyped_json
+            # 惯例）：否则「再评估触发条件」「触发位申报」两条无关门禁会各多打回一次，
+            # 污染本用例「恰打回一次」的调用计数；降级后的 watch 终稿继承它们，
+            # 不再误入后续打回回路
+            return {
+                "action": "sell",
+                "confidence": 0.5,
+                "reasoning": "看空",
+                "sell_type": "exit",
+                "exit_schedule": "现价清仓",
+                "reeval_triggers": ["跌破 600 重估"],
+                "trigger_low": 600.0,
+            }
+
+        monkeypatch.setattr(risk_mod, "call_llm_for_json", _fake_llm)
+        monkeypatch.setattr(risk_mod, "_build_hysteresis_context", lambda s: "")
+        result = risk_mod.risk_judge(self._state(False))
+        assert len(calls) == 2, "应恰打回重申一次"
+        assert "无敞口可退" in calls[1]
+        decision = result["final_trade_decision"]
+        assert decision.action == "watch"
+        assert decision.sell_type is None
+        assert decision.exit_schedule is None
+        assert decision.entry_price is None and decision.stop_loss is None
+        check = result["holdings_executability_check"]
+        assert check["result"] == "fail"
+        assert "降级观望" in check["note"]
+        assert "未持有无敞口可退" in decision.inaction_reason
+
+    def test_not_holding_exit_corrected_on_retry_passes(self, monkeypatch):
+        from finance_agent.nodes import risk as risk_mod
+
+        seq = [
+            {
+                "action": "sell",
+                "confidence": 0.5,
+                "reasoning": "看空",
+                "sell_type": "exit",
+                "exit_schedule": "现价清仓",
+            },
+            {
+                "action": "watch",
+                "confidence": 0.5,
+                "reasoning": "改判观望",
+                "inaction_reason": "受众未持有，无敞口可退",
+                "reeval_triggers": ["跌破 600"],
+                "trigger_low": 600.0,
+            },
+        ]
+        monkeypatch.setattr(risk_mod, "call_llm_for_json", lambda context, **k: seq.pop(0))
+        monkeypatch.setattr(risk_mod, "_build_hysteresis_context", lambda s: "")
+        result = risk_mod.risk_judge(self._state(False))
+        assert result["final_trade_decision"].action == "watch"
+        assert result["holdings_executability_check"]["result"] == "pass"
+        assert "改判" in result["holdings_executability_check"]["note"]
+
+    @pytest.mark.parametrize("holds", [True, None])
+    def test_gate_not_triggered_for_holding_or_undeclared(self, holds, monkeypatch):
+        from finance_agent.nodes import risk as risk_mod
+
+        calls: list[str] = []
+
+        def _fake_llm(context, **kwargs):
+            calls.append(context)
+            # 夹具中性字段（同 test_risk._sell_untyped_json 惯例）：避免「再评估触发条件」
+            # 门禁多打回一次，污染「未触发门禁时恰一次调用」的计数
+            return {
+                "action": "sell",
+                "confidence": 0.5,
+                "reasoning": "看空",
+                "sell_type": "exit",
+                "exit_schedule": "现价清仓",
+                "reeval_triggers": ["跌破 600 重估"],
+            }
+
+        monkeypatch.setattr(risk_mod, "call_llm_for_json", _fake_llm)
+        monkeypatch.setattr(risk_mod, "_build_hysteresis_context", lambda s: "")
+        result = risk_mod.risk_judge(self._state(holds))
+        assert len(calls) == 1, "未触发门禁时不得额外调用 LLM"
+        assert result["final_trade_decision"].action == "sell"
+        assert result["holdings_executability_check"]["result"] == "pass"
+
+
+class TestFinalSellTypeCollapse:
+    """T5 收口：打回换代（减仓节奏/理由/再评估/触发位/价位交叉校验）后 LLM 再丢
+    sell_type 时终稿不得停在 None——全部重试结束后幂等兜底 exit 并如实改注，
+    MUST NOT 再触发新打回（死循环）；未持有受众的门禁判据不得因此失明。
+    """
+
+    def _state(self, holds):
+        return {
+            "holdings_context": HoldingsContext(holds=holds),
+            "trader_plan": {"action": "sell", "confidence": 0.5, "reasoning": "看空"},
+            "analyst_reports": {},
+        }
+
+    def test_schedule_retry_dropping_sell_type_collapses_to_exit(self, monkeypatch):
+        """节奏打回后的新终稿丢 sell_type：兜底 exit + 改注，不再打回。"""
+        from finance_agent.nodes import risk as risk_mod
+
+        seq = [
+            # call1：申报 exit 但缺减仓节奏 → 触发「减仓节奏申报打回」
+            {
+                "action": "sell",
+                "confidence": 0.5,
+                "reasoning": "看空",
+                "sell_type": "exit",
+                "reeval_triggers": ["跌破 600 重估"],
+            },
+            # call2：打回换代后补了节奏却丢了 sell_type（终稿停在 None 的路径）
+            {
+                "action": "sell",
+                "confidence": 0.5,
+                "reasoning": "看空",
+                "exit_schedule": "现价清仓",
+                "reeval_triggers": ["跌破 600 重估"],
+            },
+        ]
+        calls: list[str] = []
+
+        def _fake_llm(context, **kwargs):
+            calls.append(context)
+            return seq.pop(0)
+
+        monkeypatch.setattr(risk_mod, "call_llm_for_json", _fake_llm)
+        monkeypatch.setattr(risk_mod, "_build_hysteresis_context", lambda s: "")
+        result = risk_mod.risk_judge(self._state(None))
+        assert len(calls) == 2, "收口不得再触发新打回"
+        decision = result["final_trade_decision"]
+        assert decision.sell_type == "exit"
+        assert decision.exit_schedule == "现价清仓"
+        # 兜底不得编造建仓价位
+        assert decision.entry_price is None and decision.stop_loss is None
+        note = result["final_price_check"]["note"]
+        assert "打回后仍未申报" in note
+        assert "默认 exit" in note
+        # 未申报受众不触发门禁：判定仍是 pass（收口不伪造门禁结论）
+        assert result["holdings_executability_check"]["result"] == "pass"
+
+    def test_collapse_exit_on_not_holding_audience_downgraded_at_final_recheck(self, monkeypatch):
+        """holds=False：门禁因 sell_type 未申报失明，收口出的 exit 仍须终稿复核降级。"""
+        from finance_agent.nodes import risk as risk_mod
+
+        seq = [
+            # call1：门禁打回一次
+            {
+                "action": "sell",
+                "confidence": 0.5,
+                "reasoning": "看空",
+                "sell_type": "exit",
+                "reeval_triggers": ["跌破 600 重估"],
+            },
+            # call2：门禁判据失明的形态（sell_type 未申报，价位/节奏齐备）
+            {
+                "action": "sell",
+                "confidence": 0.5,
+                "reasoning": "看空",
+                "exit_schedule": "现价清仓",
+                "entry_price": 640.0,
+                "stop_loss": 660.0,
+                "target_price": 571.0,
+                "reeval_triggers": ["跌破 600 重估"],
+            },
+        ]
+        calls: list[str] = []
+
+        def _fake_llm(context, **kwargs):
+            calls.append(context)
+            return seq.pop(0)
+
+        monkeypatch.setattr(risk_mod, "call_llm_for_json", _fake_llm)
+        monkeypatch.setattr(risk_mod, "_build_hysteresis_context", lambda s: "")
+        result = risk_mod.risk_judge(self._state(False))
+        assert len(calls) == 2, "终稿复核不得再触发 LLM 打回"
+        decision = result["final_trade_decision"]
+        assert decision.action == "watch"
+        assert decision.sell_type is None
+        assert decision.exit_schedule is None and decision.entry_price is None
+        check = result["holdings_executability_check"]
+        assert check["result"] == "fail"
+        assert "降级观望" in check["note"]
+        assert "未持有无敞口可退" in decision.inaction_reason
+        # 降级后触发位缺失须如实改注（不得留空注假阳性）
+        assert "触发位" in result["final_trigger_check"]["note"]

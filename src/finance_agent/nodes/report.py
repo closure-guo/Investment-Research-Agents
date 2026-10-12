@@ -865,8 +865,8 @@ def _format_trade_decision(
     lines.append(f"- **仓位**: {_fmt_position_size(position)}")
     # sell 分型分模板（update-sell-action-typing，#188）：exit（持有者减仓）无新建仓
     # 参数——渲染减仓节奏、不渲染价位行与派生指标（与 watch/hold 无建仓参数语义
-    # 同型，重新介入条件由 reeval_triggers 承载）；short 与未申报（None，默认
-    # short）维持现行参数行（历史报告兼容）
+    # 同型，重新介入条件由 reeval_triggers 承载）；short 与未申报（None——历史报告
+    # 形态，新管线经 risk_judge 收口默认 exit）维持现行建仓参数行（历史报告兼容）
     if action == "sell" and sell_type == "exit":
         if isinstance(exit_schedule, str) and exit_schedule.strip():
             lines.append(f"- **减仓节奏**: {exit_schedule}")
