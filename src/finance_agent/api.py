@@ -38,6 +38,7 @@ from finance_agent.graph import build_5layer_graph  # noqa: E402
 from finance_agent.langfuse_tracing import get_langfuse  # noqa: E402
 from finance_agent.llm import LLMConfig  # noqa: E402
 from finance_agent.llm.probe_cache import get_probe_cache  # noqa: E402
+from finance_agent.models import HoldingsContext  # noqa: E402
 from finance_agent.pipeline_runner import PipelineRunner, build_layer_tree  # noqa: E402
 from finance_agent.session_store import (  # noqa: E402
     append_chat,
@@ -263,6 +264,9 @@ class AnalyzeRequest(BaseModel):
     api_key: str | None = None
     session_id: str | None = None  # 追问时传入会话 ID
     focus: str = ""  # 深度研究意图澄清环节用户填写的关注点（Kimi 风格反问回答）
+    # 受众是否持有该标的（add-holdings-context）：False=未持有、True=持有、
+    # None=未申报（默认）。未申报按可执行默认（exit）表达并要求说明未持有处置
+    holdings: bool | None = None
     user_id: str | None = None  # Langfuse user 聚合（ADR-0015）
     llm_config: LLMConfigRequest | None = None  # 请求级 LLM 配置（model/baseUrl/apiKey/thinking）
 
@@ -1091,6 +1095,9 @@ def _run_graph_streaming(
         "enable_web_search": req.enable_web_search,
         "api_key": req.api_key,
         "focus": focus_value,
+        # 受众持仓上下文（add-holdings-context）：始终写入（未申报即 holds=None）——
+        # 省略该键会让决策层注入行与可执行性门禁一起哑火
+        "holdings_context": HoldingsContext(holds=req.holdings),
         # 请求级 LLM 配置透传到管线节点（call_llm_streaming / call_llm）
         "llm_config": llm_config,
     }
