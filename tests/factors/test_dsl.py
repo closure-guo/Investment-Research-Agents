@@ -35,6 +35,8 @@ from finance_agent.factors.dsl import (
     ast_depth,
     count_fields,
     count_free_params,
+    is_subtree_isomorphic,
+    normalize,
     parse,
     serialize,
 )
@@ -389,3 +391,124 @@ def test_enforce_complexity_false_bypasses_caps():
     node = parse(expr, enforce_complexity=False)
     assert ast_depth(node) == 5
     assert serialize(node) == "abs(rank(zscore(ts_mean(close,10))))"
+
+
+# ── Task 3: 规范化（D5）与子树同构（D6） ─────────────────────────────────────
+
+
+def test_normalize_flattens_associative_ops():
+    """D5①：``add(add(a,b),c)`` → 三参 add（同 op 展平；子节点保持集合相等）。"""
+    flat = normalize(parse("add(add(close, volume), open)"))
+    assert isinstance(flat, Call)
+    assert flat.op == "add"
+    assert len(flat.args) == 3
+    assert set(flat.args) == {Field("close"), Field("volume"), Field("open")}
+
+
+@pytest.mark.parametrize("op", ["add", "mul", "max", "min"])
+def test_normalize_flattens_all_four_associative_ops(op: str):
+    """D5① 全集：add/mul/max/min 四个算子都执行结合律展平。"""
+    flat = normalize(parse(f"{op}({op}(close, volume), open)"))
+    assert isinstance(flat, Call)
+    assert flat.op == op
+    assert len(flat.args) == 3
+
+
+def test_normalize_does_not_flatten_non_associative():
+    """D5① 边界：sub 非结合律 → 结构原样保留（不展平、不排序）。"""
+    node = normalize(parse("sub(sub(close, volume), open)"))
+    assert node == parse("sub(sub(close, volume), open)")
+
+
+def test_normalize_sorts_commutative_children():
+    """D5②：交换律等价因子规范形态相同（按 serialize 字符串排序）。"""
+    assert normalize(parse("add(close, volume)")) == normalize(parse("add(volume, close)"))
+    assert normalize(parse("add(volume, close)")) == Call("add", (Field("close"), Field("volume")))
+
+
+def test_normalize_keeps_non_commutative_arg_order_including_window():
+    """D5② 边界：非交换算子（含 ts_corr 的 window 位置）保持参数顺序。"""
+    node = normalize(parse("ts_corr(volume, close, 10)"))
+    assert node == parse("ts_corr(volume, close, 10)")
+
+
+def test_normalize_uses_canonical_serialize_for_sorting():
+    """D5②④：排序键用规范序列化（数字整数无小数点、小数去尾零）。"""
+    assert serialize(normalize(parse("add(close, 2.50)"))) == "add(2.5,close)"
+
+
+def test_normalize_is_idempotent():
+    """D5③：normalize(normalize(x)) == normalize(x)（含嵌套展平 + 排序）。"""
+    expr = "add(mul(volume, close), add(open, mul(close, volume)))"
+    once = normalize(parse(expr))
+    twice = normalize(once)
+    assert twice == once
+    assert serialize(twice) == serialize(once)
+
+
+def test_normalize_leaf_and_simple_call_unchanged():
+    """D5 边界：叶子与已规范形态调用原样返回。"""
+    assert normalize(Field("close")) == Field("close")
+    assert normalize(Number(10)) == Number(10)
+    assert normalize(parse("rank(close)")) == parse("rank(close)")
+
+
+# ── Task 3: is_subtree_isomorphic（D6） ──────────────────────────────────────
+
+
+def test_spec_scenario_window_skin_isomorphic():
+    """spec 场景：``ts_mean(close,10)`` vs ``ts_mean(close,11)`` → True（仅窗口不同）。"""
+    assert is_subtree_isomorphic(parse("ts_mean(close, 10)"), parse("ts_mean(close, 11)")) is True
+
+
+def test_isomorphic_false_on_different_field():
+    """字段名位置对应：close vs volume → False。"""
+    assert is_subtree_isomorphic(parse("ts_mean(close, 10)"), parse("ts_mean(volume, 10)")) is False
+
+
+def test_isomorphic_false_on_different_op_or_arity():
+    """同 op、同元数才可能同构：op 不同 / 元数不同 → False。"""
+    assert is_subtree_isomorphic(parse("ts_mean(close, 10)"), parse("ts_std(close, 10)")) is False
+    assert is_subtree_isomorphic(parse("rank(close)"), parse("ts_mean(close, 10)")) is False
+
+
+def test_isomorphic_commutative_equivalence():
+    """D6 + D5②：交换律等价视为同构；非交换算子（sub）正反例。"""
+    assert is_subtree_isomorphic(parse("add(close, volume)"), parse("add(volume, close)")) is True
+    assert is_subtree_isomorphic(parse("sub(close, volume)"), parse("sub(volume, close)")) is False
+
+
+def test_isomorphic_binary_vs_flattened_equivalence():
+    """D5①+D6：结合律分组不同的等价式（add 二叉树两种分组）→ True。"""
+    a = parse("add(add(close, volume), open)")
+    b = parse("add(close, add(volume, open))")
+    assert is_subtree_isomorphic(a, b) is True
+
+
+def test_isomorphic_false_on_depth_difference():
+    """深度不同 → False（元数/结构不可能逐位置对应）。"""
+    a = parse("add(close, volume)")
+    b = parse("add(close, add(volume, open))")
+    assert is_subtree_isomorphic(a, b) is False
+
+
+def test_isomorphic_false_on_number_vs_field_position_mismatch():
+    """位置错配：数字占位 vs 字段占位 → False（类型不同，取值忽略不适用）。"""
+    assert is_subtree_isomorphic(parse("add(close, 10)"), parse("add(close, volume)")) is False
+    assert is_subtree_isomorphic(parse("mul(close, 1.5)"), parse("mul(close, 2)")) is True
+
+
+def test_isomorphic_ignores_number_values_deep():
+    """D6：深树中数字取值全忽略（窗口 9 vs 30、字面量 1 vs 2）。"""
+    a = parse("ts_rank(rank(low), 9)")
+    b = parse("ts_rank(rank(low), 30)")
+    assert is_subtree_isomorphic(a, b) is True
+    assert is_subtree_isomorphic(parse("add(1, 2)"), parse("add(3, 4)")) is True
+    assert is_subtree_isomorphic(parse("add(close, 1)"), parse("add(volume, 1)")) is False
+
+
+def test_isomorphic_mixed_association_and_numbers():
+    """D6 综合：交换律 + 结合律 + 数字等价（位置一一对应）。"""
+    a = parse("add(close, add(volume, 1))")
+    b = parse("add(volume, add(1, close))")
+    assert is_subtree_isomorphic(a, b) is True

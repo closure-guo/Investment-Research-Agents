@@ -389,3 +389,56 @@ def _format_number(value: int | float) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text
+
+
+# ── 对外接口：规范化 / 子树同构 ─────────────────────────────────────────────
+
+# D5 规范分组算子：既参与结合律展平，也参与交换律排序（v1 两集合一致；
+# ts_corr 虽语义对称但 window 位置固定，不参与排序以免破坏 D2 参数位次）
+_CANONICAL_OPS: frozenset[str] = frozenset({"add", "mul", "max", "min"})
+
+
+def normalize(node: AstNode) -> AstNode:
+    """D5 规范化（自底向上、幂等）：
+
+    ① 结合律展平：同 op 且 op ∈ {add, mul, max, min} 的子调用并入父调用
+    （``add(add(a,b),c)`` → ``add(a,b,c)``）；
+    ② 交换律排序：展平后对上述算子的子节点按 ``serialize`` 规范字符串排序；
+    ③ 幂等：``normalize(normalize(x)) == normalize(x)``；
+    ④ 展平后的多参形态是**比较用规范形**（超出 D2 元数表，不可 ``parse`` 回读）。
+    """
+    if not isinstance(node, Call):
+        return node
+    args: list[AstNode] = []
+    for arg in node.args:
+        normalized = normalize(arg)
+        if node.op in _CANONICAL_OPS and isinstance(normalized, Call) and normalized.op == node.op:
+            args.extend(normalized.args)
+        else:
+            args.append(normalized)
+    if node.op in _CANONICAL_OPS:
+        args.sort(key=serialize)
+    return Call(op=node.op, args=tuple(args))
+
+
+def is_subtree_isomorphic(a: AstNode, b: AstNode) -> bool:
+    """D6 子树同构判定（比较在规范化后进行）。
+
+    同 op、同元数、字段名位置对应；数字**只按「有」匹配（取值忽略）**——
+    ``ts_mean(close,10)`` ≍ ``ts_mean(close,11)``；交换律等价（``add(close,volume)``
+    ≍ ``add(volume,close)``）与结合律分组差异视为同构。
+    """
+    return _isomorphic(normalize(a), normalize(b))
+
+
+def _isomorphic(a: AstNode, b: AstNode) -> bool:
+    """规范化后 AST 的逐位置同构（数字值忽略；Field 名必须相等）。"""
+    if isinstance(a, Number) or isinstance(b, Number):
+        return isinstance(a, Number) and isinstance(b, Number)
+    if isinstance(a, Field) or isinstance(b, Field):
+        return isinstance(a, Field) and isinstance(b, Field) and a.name == b.name
+    return (
+        a.op == b.op
+        and len(a.args) == len(b.args)
+        and all(_isomorphic(left, right) for left, right in zip(a.args, b.args, strict=True))
+    )
