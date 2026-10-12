@@ -250,11 +250,10 @@ def validate_proposal_payload(payload: dict[str, Any]) -> tuple[FactorProposal |
 
 @dataclass
 class _Draft:
-    """一轮未通过合同校验的条目（下一轮修复对象）。"""
+    """一轮未通过合同校验的条目（下一轮修复对象）：原始 payload + 该轮错误原文。"""
 
     raw: dict[str, Any]
     error: str
-    attempts: int
 
 
 def _response_items(payload: Any) -> list[tuple[dict[str, Any], str | None]]:
@@ -283,18 +282,18 @@ def _response_items(payload: Any) -> list[tuple[dict[str, Any], str | None]]:
 
 
 def _validate_round(
-    items: list[tuple[dict[str, Any], str | None]], *, mode: str, attempts: int
+    items: list[tuple[dict[str, Any], str | None]], *, mode: str
 ) -> tuple[list[FactorProposal], list[_Draft]]:
     """校验一轮响应条目：通过者收编（钉上 mode），未通过者成下一轮修复对象。"""
     proposals: list[FactorProposal] = []
     drafts: list[_Draft] = []
     for raw, preset_error in items:
         if preset_error is not None:
-            drafts.append(_Draft(raw=raw, error=preset_error, attempts=attempts))
+            drafts.append(_Draft(raw=raw, error=preset_error))
             continue
         proposal, error = validate_proposal_payload(raw)
         if proposal is None:
-            drafts.append(_Draft(raw=raw, error=error or "合同校验失败", attempts=attempts))
+            drafts.append(_Draft(raw=raw, error=error or "合同校验失败"))
         else:
             proposals.append(dataclasses.replace(proposal, mode=mode))
     return proposals, drafts
@@ -362,7 +361,7 @@ def _run_proposal_batch(
             items = _response_items(payload)
         except ProposalResponseError as exc:
             items = [({"raw_text": exc.raw_text}, str(exc))]
-        round_proposals, drafts = _validate_round(items, mode=mode, attempts=round_index + 1)
+        round_proposals, drafts = _validate_round(items, mode=mode)
         proposals.extend(round_proposals)
         if not drafts:
             break
@@ -374,23 +373,87 @@ def _run_proposal_batch(
     )
 
 
+def _render_bucket_stats(bucket_stats: dict[str, int]) -> str:
+    """分桶存量渲染：`桶名 N 条（P%）`，按存量降序（同量按桶名），无存量 → 明示为空。"""
+    total = sum(bucket_stats.values())
+    if total <= 0:
+        return "（因子库为空）"
+    parts = [
+        f"{name} {count} 条（{count / total:.0%}）"
+        for name, count in sorted(bucket_stats.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return "；".join(parts)
+
+
+def _dominance_instruction(bucket_stats: dict[str, int]) -> str:
+    """单桶占比 > 50% → 显式跨桶指令（含占比数字与其他桶枚举），否则空串（P4）。
+
+    严格大于阈值才触发——占比均 ≤50% 时不产生任何引导段（spec「跨桶采样防收敛」）。
+    """
+    total = sum(bucket_stats.values())
+    if total <= 0:
+        return ""
+    dominant, count = max(bucket_stats.items(), key=lambda item: item[1])
+    share = count / total
+    if share <= _DOMINANCE_THRESHOLD:
+        return ""
+    others = "/".join(category for category in CATEGORIES if category != dominant)
+    return (
+        f"单桶占优提示：{dominant} 桶存量占比 {share:.0%}（{count}/{total} 条）已超过 50%，"
+        f"本批候选必须偏向其他桶（{others}），不得继续集中在 {dominant} 桶。"
+    )
+
+
+def _render_operator_ic(operator_ic: dict[str, float]) -> str:
+    """算子历史入库 IC 均值渲染：`op: 0.0210`（IC 降序，同值按算子名）；无数据 → 明示。"""
+    if not operator_ic:
+        return "（暂无入库 IC 统计）"
+    parts = [
+        f"{op}: {ic:.4f}"
+        for op, ic in sorted(operator_ic.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return "；".join(parts)
+
+
+def _render_feedback(feedback: list[dict]) -> str:
+    """因子库反馈渲染：逐条 `1. 键=值，键=值`（保持条目顺序）；无反馈 → 明示。"""
+    if not feedback:
+        return "（暂无因子库反馈）"
+    return "\n".join(
+        f"{index}. " + "，".join(f"{key}={value}" for key, value in item.items())
+        for index, item in enumerate(feedback, 1)
+    )
+
+
 def build_broad_prompt(
     *, bucket_stats: dict[str, int], operator_ic: dict[str, float], n: int
 ) -> str:
-    """广度变异 prompt 组装（P4，纯函数）：模板 + 分桶统计 + 算子先验 + 候选数要求。"""
+    """广度变异 prompt 组装（P4）：分桶占比 + 算子先验 + 候选数 + 跨桶指令。
+
+    渲染确定（同输入同输出）；模板经既有 `load_prompt`（Langfuse production 优先、
+    本地 `prompts/factor_proposal.md` 兜底 + TTL 缓存）。
+    """
     template = load_prompt(_PROMPT_NAME)
-    sampling_context = f"因子库分桶存量：{bucket_stats}\n算子历史入库 IC 均值：{operator_ic}"
+    sampling_context = (
+        f"因子库分桶存量：{_render_bucket_stats(bucket_stats)}\n"
+        f"算子历史入库 IC 均值：{_render_operator_ic(operator_ic)}"
+    )
     extra_instruction = f"本批需产出不少于 {n} 条候选（proposals 数组长度 ≥ {n}）。"
+    dominance = _dominance_instruction(bucket_stats)
+    if dominance:
+        extra_instruction = f"{extra_instruction}\n{dominance}"
     return _render_template(
         template, sampling_context=sampling_context, extra_instruction=extra_instruction
     )
 
 
 def build_deep_prompt(*, feedback: list[dict]) -> str:
-    """深度改进 prompt 组装（P4，纯函数）：拒收原因分布 + 衰减复盘注入。"""
+    """深度改进 prompt 组装（P4）：拒收原因分布 + 衰减复盘注入（模板同上）。"""
     template = load_prompt(_PROMPT_NAME)
-    sampling_context = f"因子库反馈（拒收原因分布 / 衰减复盘）：{feedback}"
-    extra_instruction = "针对上述反馈做深度改进：优先修复高频拒收原因、替换已衰减形态。"
+    sampling_context = f"因子库反馈（拒收原因分布 / 衰减复盘）：\n{_render_feedback(feedback)}"
+    extra_instruction = (
+        "针对上述反馈做深度改进：优先修复高频拒收原因、替换已衰减形态；每条提案仍需满足输出合同。"
+    )
     return _render_template(
         template, sampling_context=sampling_context, extra_instruction=extra_instruction
     )

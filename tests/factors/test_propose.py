@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from finance_agent.factors import propose
@@ -23,6 +25,8 @@ from finance_agent.factors.propose import (
     GatewayProposalClient,
     ProposalBatchResult,
     ProposalResponseError,
+    build_broad_prompt,
+    build_deep_prompt,
     propose_broad_batch,
     propose_deep_improvement,
     route_proposal_call,
@@ -406,3 +410,87 @@ class TestGatewayClient:
     def test_unknown_mode_rejected_at_construction(self):
         with pytest.raises(ValueError):
             GatewayProposalClient(mode="sideways")
+
+
+class TestPromptAssembly:
+    """P4：跨桶采样 prompt 组装（分桶占比 + 算子先验 + 跨桶指令；拒收/衰减反馈注入）。"""
+
+    def test_template_file_exists_with_placeholders(self):
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "finance_agent"
+            / "prompts"
+            / "factor_proposal.md"
+        )
+        text = path.read_text(encoding="utf-8")
+        assert text.strip()
+        assert "{{sampling_context}}" in text
+        assert "{{extra_instruction}}" in text
+        assert "{{categories}}" in text
+
+    def test_prompt_template_is_loaded_and_fully_rendered(self, monkeypatch):
+        seen = []
+
+        def fake_load(name):
+            seen.append(name)
+            return "M {{categories}} | S {{sampling_context}} | E {{extra_instruction}}"
+
+        monkeypatch.setattr(propose, "load_prompt", fake_load)
+        prompt = build_broad_prompt(bucket_stats={}, operator_ic={}, n=20)
+        assert seen == ["factor_proposal"]
+        assert "{{" not in prompt  # 占位符全部替换，无残留
+        assert "价量/反转/动量/流动性/波动率" in prompt
+
+    def test_broad_prompt_contains_bucket_shares_and_operator_ic(self):
+        prompt = build_broad_prompt(
+            bucket_stats={"动量": 7, "价量": 3}, operator_ic={"ts_mean": 0.021}, n=25
+        )
+        # 分桶占比数字
+        assert "动量 7 条（70%）" in prompt
+        assert "价量 3 条（30%）" in prompt
+        # 算子历史入库 IC 表
+        assert "ts_mean: 0.0210" in prompt
+        # 候选数要求
+        assert "不少于 25 条" in prompt
+        # 动量占比 70% > 50% → 显式跨桶指令（含占比与「其他桶」枚举）
+        assert "70%" in prompt
+        assert "偏向其他桶（价量/反转/流动性/波动率）" in prompt
+
+    def test_dominance_instruction_lists_other_buckets_by_category_order(self):
+        prompt = build_broad_prompt(bucket_stats={"反转": 6, "价量": 4}, operator_ic={}, n=20)
+        assert "偏向其他桶（价量/动量/流动性/波动率）" in prompt
+        assert "反转 桶存量占比 60%" in prompt
+
+    def test_broad_prompt_without_dominant_bucket_has_no_instruction(self):
+        prompt = build_broad_prompt(bucket_stats={"动量": 5, "价量": 5}, operator_ic={}, n=20)
+        assert "50%" in prompt  # 占比仍照实渲染
+        assert "偏向其他桶" not in prompt
+        assert "单桶占优" not in prompt
+
+    def test_broad_prompt_empty_library(self):
+        prompt = build_broad_prompt(bucket_stats={}, operator_ic={}, n=20)
+        assert "（因子库为空）" in prompt
+        assert "（暂无入库 IC 统计）" in prompt
+        assert "偏向其他桶" not in prompt
+
+    def test_deep_prompt_contains_feedback_distribution_and_decay_review(self):
+        feedback = [
+            {"原因": "DSL 解析失败", "条数": 12},
+            {"因子": "ts_mean(close,5)", "复盘": "近 3 月 IC 由 0.04 衰减至 0.005"},
+        ]
+        prompt = build_deep_prompt(feedback=feedback)
+        assert "原因=DSL 解析失败" in prompt
+        assert "条数=12" in prompt
+        assert "ts_mean(close,5)" in prompt
+        assert "近 3 月 IC 由 0.04 衰减至 0.005" in prompt
+
+    def test_deep_prompt_without_feedback_is_explicit(self):
+        assert "（暂无因子库反馈）" in build_deep_prompt(feedback=[])
+
+    def test_batch_passes_alignment_score_through_without_rejection(self):
+        """P5 端到端：alignment_score=0 的提案照常进入 proposals。"""
+        client = StubClient([_payload(alignment_score=0)])
+        result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
+        assert result.rejected == ()
+        assert result.proposals[0].alignment_score == 0.0
