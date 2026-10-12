@@ -40,6 +40,7 @@ import { MenuToggleIcon } from './components/ui/menu-toggle-icon'
 import { loadThemeChoice, saveThemeChoice, applyTheme, watchSystemTheme, type ThemeChoice } from './theme'
 import { useHotkeys } from './hooks/useHotkeys'
 import { Toaster } from './components/ui/sonner'
+import { SnapshotBanner } from './SnapshotBanner'
 import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
 import { Textarea } from './components/ui/textarea'
@@ -1113,6 +1114,11 @@ export default function App() {
         onCycleTheme={cycleTheme}
         themeChoice={themeChoice}
       />
+
+      {/* 行情快照新鲜度全局横幅（add-market-snapshot D5/T9）：挂载即轮询
+          GET /api/snapshot/status，stale 时才渲染。挂 App 壳层（与 Toaster 同级）
+          而非「会话生成中」警告条（其在聊天分支内，空态首页不渲染）。 */}
+      <SnapshotBanner />
 
       {/* 全局 toast 容器（shadcn/sonner 封装；仅挂载，暂无调用方） */}
       <Toaster />
