@@ -487,3 +487,15 @@ class TestFinalSellTypeCollapse:
         assert "未持有无敞口可退" in decision.inaction_reason
         # 降级后触发位缺失须如实改注（不得留空注假阳性）
         assert "触发位" in result["final_trigger_check"]["note"]
+        # 终稿复核降级换代后价位注必须订正（评审 I-1）：收口注/重试注可能仍写着
+        # 对 sell/exit 的结论——终稿已是完整 watch，旧注失真；且注经 report.
+        # _fm_incomplete_integrity_block（marker「仍未申报」）渲染用户可见标注，
+        # 并进 FM 审批上下文（fund_manager.final_integrity_notes）
+        price_note = result["final_price_check"]["note"]
+        assert "默认 exit" not in price_note, "降级后价位注残留 sell 结论"
+        assert "exit_schedule" not in price_note, "降级后价位注残留 sell 结论"
+        assert "仍未申报" not in price_note, "降级后价位注含 FM/report 不完整标记词"
+        assert "终稿复核降级覆盖" in price_note, "缺换代措辞（须如实说明已被降级覆盖）"
+        # 「LLM 丢过 sell_type」的事实在换代注中不保留，改记门禁判定键（trace
+        # 可观测；本键不进 report/FM 消费链）——来源可溯不丢
+        assert "sell_type" in check["note"]

@@ -692,6 +692,7 @@ def risk_judge(state: dict) -> dict:
     # 兜底 exit 后按 exit 口径重算价位结论——旧注基于「未申报 → 建仓价位必填」
     # 口径，换代后已成失真结论；exit_schedule 缺失按既有「已打回仍未申报」语义
     # 如实标注，MUST NOT 编造减仓节奏/建仓价位。
+    _sell_type_collapse_note = ""
     if (
         str(getattr(decision, "action", "")) == "sell"
         and getattr(decision, "sell_type", None) is None
@@ -702,6 +703,7 @@ def risk_judge(state: dict) -> dict:
         if _missing_after_collapse:
             _collapse_note += f"；终稿仍缺：{'、'.join(_missing_after_collapse)}（已打回仍未申报）"
         final_price_check["note"] = _collapse_note
+        _sell_type_collapse_note = _collapse_note
     # 2) 门禁判据终稿复核：后续打回换代可能把门禁已降级的终稿翻回 sell/exit，或
     # 收口默认出的 exit 落在未持有受众上（门禁在主块已过）——打回预算已尽，按同一
     # 确定性降级语义改判并如实改注（MUST NOT 再调用 LLM，避免死循环）。
@@ -711,6 +713,25 @@ def risk_judge(state: dict) -> dict:
             "result": "fail",
             "note": "未持有无敞口可退，已降级观望（终稿复核降级）",
         }
+        if _sell_type_collapse_note:
+            # 收口历史（LLM 打回后仍丢 sell_type、曾按未申报默认 exit）改记本键：
+            # 下方换代改注会覆盖 final_price_check 注，该事实仅此处可保留（trace
+            # 可观测；本键不进 report/FM 消费链，措辞亦避开 _FM_INCOMPLETE_MARKERS
+            # 「仍未申报」/「缺失」）
+            holdings_check["note"] += (
+                "；历史披露：终稿收口时 sell_type 曾按未申报默认 exit，该结论已被终稿复核降级覆盖"
+            )
+        # 终稿复核降级换代后价位注须订正（评审 I-1）：注可能仍写着对 sell/exit 的
+        # 结论（收口注「默认 exit…」/各重试注），对完整 watch 终稿已成失真陈述——
+        # 且注含标记词会经 report._fm_incomplete_integrity_block 渲染用户可见的
+        # 「审批对象结构不完整标注」，并进 FM 审批上下文。复用重试回路的换代改注
+        # helper（如实标注已被降级覆盖，不再打回）
+        _recheck_price_note_after_retry(decision, final_price_check, "终稿复核降级")
+        # 价位复核结果（decision_price_anomalies/decision_price_gate）保持降级前
+        # sell 终稿的结论不重跑：降级清空的是分型/节奏/建仓价位（非校验器输入），
+        # 校验输入 reeval_triggers/reasoning 与触发位均未被降级改动，唯一被替换的
+        # inaction_reason 是固定无价位文案（不引入新 anomaly）——既有价位复核结论
+        # 对新终稿仍成立
         # 终稿换代改判 watch：复核兄弟结论（同 I-1 链模式，不再打回，不得留空注假阳性）
         _missing_inaction_final = inaction_rationale_missing(decision)
         if _missing_inaction_final:
