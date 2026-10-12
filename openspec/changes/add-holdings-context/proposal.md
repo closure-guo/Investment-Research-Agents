@@ -40,7 +40,8 @@ A 股散户几乎只能做多：融券做空受两融标的范围、券源与信
 - **非交互类变更**：不涉及前端 UI、SSE 流式、会话切换、状态流转，不适用 E2E 门禁
 - **明确不做（后续 delta）**：持仓持久化与真实账户接入（自动选股 / 交易本体）、前端持仓录入 UI、`sell→short` 结算方向映射变更（「跌了获益」对 exit 与 short 同样成立，维持现状）、两融标的名单数据源
 
-## 与其他在飞 change 的关系
+## 与其他 change 的关系
 
-- `add-horizon-semantics-to-decision-layer`：同改 `agent-prompt-contracts` 的**不同 requirement**（该 change 为 ADDED「决策层周期语义契约」/「分析师论据周期标注」；本 change 为 MODIFIED「Trader 决策语义契约」+ ADDED「决策层受众可执行性约束」），依 `project-workflow.md` §6 可并行。物理上同改 `trader.md` / `risk_judge.md` 的不同章节，先到者合并后后者 rebase。
-- `add-watch-trigger-tracking`：同改 `report-decision-rendering` 的**不同 requirement**（该 change 为 ADDED「watch 触发位与入池跟踪渲染」；本 change 为 MODIFIED「交易决策节渲染操作参数」）。
+- `add-horizon-semantics-to-decision-layer`（已在 `origin/main`，PR #321/#324）：同样改 `agent-prompt-contracts` 与 `trader.md`/`risk_judge.md`，但落在**不同 requirement 与不同章节**——该 change 为 ADDED「决策层周期语义契约」/「分析师论据周期标注」并在两份 prompt 顶部插入 `## 周期契约` 段；本 change 为 MODIFIED「Trader 决策语义契约」+ ADDED「决策层受众可执行性约束」并在文末追加 `## 受众可执行性约束` 段。本 change 已 rebase 到 `a3e2eb97`（含该 PR），两段在 `trader.md` / `risk_judge.md` 中并存，发布后指纹回验确认未覆盖周期契约段。
+  教训记录：本 change 的初始分支基于**陈旧本地 main**（`f5b54fe3`，落后 `origin/main` 40 个提交），而该 change 的 prompt 已先于本地 main 部署到 Langfuse production——`deploy_prompts.py` 预检因此对本 change 判定 `mismatched`（生产内容不命中分支历史）。经指纹取证（生产内容 vs 本地 vs HEAD vs git 历史）定位为「本地 main 陈旧」而非 UI 编辑后，rebase 到 `origin/main` 使生产内容命中 `#321` 历史版本，预检改判 `stale` 放行。**未**使用 `sync_prompts.py` 收编。
+- `add-watch-trigger-tracking`：同改 `report-decision-rendering` 的**不同 requirement**（该 change 为 ADDED「watch 触发位与入池跟踪渲染」；本 change 为 MODIFIED「交易决策节渲染操作参数」）。该 requirement 已随其同步进入 `origin/main` 主规范库。
