@@ -773,6 +773,14 @@ _TRIGGER_MARKS = "①②③④⑤⑥⑦⑧⑨⑩"
 # report-decision-rendering「参数缺失时诚实标注」MODIFIED）
 _POSITION_VOCAB = frozenset({"light", "moderate", "heavy"})
 
+# add-holdings-context：按做空建仓模板呈现的 sell 必须披露执行前提——A 股普通
+# 证券账户不可做空，不披露即把不可执行结构呈现为可执行建议。文本代码直出，
+# MUST NOT 依赖 LLM 生成或改写（spec report-decision-rendering）。
+SHORT_DISCLOSURE = (
+    "做空建仓需融资融券信用账户（标的须为两融标的且有券源），"
+    "A 股普通证券账户不可执行；本条为方向研判，不代表可直接执行"
+)
+
 
 def _fmt_position_size(value: object) -> str:
     """仓位档位渲染：词表 light/moderate/heavy 大小写不敏感。
@@ -824,6 +832,9 @@ def _format_trade_decision(
     禁从 reeval_triggers 文本解析回填；buy/sell/hold 不渲染该两行）；fund_approved
     时渲染入池跟踪声明；data_cutoff 与 report_date 间隔 >_DATA_VACUUM_THRESHOLD_DAYS
     自然日时渲染数据真空提示（全 action）。新参数仅关键字传参（旧单参调用兼容不变）。
+    add-holdings-context：按做空建仓模板呈现的 sell（sell_type="short" 与历史 None
+    形态）在参数行后渲染确定性做空披露行（SHORT_DISCLOSURE，代码直出，不依赖
+    LLM）；exit/buy/watch/hold MUST NOT 渲染该行。
     """
     if isinstance(decision, TradeDecision):
         action = decision.action
@@ -879,6 +890,10 @@ def _format_trade_decision(
         derived = _fmt_derived_metrics(action, entry, stop, target)
         if derived:
             lines.append(derived)
+        # 按做空建仓模板呈现的 sell（short 与历史 None 形态）披露执行前提；
+        # exit 走上一分支、buy 不适用——两者 MUST NOT 渲染该行
+        if action == "sell":
+            lines.append(f"- **做空披露**: {SHORT_DISCLOSURE}")
     else:
         if isinstance(inaction, str) and inaction.strip():
             lines.append(f"- **不行动原因**: {inaction}")
