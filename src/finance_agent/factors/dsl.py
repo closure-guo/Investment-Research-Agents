@@ -85,6 +85,11 @@ WINDOW_ARG_INDEX: dict[str, int] = {
     "ts_corr": 2,
 }
 
+# 复杂度上限（解析期硬约束；默认路径超限即拒收）
+MAX_AST_DEPTH: int = 4
+MAX_FREE_PARAMS: int = 3
+MAX_FIELDS: int = 3
+
 
 # ── 错误类型 ────────────────────────────────────────────────────────────────
 
@@ -99,6 +104,15 @@ class DSLParseError(ValueError):
     def __init__(self, message: str, pos: int) -> None:
         super().__init__(f"{message}，位置 {pos}")
         self.pos = pos
+
+
+class FactorComplexityError(ValueError):
+    """复杂度硬约束超限（深度 / 自由参数 / 字段种类）。
+
+    消息**不短路**：一次列出全部违规项，形如
+    ``复杂度超限：深度 5 > 上限 4；自由参数 4 > 上限 3``
+    （spec 场景要求的「深度 5 > 上限 4」子串逐字保留）。
+    """
 
 
 # ── AST（冻结 dataclass） ───────────────────────────────────────────────────
@@ -127,6 +141,61 @@ class Call:
 
 
 type AstNode = Field | Number | Call
+
+
+# ── AST 工具：深度 / 自由参数 / 字段种类 / 复杂度检查 ───────────────────────
+
+
+def ast_depth(node: AstNode) -> int:
+    """D3 深度口径：叶子（Field/Number）深度 1；Call = 1 + max(子节点深度)。"""
+    if isinstance(node, Call):
+        return 1 + max(ast_depth(arg) for arg in node.args)
+    return 1
+
+
+def count_free_params(node: AstNode) -> int:
+    """D4 自由参数计数 = AST 中 Number 节点总数（含 window 数字）。"""
+    if isinstance(node, Number):
+        return 1
+    if isinstance(node, Call):
+        return sum(count_free_params(arg) for arg in node.args)
+    return 0
+
+
+def count_fields(node: AstNode) -> int:
+    """D4 字段种类计数 = 去重后的 Field 名数量（同名字段多次引用只计一种）。"""
+    if isinstance(node, Field):
+        return 1
+    if isinstance(node, Call):
+        return len(_field_names(node))
+    return 0
+
+
+def _field_names(node: Call) -> set[str]:
+    """收集子树中的 Field 名集合（``count_fields`` 递归辅助）。"""
+    names: set[str] = set()
+    for arg in node.args:
+        if isinstance(arg, Field):
+            names.add(arg.name)
+        elif isinstance(arg, Call):
+            names |= _field_names(arg)
+    return names
+
+
+def _check_complexity(node: AstNode) -> None:
+    """三条上限逐条检查；**不短路**——一次列出全部违规项（见错误类 docstring）。"""
+    violations: list[str] = []
+    depth = ast_depth(node)
+    if depth > MAX_AST_DEPTH:
+        violations.append(f"深度 {depth} > 上限 {MAX_AST_DEPTH}")
+    free_params = count_free_params(node)
+    if free_params > MAX_FREE_PARAMS:
+        violations.append(f"自由参数 {free_params} > 上限 {MAX_FREE_PARAMS}")
+    fields = count_fields(node)
+    if fields > MAX_FIELDS:
+        violations.append(f"字段种类 {fields} > 上限 {MAX_FIELDS}")
+    if violations:
+        raise FactorComplexityError("复杂度超限：" + "；".join(violations))
 
 
 # ── 词法 ────────────────────────────────────────────────────────────────────
@@ -278,15 +347,24 @@ class _Parser:
 # ── 对外接口：解析 / 序列化 ─────────────────────────────────────────────────
 
 
-def parse(expr: str) -> AstNode:
+def parse(expr: str, *, enforce_complexity: bool = True) -> AstNode:
     """解析因子表达式字符串为 AST（D1/D2；错误带字符位置）。
 
     空白自由、无中缀运算符；未知算子/字段、元数错误、window 形态非法、
     括号不配对等一律 ``DSLParseError``。
+
+    ``enforce_complexity=True``（默认，**提案/生产路径唯一允许值**）时解析成功后
+    立即执行 D3/D4 三条复杂度上限检查，超限 → ``FactorComplexityError``。
+    ``enforce_complexity=False`` **仅供工具与验证旁路**（如 Alpha101 公开公式的
+    round-trip 核对——它们普遍超出上限）；**不得从提案（LLM 因子提案）路径传入
+    False**，否则复杂度硬约束形同虚设。
     """
     if not expr.strip():
         raise DSLParseError("表达式为空", 0)
-    return _Parser(_tokenize(expr)).parse_root()
+    node = _Parser(_tokenize(expr)).parse_root()
+    if enforce_complexity:
+        _check_complexity(node)
+    return node
 
 
 def serialize(node: AstNode) -> str:

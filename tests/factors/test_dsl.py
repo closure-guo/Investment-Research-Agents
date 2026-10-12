@@ -23,11 +23,18 @@ import pytest
 from finance_agent.factors.dsl import (
     ARITY,
     FIELDS,
+    MAX_AST_DEPTH,
+    MAX_FIELDS,
+    MAX_FREE_PARAMS,
     OPS,
     Call,
     DSLParseError,
+    FactorComplexityError,
     Field,
     Number,
+    ast_depth,
+    count_fields,
+    count_free_params,
     parse,
     serialize,
 )
@@ -278,3 +285,107 @@ def test_parse_error_is_value_error():
     assert issubclass(DSLParseError, ValueError)
     with pytest.raises(ValueError):
         parse("future_peek(close, 10)")
+
+
+# ── Task 2: 复杂度硬约束（深度/自由参数/字段种类） ───────────────────────────
+
+
+def test_complexity_caps_verbatim():
+    """三条上限逐字：深度 4 / 自由参数 3 / 字段种类 3；错误类型为 ValueError 子类。"""
+    assert MAX_AST_DEPTH == 4
+    assert MAX_FREE_PARAMS == 3
+    assert MAX_FIELDS == 3
+    assert issubclass(FactorComplexityError, ValueError)
+
+
+def test_parse_enforce_complexity_is_keyword_only():
+    """D7 签名：``enforce_complexity`` 为仅关键字参数（parse(expr, *, ...)）。"""
+    with pytest.raises(TypeError):
+        parse("close", False)  # type: ignore[call-arg]
+
+
+def test_depth_boundary_4_passes_5_rejected():
+    """spec 场景：深度恰 4 通过；深度 5 → 拒收且消息含「深度 5 > 上限 4」逐字要素。"""
+    ok = parse("rank(zscore(ts_mean(close, 10)))")
+    assert ast_depth(ok) == 4
+    with pytest.raises(FactorComplexityError) as excinfo:
+        parse("abs(rank(zscore(ts_mean(close, 10))))")
+    assert "深度 5 > 上限 4" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("expr", "depth"),
+    [
+        ("close", 1),
+        ("10", 1),
+        ("rank(close)", 2),
+        ("ts_mean(close, 10)", 2),
+        ("zscore(rank(close))", 3),
+        ("rank(zscore(ts_mean(close, 10)))", 4),
+    ],
+)
+def test_ast_depth_leaf_is_one(expr: str, depth: int):
+    """D3 口径：叶子（Field/Number）深度 1；Call = 1 + max(子节点深度)。"""
+    assert ast_depth(parse(expr)) == depth
+
+
+def test_free_params_boundary_3_passes_4_rejected():
+    """自由参数（Number 总数）3 通过 / 4 拒收，消息含「自由参数 4 > 上限 3」。"""
+    ok = parse("add(add(ts_mean(close, 1), ts_mean(close, 2)), ts_mean(close, 3))")
+    assert count_free_params(ok) == 3
+    assert ast_depth(ok) == 4
+    with pytest.raises(FactorComplexityError) as excinfo:
+        parse(
+            "add(add(ts_mean(close, 1), ts_mean(close, 2)), "
+            "add(ts_mean(close, 3), ts_mean(close, 4)))"
+        )
+    assert "自由参数 4 > 上限 3" in str(excinfo.value)
+
+
+def test_count_free_params_counts_window_and_plain_literals():
+    """D4：window 数字与其他位置数字都计入自由参数（含小数）。"""
+    node = parse("add(ts_mean(close, 20), 1.5)")
+    assert count_free_params(node) == 2
+    assert count_free_params(parse("close")) == 0
+
+
+def test_field_kinds_boundary_3_passes_4_rejected():
+    """字段种类 3 通过 / 4 拒收，消息含「字段种类 4 > 上限 3」。"""
+    ok = parse("add(add(close, volume), open)")
+    assert count_fields(ok) == 3
+    assert ast_depth(ok) == 3
+    with pytest.raises(FactorComplexityError) as excinfo:
+        parse("add(add(add(close, volume), open), high)")
+    assert "字段种类 4 > 上限 3" in str(excinfo.value)
+
+
+def test_count_fields_deduplicates_repeated_names():
+    """D4：同一字段多次引用只计一种；3 次 close 引用不触字段上限。"""
+    assert count_fields(parse("add(close, close)")) == 1
+    node = parse("add(add(close, close), close)")
+    assert count_fields(node) == 1
+    assert ast_depth(node) == 3
+
+
+def test_all_three_violations_listed_in_one_message():
+    """三条约束同时违反 → 消息含全部违规项（实现钉住「不短路，全部列出」）。"""
+    expr = (
+        "add(add(add(ts_mean(close, 1), ts_mean(volume, 2)), ts_mean(open, 3)), "
+        "add(ts_mean(high, 4), low))"
+    )
+    with pytest.raises(FactorComplexityError) as excinfo:
+        parse(expr)
+    message = str(excinfo.value)
+    assert "深度 5 > 上限 4" in message
+    assert "自由参数 4 > 上限 3" in message
+    assert "字段种类 5 > 上限 3" in message
+
+
+def test_enforce_complexity_false_bypasses_caps():
+    """D7：``enforce_complexity=False`` 旁路三条上限（仅供工具/验证）——默认路径同式拒收。"""
+    expr = "abs(rank(zscore(ts_mean(close, 10))))"
+    with pytest.raises(FactorComplexityError):
+        parse(expr)
+    node = parse(expr, enforce_complexity=False)
+    assert ast_depth(node) == 5
+    assert serialize(node) == "abs(rank(zscore(ts_mean(close,10))))"
