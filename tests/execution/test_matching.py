@@ -167,6 +167,19 @@ def test_fill_price_uses_market_amount_quantile_tier():
     assert high.slippage_rate == 0.0005
 
 
+def test_fill_price_falls_back_to_most_conservative_tier_without_market_amounts():
+    """market_amounts 缺失（回放不传样本）→ 最保守档 0.002（宁可高估成本）。"""
+    result = match_order(
+        Order(code="600519", side="buy", qty=100),
+        _make_bar(open_=100.0, amount=None),
+        config=_CONFIG,
+        market_amounts=None,
+    )
+    # 成交价 = round(100.0 × (1 + 0.002), 2) = 100.2
+    assert result.fill_price == 100.2
+    assert result.slippage_rate == 0.002
+
+
 # ── 费用（M5）────────────────────────────────────────────────────────────────
 
 
