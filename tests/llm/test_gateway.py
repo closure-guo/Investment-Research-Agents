@@ -208,3 +208,46 @@ class TestFinalizeObservationTruncation:
         assert gen.updated["output"]["answer"] == "短答"
         assert gen.updated["output"]["reasoning"] == "短思考"
         assert gen.updated["usage_details"] == {}
+
+
+class TestCompleteTextProfileOverride:
+    """评审修正 1（add-factor-proposal-agent）：``profile=`` 显式钉死调用 profile。
+
+    路由调用点（GatewayProposalClient）先经 PolicyRouter 选出档位 profile，
+    再以一个不可能重解析的 profile 覆盖发起调用——此前 gateway 无覆盖参数，
+    路由结果会被 purpose 解析覆盖，产生静默漂移。
+    """
+
+    def test_profile_override_skips_resolution_and_pins_request(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import finance_agent.llm.gateway as gateway
+
+        def _must_not_resolve(**kwargs):
+            raise AssertionError("显式传入 profile 时不得再按 purpose/preset 解析")
+
+        monkeypatch.setattr(gateway, "resolve_profile", _must_not_resolve)
+        captured: dict = {}
+
+        def fake_completion(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(message=SimpleNamespace(content="答"), finish_reason="stop")
+                ],
+                usage=None,
+            )
+
+        monkeypatch.setattr(
+            "finance_agent.llm.adapters.litellm_adapter.raw_completion", fake_completion
+        )
+        profile = get_profile_preset("deepseek-official")
+        text, metadata = complete_text(
+            [{"role": "user", "content": "hi"}],
+            purpose="factor_proposal",
+            profile=profile,
+        )
+        assert text == "答"
+        assert captured["model"] == "deepseek/deepseek-chat"
+        assert metadata["profile"] == "deepseek-official"
+        assert metadata["purpose"] == "factor_proposal"

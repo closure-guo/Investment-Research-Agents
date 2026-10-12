@@ -6,12 +6,19 @@
   + `hypothesis`（经济学假设 ≥30 字，中文按字符数，去首尾空白）
   + `category`（枚举）。DSL 解析失败触发修复重试，上限 2 次
   （首轮 + 2 = 3 次尝试）；耗尽后该条丢弃进 `rejected`，并在 trace metadata
-  记 `proposal_rejected`（逐条 raw + 最后错误）。
+  记 `proposal_rejected`（逐条 raw + 最后错误）。修复轮的未应答条目持续
+  待处理（评审修正 2：不得因某轮少答/空答而静默消失），批次 trace metadata
+  经既有 span 助手 best-effort 发射到 Langfuse（评审修正 3）。
 - 双档路由（P1）：broad → quick profile / deep → deep profile，经 PolicyRouter
-  （`route_proposal_call`）；实际 LLM 调用经 gateway，`purpose="factor_proposal"`。
+  （`route_proposal_call`）；实际 LLM 调用经 gateway，`purpose="factor_proposal"`，
+  并把路由选中的 profile **原样钉死**进本次调用（评审修正 1：gateway `profile=`
+  覆盖，杜绝 purpose 重解析漂移）。候选按 (name, model, base_url) 去重
+  （评审修正 4：fallback 链不得列 primary 自己）。
 - 跨桶采样（P4）：prompt 注入分桶统计与算子历史 IC 先验；单桶占比 > 50% 时
   显式要求候选偏向其他桶。
 - 软评分（P5）：`alignment_score` 只写元数据，**任何代码路径不得因该分值拒收**。
+- broad 批次不足 n 时补一轮（同一 prompt + 缺口说明，评审修正 5），
+  `shortfall`（初始缺口/最终缺口）落 trace metadata。
 
 LLM 调用经注入的 client（`ProposalLLMClient` 协议，stub 可替，单测零网络）；
 默认实现 `GatewayProposalClient` 薄包 gateway `complete_text`。
@@ -21,17 +28,20 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from finance_agent.factors.dsl import DSLParseError, FactorComplexityError, parse
+from finance_agent.langfuse_tracing import get_langfuse, update_current_span
 from finance_agent.llm.contracts import extract_json
 from finance_agent.llm.gateway import complete_text
-from finance_agent.llm.registry import list_presets
 from finance_agent.llm.resolver import resolve_profile
 from finance_agent.llm.router import RouterResult, select_profile
 from finance_agent.llm.types import ModelProfile, Purpose
 from finance_agent.prompts.loader import load_prompt
+
+_logger = logging.getLogger("finance_agent.factors.propose")
 
 # 提案用途标签（PolicyRouter 注册名 + trace 用途标签，逐字）
 PURPOSE_TAG: Purpose = "factor_proposal"
@@ -110,9 +120,11 @@ def route_proposal_call(mode: str, *, llm_config: dict[str, Any] | None = None) 
     - broad：候选 = [quick profile, deep profile]，保序 → primary=quick；
     - deep：候选序 [deep, quick] → primary=deep；
     - 两档候选各自 `resolve_profile(purpose="quick"/"deep", llm_config=...)`；
-      `select_profile(purpose="factor_proposal", ...)` 施加 REQUIRED_CAPS
-      （json_schema ∈ {json_mode, strict_schema}）——不满足的候选出局，
-      全部出局时抛 `UnsupportedCapabilityError`（typed error，不发起裸调用）。
+      按 (name, model, base_url) 去重后再 `select_profile(purpose="factor_proposal",
+      ...)`（评审修正 4：两档解析到同一 profile 时，fallback 链不得列 primary 自己）；
+    - `select_profile` 施加 REQUIRED_CAPS（json_schema ∈ {json_mode, strict_schema}）
+      ——不满足的候选出局，全部出局时抛 `UnsupportedCapabilityError`
+      （typed error，不发起裸调用）。
     """
     if mode == "broad":
         purposes: tuple[Purpose, Purpose] = ("quick", "deep")
@@ -120,40 +132,24 @@ def route_proposal_call(mode: str, *, llm_config: dict[str, Any] | None = None) 
         purposes = ("deep", "quick")
     else:
         raise ValueError(f"未知提案档位 mode={mode!r}（仅支持 'broad'/'deep'）")
-    candidates = [resolve_profile(purpose=purpose, llm_config=llm_config) for purpose in purposes]
+    candidates: list[ModelProfile] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    for purpose in purposes:
+        profile = resolve_profile(purpose=purpose, llm_config=llm_config)
+        key = (profile.name, profile.model, profile.base_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(profile)
     return select_profile(purpose=PURPOSE_TAG, candidates=candidates)
-
-
-def _gateway_selection(profile: ModelProfile, llm_config: dict[str, Any] | None) -> dict[str, Any]:
-    """把路由选中的 profile 转成 `gateway.complete_text` 的选择参数（钉死本次档位）。
-
-    - 请求级 `llm_config` 已给定时原样透传（两档候选都由它解析，路由为恒等）；
-    - 命名 preset（registry）→ `preset=`；
-    - env 解析出端点的 profile → 请求级 llm_config（model/baseUrl/apiKey +
-      provider_options 原样，保住 env 合并出的 provider 选项）；
-    - registry 官方端点语义（无 base_url）→ 空 dict，交回 gateway 按 purpose 解析。
-    """
-    if llm_config is not None:
-        return {"llm_config": llm_config}
-    if profile.name in set(list_presets()):
-        return {"preset": profile.name}
-    if profile.base_url:
-        built: dict[str, Any] = {
-            "model": profile.model,
-            "baseUrl": profile.base_url,
-            "apiKey": profile.api_key,
-        }
-        if profile.provider_options:
-            built["provider_options"] = dict(profile.provider_options)
-        return {"llm_config": built}
-    return {}
 
 
 class GatewayProposalClient:
     """默认 `ProposalLLMClient`：gateway `complete_text` 薄适配（唯一生产 LLM 入口）。
 
-    - 档位决策经 `route_proposal_call(mode)`（PolicyRouter 调用点，P1），并按
-      路由结果钉死本次调用的 profile（见 `_gateway_selection`）；
+    - 档位决策经 `route_proposal_call(mode)`（PolicyRouter 调用点，P1），并把
+      路由选中的 profile 经 gateway `profile=` 覆盖**原样钉死**为本次调用的
+      profile（评审修正 1：实际调用的就是路由选中的档位，无 purpose 重解析漂移）；
     - gateway 调用固定 `purpose="factor_proposal"`（trace 用途标签），
       trace metadata 附 `purpose_tag` / `mode` / router 决策（P1）；
     - 响应文本经 `extract_json` 解析为 payload；不可解析 → `ProposalResponseError`
@@ -177,7 +173,6 @@ class GatewayProposalClient:
         self, prompt: str, *, purpose: Purpose, metadata: dict[str, Any]
     ) -> dict[str, Any]:
         route = route_proposal_call(self._mode, llm_config=self._llm_config)
-        selection = _gateway_selection(route.primary, self._llm_config)
         trace_metadata: dict[str, Any] = {
             **metadata,
             "purpose_tag": PURPOSE_TAG,
@@ -188,8 +183,8 @@ class GatewayProposalClient:
             [{"role": "user", "content": prompt}],
             purpose=purpose,
             max_tokens=self._max_tokens,
+            profile=route.primary,
             trace={"name": f"{PURPOSE_TAG}.{self._mode}", "metadata": trace_metadata},
-            **selection,
         )
         try:
             return extract_json(text)
@@ -299,6 +294,20 @@ def _validate_round(
     return proposals, drafts
 
 
+def _draft_key(draft: _Draft) -> str:
+    """待修复条目的身份键：原始 payload 的 canonical JSON（键排序、保中文逐字）。"""
+    return json.dumps(draft.raw, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _merge_drafts(*groups: list[_Draft]) -> list[_Draft]:
+    """合并待修复条目并按身份键去重（后者覆盖前者 = 保留最新一次错误原文）。"""
+    merged: dict[str, _Draft] = {}
+    for group in groups:
+        for draft in group:
+            merged[_draft_key(draft)] = draft
+    return list(merged.values())
+
+
 def _repair_prompt(base_prompt: str, drafts: list[_Draft]) -> str:
     """修复轮 prompt：把上一轮失败条目的 payload 原文与校验错误原文追加为上下文。
 
@@ -315,10 +324,27 @@ def _repair_prompt(base_prompt: str, drafts: list[_Draft]) -> str:
     return "\n".join(lines)
 
 
+def _topup_prompt(base_prompt: str, *, missing: int) -> str:
+    """补充轮 prompt（评审修正 5）：同一基础 prompt + 缺口说明。"""
+    return (
+        f"{base_prompt}\n\n"
+        f"# 补充轮（上一轮产出不足：距目标还差 {missing} 条）\n"
+        f"请再产出不少于 {missing} 条候选（proposals 数组长度 ≥ {missing}），"
+        "不要重复已通过的提案。"
+    )
+
+
 def _trace_metadata(
-    *, mode: str, rejected: tuple[RejectedProposal, ...], router_trace: dict[str, Any]
+    *,
+    mode: str,
+    rejected: tuple[RejectedProposal, ...],
+    router_trace: dict[str, Any],
+    shortfall: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """批量调用 trace metadata（P1/P2）：用途标签 + 档位 + 路由决策 + 逐条拒收明细。"""
+    """批量调用 trace metadata（P1/P2）：用途标签 + 档位 + 路由决策 + 逐条拒收明细。
+
+    `shortfall`（评审修正 5）：broad 批次不足 n 时的初始缺口 / 最终缺口。
+    """
     meta: dict[str, Any] = {
         "purpose_tag": PURPOSE_TAG,
         "mode": mode,
@@ -327,29 +353,55 @@ def _trace_metadata(
     }
     if rejected:
         meta["proposal_rejected"] = True
+    if shortfall is not None:
+        meta["shortfall"] = shortfall
     return meta
+
+
+def _emit_trace_metadata(metadata: dict[str, Any]) -> None:
+    """best-effort：把批次 trace metadata（含 `proposal_rejected`）写入当前 Langfuse span。
+
+    Langfuse 未配置 → 仅 debug 日志（零网络零副作用）；写入失败不阻断业务
+    （评审修正 3：批次级弃收事实此前只随返回值流转，无落点）。
+    """
+    if get_langfuse() is None:
+        _logger.debug("Langfuse 未配置：proposal 批次 trace metadata 仅返回、不发射")
+        return
+    try:
+        update_current_span(metadata={"proposal_batch": metadata})
+    except Exception:  # noqa: BLE001 -- 观测失败不阻断业务
+        _logger.warning("proposal 批次 trace metadata 发射失败", exc_info=True)
 
 
 def _run_proposal_batch(
     *,
     mode: str,
     prompt: str,
-    client: Any,
+    client: ProposalLLMClient,
     llm_config: dict[str, Any] | None = None,
+    n: int | None = None,
 ) -> ProposalBatchResult:
-    """批量执行：首轮 + 至多 `MAX_REPAIR_ATTEMPTS` 次修复（P2/P3）。
+    """批量执行：首轮 + 至多 `MAX_REPAIR_ATTEMPTS` 次修复（P2/P3）+ 可选补充轮（修正 5）。
 
     每轮调用 client 一次；通过者立即收编，未通过者进下一轮修复上下文；
-    修复轮响应同样按条目校验（部分通过即部分收编）。轮次耗尽后仍未通过的条目
-    逐条进 `rejected`（raw + 最后错误）并在 trace metadata 记 `proposal_rejected`。
+    修复轮响应按位置应答本轮待修复清单——未被应答的条目**跨轮保留**，空响应
+    视为终止信号（评审修正 2：任何耗尽路径下未收编的条目都进 `rejected`，
+    逐条 raw + 最后错误，绝不静默消失）。轮次耗尽后仍在待修复清单中的条目
+    逐条进 `rejected`，并在 trace metadata 记 `proposal_rejected`。
     档位决策先经 `route_proposal_call`（能力不满足/未知档位在此即 typed error，
     不发起裸调用），其 trace 并入返回的 trace_metadata。
+    `n`（仅 broad）：**首轮全数通过但条数不足 n**（未消耗任何修复轮）时补发一轮
+    （同 prompt + 缺口说明，评审修正 5），`shortfall`（初始缺口 / 最终缺口）记入
+    trace metadata；已触发修复轮或已有弃收的批次不追量（弃收事实优先，不再消耗调用）。
     """
     router_trace = route_proposal_call(mode, llm_config=llm_config).trace
     proposals: list[FactorProposal] = []
-    drafts: list[_Draft] = []
+    pending: list[_Draft] = []
+    repair_consumed = False
     for round_index in range(1 + MAX_REPAIR_ATTEMPTS):
-        call_prompt = prompt if round_index == 0 else _repair_prompt(prompt, drafts)
+        if round_index > 0:
+            repair_consumed = True
+        call_prompt = prompt if round_index == 0 else _repair_prompt(prompt, pending)
         metadata: dict[str, Any] = {
             "purpose_tag": PURPOSE_TAG,
             "mode": mode,
@@ -361,15 +413,51 @@ def _run_proposal_batch(
             items = _response_items(payload)
         except ProposalResponseError as exc:
             items = [({"raw_text": exc.raw_text}, str(exc))]
-        round_proposals, drafts = _validate_round(items, mode=mode)
+        round_proposals, failures = _validate_round(items, mode=mode)
         proposals.extend(round_proposals)
-        if not drafts:
+        if round_index > 0 and not items:
+            # 修复轮空响应 = 终止信号：本轮什么都没答，待修复条目原样保留进 rejected
             break
-    rejected = tuple(RejectedProposal(raw=draft.raw, error=draft.error) for draft in drafts)
+        if round_index == 0:
+            pending = _merge_drafts(failures)
+        else:
+            # 修复轮响应按位置应答待修复清单：响应条数之外的尾部条目未被处理，保留
+            unaddressed = pending[len(items) :]
+            pending = _merge_drafts(unaddressed, failures)
+        if not pending:
+            break
+    shortfall: dict[str, Any] | None = None
+    if n is not None and not repair_consumed and len(proposals) < n:
+        initial = n - len(proposals)
+        top_up_metadata: dict[str, Any] = {
+            "purpose_tag": PURPOSE_TAG,
+            "mode": mode,
+            "attempt": 1 + MAX_REPAIR_ATTEMPTS + 1,
+            "repair_count": 0,
+            "top_up": True,
+        }
+        try:
+            payload = client.complete_json(
+                _topup_prompt(prompt, missing=initial),
+                purpose=PURPOSE_TAG,
+                metadata=top_up_metadata,
+            )
+            items = _response_items(payload)
+        except ProposalResponseError as exc:
+            items = [({"raw_text": exc.raw_text}, str(exc))]
+        topup_proposals, topup_failures = _validate_round(items, mode=mode)
+        proposals.extend(topup_proposals)
+        pending = _merge_drafts(pending, topup_failures)
+        shortfall = {"initial": initial, "final": max(0, n - len(proposals)), "top_up": True}
+    rejected = tuple(RejectedProposal(raw=draft.raw, error=draft.error) for draft in pending)
+    trace_metadata = _trace_metadata(
+        mode=mode, rejected=rejected, router_trace=router_trace, shortfall=shortfall
+    )
+    _emit_trace_metadata(trace_metadata)
     return ProposalBatchResult(
         proposals=tuple(proposals),
         rejected=rejected,
-        trace_metadata=_trace_metadata(mode=mode, rejected=rejected, router_trace=router_trace),
+        trace_metadata=trace_metadata,
     )
 
 
@@ -471,27 +559,30 @@ def _render_template(template: str, *, sampling_context: str, extra_instruction:
 def propose_broad_batch(
     *,
     n: int = MIN_BROAD_BATCH_N,
-    client: Any,
+    client: ProposalLLMClient,
     llm_config: dict[str, Any] | None = None,
     bucket_stats: dict[str, int],
     operator_ic: dict[str, float],
 ) -> ProposalBatchResult:
     """广度变异批次（≥20 条候选；P3）：入参 n 硬校验后组装 prompt 并执行 repair 循环。
 
-    `n` 为 prompt 级要求（生成本批候选数）；响应条数由 LLM 满足，本函数不因
-    响应条数少于 n 拒绝整批（合同逐条约束，见 spec「提案输出合同」）。
+    `n` 为 prompt 级要求（生成本批候选数）；合同逐条约束提案——响应条数少于 n
+    时补一轮（同 prompt + 缺口说明，评审修正 5），`shortfall` 落 trace metadata；
+    多于 n 不拒收整批（见 spec「提案输出合同」）。
     `llm_config`：请求级 LLM 配置，透传档位路由决策（trace metadata 记 router）。
     """
     if n < MIN_BROAD_BATCH_N:
         raise ValueError(f"广度变异批次候选数 n 不得少于 {MIN_BROAD_BATCH_N}（收到 {n}）")
     prompt = build_broad_prompt(bucket_stats=bucket_stats, operator_ic=operator_ic, n=n)
-    return _run_proposal_batch(mode="broad", prompt=prompt, client=client, llm_config=llm_config)
+    return _run_proposal_batch(
+        mode="broad", prompt=prompt, client=client, llm_config=llm_config, n=n
+    )
 
 
 def propose_deep_improvement(
     *,
     feedback: list[dict],
-    client: Any,
+    client: ProposalLLMClient,
     llm_config: dict[str, Any] | None = None,
 ) -> ProposalBatchResult:
     """深度改进批次（P3）：拒收原因分布 + 衰减复盘注入 prompt 后执行 repair 循环。"""

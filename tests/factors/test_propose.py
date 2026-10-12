@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -189,10 +190,12 @@ class TestRepairLoop:
         assert meta["proposal_rejected"] is True
 
     def test_no_rejection_has_no_marker(self):
-        client = StubClient([_payload()])
+        # 第二响应是首轮不足 n 触发的补充轮（评审修正 5）；空列表终止补充。
+        client = StubClient([_payload(), {"proposals": []}])
         result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
         assert result.trace_metadata["rejected"] == []
         assert "proposal_rejected" not in result.trace_metadata
+        assert len(client.calls) == 2
 
     def test_partial_acceptance_repairs_only_failing_item(self):
         good = _payload()
@@ -344,7 +347,7 @@ class TestTierRouting:
         monkeypatch.setattr(
             propose, "resolve_profile", lambda **kw: _stub_profile("env:openai/main")
         )
-        client = StubClient([_payload()])
+        client = StubClient([_payload(), {"proposals": []}])  # 补充轮终止响应（修正 5）
         result = propose_broad_batch(
             n=20,
             client=client,
@@ -382,20 +385,47 @@ class TestGatewayClient:
         assert payload == {"proposals": []}
         assert captured["messages"] == [{"role": "user", "content": "PROMPT-文本"}]
         assert captured["purpose"] == "factor_proposal"
-        # env 解析出的端点 profile → 请求级 llm_config 钉死本次调用
-        assert captured["llm_config"]["model"] == profile.model
-        assert captured["llm_config"]["baseUrl"] == "http://llm.invalid"
+        # 路由选中的 profile 原样钉死进本次调用（评审修正 1：不给 gateway 重解析的机会）
+        assert captured["profile"] is profile
+        assert captured.get("llm_config") is None
+        assert captured.get("preset") is None
         meta = captured["trace"]["metadata"]
         assert meta["purpose_tag"] == "factor_proposal"
         assert meta["mode"] == "broad"
         assert meta["router"]["profile"] == profile.name
 
-    def test_preset_profile_pinned_via_preset_kwarg(self, monkeypatch):
+    def test_routed_profile_pinned_against_purpose_resolution_drift(self, monkeypatch):
+        """评审修正 1 回归（review repro）：env 双档解析不同模型且无 LLM_BASE_URL 时，
+        实际调用必须钉死路由选中的 quick profile（deepseek-chat），不得回落到 LLM_MODEL
+        （deepseek-reasoner）——此前的 `{}` 选择参数会让 gateway 按 purpose 重解析。"""
+        monkeypatch.delenv("LLM_BASE_URL", raising=False)
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.setenv("LLM_QUICK_MODEL", "deepseek/deepseek-chat")
+        monkeypatch.setenv("LLM_MODEL", "deepseek/deepseek-reasoner")
+        captured: dict = {}
+
+        def fake_complete_text(messages, **kwargs):
+            captured["messages"] = messages
+            captured.update(kwargs)
+            return '{"proposals": []}', {}
+
+        monkeypatch.setattr(propose, "complete_text", fake_complete_text)
+        route = route_proposal_call("broad")
+        assert route.primary.model == "deepseek/deepseek-chat"
+        client = GatewayProposalClient(mode="broad")
+        client.complete_json("p", purpose="factor_proposal", metadata={})
+        pinned = captured["profile"]
+        assert pinned.name == route.primary.name
+        assert pinned.model == "deepseek/deepseek-chat"
+        assert pinned.model != "deepseek/deepseek-reasoner"
+
+    def test_preset_profile_pinned_via_profile_override(self, monkeypatch):
         profile = _stub_profile("deepseek-official", base_url=None)
         captured = self._patch(monkeypatch, profile)
         client = GatewayProposalClient(mode="deep")
         client.complete_json("p", purpose="factor_proposal", metadata={})
-        assert captured["preset"] == "deepseek-official"
+        assert captured["profile"] is profile
+        assert captured.get("preset") is None
         assert captured.get("llm_config") is None
 
     def test_unparsable_gateway_text_raises_response_error(self, monkeypatch):
@@ -490,7 +520,155 @@ class TestPromptAssembly:
 
     def test_batch_passes_alignment_score_through_without_rejection(self):
         """P5 端到端：alignment_score=0 的提案照常进入 proposals。"""
-        client = StubClient([_payload(alignment_score=0)])
+        client = StubClient([_payload(alignment_score=0), {"proposals": []}])
         result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
         assert result.rejected == ()
         assert result.proposals[0].alignment_score == 0.0
+
+
+def _valid_payloads(count: int, *, start: int = 2) -> list[dict]:
+    """生成 count 条互异且合同合法的 payload（expression 用不同窗口参数区分）。"""
+    return [_payload(expression=f"ts_mean(close, {start + i})") for i in range(count)]
+
+
+class TestDroppedDraftsAlwaysMarked:
+    """评审修正 2：修复轮空响应 / 未应答条目不得静默消失——耗尽后必须进 rejected + 标记。"""
+
+    def test_empty_repair_response_rejects_carried_draft(self):
+        """review repro：`[坏, 空回复]` 此前 0 proposals / 0 rejected / 无标记。"""
+        bad = _payload(expression=BAD_EXPRESSION)
+        client = StubClient([bad, {"proposals": []}])
+        result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
+        assert result.proposals == ()
+        assert len(result.rejected) == 1
+        assert result.rejected[0].raw == bad
+        assert "unknown_op" in result.rejected[0].error
+        assert result.trace_metadata["proposal_rejected"] is True
+        # 空响应即终止信号，不再空转第三轮
+        assert len(client.calls) == 2
+
+    def test_repair_response_shorter_than_pending_carries_tail(self):
+        """修复轮只应答了一部分：未应答的尾部条目持续待处理，最终进 rejected。"""
+        bad1 = _payload(expression=BAD_EXPRESSION)
+        bad2 = _payload(hypothesis="太短")
+        fixed = _payload(expression="ts_std(close, 10)")
+        client = StubClient(
+            [{"proposals": [bad1, bad2]}, {"proposals": [fixed]}, {"proposals": []}]
+        )
+        result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
+        assert [p.expression for p in result.proposals] == ["ts_std(close, 10)"]
+        assert len(result.rejected) == 1
+        assert result.rejected[0].raw == bad2  # 尾部未被应答的条目保留（含其最后错误）
+        assert "30" in result.rejected[0].error
+        assert result.trace_metadata["proposal_rejected"] is True
+        assert len(client.calls) == 3
+
+
+class TestBroadTopUp:
+    """评审修正 5：broad 批次不足 n 时补一轮（同 prompt + 缺口说明），shortfall 落 trace。"""
+
+    def test_shortfall_triggers_one_topup_round_and_records_metadata(self):
+        second = [_payload(expression=f"ts_std(close, {2 + i})") for i in range(5)]
+        client = StubClient([{"proposals": _valid_payloads(18)}, {"proposals": second}])
+        result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
+        assert len(result.proposals) == 23
+        assert result.rejected == ()
+        assert len(client.calls) == 2
+        assert client.calls[1]["metadata"]["top_up"] is True
+        assert "补充轮" in client.calls[1]["prompt"]
+        assert "还差 2 条" in client.calls[1]["prompt"]
+        assert result.trace_metadata["shortfall"] == {"initial": 2, "final": 0, "top_up": True}
+
+    def test_no_topup_call_when_batch_meets_n(self):
+        client = StubClient([{"proposals": _valid_payloads(20)}])
+        result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
+        assert len(result.proposals) == 20
+        assert len(client.calls) == 1
+        assert "shortfall" not in result.trace_metadata
+
+    def test_topup_failures_go_to_rejected_and_final_deficit_recorded(self):
+        bad = _payload(expression=BAD_EXPRESSION)
+        client = StubClient([{"proposals": _valid_payloads(18)}, {"proposals": [bad]}])
+        result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
+        assert len(result.proposals) == 18
+        assert len(result.rejected) == 1
+        assert result.rejected[0].raw == bad
+        assert result.trace_metadata["shortfall"] == {"initial": 2, "final": 2, "top_up": True}
+        assert result.trace_metadata["proposal_rejected"] is True
+
+
+class TestRoutingCandidateDedupe:
+    """评审修正 4：路由候选按 (name, model, base_url) 去重，fallback 链不得列 primary 自己。"""
+
+    def test_identical_tier_profiles_deduped_before_select(self, monkeypatch):
+        profile = _stub_profile("env:openai/k3-256k")
+        seen = []
+
+        def fake_resolve(*, purpose, llm_config=None):
+            seen.append(purpose)
+            return profile
+
+        monkeypatch.setattr(propose, "resolve_profile", fake_resolve)
+        result = route_proposal_call("broad")
+        assert seen == ["quick", "deep"]  # 两档都解析后才可判定重复
+        assert result.primary is profile
+        assert result.fallback_chain == []
+        assert result.trace["fallback_chain"] == []
+
+    def test_same_model_but_distinct_names_kept_in_chain(self, monkeypatch):
+        """去重键含 name：同名同模型才算重复，命名不同的档位照常保留在链中。"""
+        quick = _stub_profile("env:openai/k3-256k")
+        deep = _stub_profile("preset:k3-256k")
+
+        def fake_resolve(*, purpose, llm_config=None):
+            return quick if purpose == "quick" else deep
+
+        monkeypatch.setattr(propose, "resolve_profile", fake_resolve)
+        result = route_proposal_call("broad")
+        assert [p.name for p in result.fallback_chain] == ["preset:k3-256k"]
+
+
+class TestTraceEmission:
+    """评审修正 3：批次 trace_metadata（含 proposal_rejected）best-effort 发射到 Langfuse。"""
+
+    def test_rejection_batch_emits_batch_metadata(self, monkeypatch):
+        emitted: list[dict] = []
+        monkeypatch.setattr(propose, "get_langfuse", lambda: object())
+        monkeypatch.setattr(
+            propose,
+            "update_current_span",
+            lambda metadata=None: emitted.append(metadata),
+        )
+        bad = _payload(expression=BAD_EXPRESSION)
+        client = StubClient([bad, bad, bad])
+        result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
+        assert len(emitted) == 1
+        payload = emitted[0]["proposal_batch"]
+        assert payload == result.trace_metadata
+        assert payload["proposal_rejected"] is True
+        assert payload["rejected"][0]["raw"] == bad
+
+    def test_emission_noop_with_debug_when_langfuse_absent(self, monkeypatch, caplog):
+        monkeypatch.setattr(propose, "get_langfuse", lambda: None)
+
+        def _must_not_be_called(**kwargs):
+            raise AssertionError("Langfuse 未配置不得调用 update_current_span")
+
+        monkeypatch.setattr(propose, "update_current_span", _must_not_be_called)
+        with caplog.at_level(logging.DEBUG, logger="finance_agent.factors.propose"):
+            client = StubClient([_payload(), {"proposals": []}])  # 补充轮终止响应（修正 5）
+            result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
+        assert result.rejected == ()
+        assert any("Langfuse" in record.getMessage() for record in caplog.records)
+
+    def test_emission_failure_never_breaks_batch(self, monkeypatch):
+        monkeypatch.setattr(propose, "get_langfuse", lambda: object())
+
+        def _boom(**kwargs):
+            raise RuntimeError("langfuse down")
+
+        monkeypatch.setattr(propose, "update_current_span", _boom)
+        bad = _payload(expression=BAD_EXPRESSION)
+        client = StubClient([bad, bad, bad])
+        result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
+        assert result.trace_metadata["proposal_rejected"] is True

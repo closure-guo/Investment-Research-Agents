@@ -3,14 +3,18 @@
 用法：
     uv run python tests/validation/2026-10-13-add-factor-proposal-live-run.py --dry
     uv run python tests/validation/2026-10-13-add-factor-proposal-live-run.py
+    uv run python tests/validation/2026-10-13-add-factor-proposal-live-run.py --out <路径.json>
 
 - 读取仓库根 `.env`（LLM_*，与 `api.py` 的 `load_dotenv()` 同一来源）；
 - 经生产路径 `GatewayProposalClient`（真实 gateway，零 mock、零 stub）发起
   两批广度变异提案（batch-1 带单桶占优 70% 触发跨桶指令；batch-2 均衡采样）；
+- 逐批计数 `complete_json` 调用（评审修正 6a）：calls==1 即「首轮通过」的直接
+  证据（>1 则含修复轮/补充轮，报告不得再声称首轮通过）；
 - 独立复核每条提案（不依赖 propose 内部校验）：DSL 再解析 / hypothesis 字数 /
   category 分布 / alignment 分布；rejected 明细与 trace metadata 原样落 JSON；
 - 打印**不包含任何密钥**：只报 key 存在性、endpoint host、模型名与结果统计；
-- 成果落 `tests/validation/2026-10-13-add-factor-proposal-live-run.json`。
+- 成果默认落 `tests/validation/2026-10-13-add-factor-proposal-live-run.json`，
+  `--out` 可指向另行文件（不覆盖既有 artifact）。
 """
 
 from __future__ import annotations
@@ -41,6 +45,32 @@ from finance_agent.factors.propose import (  # noqa: E402
 OUT_JSON = Path(__file__).resolve().with_name("2026-10-13-add-factor-proposal-live-run.json")
 
 BATCH_N = 25
+
+
+def _out_path() -> Path:
+    """输出路径：默认既有 artifact，`--out <路径>` 可另存（不覆盖既有结果）。"""
+    if "--out" in sys.argv:
+        index = sys.argv.index("--out")
+        if index + 1 < len(sys.argv):
+            return Path(sys.argv[index + 1])
+    return OUT_JSON
+
+
+class _CountingClient:
+    """包装生产客户端逐批计数 `complete_json` 调用（评审修正 6a）。
+
+    `count == 1` = 该批首轮全部通过合同（无修复轮、无补充轮）——「首轮通过」
+    陈述的直接证据；`count > 1` 时报告不得再声称首轮通过。
+    """
+
+    def __init__(self, inner: GatewayProposalClient) -> None:
+        self._inner = inner
+        self.count = 0
+
+    def complete_json(self, prompt, *, purpose, metadata):
+        self.count += 1
+        return self._inner.complete_json(prompt, purpose=purpose, metadata=metadata)
+
 
 BATCHES = [
     {
@@ -158,11 +188,12 @@ def main() -> int:
     failures = 0
     for spec in BATCHES:
         entry: dict = {"name": spec["name"], "bucket_stats": spec["bucket_stats"]}
+        counted = _CountingClient(client)
         started = time.time()
         try:
             result = propose_broad_batch(
                 n=BATCH_N,
-                client=client,
+                client=counted,
                 bucket_stats=spec["bucket_stats"],
                 operator_ic=spec["operator_ic"],
             )
@@ -170,12 +201,15 @@ def main() -> int:
             failures += 1
             entry["error"] = f"{type(exc).__name__}: {exc}"
             entry["elapsed_seconds"] = round(time.time() - started, 1)
+            entry["complete_json_calls"] = counted.count
             report["batches"].append(entry)
             print(f"[{spec['name']}] 调用失败：{entry['error']}")
             continue
         entry["elapsed_seconds"] = round(time.time() - started, 1)
         entry["proposal_count"] = len(result.proposals)
         entry["rejected_count"] = len(result.rejected)
+        entry["complete_json_calls"] = counted.count
+        entry["first_round_pass"] = counted.count == 1
         entry["trace_metadata"] = result.trace_metadata
         entry["rejected"] = [{"raw": r.raw, "error": r.error} for r in result.rejected]
         entry["review"] = _review_proposals(result.proposals)
@@ -184,6 +218,7 @@ def main() -> int:
         print(
             f"[{spec['name']}] {entry['elapsed_seconds']}s "
             f"proposals={entry['proposal_count']} rejected={entry['rejected_count']} "
+            f"calls={counted.count} first_round_pass={entry['first_round_pass']} "
             f"DSL={review['dsl_parse_rate']} hypothesis={review['hypothesis_rate']} "
             f"category={review['category_distribution']} alignment={review['alignment_distribution']}"
         )
@@ -198,8 +233,9 @@ def main() -> int:
     total = sum(int(b.get("review", {}).get("total", 0)) for b in report["batches"])
     rejected_total = sum(int(b.get("rejected_count", 0)) for b in report["batches"])
     print(f"\n合计：proposals={total} rejected={rejected_total} 批次失败={failures}")
-    OUT_JSON.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"明细已落：{OUT_JSON}")
+    out_json = _out_path()
+    out_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"明细已落：{out_json}")
     return 1 if failures == len(BATCHES) else 0
 
 
