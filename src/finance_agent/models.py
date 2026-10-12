@@ -328,6 +328,20 @@ class TradeDecision(BaseModel):
         return self
 
 
+class HoldingsContext(BaseModel):
+    """受众持仓上下文（add-holdings-context 预留框架）。
+
+    三态：True=已申报持有、False=已申报未持有、None=未申报。未申报 MUST NOT 被
+    等同于「未持有」——二者对方向可执行性的含义不同（未持有者看空只能观望；
+    未申报者按可执行默认 exit 表达并要求说明未持有情形处置）。
+
+    当前唯一来源是分析请求的显式声明；未来自动选股/交易接入真实账户持仓时，
+    在本模型上扩展来源与持仓明细字段（数量/成本随消费方一并增加，避免死字段）。
+    """
+
+    holds: bool | None = None
+
+
 class FundManagerDecision(BaseModel):
     """Layer V Fund Manager 的审批决策。
 
