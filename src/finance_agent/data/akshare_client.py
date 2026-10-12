@@ -251,6 +251,91 @@ _LEGACY_POSITION_MAP: dict[str, dict[int, str]] = {
     "资产负债表": {137: "归母所有者权益"},
 }
 
+# ── add-market-snapshot T5：快照取数包装的列名候选与归一工具 ─────────────────
+# 上市清单接口列名候选（沪/深/北接口列名不同，归一化后精确匹配，容忍空白变体）
+_LISTING_CODE_COLS = ("A股代码", "证券代码", "股票代码", "代码")
+_LISTING_NAME_COLS = ("A股简称", "证券简称", "股票简称", "简称", "名称")
+_LISTING_DATE_COLS = ("A股上市日期", "上市日期", "上市时间")
+# 沪市三块板分别拉取（stock_info_sh_name_code 的 symbol 变体）
+_SH_LISTING_BOARDS = ("主板A股", "主板B股", "科创板")
+
+
+def _pick_col(df: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
+    """按候选列名（归一化后精确匹配）取实际列名；无命中 → None。"""
+    norm_to_actual = {_normalize_col_name(c): str(c) for c in df.columns}
+    for cand in candidates:
+        actual = norm_to_actual.get(_normalize_col_name(cand))
+        if actual is not None:
+            return actual
+    return None
+
+
+def _norm_six_digit_code(value) -> str | None:
+    """代码归一为 6 位字符串（float 整数值去 ".0"）；缺失/非数字 → None。"""
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if value != value:  # NaN
+            return None
+        if value.is_integer():
+            value = int(value)
+    text = str(value).strip()
+    if not text or not text.isdigit():
+        return None
+    return text.zfill(6)
+
+
+def _norm_date_iso(value) -> str | None:
+    """上市日期归一 ``YYYY-MM-DD``：date/datetime/str（含 8 位与斜杠串）；缺失 → None。"""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):  # NaN / NaT / pd.NA 标量
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, datetime):  # datetime 是 date 子类，先判
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    text = str(value).strip()
+    if not text:
+        return None
+    digits = text.replace("-", "").replace("/", "")
+    if len(digits) == 8 and digits.isdigit():
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        return None
+
+
+def _listing_rows(df: pd.DataFrame) -> list[dict]:
+    """上市清单 DataFrame → ``[{"code","name","list_date"}]``；缺代码列 → []（不可用）。"""
+    code_col = _pick_col(df, _LISTING_CODE_COLS)
+    if code_col is None:
+        return []
+    name_col = _pick_col(df, _LISTING_NAME_COLS)
+    date_col = _pick_col(df, _LISTING_DATE_COLS)
+    rows: list[dict] = []
+    for _, raw in df.iterrows():
+        code = _norm_six_digit_code(raw.get(code_col))
+        if not code:
+            continue
+        name = None
+        if name_col is not None:
+            raw_name = raw.get(name_col)
+            if raw_name is not None and not pd.isna(raw_name):
+                name = str(raw_name).strip() or None
+        rows.append(
+            {
+                "code": code,
+                "name": name,
+                "list_date": _norm_date_iso(raw.get(date_col)) if date_col else None,
+            }
+        )
+    return rows
+
 
 class AKShareClient:
     def __init__(self) -> None:
@@ -1435,4 +1520,124 @@ class AKShareClient:
                     "report_period",
                 ],
             )
+        )
+
+    # ── add-market-snapshot T5：全市场快照取数包装（日批/回填共用） ──────────
+
+    def fetch_market_spot(self) -> pd.DataFrame | None:
+        """全市场 spot 表（``stock_zh_a_spot_em`` 原样透传；列映射由日批负责）。
+
+        缺「代码」列（维护窗口变体）或空表 → None（调用方按拉取失败走重试/告警）。
+        """
+        df = _call_ak(ak.stock_zh_a_spot_em)
+        if not isinstance(df, pd.DataFrame) or df.empty or "代码" not in df.columns:
+            logger.warning("全市场 spot 拉取失败/空/缺「代码」列（返回 None）")
+            return None
+        return df
+
+    def fetch_trade_calendar(self) -> list[str] | None:
+        """全历史交易日历（``tool_trade_date_hist_sina``）→ 升序去重的 ``YYYY-MM-DD``。
+
+        ``trade_date`` 列值可能是 date/datetime/str 混合，统一归一；缺列/空表/
+        全不可解析 → None（D4：宁可日批抛错，不写空日历当权威）。
+        """
+        df = _call_ak(ak.tool_trade_date_hist_sina)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            logger.warning("交易日历拉取失败/空（返回 None）")
+            return None
+        col = _pick_col(df, ("trade_date",))
+        if col is None:
+            logger.warning("交易日历缺 trade_date 列（返回 None）")
+            return None
+        dates = {iso for iso in (_norm_date_iso(v) for v in df[col]) if iso}
+        if not dates:
+            logger.warning("交易日历全部不可解析（返回 None）")
+            return None
+        return sorted(dates)
+
+    def fetch_listing_info(self) -> list[dict] | None:
+        """沪（三块板变体）+ 深 + 北上市清单 → ``[{"code","name","list_date"}]``。
+
+        每源独立 try：单交易所失败不拖垮其余（代码归一 6 位字符串；``list_date``
+        归一 ``YYYY-MM-DD`` 或 None，不编造）。全源失败 → None。
+        """
+        frames: list[pd.DataFrame] = []
+        for board in _SH_LISTING_BOARDS:
+            try:
+                df = _call_ak(ak.stock_info_sh_name_code, symbol=board)
+            except Exception as e:
+                logger.warning("上市清单 沪%s 拉取失败，跳过: %s", board, e)
+                continue
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                frames.append(df)
+        try:
+            df = _call_ak(ak.stock_info_sz_name_code)
+        except Exception as e:
+            logger.warning("上市清单 深市拉取失败，跳过: %s", e)
+        else:
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                frames.append(df)
+        try:
+            df = _call_ak(ak.stock_info_bj_name_code)
+        except Exception as e:
+            logger.warning("上市清单 北交所拉取失败，跳过: %s", e)
+        else:
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                frames.append(df)
+
+        rows: list[dict] = []
+        for df in frames:
+            rows.extend(_listing_rows(df))
+        if not rows:
+            logger.warning("上市清单全源失败/不可用（返回 None）")
+            return None
+        return rows
+
+    def fetch_symbol_history_raw_qfq(self, code: str, start: str, end: str) -> pd.DataFrame | None:
+        """逐票历史日线双口径（回填用）：raw（``adjust=""``）+ qfq 两次调用按「日期」内连接。
+
+        输出列 ``[日期, 开盘, 收盘_raw, 收盘_qfq, 成交量]``（成交量取 raw 口径），
+        按日期升序。任一腿失败/空/缺列或按日期无交集 → None（不产出半口径数据）。
+        """
+        raw = _call_ak(
+            ak.stock_zh_a_hist,
+            symbol=code,
+            period="daily",
+            start_date=start,
+            end_date=end,
+            adjust="",
+        )
+        if not isinstance(raw, pd.DataFrame) or raw.empty:
+            logger.warning("历史日线 raw 腿失败/空: %s", code)
+            return None
+        if not {"日期", "开盘", "收盘", "成交量"} <= set(raw.columns):
+            logger.warning("历史日线 raw 腿缺列: %s", code)
+            return None
+        qfq = _call_ak(
+            ak.stock_zh_a_hist,
+            symbol=code,
+            period="daily",
+            start_date=start,
+            end_date=end,
+            adjust="qfq",
+        )
+        if not isinstance(qfq, pd.DataFrame) or qfq.empty:
+            logger.warning("历史日线 qfq 腿失败/空: %s", code)
+            return None
+        if not {"日期", "收盘"} <= set(qfq.columns):
+            logger.warning("历史日线 qfq 腿缺列: %s", code)
+            return None
+        merged = pd.merge(
+            raw[["日期", "开盘", "收盘", "成交量"]].rename(columns={"收盘": "收盘_raw"}),
+            qfq[["日期", "收盘"]].rename(columns={"收盘": "收盘_qfq"}),
+            on="日期",
+            how="inner",
+        )
+        if merged.empty:
+            logger.warning("历史日线 raw/qfq 按日期无交集: %s", code)
+            return None
+        return (
+            merged[["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量"]]
+            .sort_values("日期")
+            .reset_index(drop=True)
         )
