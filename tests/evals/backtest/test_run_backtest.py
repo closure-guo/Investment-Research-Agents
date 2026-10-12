@@ -919,3 +919,60 @@ class TestPilotAnnotation:
         assert "0.6666" in text  # Buy-and-Hold Sharpe 原文数字
         assert "-4.2816" in text  # 系统 Sharpe 原文数字
         assert "#102" in text and "#104" in text  # 缺陷表原文
+
+
+# ---- add-matching-engine T6: 未成交按原因码披露、不计入收益序列（M7） ----
+
+
+class TestUnfilledDisclosure:
+    """回放未成交（settlement=None + unfilled_reason，T5 fail-closed 产物）在聚合侧的表态。
+
+    计数范围 = 一致率达标（进入绩效循环）的标的；未成交笔在 `_trade_daily_returns`
+    走既有 `settlement=None → []` 分支（零改动），天然不为收益序列贡献任何日收益。
+    """
+
+    @staticmethod
+    def _unfilled(outcome: dict, reason: str) -> dict:
+        return {**outcome, "settlement": None, "entry_price": None, "unfilled_reason": reason}
+
+    def test_counts_by_reason_and_excludes_from_return_series(self):
+        sample, outcomes, klines = _batch_setup()
+        outcomes = {
+            "600000": self._unfilled(outcomes["600000"], "LIMIT_UP_UNFILLABLE"),
+            "600001": self._unfilled(outcomes["600001"], "LIMIT_DOWN_UNFILLABLE"),
+        }
+        report = run_backtest(sample, klines, replay_fn=_fake_replay(outcomes))
+
+        assert report["unfilled_counts"] == {
+            "LIMIT_UP_UNFILLABLE": 1,
+            "LIMIT_DOWN_UNFILLABLE": 1,
+        }
+        # 未成交 → 收益序列为空（不是 0 收益）：绩效表全 0、无 CI、无 block 敏感度
+        assert report["perf_table"]["system"] == {"CR": 0.0, "ARR": 0.0, "Sharpe": 0.0, "MDD": 0.0}
+        assert report["sharpe_excess_ci"] is None
+        assert report["block_length_sensitivity"] is None
+        # methodology 逐字披露（spec/计划用语）
+        assert "未成交笔数按原因码披露、不计入收益序列" in report["methodology"]["unfilled"]
+
+    def test_unfilled_row_equals_absence_from_perf_table(self):
+        """一笔未成交 + 一笔成交：绩效表等价于只跑成交笔（未成交笔零贡献）。"""
+        sample, outcomes, klines = _batch_setup()
+        outcomes = {**outcomes, "600000": self._unfilled(outcomes["600000"], "LIMIT_UP_UNFILLABLE")}
+        report = run_backtest(sample, klines, replay_fn=_fake_replay(outcomes))
+        only_filled = run_backtest(
+            [sample[1]],
+            {"600001": klines["600001"]},
+            replay_fn=_fake_replay({"600001": outcomes["600001"]}),
+        )
+
+        assert report["unfilled_counts"] == {"LIMIT_UP_UNFILLABLE": 1}
+        assert report["perf_table"]["system"] == only_filled["perf_table"]["system"]
+        # 基线侧同样不为未成交笔计入窗口收益（整笔不参与绩效与基线两条序列）
+        for strat in ("buy_hold", "macd", "kdj", "rsi"):
+            assert report["perf_table"][strat] == only_filled["perf_table"][strat]
+
+    def test_no_unfilled_yields_empty_counts(self):
+        sample, outcomes, klines = _batch_setup()
+        report = run_backtest(sample, klines, replay_fn=_fake_replay(outcomes))
+        assert report["unfilled_counts"] == {}
+        assert "未成交笔数按原因码披露、不计入收益序列" in report["methodology"]["unfilled"]
