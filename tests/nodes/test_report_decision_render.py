@@ -22,6 +22,7 @@ import pytest
 
 from finance_agent.models import TradeDecision
 from finance_agent.nodes.report import (
+    SHORT_DISCLOSURE,
     _fmt_reeval_triggers,
     _format_trade_decision,
     generate_report,
@@ -393,6 +394,29 @@ class TestSellTypeSplitRendering:
         assert "做空披露" in md
         assert "融资融券信用账户" in md
         assert "A 股普通证券账户不可执行" in md
+
+    def test_short_disclosure_constant_matches_spec_literal(self):
+        """规格固定文本逐字完整相等（review M-3）：三处子串断言杀不死删句变异
+        （删「标的须为两融标的且有券源」或「本条为方向研判，不代表可直接执行」
+        子串均不会红）——规格字面量全文钉死，渲染行须原样内嵌该常量。"""
+        spec_literal = (
+            "做空建仓需融资融券信用账户（标的须为两融标的且有券源），"
+            "A 股普通证券账户不可执行；本条为方向研判，不代表可直接执行"
+        )
+        assert spec_literal == SHORT_DISCLOSURE
+        decision = TradeDecision.model_validate(
+            {
+                "action": "sell",
+                "confidence": 0.55,
+                "sell_type": "short",
+                "entry_price": 640.0,
+                "stop_loss": 700.0,
+                "target_price": 571.0,
+                "reasoning": "做空建仓",
+                "reeval_triggers": ["跌破 570 重估"],
+            }
+        )
+        assert f"- **做空披露**: {spec_literal}" in _format_trade_decision(decision)
 
     def test_legacy_none_sell_renders_short_disclosure(self):
         """历史 None 形态同样按做空模板呈现——不披露即把不可执行结构呈现为可执行建议。"""
