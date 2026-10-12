@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from finance_agent.models import TradeDecision
-from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint
+from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint, holdings_context_line
 from finance_agent.nodes.validate import apply_payout_self_check as _apply_payout_self_check
 from finance_agent.prompts.loader import load_prompt_with_meta
 
@@ -51,6 +51,9 @@ def _build_trader_context(state: dict) -> str:
     hint = focus_hint(state)
     if hint:
         sections.append(hint)
+
+    # 受众持仓上下文（add-holdings-context）：三态均注入，决定看空按 exit 还是 watch 表达
+    sections.append(holdings_context_line(state))
 
     # 分析师报告
     reports = state.get("analyst_reports") or {}

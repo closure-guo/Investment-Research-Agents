@@ -14,7 +14,7 @@ from finance_agent.debate_anchors import anchor_stats, check_argument_anchors
 from finance_agent.langfuse_tracing import update_current_span
 from finance_agent.metrics.decision_price_check import check_decision_prices
 from finance_agent.models import DebateMessage, TradeDecision
-from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint
+from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint, holdings_context_line
 from finance_agent.nodes.validate import apply_payout_self_check as _apply_payout_self_check
 from finance_agent.nodes.validate import final_price_missing, inaction_rationale_missing
 from finance_agent.outcome.track_record.model import recent_directions
@@ -652,6 +652,9 @@ def _build_risk_context(state: dict) -> str:
     hint = focus_hint(state)
     if hint:
         sections.append(hint)
+
+    # 受众持仓上下文（add-holdings-context）：三态均注入（同 Trader 层，两层不得漂移）
+    sections.append(holdings_context_line(state))
 
     # Trader 方案
     plan = state.get("trader_plan") or {}
