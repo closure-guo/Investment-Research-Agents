@@ -81,3 +81,36 @@ class TestInactionRationalePromptContract:
         assert "1-3 条" in text
         # 继承行同样须钉死与 reasoning 的分工（design D1）
         assert "禁止照抄" in text
+
+
+class TestAudienceExecutabilityContract:
+    """add-holdings-context：决策层受众可执行性约束（prompt 政策）。"""
+
+    def test_trader_declares_a_share_constraint(self):
+        text = _load("trader.md")
+        assert "融资融券" in text
+        assert "普通证券账户" in text or "普通账户" in text
+
+    def test_trader_enumerates_three_states(self):
+        text = _load("trader.md")
+        assert "已申报持有" in text
+        assert "已申报未持有" in text
+        assert "未申报" in text
+
+    def test_risk_judge_declares_a_share_constraint(self):
+        text = _load("risk_judge.md")
+        assert "融资融券" in text or "两融" in text
+        assert "普通证券账户" in text or "普通账户" in text
+
+    def test_risk_judge_enumerates_three_states(self):
+        text = _load("risk_judge.md")
+        assert "已申报持有" in text
+        assert "已申报未持有" in text
+        assert "未申报" in text
+
+    def test_undeclared_default_is_exit_not_short(self):
+        """未申报兜底表述必须改口——原「默认按 short」把受众推向不可执行模板。"""
+        for name in ("trader.md", "risk_judge.md"):
+            text = _load(name)
+            assert "默认按 short" not in text, f"{name} 仍声明默认 short"
+            assert "默认按 exit" in text, f"{name} 未声明默认 exit"
