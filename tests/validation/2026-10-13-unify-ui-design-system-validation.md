@@ -26,7 +26,7 @@ OpenSpec change `unify-ui-design-system`（打底阶段）：新增涨跌语义�
 | 3 | AI 角标（hover 文案逐字） | LLM 生成内容带紫系 AiBadge；hover 提示「由模型生成，仅供参考」；确定性数字无角标 | ✅ | `frontend/src/components/AiBadge.tsx`（`AI_BADGE_HINT='由模型生成，仅供参考'` 唯一文案来源，shadcn Tooltip hover/聚焦）；`aiBadge.test.tsx` 4 例（紫系令牌/aria-label、hover 逐字文案、键盘聚焦可达、小号角标默认文案） |
 | 4 | 四种页面壳（含空态与骨架屏） | A 指标条+主图表+底部 Tab 表；B 筛选栏+数据表+行展开；C 左列表+右详情+确认/驳回；D 批次列表+步骤级状态图标；空态=图标+一句说明+主操作按钮；加载=5 行骨架 | ✅ | `frontend/src/components/shells/PageShellA~D.tsx` + `ShellParts.tsx`；`pageShellA/B/C/D.test.tsx` 共 21 例（渲染/空态/骨架、C 确认驳回禁用态、B 行展开、数值列右对齐 tabular-nums） |
 | 5 | 动效规范（行入场 8px+30ms stagger、Tab 150ms、徽章 200ms ease-out、reduced-motion 全禁） | 参数写死且降级无动画 | ✅ | `frontend/src/design/motion.ts`（`ROW_ENTRANCE_Y=8` / `STAGGER_MS=30` 封顶 600ms / `TAB_FADE_MS=150` / `BADGE_TRANSITION_MS=200`）；`motion.test.tsx` 7 例（常量钉死、stagger 延迟曲线、DOM 级 reduced 降级、index.css keyframes 与媒体查询断言） |
-| 6 | **零视觉变更红线（14/14 页面×主题像素对比 ≤0.1%）** | 打底前后现有全部页面（浅+深）逐页零差异，容差 ≤0.1% 像素 | ✅ | `npx playwright test -c playwright.ui-baseline.config.ts`（**无** `--update-snapshots`）→ **`14 passed (37.2s)`**，零 diff；运行后 `git status` 干净（基线 PNG 未被重写） |
+| 6 | **零视觉变更红线（14/14 页面×主题像素对比 ≤0.1%）** | 打底前后现有全部页面（浅+深）逐页对比，容差 ≤0.1% 像素（`maxDiffPixelRatio: 0.001`） | ✅ | `npx playwright test -c playwright.ui-baseline.config.ts`（**无** `--update-snapshots`）→ **`14 passed (37.2s)`**，0 例上报差异（≤0.1% 容差，maxDiffPixelRatio 0.001）；运行后 `git status` 干净（基线 PNG 未被重写） |
 
 设计层新增单测合计：9 文件 / 73 例，全绿（含入前端全量 91 files / 761 tests）。
 
@@ -38,7 +38,7 @@ OpenSpec change `unify-ui-design-system`（打底阶段）：新增涨跌语义�
 npx playwright test -c playwright.ui-baseline.config.ts
 ```
 
-结果行：**`14 passed (37.2s)`**（2026-10-13 18:35 完成；HEAD `7495ea0a`；无 `--update-snapshots`，纯像素对比）。
+结果行：**`14 passed (37.2s)`**（≤0.1% 容差下 0 例上报差异；2026-10-13 18:35 完成；HEAD `7495ea0a`；无 `--update-snapshots`，纯像素对比）。
 
 环境隔离与确定性（T1 已固化，本次沿用）：专属端口对 8006/5179；五个测试库 `data/test-e2e-ui-baseline*.db`（含 `CACHE_DB_PATH`）；`REPORTS_DIR` 专属空目录；固定视口 1440×900 且 `colorScheme`/`timezoneId` 钉死；`fa_theme` 预置双主题。
 
@@ -58,7 +58,8 @@ npx playwright test -c playwright.ui-baseline.config.ts
 
 ### 对比工具能力自证（T1 记录，提交 ed18ce02）
 
-- 向 `home-light.png` 合成注入 400×100 差异块（约 4 万像素）后重跑该单例：Playwright 报 **40346 像素差异 / ratio 0.04** → 远超 `maxDiffPixelRatio: 0.001` 容差必红，证明对比链路真在逐像素比对而非空跑；还原基线后重跑 14/14 通过。
+- 向 `home-light.png` 合成注入 400×100 差异块后重跑该单例：Playwright 报 **40346 像素差异 / ratio 0.04**。计数构成精确为：注入块 400×100 = 40000 px + 块外 ≤346 px 容差内页面噪声（40346 − 40000）——该噪声平日低于容差不上报，注入块才使其一并计入；相对 1440×900 画布 raw 占比 ≈3.1%（Playwright 的 ratio 为向上取整到两位小数 → 0.04）。40346 px 远超 `maxDiffPixelRatio: 0.001`（1440×900 下允许 1296 px）→ 必红，证明对比链路真在逐像素比对而非空跑；还原基线后重跑 14/14（0 例上报差异）。
+- 该合成自证为一次性运行，未提交产物/失败日志（`tests/validation/ui-baseline/` 下仅存基线 PNG）；上述数字即其留存记录。
 - 真实回归发生时 actual/diff PNG 落 `tests/e2e/playwright/test-results/` 供人工核验。
 
 ### 唯一 mask（文档化，非跳过页面）
@@ -84,7 +85,7 @@ cd frontend && npx vitest run
 
 结果：**`Test Files 91 passed (91)` / `Tests 761 passed (761)`**（52.29s）。
 
-既有测试零修改证据：`git diff --name-status ed18ce02..HEAD`（本 change 全部代码提交）仅 19 个新增文件 + 1 个修改文件（`frontend/src/index.css`，numstat 85 增 / 0 删，纯新增声明）；`frontend/src/test/` 与 `tests/` 下无任何既有测试文件被修改。
+既有测试零修改证据：`git diff --name-status ed18ce02^..HEAD`（本 change 全范围提交，含 T1 基线提交 ed18ce02）共 41 个新增文件 + 3 个修改文件——`.gitignore`（+3/−0，新增 ui-baseline 测试库忽略项）、`frontend/src/index.css`（+85/−0，纯新增声明）、`src/finance_agent/data/cache.py`（+6/−1，调用期读 `CACHE_DB_PATH`，默认值不变，见异常记录 a）；3 个修改文件均非测试文件，`frontend/src/test/` 与 `tests/` 下无任何既有测试文件被修改。
 
 ## 异常记录
 
@@ -107,11 +108,16 @@ cd frontend && npx vitest run
 **(d) 默认 E2E 套件本机既有环境性红（非本 change 引入；本 change 门禁为隔离 ui-baseline 套件）**
 
 - 本机默认 `npx playwright test` 套件存在既有环境性失败（Windows 并发 worker + vite polling 等，见 `tests/validation/2026-08-29-refactor-ui-design-system-validation.md` 的 E2E 失败归因；vite 代理默认 8000 + `reuseExistingServer` 复用生产容器的 footgun 见 `docs/incidents/038-e2e-default-suite-hits-production-vite-proxy-20261007.md`）。
-- 本轮**未重跑**默认套件；本 change 的 E2E 门禁是隔离 `playwright.ui-baseline.config.ts` 套件（14/14 像素零差异），其自带守卫保证被默认 config 扫到时整组 skip。
+- 本轮**未重跑**默认套件；本 change 的 E2E 门禁是隔离 `playwright.ui-baseline.config.ts` 套件（14/14 在 ≤0.1% 容差内 0 例上报差异），其自带守卫保证被默认 config 扫到时整组 skip。
+
+**(e) 两个 spec Scenario 的真实页面落地由后续功能页 delta 承接（本 change 仅组件级覆盖）**
+
+- spec「角标展示」Scenario（GIVEN 选股页一行候选：L3 理由带 AiBadge、综合分数字无角标）与「状态展示复用 StatusBadge」（即「状态徽章五态」Requirement 的「任何页面的状态展示 SHALL 复用该组件，禁止自绘状态样式」条款）都需要落在真实功能页面上才能端到端验收；本 change 受「零视觉变更红线」约束（不改任何现有页面），而 /screening 等页面由后续功能 delta 实现 → 两者不能在本 change 内落地。
+- 承接方式：由后续功能页 delta 的验收项承接上述 Scenario/条款（在相应 delta 中做真实页面级断言）；本 change 的当前覆盖为组件级测试——`aiBadge.test.tsx`（4 例）与 `statusBadge.test.tsx`（9 例）。
 
 ## 结论
 
-- **机器验证：通过**——零视觉变更红线 14/14 零差异（含对比工具能力自证）；前端 91 files / 761 tests 全绿；后端定向 222 通过；既有测试零修改（红线守住）。
+- **机器验证：通过**——零视觉变更红线 14/14 在 ≤0.1% 容差（maxDiffPixelRatio 0.001）内 0 例上报差异（含对比工具能力自证）；前端 91 files / 761 tests 全绿；后端定向 222 通过；既有测试零修改（红线守住）。
 - **人工签收待办**：①令牌美学（rise/fall 与既有 status-error/success 同色族的观感）；②五态徽章浅/深双主题对比度（尤其 degraded 琥珀描边、running 蓝底白字）；③异常记录 (b)(c) 的裁定（表格库与 SignedPct 组件是否需要）。
 
 ## 人工验证签字

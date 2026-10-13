@@ -3,7 +3,8 @@
 ## 1. 视觉基线存档
 - [x] 1.1 打底前对现有全部页面（浅色+深色各一套）全局截图存 `tests/validation/ui-baseline/`
   - 7 页 × 2 主题 = 14 张，落 `tests/validation/ui-baseline/pages/`（ed18ce02）；专属 config（8006/5179 端口对 + 五库 + REPORTS_DIR 隔离）+ 自带 skip 守卫
-  - 对比工具能力自证：合成 400×100 差异块 → 40346 px / ratio 0.04 检出；唯一 mask 为 /track-record 「截至」当天日期（`_track_as_of` 跨日必变）
+  - 对比工具能力自证：向 `home-light.png` 注入 400×100 差异块（40000 px）+ ≤346 px 容差内页面噪声 → Playwright 报 40346 px / ratio 0.04（1440×900 画布下 0.1% 容差仅允许 1296 px）→ 必红；该自证为一次性运行、无留档产物，本行为其记录
+  - 红线判定口径：`14 passed` 的含义是 ≤0.1% 容差（maxDiffPixelRatio 0.001）下 0 例上报差异，非「像素零差异」；唯一 mask 为 /track-record 「截至」当天日期（`_track_as_of` 跨日必变）
 
 ## 2. 设计令牌
 - [x] 2.1 `design/tokens.ts`：rise/fall/flat 涨跌语义色（红涨绿跌）+ 五态徽章色 + AI 紫系标识色，双主题映射 + 令牌快照单测
@@ -34,8 +35,8 @@
 
 ## 6. 验证
 - [x] 6.1 全量测试通过（后端 pytest + 前端 Vitest + E2E stub 门禁）
-  - 前端 91 files / 761 tests 全绿；后端定向 `pytest tests/data tests/test_api_settings.py` 222 通过（本 change 唯一触及后端文件 cache.py）；E2E 门禁 = 隔离 ui-baseline 套件 14/14 零差异（默认套件本机既有环境性红，未重跑，见验证报告异常记录 d）
-- [x] 6.2 现有页面打底前后截图逐页对比零变化，报告落 `tests/validation/`
-  - `npx playwright test -c playwright.ui-baseline.config.ts`（无 --update-snapshots）→ `14 passed (37.2s)` 零 diff；报告 `tests/validation/2026-10-13-unify-ui-design-system-validation.md`
+  - 前端 91 files / 761 tests 全绿；后端定向 `pytest tests/data tests/test_api_settings.py` 222 通过（本 change 唯一触及后端文件 cache.py）；E2E 门禁 = 隔离 ui-baseline 套件 14/14（≤0.1% 容差，0 例上报差异；默认套件本机既有环境性红，未重跑，见验证报告异常记录 d）
+- [x] 6.2 现有页面打底前后截图逐页对比零变化，报告落 `tests/validation/`（口径：≤0.1% 容差内 0 例上报差异）
+  - `npx playwright test -c playwright.ui-baseline.config.ts`（无 --update-snapshots）→ `14 passed (37.2s)`（≤0.1% 容差下 0 例上报差异）；报告 `tests/validation/2026-10-13-unify-ui-design-system-validation.md`
 - [x] 6.3 既有测试无修改通过（红线）
-  - `git diff --name-status ed18ce02..HEAD`：19 新增 + 唯一修改 frontend/src/index.css（85 增 / 0 删，纯新增声明）；test 目录零修改，前端 761 例全绿
+  - `git diff --name-status ed18ce02^..HEAD`（全范围）：41 新增 + 3 修改（`.gitignore` +3/−0、`frontend/src/index.css` +85/−0 纯新增声明、`src/finance_agent/data/cache.py` +6/−1 调用期读 `CACHE_DB_PATH`）；3 个修改文件均非测试，`frontend/src/test/` 与 `tests/` 零修改，前端 761 例全绿
