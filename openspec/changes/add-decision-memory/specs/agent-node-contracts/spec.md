@@ -1,6 +1,6 @@
 # agent-node-contracts delta: add-decision-memory
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: 分析师与 Trader 上下文输入契约
 

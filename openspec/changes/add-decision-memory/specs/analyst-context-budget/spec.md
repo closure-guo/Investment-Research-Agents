@@ -1,6 +1,6 @@
 # analyst-context-budget delta: add-decision-memory
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: 记忆块预算核算
 
