@@ -258,6 +258,9 @@ data/test-e2e-track-record-execution.db*
 data/test-e2e-eval-ops.db*
 # 选股页 E2E 独立测试库（playwright.config.ts 注入 SCREENING_DB_PATH）
 data/test-e2e-screening.db*
+# unify-ui-design-system T1：页面视觉基线专属套件测试库（playwright.ui-baseline.config.ts
+# 注入 SESSIONS_DB_PATH / SNAPSHOT_DB_PATH / SCREENING_DB_PATH / EXECUTION_DB_PATH / CACHE_DB_PATH）
+data/test-e2e-ui-baseline*.db*
 # 行情快照库（本地运行时数据，同 **/sessions.db 处置）；非 live 测试经默认路径
 # 读取会创建空库（analyze 端点时效性校验取数），不得误提交
 data/market_snapshot.db*
