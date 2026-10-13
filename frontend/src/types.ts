@@ -763,3 +763,50 @@ export interface OpsCaliber {
   knobs: Record<string, number>
   source: string
 }
+
+// 选股池（add-screening-pipeline S4/S5：GET /api/screening/pool 载荷）
+export interface ScreeningFactorContrib {
+  factor_id: number
+  zscore?: number
+  weight?: number
+  contribution: number
+}
+
+export interface ScreeningPoolRow {
+  symbol: string
+  composite_score: number
+  rank: number
+  consecutive_days: number
+  l3_verdict: string
+  l3_reason: string
+  factor_contribs: ScreeningFactorContrib[]
+}
+
+// 批量分析队列条目（S3 四态；前端只对 queued/running 渲染徽标）
+export interface ScreeningQueueEntry {
+  symbol: string
+  session_id: string
+  state: string
+}
+
+// 深度分析前的时效性校验移除项（reason ∈ SUSPENDED/LIMIT_LOCKED/NEW_EVENT）
+export interface ScreeningRemoval {
+  symbol: string
+  reason: string
+  detail: string
+}
+
+export interface ScreeningPoolResponse {
+  batch_date: string | null
+  batch_status: string | null
+  stale: boolean
+  pool: ScreeningPoolRow[]
+  queue: ScreeningQueueEntry[]
+}
+
+// POST /api/screening/analyze 响应（池空为 409 显式错误）
+export interface ScreeningAnalyzeResponse {
+  started: ScreeningQueueEntry[]
+  queued: ScreeningQueueEntry[]
+  removed: ScreeningRemoval[]
+}

@@ -17,6 +17,7 @@ import { TimelineRenderer, type TimelineBannerComponents } from './TimelineRende
 import { useClickOutside } from './useClickOutside'
 import { usePathname, navigate } from './route'
 import { DownloadCenter } from './pages/downloads/DownloadCenter'
+import { ScreeningPage } from './pages/screening/ScreeningPage'
 import { TrackRecordPage } from './pages/trackRecord/TrackRecordPage'
 import { CalibrationPage } from './pages/trackRecord/CalibrationPage'
 import { PredictionDetailPage } from './pages/trackRecord/PredictionDetailPage'
@@ -889,6 +890,7 @@ export default function App() {
         onNew={newAnalysis}
         onOpenDownloads={() => navigate('/downloads')}
         onOpenDecisions={() => navigate('/track-record')}
+        onOpenScreening={() => navigate('/screening')}
         onOpenSettings={() => { setSettingsFocus(undefined); navigate('/settings') }}
         themeChoice={themeChoice}
         onCycleTheme={cycleTheme}
@@ -911,6 +913,9 @@ export default function App() {
           <TrackRecordPage onBack={() => navigate('/')} />
         ) : pathname === '/downloads' ? (
           <DownloadCenter onBack={() => navigate('/')} />
+        ) : pathname === '/screening' ? (
+          // 选股页（add-screening-pipeline T4）：最近成功批次池 + 批量深度分析
+          <ScreeningPage onBack={() => navigate('/')} />
         ) : pathname === '/settings' ? (
           // 设置中心页（add-agent-settings-center Task 7）：左导航六分区 + 右内容区
           <SettingsCenterPage
@@ -1127,7 +1132,7 @@ export default function App() {
 }
 
 // ── Sidebar（add-collapsible-sidebar：shadcn Sidebar 原语重构）──
-function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
+function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
   sessions: SessionMeta[]
   currentSessionId: string | null
   onSelect: (id: string) => void
@@ -1136,6 +1141,7 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
   onNew: () => void
   onOpenDownloads: () => void
   onOpenDecisions: () => void
+  onOpenScreening: () => void
   onOpenSettings: () => void
   runningSessionIds: Set<string>
   loading?: boolean
@@ -1185,6 +1191,11 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
             </Button>
           </SidebarIcon>
           <div className="flex-1" />
+          <SidebarIcon label="选股池">
+            <Button variant="ghost" size="icon" onClick={onOpenScreening} aria-label="选股池" data-testid="sidebar-screening-collapsed">
+              <i className="fas fa-filter text-xs"></i>
+            </Button>
+          </SidebarIcon>
           <SidebarIcon label="决策战绩">
             <Button variant="ghost" size="icon" onClick={onOpenDecisions} aria-label="决策战绩" data-testid="sidebar-decisions-collapsed">
               <i className="fas fa-chart-line text-xs"></i>
@@ -1223,6 +1234,19 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
         >
           <i className="fas fa-plus text-xs"></i>
           新建分析
+        </Button>
+      </div>
+
+      {/* 选股池入口（add-screening-pipeline T4）：与折叠态图标栏/命令面板同源 navigate */}
+      <div className="px-3 -mt-1 pb-1">
+        <Button
+          onClick={onOpenScreening}
+          data-testid="sidebar-screening"
+          variant="ghost"
+          className="w-full justify-start gap-2 rounded-lg text-xs h-8 font-normal"
+        >
+          <i className="fas fa-filter text-[10px]"></i>
+          选股池
         </Button>
       </div>
 
