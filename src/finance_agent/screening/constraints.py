@@ -15,7 +15,12 @@
 - ``build_candidate_record`` 调用期读 ``DEFAULT_THRESHOLDS``（或显式
   ``thresholds=`` 覆盖）的 ``min_liquidity_history_days``，经
   ``avg_amount_20d(amounts, history_days=...)`` 决定均值窗口长度；``avg_amount_20d``
-  在 ``history_days=None`` 时调用期读本模块 ``MIN_LIQUIDITY_HISTORY_DAYS`` 常量。
+  在 ``history_days=None`` 时调用期读本模块 ``MIN_LIQUIDITY_HISTORY_DAYS`` 常量；
+- 交易执行层（add-signal-portfolio-risk-gate，spec 明文「约束定义 import 自
+  ``screening/constraints.py``」）：``execution/portfolio.py`` 默认上限读
+  ``MAX_SINGLE_POSITION`` / ``MAX_TOTAL_POSITION``；``execution/risk_gate.py``
+  调用期读三常量（单票/总仓上限 + 整手）；``execution/matching.py`` 的整手判定
+  import ``LOT_SIZE``。
 
 因此修改上方常量（或测试中 monkeypatch ``DEFAULT_THRESHOLDS`` /
 ``MIN_LIQUIDITY_HISTORY_DAYS``）即改变过滤行为，无需改任何其他文件。后续交易执行层的
@@ -32,6 +37,10 @@ MIN_TRADING_DAYS: int = 60
 MIN_AVG_AMOUNT_20D: float = 50_000_000.0
 # 流动性判定所需的成交额历史长度（交易日）：快照积累不足即 DATA_MISSING
 MIN_LIQUIDITY_HISTORY_DAYS: int = 20
+# 单票目标仓位上限（组合聚合/风控门禁共用单一来源）
+MAX_SINGLE_POSITION: float = 0.2
+# 组合总仓位上限（组合聚合/风控门禁共用单一来源）
+MAX_TOTAL_POSITION: float = 0.8
 
 
 @dataclass(frozen=True)
