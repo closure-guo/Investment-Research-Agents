@@ -13,7 +13,7 @@ import re
 import subprocess
 import time
 import uuid
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -43,6 +43,12 @@ from finance_agent.langfuse_tracing import get_langfuse  # noqa: E402
 from finance_agent.llm import LLMConfig  # noqa: E402
 from finance_agent.llm.probe_cache import get_probe_cache  # noqa: E402
 from finance_agent.pipeline_runner import PipelineRunner, build_layer_tree  # noqa: E402
+from finance_agent.screening.pipeline import latest_successful_pool  # noqa: E402
+from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
+from finance_agent.screening.store import (  # noqa: E402
+    latest_screening_batch,
+    latest_successful_batch,
+)
 from finance_agent.session_store import (  # noqa: E402
     append_chat,
     append_session_event,
@@ -725,14 +731,20 @@ if TESTING:
         也可单独使用，且不创建会话；
         顶层可选 snapshot（dict：写 snapshot_meta 键）与 snapshot_reset（bool：先清
         快照三表）造行情快照告警态（add-market-snapshot D6），同样无需 chat_history。
+        顶层可选 screening（dict：``batch`` 造批次行（含 error 造失败横幅）、``pool``
+        造精选池行、``queue`` 造批量分析队列徽标态）与 screening_reset（bool：清
+        screening 四表）造选股页确定性状态（add-screening-pipeline S6）；库路径于
+        调用期读 SCREENING_DB_PATH（导入期冻结会让 E2E 注入失效）。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
-        # track_record 造数块不受 chat_history 前置约束（track_record-only 造数合法）
+        # track_record / snapshot / screening 造数块不受 chat_history 前置约束
         if (
             "chat_history" not in req
             and not isinstance(req.get("track_record"), dict)
             and not isinstance(req.get("snapshot"), dict)
             and not req.get("snapshot_reset")
+            and not isinstance(req.get("screening"), dict)
+            and not req.get("screening_reset")
         ):
             return {"status": "ok", "mode": "testing"}
         # add-index-performance-compare:战绩页 E2E 造数(equity_curve/index_closes
@@ -848,6 +860,34 @@ if TESTING:
                 "last_attempt_at", datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
             )
             set_meta_many(snapshot_meta)
+        # add-screening-pipeline S6：选股页造数——可选先 reset（清四表）再写批次/池/
+        # 队列。库路径调用期读 SCREENING_DB_PATH（store 各入口 env 口径）；队列为
+        # 进程内单例（徽标态造数，不启动轮询/补位）。
+        if req.get("screening_reset"):
+            from finance_agent.screening.store import reset_screening_db
+
+            reset_screening_db()
+        screening_seed = req.get("screening")
+        if isinstance(screening_seed, dict):
+            from finance_agent.screening.store import record_screening_batch as _seed_batch
+
+            batch_seed = screening_seed.get("batch")
+            if isinstance(batch_seed, dict):
+                trade_date = batch_seed["trade_date"]
+                _seed_batch(
+                    trade_date,
+                    status=batch_seed.get("status", "ok"),
+                    error=batch_seed.get("error"),
+                    started_at=batch_seed.get("started_at", _now()),
+                    finished_at=batch_seed.get("finished_at", _now()),
+                    l1_passed=batch_seed.get("l1_passed", 0),
+                    l2_top=batch_seed.get("l2_top", 0),
+                    l3_keep=batch_seed.get("l3_keep", 0),
+                    pool_rows=screening_seed.get("pool") or [],
+                )
+            queue_seed = screening_seed.get("queue")
+            if isinstance(queue_seed, list):
+                _get_analyze_queue().seed(queue_seed)
         # track_record-only（含 {} 空 dict）造数后即返回占位响应，不落会话
         if "chat_history" not in req:
             return {"status": "ok", "mode": "testing"}
@@ -2823,6 +2863,212 @@ async def snapshot_status() -> dict:
             "last_error": "status_unavailable",
             "last_error_date": None,
         }
+
+
+# ── 选股（add-screening-pipeline T3；S3/S4：池 / 状态 / 批量深度分析） ──
+
+# 批量分析并发上限：默认 2（Global Constraints），SCREENING_ANALYZE_CONCURRENCY 可配置
+_SCREENING_ANALYZE_CONCURRENCY_DEFAULT = 2
+# 进程内队列单例（懒创建：env 于调用期读取；单 worker 前提同 StreamRegistry）
+_analyze_queue: AnalyzeQueue | None = None
+
+_SCREENING_STATUS_DEGRADED: dict[str, Any] = {
+    "latest_success_date": None,
+    "failed_date": None,
+    "message": None,
+    "stale": False,
+}
+
+
+def _analyze_concurrency() -> int:
+    """并发上限（默认 2；env 非法值回落默认，不因运维配错打挂端点）。"""
+    raw = os.getenv("SCREENING_ANALYZE_CONCURRENCY")
+    if not raw:
+        return _SCREENING_ANALYZE_CONCURRENCY_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        _logger.warning("非法 SCREENING_ANALYZE_CONCURRENCY=%r，回落默认 2", raw)
+        return _SCREENING_ANALYZE_CONCURRENCY_DEFAULT
+    if value < 1:
+        _logger.warning("SCREENING_ANALYZE_CONCURRENCY=%r 非正，回落默认 2", raw)
+        return _SCREENING_ANALYZE_CONCURRENCY_DEFAULT
+    return value
+
+
+def _start_screening_analysis(symbol: str, session_id: str) -> None:
+    """队列补位启动器（S3：至终态后启动下一个）：为已建会话启动后台管线。
+
+    与 ``/api/analyze`` fast path 同款 ``PipelineRunner.start`` 装配（事件经
+    journal 桥接，SSE 侧零改动）；由 ``AnalyzeQueue`` 在补位时调用（事件循环内）。
+    """
+    loop = asyncio.get_running_loop()
+    analysis_id = str(uuid.uuid4())[:8]
+    start_time = time.time()
+    PipelineRunner.start(
+        session_id,
+        _screening_event_source(symbol, session_id, analysis_id, start_time),
+        {
+            "layerTree": build_layer_tree(),
+            "currentNodeId": "",
+            "progress": 0.0,
+            "updatedAt": int(time.time() * 1000),
+            "pipeline_start_ts": int(start_time * 1000),
+        },
+        loop=loop,
+    )
+
+
+def _get_analyze_queue() -> AnalyzeQueue:
+    """进程内分析队列单例（懒创建：env 调用期读取；测试可整体替换）。
+
+    ``starter`` 注入「补位即启动后台管线」——并发上限约束的是真实在跑的分析数，
+    排队条目在建会话后**不启动**，等空位（S3）。
+    """
+    global _analyze_queue
+    if _analyze_queue is None:
+        _analyze_queue = AnalyzeQueue(
+            max_concurrency=_analyze_concurrency(), starter=_start_screening_analysis
+        )
+    return _analyze_queue
+
+
+def _screening_pool_payload(queue_snapshot: list[dict]) -> dict[str, Any]:
+    """池端点载荷（同步体，供 to_thread 包裹）：最近成功池 + 最近尝试状态 + 队列。"""
+    latest = latest_screening_batch()
+    successful = latest_successful_pool()
+    return {
+        "batch_date": successful["batch"]["trade_date"] if successful else None,
+        "batch_status": latest["status"] if latest else None,
+        # 最近一次尝试非 ok（含失败）→ stale：页面横幅可见，池仍展示最近成功批次
+        "stale": bool(latest is not None and latest["status"] != "ok"),
+        "pool": successful["pool"] if successful else [],
+        "queue": queue_snapshot,
+    }
+
+
+def _screening_event_source(
+    symbol: str, session_id: str, analysis_id: str, start_time: float
+) -> Callable[[], Generator[str, None, None]]:
+    """批量分析的管线事件源（与 /api/analyze fast path 同款 ``_run_graph_streaming`` 装配）。"""
+
+    def _source() -> Generator[str, None, None]:
+        return _run_graph_streaming(
+            symbol,
+            "",
+            AnalyzeRequest(query=f"{symbol} 深度分析", stock_code=symbol),
+            analysis_id,
+            start_time,
+            session_id=session_id,
+            llm_config=None,
+        )
+
+    return _source
+
+
+@app.get("/api/screening/pool")
+async def screening_pool() -> dict[str, Any]:
+    """选股页取数（S4）：最近成功批次池（含贡献分解）+ 批次状态 + 队列快照。
+
+    无成功批次 → ``batch_date=None`` + 空池；最近一次尝试失败 → ``stale=True``，
+    池仍为最近成功批次（spec：页面标注其日期）。
+    """
+    queue_snapshot = _get_analyze_queue().snapshot()
+    return await asyncio.to_thread(_screening_pool_payload, queue_snapshot)
+
+
+@app.get("/api/screening/status")
+async def screening_status() -> dict[str, Any]:
+    """选股批次失败横幅通道（S4）：**永不 500**，读库异常降级 200。
+
+    正常载荷 ``{latest_success_date, failed_date, message, stale}``；失败文案逐字
+    「选股批次失败（最近成功: YYYY-MM-DD）」（无成功批次时括注「无」）。
+    """
+
+    def _payload() -> dict[str, Any]:
+        latest = latest_screening_batch()
+        success = latest_successful_batch()
+        success_date = success["trade_date"] if success else None
+        if latest is None or latest["status"] == "ok":
+            return {
+                "latest_success_date": success_date,
+                "failed_date": None,
+                "message": None,
+                "stale": False,
+            }
+        return {
+            "latest_success_date": success_date,
+            "failed_date": latest["trade_date"],
+            "message": f"选股批次失败（最近成功: {success_date or '无'}）",
+            "stale": True,
+        }
+
+    try:
+        return await asyncio.to_thread(_payload)
+    except Exception:  # noqa: BLE001 -- 横幅通道永不 500（前端轮询不得被后端故障打断）
+        _logger.exception("选股批次状态读取失败，降级返回")
+        return dict(_SCREENING_STATUS_DEGRADED)
+
+
+@app.post("/api/screening/analyze")
+async def screening_analyze() -> Any:
+    """精选池批量深度分析（S3/S4）：逐标的独立 session + 复用管线，队列并发上限 2。
+
+    - 每个标的经 ``create_session`` + ``append_chat`` + ``set_pipeline_anchor`` +
+      ``update_session_for_clarify``（与 ``/api/analyze`` 新会话路径同款）建独立
+      session 并入队；**补位者才真正启动**（``PipelineRunner.start`` 由队列的
+      starter 在空位时调用——并发上限约束真实在跑的分析数，事件仍经既有
+      journal/subscribe SSE 通道，本端点不改流式纪律）；
+    - 池空 → 409 显式错误（不静默返回空队列）；
+    - 返回队列当前态划分：``{started: [running...], queued: [queued...]}``；
+      终态由队列按 session status 轮询驱动补位（并发始终 ≤ 上限）。
+    """
+    successful = await asyncio.to_thread(latest_successful_pool)
+    pool = successful["pool"] if successful else []
+    if not pool:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "screening_pool_empty",
+                "message": "精选池为空：无可分析的标的（先跑选股日批）",
+            },
+        )
+    queue = _get_analyze_queue()
+    for row in pool:
+        symbol = str(row["symbol"])
+        display_name = f"{symbol} 选股分析"
+        session_id = await asyncio.to_thread(
+            create_session,
+            stock_code="",
+            stock_name="",
+            display_name=display_name,
+            status="clarifying",
+            session_type="analysis",
+        )
+        await asyncio.to_thread(append_chat, session_id, "user", f"对 {symbol} 进行深度分析")
+        await asyncio.to_thread(set_pipeline_anchor, session_id)
+        await asyncio.to_thread(
+            update_session_for_clarify,
+            session_id,
+            stock_code=symbol,
+            stock_name="",
+            status="running",
+        )
+        append_session_event(
+            session_id,
+            {
+                "type": "session_created",
+                "session_id": session_id,
+                "display_name": display_name,
+                "timestamp": _now(),
+            },
+        )
+        queue.enqueue(symbol, session_id)
+    snapshot = queue.snapshot()
+    return {
+        "started": [item for item in snapshot if item["state"] == "running"],
+        "queued": [item for item in snapshot if item["state"] == "queued"],
+    }
 
 
 # ── AG-UI 协议通道（add-assistant-ui-thread PoC，双轨隔离：仅挂载，不接入 registry）──
