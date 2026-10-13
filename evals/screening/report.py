@@ -81,16 +81,18 @@ def _methodology_bullets(methodology: Mapping[str, Any] | None) -> list[str]:
 
 
 def _stats_table(
-    rows: Sequence[tuple[str, Mapping[str, Any]]], *, extra_columns: Sequence[str] = ()
+    rows: Sequence[tuple[str, Mapping[str, Any]]],
+    *,
+    extra_columns: Sequence[tuple[str, str]] = (),
 ) -> list[str]:
-    """分组表：有效 n / 均值 / 胜率 / 有样本池日 / 剔除（+ 可扩展列）。"""
+    """分组表：有效 n / 均值 / 胜率 / 有样本池日 / 剔除（+可扩展列 ``(表头, 统计键)``）。"""
     header = "| 组 | 有效 n | 均值 | 胜率 | 有样本池日 | 剔除/未成交 |"
     separator = "|---|---|---|---|---|---|"
     extras = [*extra_columns]
     if extras:
         header = (
             "| 组 | 有效 n | 均值 | 胜率 | 有样本池日 | 剔除/未成交 |"
-            + "|".join(f" {name} " for name in extras)
+            + "|".join(f" {name} " for name, _key in extras)
             + "|"
         )
         separator = "|---|---|---|---|---|---" + "|---" * len(extras) + "|"
@@ -104,8 +106,8 @@ def _stats_table(
             str(stats.get("days", 0)),
             _fmt_counts(stats),
         ]
-        for name in extras:
-            cells.append(_fmt_win(stats.get(name)))
+        for _name, key in extras:
+            cells.append(_fmt_win(stats.get(key)))
         lines.append("| " + " | ".join(cells) + " |")
     return lines
 
@@ -216,7 +218,7 @@ def _render_l3_section(section: Mapping[str, Any]) -> list[str]:
             ("keep 组（粗筛保留 ∩ 入池）", section.get("keep") or {}),
             ("drop 组（粗筛剔除）", section.get("drop") or {}),
         ],
-        extra_columns=(label,),
+        extra_columns=((label, "blowup_rate"),),
     )
     lines.append("")
     diff = section.get("diff") or {}

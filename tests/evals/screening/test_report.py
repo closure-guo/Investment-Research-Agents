@@ -200,3 +200,100 @@ def test_render_without_sections_is_still_valid():
     text = report.render_screening_report_md({"data_source": "live"})
     assert "选股前向跟踪" in text
     assert "合成数据" not in text
+
+
+def _l3_payload(*, conclusion: str, ci: list[float] | None) -> dict:
+    """spec 场景 payload：keep 20 日均值 +2.1%、drop -3.4%（Task 3 测试清单）。"""
+    return {
+        "data_source": "synthetic",
+        "l3": {
+            "horizon": 20,
+            "as_of": "2026-10-13",
+            "pool_dates": [f"2026-09-{day:02d}" for day in range(1, 31, 2)],  # 15 个池日
+            "blowup_threshold": -0.10,
+            "keep": {
+                **_stats(n=12, mean=0.021, win_rate=0.58, days=12),
+                "blowup_rate": 0.0,
+            },
+            "drop": {
+                **_stats(n=9, mean=-0.034, win_rate=0.22, days=9),
+                "blowup_rate": 1 / 3,
+            },
+            "diff": {
+                "paired_days": 15,
+                "diff_mean": 0.055,
+                "ci95": ci,
+                "bootstrap_B": 10000,
+                "seed": 42,
+                "conclusion": conclusion,
+            },
+            "conclusion": conclusion,
+            "methodology": {
+                "entry": "入场 = 池日次一交易日开盘经撮合引擎成交（买 1 手）",
+                "exit": "出场 = 入场日后第 20 个交易日收盘",
+                "truncation": "时点截断：只用 ≤ as_of 的面板行",
+                "bootstrap": "配对单元 = 池日；B=10000，seed=42",
+            },
+        },
+    }
+
+
+def test_render_l3_section_spec_scenario_discloses_window_and_n():
+    """spec 场景：keep +2.1% / drop -3.4% / CI 不含 0 → 「具有排雷价值」+ 窗口与 n 披露。"""
+    text = report.render_screening_report_md(
+        _l3_payload(conclusion="具有排雷价值", ci=[0.012, 0.098])
+    )
+    assert "具有排雷价值" in text
+    assert "有效 n" in text
+    assert "池日窗口" in text and "15 个池日" in text  # 窗口范围披露
+    assert "+2.10%" in text and "-3.40%" in text  # 两组均值逐字可复核
+    assert "踩雷率" in text
+    assert "0.0%" in text and "33.3%" in text  # 踩雷率两行随表披露
+    assert "[1.20%, 9.80%]" in text  # 配对 CI 随文案披露
+
+
+def test_render_l3_section_ci_containing_zero_says_no_significant_difference():
+    text = report.render_screening_report_md(_l3_payload(conclusion="无显著差异", ci=[-0.02, 0.04]))
+    assert "无显著差异" in text
+    for forbidden in ("无效", "无价值", "无用", "没有价值"):
+        assert forbidden not in text
+
+
+def _stratify_payload(*, conclusion: str) -> dict:
+    return {
+        "data_source": "synthetic",
+        "stratify": {
+            "horizon": 20,
+            "as_of": None,
+            "pool_dates": [D0, D1],
+            "top_n": 3,
+            "strata": {
+                "builtin": {**_stats(n=6, mean=0.011), "factors": [{"id": 1}]},
+                "llm": {**_stats(n=6, mean=0.004), "factors": [{"id": 2}]},
+            },
+            "diff": {
+                "paired_days": 2,
+                "diff_mean": -0.007,
+                "ci95": [-0.02, 0.006],
+                "bootstrap_B": 10000,
+                "seed": 42,
+                "conclusion": conclusion,
+            },
+            "conclusion": conclusion,
+            "methodology": {
+                "entry": "入场 = 池日次一交易日开盘经撮合引擎成交（买 1 手）",
+                "exit": "出场 = 入场日后第 horizon 个交易日收盘",
+                "truncation": "时点截断：只用 ≤ as_of 的面板行",
+                "bootstrap": "配对单元 = 池日；B=10000，seed=42",
+            },
+        },
+    }
+
+
+def test_render_stratify_section_two_strata_rows():
+    text = report.render_screening_report_md(_stratify_payload(conclusion="无显著差异"))
+    assert "仅 builtin 打分" in text
+    assert "仅 LLM 因子打分" in text
+    assert "无显著差异" in text
+    assert "有效 n" in text
+    assert "[-2.00%, 0.60%]" in text
