@@ -27,9 +27,14 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
  */
 test.describe.configure({ timeout: 120_000 })
 
-// 五任务 id（顺序 = 后端 JOB_IDS）
+// 任务 id（顺序 = 后端 JOB_IDS）。add-market-snapshot / add-factor-library-and-monitor /
+// add-paper-broker 三次注册表扩容（5→8：快照 15:30、因子衰减 15:45、paper 结算 16:20）
+// 后同步更新——断言强度不变（仍逐 id 断言存在与顺序）。
 const JOB_IDS = [
+  'market_snapshot_daily',
+  'factor_decay_monitor',
   'decision_settle_daily',
+  'paper_settle_daily',
   'daily_marking',
   'metrics_snapshot',
   'integrity_check',
@@ -101,7 +106,7 @@ async function cohortAuditCount(request: APIRequestContext): Promise<number> {
 }
 
 test.describe('评估运维分区（设置中心）', () => {
-  test('分区渲染五任务卡片与「调度器未运行」显式横幅', async ({ page }) => {
+  test('分区渲染任务卡片（当前 8 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
     await openEvalOps(page)
 
     // TESTING=1 → 调度器未启动：显式提示，不得空白、不得以空列表冒充「一切正常」
@@ -109,7 +114,7 @@ test.describe('评估运维分区（设置中心）', () => {
     await expect(banner).toBeVisible()
     await expect(banner).toContainText('调度器未运行')
 
-    // 五任务卡片（`:not(...)` 排除 `eval-ops-job-audit-*`——审计行 testid 与本前缀重合）
+    // 任务卡片（`:not(...)` 排除 `eval-ops-job-audit-*`——审计行 testid 与本前缀重合）
     const cards = page.locator('[data-testid^="eval-ops-job-"]:not([data-testid^="eval-ops-job-audit-"])')
     await expect(cards).toHaveCount(JOB_IDS.length)
     for (const jobId of JOB_IDS) {
