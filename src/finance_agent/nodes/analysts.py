@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 
 from pydantic import ValidationError
 
@@ -298,31 +299,106 @@ def _parse_analyst_report_raw(response: str, agent_name: str, round_no: int = 0)
         )
 
 
-def technical_analyst(state: dict) -> dict:
-    """Layer I 技术面分析师 Agent。"""
-    context = _build_technical_context(state)
-    feedback = _retry_feedback_section(state, "technical")
-    if feedback:
-        context = f"{context}\n\n{feedback}"
-    _pinfo = load_prompt_with_meta("technical_analyst")
-    system = _pinfo.template
-    api_key = state.get("api_key")
+def make_technical_analyst(*, with_factor_tool: bool = True) -> Callable[[dict], dict]:
+    """构造 Layer I 技术面分析师节点。
 
-    response = call_llm_streaming_with_fallback(
-        context,
-        system=system,
-        api_key=api_key,
-        node_name="technical_analyst",
-        llm_config=state.get("llm_config"),
-        stock_code=state.get("stock_code"),
-        prompt_name=_pinfo.prompt_name,
-        prompt_version=_pinfo.prompt_version,
-    )
-    report = _parse_analyst_report(
-        response, "technical", round_no=int(state.get("iteration_count") or 0)
+    工具集消费（add-analyst-factor-tools Task 2）：工具集权威声明在
+    ``agent_factory.ANALYST_TOOLSETS``（技术分析师唯一含 ``query_factor_library``），
+    本节点按声明取工具并把工具输出 JSON 注入自己的上下文（toolize 先例：工具算好、
+    LLM 直接引用不心算；值缺失记 null）。``with_factor_tool=False`` = 消融裸对照臂
+    （不调用工具、不注入因子库段，单变量差异）。
+
+    节点产出语义与既有完全一致（``{"analyst_reports": {"technical": ...}}``）。
+    """
+
+    def node(state: dict) -> dict:
+        """Layer I 技术面分析师 Agent。"""
+        context = _build_technical_context(state)
+        if with_factor_tool:
+            block = _factor_library_block(state)
+            if block:
+                context = f"{context}\n\n{block}"
+        feedback = _retry_feedback_section(state, "technical")
+        if feedback:
+            context = f"{context}\n\n{feedback}"
+        _pinfo = load_prompt_with_meta("technical_analyst")
+        system = _pinfo.template
+        api_key = state.get("api_key")
+
+        response = call_llm_streaming_with_fallback(
+            context,
+            system=system,
+            api_key=api_key,
+            node_name="technical_analyst",
+            llm_config=state.get("llm_config"),
+            stock_code=state.get("stock_code"),
+            prompt_name=_pinfo.prompt_name,
+            prompt_version=_pinfo.prompt_version,
+        )
+        report = _parse_analyst_report(
+            response, "technical", round_no=int(state.get("iteration_count") or 0)
+        )
+
+        return {
+            "analyst_reports": {"technical": _keep_valid_over_degraded(state, "technical", report)}
+        }
+
+    node.__name__ = "technical_analyst"
+    node.__qualname__ = "technical_analyst"
+    # 绑定事实供消融变体/测试断言（构造参数即开关，无第二套口径）
+    setattr(node, "factor_tool_enabled", with_factor_tool)  # noqa: B010
+    return node
+
+
+# ── 技术分析师因子库工具（add-analyst-factor-tools Task 2） ──────────────────
+
+_FACTOR_LIBRARY_SECTION_HEADER = (
+    "因子库（工具 query_factor_library 输出：active 因子当前取值 / 全市场截面 "
+    "z-score / 近 60 日 IC；缺失值记 null，直接引用不臆测）:"
+)
+
+
+def _factor_library_tool() -> Callable[..., str] | None:
+    """按工具集声明取因子库工具；技术分析师不含该工具 → None。
+
+    声明唯一来源 = ``agent_factory.ANALYST_TOOLSETS``（含工具名→薄壳的组装）；
+    单测/消融经本函数注入桩（agent_factory 薄壳自测见 tests/test_agent_factory.py）。
+    """
+    from finance_agent.agent_factory import (
+        TOOL_QUERY_FACTOR_LIBRARY,
+        analyst_tool_names,
+        make_query_factor_library,
     )
 
-    return {"analyst_reports": {"technical": _keep_valid_over_degraded(state, "technical", report)}}
+    if TOOL_QUERY_FACTOR_LIBRARY not in analyst_tool_names("technical"):
+        return None
+    return make_query_factor_library()
+
+
+def _factor_library_block(state: dict) -> str | None:
+    """因子库上下文段：工具输出逐字注入；不可用/无标的 → 如实标注或 None。
+
+    工具故障不阻断分析（旁路铁律）：降级为「不可用」标注段落，节点照常产出报告。
+    """
+    tool = _factor_library_tool()
+    if tool is None:
+        return None
+    symbol = str(state.get("stock_code") or "").strip()
+    if not symbol:
+        return None
+    try:
+        payload = tool(symbol=symbol)
+    except Exception as exc:  # noqa: BLE001 - 工具故障标注不可用，不阻断分析
+        logger.warning("因子库工具调用失败（不阻断分析）: %s: %s", type(exc).__name__, exc)
+        return (
+            f"{_FACTOR_LIBRARY_SECTION_HEADER}\n"
+            f"query_factor_library 不可用（{type(exc).__name__}）：本次分析不含因子库信息。"
+        )
+    return f"{_FACTOR_LIBRARY_SECTION_HEADER}\n{payload}"
+
+
+# 生产用法：带因子库工具（spec「技术分析师可通过 query_factor_library 查询」）
+technical_analyst = make_technical_analyst()
 
 
 # analyst-context-budget delta：技术指标 context 窗口。250 期全窗口指标 JSON
