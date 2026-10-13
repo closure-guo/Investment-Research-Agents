@@ -33,8 +33,18 @@ from finance_agent.outcome.ops.model import (
 class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 7  # 6 → 7：add-factor-library-and-monitor 增 factor_decay_monitor
+        assert len(JOB_IDS) == 8  # 6 → 8：+factor_decay_monitor(1) +paper_settle_daily(12)
         assert all(JOB_LABELS[jid] for jid in JOB_IDS)
+
+    def test_paper_settle_schedule_spec_is_1620_monfri(self):
+        """add-paper-broker T2：paper 结算日批 16:20（mon-fri，Asia/Shanghai）逐字钉死。"""
+        assert SCHEDULES["paper_settle_daily"] == {
+            "day_of_week": "mon-fri",
+            "hour": 16,
+            "minute": 20,
+            "timezone": "Asia/Shanghai",
+        }
+        assert JOB_LABELS["paper_settle_daily"] == "paper 结算"
 
     def test_market_snapshot_schedule_spec_is_1530_monfri(self):
         """add-market-snapshot：行情快照日批 15:30（mon-fri，Asia/Shanghai）逐字钉死。"""

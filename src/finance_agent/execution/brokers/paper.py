@@ -1,6 +1,6 @@
-"""PaperBroker：仿真执行末端（add-paper-broker Task 1；计划 B1）。
+"""PaperBroker：仿真执行末端（add-paper-broker Task 1/2；计划 B1/B2）。
 
-设计决策（B1，不得自行改口径）：
+设计决策（B1/B2，不得自行改口径）：
 
 - 成交判定一律经 ``matching.match_order``（spec「仿真撮合走统一引擎」，禁止在
   broker 内重写成交逻辑）；
@@ -18,7 +18,11 @@
 - ``cancel`` 为终态动作：在逐字四态内以 ``expired`` + reason ``CANCELED`` 表达
   （不新增第五个状态）；仅 ``pending`` 可撤；
 - ``retry_pending``：对挂单逐单重撮合；无 bar 的标的跳过（数据缺失不记尝试）；
-  仍不成交 → attempts+1，达到 ``pending_expire_days``（默认 3）→ ``expired``。
+  仍不成交 → attempts+1，达到 ``pending_expire_days``（默认 3）→ ``expired``；
+- ``settle_daily``（B2）：持仓按注入收盘价 mark 成 ``paper_equity`` 曲线
+  （``cash + Σ(qty×close)``，trade_date 幂等 upsert）；持仓标的缺收盘价 →
+  ``ValueError``（不编造价格）；生产入口 ``run_paper_settle_daily`` 从快照库取
+  最新交易日与 ``close_raw`` 注入（快照 code 为 6 位裸码，订单 symbol 带去后缀）。
 
 数值口径：成交价/费用一律来自 matching-engine（M1/M4/M5），本模块只做资金与
 持仓记账；金额 round(2) 落库（账户台账两位小数）。
@@ -26,6 +30,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -62,8 +67,10 @@ from finance_agent.execution.store import (
     read_cash,
     read_order,
     read_position,
+    read_positions,
     update_order,
     write_cash,
+    write_paper_equity,
     write_position,
 )
 
@@ -336,3 +343,103 @@ class PaperBroker(Broker):
                 else:
                     summary["pending"] += 1
         return summary
+
+
+# ── 每日结算（B2）：持仓 mark → paper_equity 曲线 ───────────────────────────
+
+
+def _valid_close(value: object) -> float | None:
+    """收盘价有效性：None/不可转数值/非有限 → None（不可用于 mark）。"""
+    if value is None:
+        return None
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _snapshot_code(symbol: str) -> str:
+    """'600519.SH' → '600519'（快照 code 为 6 位裸码；同 outcome 侧 _code 口径）。"""
+    return str(symbol).split(".")[0]
+
+
+def settle_daily(
+    as_of: str,
+    *,
+    close_prices: Mapping[str, float],
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """按收盘价 mark 持仓 → ``paper_equity`` 曲线（trade_date 幂等 upsert）。
+
+    净值口径：``equity = cash + Σ(qty×close)``；收盘价由调用方注入（生产入口
+    ``run_paper_settle_daily`` 从快照库取；回放/核对可注入合成面板）。持仓标的
+    缺有效收盘价 → ``ValueError``（fail loud，不编造价格）。无持仓时净值 = 现金
+    （账户曲线从纯现金起步，不是编造）。账户尚未建行时按 spec 默认初始资金
+    100 万建行（``ensure_account`` 不覆盖已有余额）。返回写入的净值字典。
+    """
+    trade_date = str(as_of or "").strip()
+    if not trade_date:
+        raise ValueError("缺少必填字段: as_of（结算交易日）")
+    close_map = {
+        str(symbol): price
+        for symbol, value in close_prices.items()
+        if (price := _valid_close(value)) is not None
+    }
+    with execution_conn(db_path) as conn:
+        ensure_account(conn, 1_000_000.0, trade_date)
+        cash = read_cash(conn)
+        positions = read_positions(conn)
+        missing = [str(p["symbol"]) for p in positions if str(p["symbol"]) not in close_map]
+        if missing:
+            raise ValueError(f"缺收盘价（不编造价格）: {', '.join(sorted(missing))}")
+        positions_value = round(
+            sum(int(p["qty"]) * close_map[str(p["symbol"])] for p in positions), 2
+        )
+        equity = round(cash + positions_value, 2)
+        write_paper_equity(conn, trade_date, cash, positions_value, equity)
+    return {
+        "trade_date": trade_date,
+        "cash": cash,
+        "positions_value": positions_value,
+        "equity": equity,
+    }
+
+
+def run_paper_settle_daily() -> dict[str, Any]:
+    """ops 日批入口（B2）：取快照最新交易日与持仓标的 ``close_raw`` → ``settle_daily``。
+
+    - 快照库为空（无任何数据行）→ 跳过摘要 ``reason="no_snapshot_data"``（部署初期
+      常态，不抛错；旁路铁律下 job 记 ok 摘要）；
+    - 持仓标的在快照中缺有效收盘价 → 由 ``settle_daily`` 抛错（job 记 failed、
+      按重试策略处理，unfail 前不落错日期净值）；
+    - 快照行取 ``close_raw``（真实盘面价，计划 B2 口径）；symbol `600519.SH` 与
+      快照 code `600519` 的映射经 ``_snapshot_code`` 去后缀。
+    """
+    from finance_agent.data.snapshot import latest_snapshot_date, read_bars
+
+    as_of = latest_snapshot_date()
+    if as_of is None:
+        return {
+            "trade_date": None,
+            "cash": None,
+            "positions_value": None,
+            "equity": None,
+            "reason": "no_snapshot_data",
+        }
+    positions = list_positions()
+    close_prices: dict[str, float] = {}
+    if positions:
+        codes = sorted({_snapshot_code(str(p["symbol"])) for p in positions})
+        frame = read_bars(codes, as_of, as_of, as_of=as_of)
+        by_code = {
+            str(row["code"]): price
+            for row in frame[["code", "close_raw"]].to_dict("records")
+            if (price := _valid_close(row["close_raw"])) is not None
+        }
+        close_prices = {
+            str(p["symbol"]): by_code[code]
+            for p in positions
+            if (code := _snapshot_code(str(p["symbol"]))) in by_code
+        }
+    return {**settle_daily(as_of, close_prices=close_prices), "reason": None}

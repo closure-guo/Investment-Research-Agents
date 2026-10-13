@@ -21,6 +21,10 @@ settle/marking/metrics/integrity)。
 (cohort 页签保存后立即生效,无需重启);未运行时(``TESTING=1`` 或未启动)返回
 ``False`` 而非抛错——状态接口在 TESTING 下必须可用。
 
+paper 仿真结算(add-paper-broker):工作日 16:20 触发 ``run_paper_settle_daily``
+(读快照最新收盘价 mark 持仓 → ``paper_equity`` 曲线),经同一 ``_with_retry``
+入口(单飞锁 + 运行历史 + 3 次退避重试);与虚拟结算链互不依赖。
+
 注:定时任务框架选型建议人工落 ADR(design 决策 6 注),agent 不自建 ADR。
 """
 
@@ -36,6 +40,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from finance_agent.data.snapshot_job import run_market_snapshot_batch
+from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.ops.jobs import (
@@ -140,6 +145,15 @@ def _settle_job() -> None:
     _with_retry("decision_settle_daily", "prediction settle", settle_open_predictions)
 
 
+def _paper_settle_job() -> None:
+    """add-paper-broker：paper 仿真账户日结算（16:20，settle 之后、marking 之前）。
+
+    读快照库最新交易日收盘价 mark 持仓 → paper_equity 曲线（幂等 upsert）；
+    快照库为空时返回跳过摘要（job 记 ok），持仓缺价时抛错走重试。
+    """
+    _with_retry("paper_settle_daily", "paper settle", run_paper_settle_daily)
+
+
 def _marking_job() -> None:
     """add-track-record-stage-b：每日盯市 + 净值曲线（16:30，settle 之后）。"""
     _with_retry("daily_marking", "daily marking", run_daily_marking)
@@ -220,6 +234,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-paper-broker：paper 仿真账户日结算（16:20）——快照收盘价 mark 持仓；
+    # 排在 decision settle（16:00）与 daily marking（16:30）之间，三条链互不依赖。
+    scheduler.add_job(
+        _paper_settle_job,
+        _cron_for("paper_settle_daily"),
+        id="paper_settle_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     # stage-b：先结算（16:00）再盯市（16:30）——已结算观点不再盯市；
     # 指标快照（16:35）独立任务，可手动重算
     scheduler.add_job(
@@ -258,7 +281,7 @@ def start_scheduler() -> BackgroundScheduler | None:
     _scheduler = scheduler
     logger.info(
         "decision settle scheduler 已启动(market snapshot 15:30;factor decay monitor 15:45;"
-        "decision settle 16:00);"
+        "decision settle 16:00;paper settle 16:20);"
         "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"
         "cohort batch %02d:%02d(开关关闭时记 skipped-disabled,零 LLM 调用)",
         cohort["hour"],

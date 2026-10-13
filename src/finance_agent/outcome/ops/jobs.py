@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from finance_agent.data.snapshot_job import MARKET_SNAPSHOT_SCHEDULE, run_market_snapshot_batch
+from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.ops.model import (
@@ -50,6 +51,7 @@ JOB_IDS: tuple[str, ...] = (
     "market_snapshot_daily",
     "factor_decay_monitor",
     "decision_settle_daily",
+    "paper_settle_daily",
     "daily_marking",
     "metrics_snapshot",
     "integrity_check",
@@ -60,6 +62,7 @@ JOB_LABELS: dict[str, str] = {
     "market_snapshot_daily": "行情快照",
     "factor_decay_monitor": "因子衰减监控",
     "decision_settle_daily": "判定",
+    "paper_settle_daily": "paper 结算",
     "daily_marking": "盯市",
     "metrics_snapshot": "指标快照",
     "integrity_check": "完整性校验",
@@ -71,17 +74,20 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "market_snapshot_daily": run_market_snapshot_batch,
     "factor_decay_monitor": run_factor_decay_monitor,
     "decision_settle_daily": settle_open_predictions,
+    "paper_settle_daily": run_paper_settle_daily,
     "daily_marking": run_daily_marking,
     "metrics_snapshot": persist_metrics_snapshot,
     "integrity_check": integrity_check,
     "cohort_batch": run_cohort_batch,
 }
 
-# 每 job 的 cron 规格:结算链四任务时刻固定(16:00/16:30/16:35/16:40,工作日);
-# 行情快照日批 15:30(收盘后,add-market-snapshot);因子衰减监控 15:45(快照之后、
-# 结算链之前,add-factor-library-and-monitor);cohort 项的 hour/minute 由
-# ``scheduler.start_scheduler``(启动时)与 ``scheduler.reschedule_cohort``(界面保存后)
-# 按 config 覆写——本字典是调度与状态接口共用的时刻快照。
+# 每 job 的 cron 规格:结算链任务时刻固定(16:00/16:20/16:30/16:35/16:40,工作日);
+# paper 仿真结算 16:20(decision settle 之后、daily marking 之前,
+# add-paper-broker);行情快照日批 15:30(收盘后,add-market-snapshot);
+# 因子衰减监控 15:45(快照之后、结算链之前,add-factor-library-and-monitor);
+# cohort 项的 hour/minute 由 ``scheduler.start_scheduler``(启动时)与
+# ``scheduler.reschedule_cohort``(界面保存后)按 config 覆写——本字典是调度与
+# 状态接口共用的时刻快照。
 SCHEDULES: dict[str, dict[str, Any]] = {
     "market_snapshot_daily": MARKET_SNAPSHOT_SCHEDULE,
     "factor_decay_monitor": {
@@ -94,6 +100,12 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 0,
+        "timezone": "Asia/Shanghai",
+    },
+    "paper_settle_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 20,
         "timezone": "Asia/Shanghai",
     },
     "daily_marking": {

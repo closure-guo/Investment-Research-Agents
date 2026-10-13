@@ -360,11 +360,16 @@ def list_positions(db_path: str | Path | None = None) -> list[dict[str, Any]]:
     init_execution_db(db_path)
     conn = _connect(db_path)
     try:
-        rows = conn.execute(
-            "SELECT symbol, qty, avg_cost, updated_at FROM positions ORDER BY symbol ASC"
-        ).fetchall()
+        return read_positions(conn)
     finally:
         conn.close()
+
+
+def read_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """全部持仓（事务内读取；symbol 升序）。"""
+    rows = conn.execute(
+        "SELECT symbol, qty, avg_cost, updated_at FROM positions ORDER BY symbol ASC"
+    ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -461,6 +466,28 @@ def list_pending_orders(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+_PAPER_EQUITY_SQL = (
+    "INSERT INTO paper_equity (trade_date, cash, positions_value, equity)"
+    " VALUES (?, ?, ?, ?)"
+    " ON CONFLICT(trade_date) DO UPDATE SET cash=excluded.cash,"
+    " positions_value=excluded.positions_value, equity=excluded.equity"
+)
+
+
+def write_paper_equity(
+    conn: sqlite3.Connection,
+    trade_date: str,
+    cash: float,
+    positions_value: float,
+    equity: float,
+) -> None:
+    """每日 paper 净值点写入（事务内；trade_date 幂等 upsert）。"""
+    conn.execute(
+        _PAPER_EQUITY_SQL,
+        (str(trade_date), float(cash), float(positions_value), float(equity)),
+    )
+
+
 def upsert_paper_equity(
     trade_date: str,
     cash: float,
@@ -473,13 +500,7 @@ def upsert_paper_equity(
     init_execution_db(db_path)
     conn = _connect(db_path)
     try:
-        conn.execute(
-            "INSERT INTO paper_equity (trade_date, cash, positions_value, equity)"
-            " VALUES (?, ?, ?, ?)"
-            " ON CONFLICT(trade_date) DO UPDATE SET cash=excluded.cash,"
-            " positions_value=excluded.positions_value, equity=excluded.equity",
-            (str(trade_date), float(cash), float(positions_value), float(equity)),
-        )
+        write_paper_equity(conn, trade_date, cash, positions_value, equity)
         conn.commit()
     finally:
         conn.close()

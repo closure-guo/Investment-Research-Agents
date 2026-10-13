@@ -734,9 +734,9 @@ if TESTING:
         分别经 update_pipeline_timelines / update_pipeline_snapshot 落库，
         供历史会话恢复等 E2E 确定性构造会话（persist-full-session-timeline delta）；
         顶层可选 track_record（{equity_curve, index_closes, metrics_snapshot,
-        predictions}）写战绩页造数表（add-index-performance-compare /
-        add-portfolio-beta-alpha / add-prediction-pool-integrity），无需 chat_history
-        也可单独使用，且不创建会话；
+        predictions, paper_equity}）写战绩页造数表（add-index-performance-compare /
+        add-portfolio-beta-alpha / add-prediction-pool-integrity / add-paper-broker），
+        无需 chat_history 也可单独使用，且不创建会话；
         顶层可选 snapshot（dict：写 snapshot_meta 键）与 snapshot_reset（bool：先清
         快照三表）造行情快照告警态（add-market-snapshot D6），同样无需 chat_history。
         顶层可选 screening（dict：``batch`` 造批次行（含 error 造失败横幅）、``pool``
@@ -850,6 +850,19 @@ if TESTING:
                             mk.get("cum_excess"),
                             mk.get("benchmark_price"),
                         )
+            # add-paper-broker：paper 净值造数（战绩页双曲线 E2E）——写 execution 库
+            # （库路径调用期读 EXECUTION_DB_PATH，见 execution/store.py 的 env 口径）
+            seed_paper = track_seed.get("paper_equity")
+            if isinstance(seed_paper, list):
+                from finance_agent.execution.store import upsert_paper_equity
+
+                for row in seed_paper:
+                    upsert_paper_equity(
+                        row["trade_date"],
+                        row["cash"],
+                        row["positions_value"],
+                        row["equity"],
+                    )
         # add-market-snapshot（D6/T8）：行情快照告警造态——可选先 reset（清三表）再写
         # meta。两处都在**调用期**经 snapshot 模块 _default_db_path() 读
         # SNAPSHOT_DB_PATH（导入期冻结会让 E2E 的 env 注入失效）。
@@ -2407,6 +2420,56 @@ def _track_as_of() -> str:
     return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
 
+# add-paper-broker：双曲线损耗标注文案（逐字，前端与接口共用口径）
+_PAPER_CURVE_NOTE = "两条曲线同一批决策同一基准期；差值为执行损耗"
+
+
+def _paper_overview_block(as_of: str) -> dict[str, Any] | None:
+    """paper 仿真净值块：既有 equity_curve（虚拟结算）与 paper_equity 共同日期对齐。
+
+    对齐规则（计划 B3）：仅共同日期；两序列都只取 ``≤ as_of`` 的行（基期只向
+    过去回退的防前视纪律对两条曲线同样适用）。paper_equity 是绝对权益（cash +
+    持仓市值），虚拟序列是归一净值——按共同基期把 paper 缩放到虚拟净值同一
+    标尺（基期两线重合），差值才可比；``loss_pct`` = 最新共同日
+    ``(paper/virtual − 1) × 100`` 保留 1 位。无 paper 数据或无可对齐日期 → None
+    （前端隐藏系列）。
+    """
+    from finance_agent.execution.store import list_paper_equity
+
+    paper_rows = [r for r in list_paper_equity() if str(r["trade_date"]) <= as_of]
+    if not paper_rows:
+        return None
+    virtual = {
+        str(r["curve_date"]): float(r["agent_nav"])
+        for r in list_equity_curve()
+        if str(r["curve_date"]) <= as_of and r["agent_nav"]
+    }
+    aligned = [
+        (str(r["trade_date"]), virtual[str(r["trade_date"])], float(r["equity"]))
+        for r in paper_rows
+        if str(r["trade_date"]) in virtual and float(r["equity"]) != 0.0
+    ]
+    if not aligned:
+        return None
+    base_date, virtual_base, paper_base = aligned[0]
+    series: list[dict[str, Any]] = [
+        {
+            "date": date,
+            "virtual_equity": round(nav, 4),
+            "paper_equity": round(equity / paper_base * virtual_base, 4),
+        }
+        for date, nav, equity in aligned
+    ]
+    latest = series[-1]
+    loss_pct = round((latest["paper_equity"] / latest["virtual_equity"] - 1) * 100, 1)
+    return {
+        "series": series,
+        "loss_pct": loss_pct,
+        "base_date": base_date,
+        "note": _PAPER_CURVE_NOTE,
+    }
+
+
 @app.get("/api/v1/track-record/overview")
 async def track_record_overview(
     source: str | None = None, version: int | None = None
@@ -2422,10 +2485,13 @@ async def track_record_overview(
     Δ2(update-decision-settlement-contract):头条口径限 T+20(`caliber_horizon`),
     252 存量经 `legacy_settled` 披露;neutral 回避正确率独立成 `avoidance` 字段
     (门控与胜率一致:settled<10 不展示),不混入胜率。
+    add-paper-broker(B3):追加 `paper` 块(虚拟 eq 曲线 vs 仿真净值共同日期对齐 +
+    执行损耗 loss_pct);无 paper 数据 → `paper: null`。
     """
     if version is None:
         active = await asyncio.to_thread(get_active_agent)
         version = active["version_seq"] if active else None
+    as_of = _track_as_of()
     stats = await asyncio.to_thread(
         prediction_stats,
         source_type=source,
@@ -2455,10 +2521,12 @@ async def track_record_overview(
         **stats,
         "source_type": source,
         "insufficient_sample": insufficient,
-        "as_of": _track_as_of(),
+        "as_of": as_of,
         "disclaimer": _DISCLAIMER,
         "win_rate": None if insufficient else stats["win_rate"],
         "portfolio": portfolio,
+        # add-paper-broker（B3）：虚拟 vs 仿真双曲线（共同日期对齐 + 执行损耗）
+        "paper": await asyncio.to_thread(_paper_overview_block, as_of),
         "version_seq": version,
         "versions": await asyncio.to_thread(list_agents),
         # Δ2 口径字段：回避正确率独立（门控同胜率）+ 头条窗口 + 跨口径存量披露
