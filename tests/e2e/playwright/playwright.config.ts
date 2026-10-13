@@ -85,8 +85,10 @@ export default defineConfig({
       // Python 后端：TESTING=1 开启测试模式（/api/test/* 端点可用，LLM stub 占位）
       // SESSIONS_DB_PATH 指向独立测试库：与生产 data/sessions.db 共用同一文件时，
       // 两个后端进程并发写会导致 SQLite 主库被 WAL 帧覆盖而彻底损坏（不可恢复）
+      // SCREENING_DB_PATH 同理指向独立测试库（add-screening-pipeline T5）：选股 E2E
+      // 的 seed/screening_reset 会清表，绝不能落到开发库 data/screening.db
       command: 'uv run uvicorn finance_agent.api:app --port 8000',
-      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', REPORTS_DIR: 'tmp/e2e-reports-8000' },
+      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', REPORTS_DIR: 'tmp/e2e-reports-8000' },
       url: 'http://localhost:8000/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
