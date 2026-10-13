@@ -45,6 +45,7 @@ from evals.causal_ablation.escape import VERIFIER_BUCKETS, split_verifier_bucket
 from evals.extract import anchor_coverage, extract_judge_vars
 from evals.judges import run_judge_mean
 from evals.stats import paired_bootstrap_ci
+from finance_agent.memory import memory_recall_entry
 from finance_agent.nodes.analysts import (
     fundamental_analyst,
     macro_analyst,
@@ -70,7 +71,14 @@ from finance_agent.routing import after_citation, after_fund_manager
 from finance_agent.state import AnalysisState
 
 Variant = Literal[
-    "analysts", "plus_debate", "through_trader", "full", "tech_factor_tool", "tech_bare"
+    "analysts",
+    "plus_debate",
+    "through_trader",
+    "full",
+    "tech_factor_tool",
+    "tech_bare",
+    "tech_memory",
+    "tech_no_memory",
 ]
 JUDGE_DIMS = ["report_relevance", "debate_quality", "decision_grounding", "consistency"]
 _VARIANTS: tuple[Variant, ...] = ("analysts", "plus_debate", "through_trader", "full")
@@ -79,6 +87,10 @@ _VARIANTS: tuple[Variant, ...] = ("analysts", "plus_debate", "through_trader", "
 _TECH_VARIANTS: tuple[Variant, ...] = ("tech_bare", "tech_factor_tool")
 # 变体 → 技术分析师是否绑定因子库工具（单变量：两臂唯一差异）
 _TECH_VARIANT_FACTOR_TOOL: dict[str, bool] = {"tech_factor_tool": True, "tech_bare": False}
+# 决策记忆配对变体（add-decision-memory）：±记忆注入（单变量：两臂唯一差异 =
+# analysts_entry 是否检索记忆；共享同一 state 快照）。顺序 = 对照臂 → 处理臂。
+_MEMORY_VARIANTS: tuple[Variant, ...] = ("tech_no_memory", "tech_memory")
+_MEMORY_VARIANT_ENABLED: dict[str, bool] = {"tech_memory": True, "tech_no_memory": False}
 # through_trader（B5 修正臂，2026-09-18）：analysts+辩论+研究经理+Trader，无风控辩论/FM——
 # 两臂都含决策层，修 analysts 对 full 的同义反复口径（analysts 臂无决策章节而判据问决策）。
 
@@ -94,6 +106,18 @@ def _variant_technical_analyst(variant: Variant) -> Callable[[dict], dict]:
     return technical_analyst
 
 
+def _variant_analysts_entry(variant: Variant) -> Callable[[dict], dict]:
+    """该变体的分析师层入口（add-decision-memory 消融单变量开关的唯一接线点）。
+
+    tech_memory → 生产召回入口（检索已结算历史 + 已确认语义条款 → state
+    `decision_memory`）；tech_no_memory → 空入口（无记忆对照臂，上下文零记忆块）。
+    既有分层/因子工具臂维持空入口（本轮不改既有臂语义，报告口径各自独立）。
+    """
+    if variant in _MEMORY_VARIANT_ENABLED:
+        return memory_recall_entry if _MEMORY_VARIANT_ENABLED[variant] else _entry
+    return _entry
+
+
 def _applicable_dims(variant: Variant) -> tuple[str, ...]:
     """judge 维度按变体适用性过滤（#112）。
 
@@ -102,8 +126,8 @@ def _applicable_dims(variant: Variant) -> tuple[str, ...]:
     """
     if variant == "analysts":
         return ("report_relevance",)
-    if variant in _TECH_VARIANTS:
-        # 因子工具配对臂同为分析师层直出（无辩论/决策层）——同 analysts 口径
+    if variant in _TECH_VARIANTS or variant in _MEMORY_VARIANTS:
+        # 因子工具/记忆配对臂同为分析师层直出（无辩论/决策层）——同 analysts 口径
         return ("report_relevance",)
     if variant == "plus_debate":
         return ("report_relevance", "debate_quality")
@@ -144,13 +168,20 @@ def build_variant_graph(variant: Variant) -> CompiledStateGraph:
 
     因子工具配对臂（tech_factor_tool / tech_bare）同为分析师层直出（无辩论/
     决策层），差异只在 ``_variant_technical_analyst`` 绑定的技术分析师节点。
+    记忆配对臂（tech_memory / tech_no_memory）同为分析师层直出，差异只在
+    ``_variant_analysts_entry``（记忆臂召回 → state `decision_memory`；对照臂空入口）。
     """
-    if variant not in _VARIANTS and variant not in _TECH_VARIANTS:
+    if (
+        variant not in _VARIANTS
+        and variant not in _TECH_VARIANTS
+        and variant not in _MEMORY_VARIANTS
+    ):
         raise ValueError(f"未知变体: {variant}")
     g = StateGraph(AnalysisState)  # pyrefly: ignore[bad-specialization]
 
     # ── 共用前段：分析师并行扇出 → 引用校验汇聚 ──
-    g.add_node("analysts_entry", _node(_entry))
+    # 入口按变体绑定（记忆臂 = 召回入口 / 其余 = 空入口；消融单变量开关）
+    g.add_node("analysts_entry", _node(_variant_analysts_entry(variant)))
     # 技术分析师按变体绑定（因子工具臂带工具 / 裸臂不带；其余变体 = 生产入口）
     g.add_node("technical_analyst", _node(_variant_technical_analyst(variant)))
     g.add_node("macro_analyst", _node(macro_analyst))
@@ -543,18 +574,19 @@ def aggregate_results(runs: list[dict], *, B: int = 10_000, seed: int = 42) -> d
     return report
 
 
-# ── 因子工具配对消融（add-analyst-factor-tools Task 3） ──────────────────────
+# ── 配对消融（因子工具 add-analyst-factor-tools / 决策记忆 add-decision-memory）──
 # 报告措辞守卫（spec causal-ablation 场景）：CI 含 0 只写「无显著差异」，
 # 禁止引申为「无效/无价值」类表述——渲染前结构校验（fail loud，坏措辞不进报告）
 _FORBIDDEN_INTERPRETATIONS: tuple[str, ...] = ("无效", "无价值", "无用", "没有价值")
 _FACTOR_TOOL_OUTCOME_DIMS: tuple[str, ...] = tuple(_applicable_dims("tech_factor_tool"))
+_MEMORY_OUTCOME_DIMS: tuple[str, ...] = tuple(_applicable_dims("tech_memory"))
 
 
-def conclusion_for_factor_tool_increment(ci: tuple[float, float]) -> str:
-    """因子工具增量结论（措辞逐字，spec causal-ablation）：
+def _conclusion_for_increment(ci: tuple[float, float]) -> str:
+    """配对增量结论（措辞逐字，spec causal-ablation）：
 
     CI 整体 >0 → 显著改进；整体 <0 → 显著退步；**含 0 → 无显著差异**（不得引申为
-    工具「无效」——该措辞被 `_FORBIDDEN_INTERPRETATIONS` 守卫拒绝）。
+    被测变量「无效」——该措辞被 `_FORBIDDEN_INTERPRETATIONS` 守卫拒绝）。
     """
     lo, hi = ci
     if lo > 0:
@@ -564,13 +596,25 @@ def conclusion_for_factor_tool_increment(ci: tuple[float, float]) -> str:
     return "无显著差异"
 
 
-def aggregate_factor_tool_ablation(
+def conclusion_for_factor_tool_increment(ci: tuple[float, float]) -> str:
+    """因子工具增量结论（措辞逐字；口径唯一来源 = `_conclusion_for_increment`）。"""
+    return _conclusion_for_increment(ci)
+
+
+def conclusion_for_memory_increment(ci: tuple[float, float]) -> str:
+    """记忆增量结论（措辞逐字；与因子工具同源，防两套措辞口径漂移）。"""
+    return _conclusion_for_increment(ci)
+
+
+def _paired_variant_report(
     runs: list[dict],
+    variants: tuple[Variant, ...],
+    outcome_dims: tuple[str, ...],
     *,
-    B: int = 10_000,  # noqa: N803 - 接口冻结：与既有 paired_bootstrap_ci 参数名一致
-    seed: int = 42,
+    B: int,  # noqa: N803 - 接口冻结：与既有 paired_bootstrap_ci 参数名一致
+    seed: int,
 ) -> dict:
-    """因子工具配对变体（tech_bare → tech_factor_tool）的 judge 维度增量与结论。
+    """配对变体（variants[0] 对照臂 → variants[1] 处理臂）的 judge 维度增量与结论。
 
     口径与 `aggregate_results` 同源：逐标的中位数配对（bootstrap 重采样单位 =
     标的）+ mean-diff 配对 bootstrap CI；judge 维度按变体适用性过滤（无辩论/决策层
@@ -583,7 +627,7 @@ def aggregate_factor_tool_ablation(
         "variants": {},
         "dims": {},
     }
-    for variant in _TECH_VARIANTS:
+    for variant in variants:
         v_runs = [r for r in runs if r["variant"] == variant]
         report["variants"][variant] = {
             "n_runs": len(v_runs),
@@ -592,11 +636,11 @@ def aggregate_factor_tool_ablation(
                 for dim in JUDGE_DIMS
             },
         }
-    prev_by_ticker = _by_ticker_median(runs, "tech_bare")
-    cur_by_ticker = _by_ticker_median(runs, "tech_factor_tool")
+    prev_by_ticker = _by_ticker_median(runs, variants[0])
+    cur_by_ticker = _by_ticker_median(runs, variants[1])
     common = sorted(set(prev_by_ticker) & set(cur_by_ticker))
     report["pairing_units"] = len(common)
-    for dim in _FACTOR_TOOL_OUTCOME_DIMS:
+    for dim in outcome_dims:
         seq_prev: list[float] = []
         seq_cur: list[float] = []
         for ticker in common:
@@ -611,9 +655,29 @@ def aggregate_factor_tool_ablation(
         report["dims"][dim] = {
             "diff_mean": round(sum(seq_cur) / len(seq_cur) - sum(seq_prev) / len(seq_prev), 4),
             "ci": (round(lo, 4), round(hi, 4)),
-            "conclusion": conclusion_for_factor_tool_increment((lo, hi)),
+            "conclusion": _conclusion_for_increment((lo, hi)),
         }
     return report
+
+
+def aggregate_factor_tool_ablation(
+    runs: list[dict],
+    *,
+    B: int = 10_000,  # noqa: N803 - 接口冻结：与既有 paired_bootstrap_ci 参数名一致
+    seed: int = 42,
+) -> dict:
+    """因子工具配对变体（tech_bare → tech_factor_tool）的 judge 维度增量与结论。"""
+    return _paired_variant_report(runs, _TECH_VARIANTS, _FACTOR_TOOL_OUTCOME_DIMS, B=B, seed=seed)
+
+
+def aggregate_memory_ablation(
+    runs: list[dict],
+    *,
+    B: int = 10_000,  # noqa: N803 - 接口冻结：与既有 paired_bootstrap_ci 参数名一致
+    seed: int = 42,
+) -> dict:
+    """记忆配对变体（tech_no_memory → tech_memory）的 judge 维度增量与结论。"""
+    return _paired_variant_report(runs, _MEMORY_VARIANTS, _MEMORY_OUTCOME_DIMS, B=B, seed=seed)
 
 
 def render_factor_tool_ablation_report(report: dict) -> str:
@@ -698,6 +762,106 @@ def run_factor_tool_ablation(
     report["snapshot_digests"] = snapshots  # 两臂共用同一 digest = 输入对齐证据
     report["generated_at"] = datetime.now().isoformat(timespec="seconds")
     report["report_markdown"] = render_factor_tool_ablation_report(report)
+    return report
+
+
+def render_memory_ablation_report(report: dict) -> str:
+    """记忆消融报告（markdown）模板渲染；措辞守卫同因子工具先例（fail loud）。
+
+    spec causal-ablation 场景：报告含两变体各 judge 维度增量与 95% CI，并披露
+    **有效 n**（配对单元数）与**适用口径**（变体适用维度）；CI 含 0 的维度结论逐字
+    「无显著差异」；报告任何位置出现 `_FORBIDDEN_INTERPRETATIONS` 措辞 → ``ValueError``。
+    """
+    lines = [
+        "# 记忆消融报告（分析师层 ± 决策记忆注入）",
+        "",
+        "- 配对：tech_no_memory（无记忆对照臂）→ tech_memory（召回已结算历史 + 已确认语义条款）",
+        f"- 配对单元：{report.get('pairing_unit', 'ticker')}（bootstrap 重采样单位）",
+        f"- 有效 n（配对单元数）：{report.get('pairing_units', 0)}",
+        f"- run 数：{report.get('n_runs', 0)}",
+        "",
+        "## 两变体 run 数与 judge 中位数",
+        "",
+    ]
+    for variant, entry in (report.get("variants") or {}).items():
+        medians = ", ".join(
+            f"{dim}={value}" for dim, value in (entry.get("judge_medians") or {}).items()
+        )
+        lines.append(f"- {variant}: n_runs={entry.get('n_runs', 0)}；{medians}")
+    lines += [
+        "",
+        "## judge 维度增量（tech_no_memory → tech_memory）",
+        "",
+    ]
+    dims = report.get("dims") or {}
+    if not dims:
+        lines.append("无可配对的 judge 维度（两侧无共同标的或维度不适用）：不产出结论。")
+    for dim, entry in dims.items():
+        lo, hi = entry["ci"]
+        lines.append(
+            f"- {dim}: 点估计 Δ{entry['diff_mean']}，95% CI [{lo}, {hi}] → {entry['conclusion']}"
+        )
+    lines += [
+        "",
+        "## 适用口径",
+        "",
+        "- 两臂同为分析师层直出（无辩论/决策层）→ judge 维度按适用性过滤为 report_relevance；",
+        "  未在报告中的维度 = 该变体不适用，非缺失。",
+        "- CI 含 0 只写「无显著差异」；不得据此引申为对记忆价值的否定。",
+        "- 本报告仅陈述统计口径与配对单元；采纳/裁剪决策须有独立证据（成本—收益）并",
+        "  遵循项目评估 SOP（judge 校准先行、一次只动一个变量）。",
+    ]
+    text = "\n".join(lines) + "\n"
+    for forbidden in _FORBIDDEN_INTERPRETATIONS:
+        if forbidden in text:
+            raise ValueError(
+                f"消融报告出现禁用措辞 {forbidden!r}：CI 含 0 不得引申为「无效/无价值」"
+            )
+    return text
+
+
+def run_memory_ablation(
+    tickers: Sequence[str],
+    *,
+    repeats: int = 1,
+    judge_repeats: int = 3,
+    snapshot_builder: Callable[[str], dict] | None = None,
+    query: str = "综合评估投资价值",
+) -> dict:
+    """记忆配对跑批：每标的同一快照 → 两臂 × repeats 次 → 聚合报告。
+
+    判分只经库侧唯一入口 `score_run`；两臂共享同一 snapshot digest（输入对齐证据）；
+    记忆臂经生产召回入口读默认记忆库（SESSIONS_DB_PATH）。实际跑批消耗 LLM token
+    （2 臂 × repeats × 完整分析师层分析），属人工触发的评估动作；不做静默降级。
+    n=10 批次为显式后续项（评估 SOP：judge 校准先行 + 成本）——见 change 验证报告。
+    """
+    builder = snapshot_builder or build_snapshot
+    runs: list[dict] = []
+    snapshots: dict[str, str] = {}
+    for ticker in tickers:
+        snapshot = builder(ticker)
+        snapshots[ticker] = snapshot_digest(snapshot)
+        for variant in _MEMORY_VARIANTS:
+            for repeat in range(repeats):
+                out = run_variant_once(variant, snapshot, query)
+                runs.append(
+                    {
+                        "variant": variant,
+                        "ticker": ticker,
+                        **score_run(
+                            variant, out, ticker=ticker, repeat=repeat, judge_repeats=judge_repeats
+                        ),
+                        "citation_pass": out["citation_pass"],
+                        "citation_buckets": out["citation_buckets"],
+                    }
+                )
+    report = aggregate_memory_ablation(runs)
+    from evals.run import _collect_prompt_versions
+
+    report["prompt_versions"] = _collect_prompt_versions()  # 复现证据：prompt 版本随报告落盘
+    report["snapshot_digests"] = snapshots  # 两臂共用同一 digest = 输入对齐证据
+    report["generated_at"] = datetime.now().isoformat(timespec="seconds")
+    report["report_markdown"] = render_memory_ablation_report(report)
     return report
 
 
@@ -842,13 +1006,21 @@ def main() -> None:
     )
     parser.add_argument(
         "--suite",
-        choices=("layers", "factor-tool"),
+        choices=("layers", "factor-tool", "memory"),
         default="layers",
-        help="layers=分层消融（既有四变体）；factor-tool=技术分析师 ± 因子库工具配对变体",
+        help=(
+            "layers=分层消融（既有四变体）；factor-tool=技术分析师 ± 因子库工具配对变体；"
+            "memory=分析师层 ± 决策记忆注入配对变体"
+        ),
     )
     args = parser.parse_args()
     if args.suite == "factor-tool":
         report = run_factor_tool_ablation(
+            list(args.tickers), repeats=args.repeats, judge_repeats=args.judge_repeats
+        )
+        print(report["report_markdown"])
+    elif args.suite == "memory":
+        report = run_memory_ablation(
             list(args.tickers), repeats=args.repeats, judge_repeats=args.judge_repeats
         )
         print(report["report_markdown"])
