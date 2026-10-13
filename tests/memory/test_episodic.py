@@ -317,7 +317,93 @@ class TestCitationCoverage:
             interpretation="历史决策 p1 的结算收益为 12%",
             direction="positive",
             metric_name="raw_return",
+            period="2026-09-01",
         )
         (verdict,) = verify_claims([claim], state)
 
         assert verdict.status == "PASS"
+        # 期次经 _resolve_index_period 从记忆条目日期解析（注册后无覆盖缺口）
+        assert verdict.coverage_gap is False
+
+    def test_wrong_period_on_memory_claim_fails(self, db: Path):
+        """期次注册的正面效应：错期次被校验器抓住（semantic_period_mismatch）。"""
+        _insert_settled(db, "p1", "300750.SZ", "2026-09-01T09:00:00", raw_return=0.12)
+        out = render_memory_state({"stock_code": "300750"}, db_path=db, as_of=AS_OF)
+        claim = Claim(
+            claim_type="numerical",
+            source_type="data",
+            field_ref="decision_memory.episodic.0.raw_return",
+            stated_value=0.12,
+            interpretation="该历史决策结算收益为 12%",
+            direction="positive",
+            metric_name="raw_return",
+            period="2026-08-01",
+        )
+        (verdict,) = verify_claims([claim], {"stock_code": "300750", **out})
+
+        assert verdict.status == "FAIL"
+        assert verdict.bucket == "semantic_period_mismatch"
+
+    def test_memory_root_registered_signed(self, db: Path):
+        """signed 注册：记忆收益为有符号量，direction 申报参与符号比对
+        （真值为正而申报 negative → direction_mismatch，而非字面误读降级）。"""
+        _insert_settled(db, "p1", "300750.SZ", "2026-09-01T09:00:00", raw_return=0.12)
+        out = render_memory_state({"stock_code": "300750"}, db_path=db, as_of=AS_OF)
+        claim = Claim(
+            claim_type="numerical",
+            source_type="data",
+            field_ref="decision_memory.episodic.0.raw_return",
+            stated_value=0.12,
+            interpretation="该历史决策结算收益为负",
+            direction="negative",
+            metric_name="raw_return",
+            period="2026-09-01",
+        )
+        (verdict,) = verify_claims([claim], {"stock_code": "300750", **out})
+
+        assert verdict.status == "FAIL"
+        assert verdict.bucket == "direction_mismatch"
+
+    def test_block_warns_against_source_id_in_interpretation(self):
+        """块内指令（已知交互的缓解）：interpretation 不写来源 ID。"""
+        block = build_memory_block(
+            [
+                {
+                    "decision_id": "p1",
+                    "date": "2026-09-01",
+                    "symbol": "300750",
+                    "direction": "long",
+                    "settlement_status": "resolved_win",
+                    "raw_return": 0.12,
+                    "rationale_summary": "",
+                }
+            ],
+            [],
+        )
+        assert "不写来源 ID" in block
+
+    def test_source_id_digits_trip_echo_check(self, db: Path):
+        """已知交互（E2E 实测，如实钉死）：interpretation 写来源 ID 且 ID 数字无法按
+        缩放集匹配 stated_value → citation 回声校验判 internal_inconsistency；
+        块内「不写来源 ID」指令即此交互的缓解；校验器侧（ID token 识别）列为后续项。
+        """
+        _insert_settled(db, "p_own_2", "300750.SZ", "2026-09-01T09:00:00", raw_return=0.181)
+        out = render_memory_state({"stock_code": "300750"}, db_path=db, as_of=AS_OF)
+        state = {"stock_code": "300750", **out}
+
+        def _claim(interpretation: str) -> Claim:
+            return Claim(
+                claim_type="numerical",
+                source_type="data",
+                field_ref="decision_memory.episodic.0.raw_return",
+                stated_value=0.181,
+                interpretation=interpretation,
+                direction="positive",
+                metric_name="raw_return",
+            )
+
+        (with_id,) = verify_claims([_claim("历史决策 p_own_2 结算收益为正")], state)
+        (without_id,) = verify_claims([_claim("历史决策结算收益为正")], state)
+
+        assert with_id.bucket == "internal_inconsistency"
+        assert without_id.status == "PASS"

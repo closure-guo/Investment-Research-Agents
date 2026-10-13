@@ -79,6 +79,10 @@ _METRIC_ALIASES: dict[str, list[str]] = {
         "基本每股收益",
         "基本每股收益(元)",
     ],
+    # decision_memory（add-decision-memory）：记忆条目的结算收益（有符号量；
+    # signed 声明见 citation._SIGNED_ROOTS 同批注册）——记忆数值 claim 的术语核对
+    # 与 field_ref 指标段（raw_return）同源，避免恒计覆盖缺口。
+    "raw_return": ["raw_return", "结算收益", "决策收益", "历史决策收益"],
 }
 
 _ALIAS_TO_CANONICAL: dict[str, str] = {

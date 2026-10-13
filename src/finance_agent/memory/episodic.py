@@ -52,7 +52,8 @@ MEMORY_BLOCK_BUDGET_CHARS = 1200
 _MEMORY_HEADER = (
     "【历史决策记忆（decision_memory；来源=已结算历史决策，只读；引用数值时 field_ref "
     "用 decision_memory.episodic.<索引>.<字段>（如 decision_memory.episodic.0.raw_return），"
-    "MUST NOT 改写或臆测）】"
+    "interpretation 只写结论与数值、不写来源 ID（来源 ID 含数字，会被 citation 回声校验"
+    "读作数值而误判 internal_inconsistency）；MUST NOT 改写或臆测）】"
 )
 _SEMANTIC_HEADER = (
     "已确认经验条款（人工确认后生效；引用时 field_ref 用 decision_memory.semantic.<索引>.text）:"
