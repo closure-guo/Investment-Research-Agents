@@ -1,9 +1,9 @@
 """选股日批编排（add-screening-pipeline T1；S1 逐字）。
 
 流程：① 快照新鲜度（``latest_snapshot_date() == as_of``，``as_of`` 缺省 = 最新
-快照日）→ ② L1 确定性硬过滤 → ③ L2 打分（Top-N **全量**落库，供稳定性查询）
-→ ④ L3 LLM 粗筛（quick profile，事件注入）→ ⑤ 精选池（``keep`` ∩ 连续在榜门槛）
-→ ⑥ 批次行 ok + 计数。
+快照日）→ ② L1 确定性硬过滤 → ③ L2 打分（Top-N **全量**落库，供稳定性查询；当日榜
+**原子替换**——同日重跑换小集合时旧行不得残留）→ ④ L3 LLM 粗筛（quick profile，
+事件注入）→ ⑤ 精选池（``keep`` ∩ 连续在榜门槛）→ ⑥ 批次行 ok + 计数。
 
 **fail-closed 纪律**：任一步失败 → ``screening_batches.status = "failed"`` + error
 文案，当日精选池**零行**——批次行与池行经 ``store.record_screening_batch`` 单事务
@@ -60,8 +60,8 @@ from finance_agent.screening.store import (
     eligible_for_selection,
     latest_successful_batch,
     list_selection_pool,
-    record_l2_candidates,
     record_screening_batch,
+    rewrite_day_l2_board,
 )
 
 _logger = logging.getLogger("finance_agent.screening.pipeline")
@@ -290,7 +290,8 @@ def run_screening_batch(
         ]
         passed = [decision.code for decision in filter_universe(records) if decision.passed]
         l1_passed = len(passed)
-        # ③ L2：active 因子 × 近 60 日 IC → Top-N（全量落库）
+        # ③ L2：active 因子 × 近 60 日 IC → Top-N（全量落库；当日榜原子替换——
+        # 同日重跑换小集合时旧行不得残留，否则虚增 consecutive_days_in_top）
         factors = list_active_factors(db_path=library_db_path)
         ic_stats = recent_ic_stats(factors, db_path=library_db_path)
         candidates = rank_universe(
@@ -301,7 +302,7 @@ def run_screening_batch(
             ic_stats=ic_stats,
             top_n=L2_TOP_N,
         )
-        record_l2_candidates(trade_date, candidates, db_path=db_path)
+        rewrite_day_l2_board(trade_date, candidates, db_path=db_path)
         l2_top = len(candidates)
         # ④ L3：quick profile 粗筛（事件注入；单只失败降级不阻断）
         client: TriageLLMClient = (

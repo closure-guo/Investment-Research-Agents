@@ -4,9 +4,11 @@
 表（C5 / pipeline Global Constraints，逐字）：
 
 - ``l2_candidates(trade_date, symbol, composite_score, rank, PRIMARY KEY(trade_date, symbol))``：
-  L2 打分名单日快照，幂等 upsert（同日重跑覆盖）；
+  L2 打分名单日快照，幂等 upsert（同日重跑覆盖）。**日批重跑走 ``rewrite_day_l2_board``**
+  （当日榜原子替换：旧行不留残——表的读取契约是「行的存在性 ≡ 当日在该榜内」）；
 - ``triage_decisions(trade_date, symbol, verdict, reason, degraded, created_at,
-  PRIMARY KEY(trade_date, symbol))``：L3 keep/drop 决策，幂等 upsert（同日重跑覆盖）。
+  PRIMARY KEY(trade_date, symbol))``：L3 keep/drop 决策，幂等 upsert（同日重跑覆盖）；
+  日批重跑时当日旧决策随 ``rewrite_day_l2_board`` 同事务清空后重写。
   两表供消融（±L3 粗筛）与前向命中率分层（后续 change）查询，是稳定性门槛查询的
   唯一数据源；
 - ``screening_batches(trade_date PK, status, error, started_at, finished_at,
@@ -165,6 +167,34 @@ def _finite_float(value: Any, field: str) -> float:
 # ── L2 名单快照（C5） ───────────────────────────────────────────────────────
 
 
+_L2_UPSERT_SQL = (
+    "INSERT INTO l2_candidates (trade_date, symbol, composite_score, rank) "
+    "VALUES (?, ?, ?, ?) "
+    "ON CONFLICT(trade_date, symbol) DO UPDATE SET "
+    "composite_score = excluded.composite_score, rank = excluded.rank"
+)
+
+
+def _l2_payload(
+    trade_date: str, candidates: Sequence[Candidate]
+) -> list[tuple[str, str, float, int]]:
+    """Candidate 序列 → ``l2_candidates`` payload（逐行 fail loud，坏值不落库）。"""
+    payload: list[tuple[str, str, float, int]] = []
+    for candidate in candidates:
+        rank = candidate.rank
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
+            raise ValueError(f"rank 必须是正整数: {rank!r}（symbol={candidate.symbol}）")
+        payload.append(
+            (
+                trade_date,
+                candidate.symbol,
+                _finite_float(candidate.composite_score, "composite_score"),
+                rank,
+            )
+        )
+    return payload
+
+
 def record_l2_candidates(
     trade_date: str, candidates: Sequence[Candidate], db_path: str | Path | None = None
 ) -> int:
@@ -174,35 +204,52 @@ def record_l2_candidates(
     ``pipeline`` 全量迁移）——表内行的**存在性**即「当日在该榜内」，稳定性查询
     （``consecutive_days_in_top``）据此判定在榜；传入未截断全量会虚增在榜天数。
 
+    本函数是**逐行 upsert**（增量写/造数入口）：同日多次写不同 symbol 会累积。
+    日批同日重跑须用 ``rewrite_day_l2_board``（当日榜原子替换，旧行不残留）。
+
     ``composite_score`` 须有限、``rank`` 须为正整数（fail loud，不落坏值）；
     空批 → 0，不建表（无行可写，连库都不碰）。返回写入行数。
     """
     normalized = _parse_trade_date(trade_date)
     if not candidates:
         return 0
-    payload: list[tuple[str, str, float, int]] = []
-    for candidate in candidates:
-        rank = candidate.rank
-        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
-            raise ValueError(f"rank 必须是正整数: {rank!r}（symbol={candidate.symbol}）")
-        payload.append(
-            (
-                normalized,
-                candidate.symbol,
-                _finite_float(candidate.composite_score, "composite_score"),
-                rank,
-            )
-        )
+    payload = _l2_payload(normalized, candidates)
     init_screening_db(db_path)
     conn = _connect(db_path)
     try:
-        conn.executemany(
-            "INSERT INTO l2_candidates (trade_date, symbol, composite_score, rank) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(trade_date, symbol) DO UPDATE SET "
-            "composite_score = excluded.composite_score, rank = excluded.rank",
-            payload,
-        )
+        conn.executemany(_L2_UPSERT_SQL, payload)
+        conn.commit()
+        return len(payload)
+    finally:
+        conn.close()
+
+
+def rewrite_day_l2_board(
+    trade_date: str, candidates: Sequence[Candidate], db_path: str | Path | None = None
+) -> int:
+    """日批重跑入口：当日 L2 榜单**原子替换**（单事务），返回写入行数。
+
+    与 ``record_l2_candidates`` 的区别 = 同日重跑语义：upsert 只保证同键覆盖，本轮
+    不再产出的旧行会残留；本函数把「表内行的**存在性** ≡ 当日在该榜内」（C4 稳定性
+    查询的唯一依据）做成硬不变量——先清当日 ``l2_candidates`` 旧行再写新名单，
+    残留行无法把已出榜标的的 ``consecutive_days_in_top`` 虚增。
+
+    ``triage_decisions`` 当日旧行**同事务**清除：调用方（日批）紧随其后经
+    ``run_triage`` 重写当日决策，旧决策不得跨轮幸存。清行与新行同一事务提交 →
+    中途失败回滚后仍是上一轮的行（不会留下「已清未写」的空榜）。
+
+    空批 → 当日榜替换为空（清旧行、写 0 行；日批「候选为空」即当日无在榜标的）。
+    任一坏值（非规范日期/rank/分值）→ 整批不落且不清旧行。
+    """
+    normalized = _parse_trade_date(trade_date)
+    payload = _l2_payload(normalized, candidates)
+    init_screening_db(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute("DELETE FROM l2_candidates WHERE trade_date = ?", (normalized,))
+        conn.execute("DELETE FROM triage_decisions WHERE trade_date = ?", (normalized,))
+        if payload:
+            conn.executemany(_L2_UPSERT_SQL, payload)
         conn.commit()
         return len(payload)
     finally:

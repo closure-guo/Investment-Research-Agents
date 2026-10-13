@@ -33,6 +33,7 @@ from finance_agent.screening.store import (
     record_triage_decision,
     record_triage_decisions,
     reset_screening_db,
+    rewrite_day_l2_board,
 )
 
 # 交易日序列（含跨周末：10-09 周五 → 10-12 周一，10-10/11 周末无行）
@@ -117,6 +118,28 @@ def test_record_l2_candidates_rejects_bad_inputs(tmp_path) -> None:
         record_l2_candidates(
             "2026-10-13", [_candidate("600519", 1, score=float("nan"))], db_path=db
         )
+
+
+def test_rewrite_day_l2_board_replaces_day_rows_and_clears_triage(tmp_path) -> None:
+    """日批重跑入口（评审修正）：当日榜**原子替换**——旧 L2/triage 行无幸存者。
+
+    「表内行的存在性 ≡ 当日在该榜内」：同日重跑产出更小集合时旧行残留会把已出榜
+    标的的连续在榜天数虚增（C4 查询只认 ``l2_candidates`` 的日期轴）。
+    """
+    db = str(tmp_path / "screening.db")
+    _in_top(db, _D4, "PRIOR")  # 前一交易日：替换只作用于当日
+    record_l2_candidates(_D5, [_candidate("Y", 1), _candidate("Z", 2)], db_path=db)
+    record_triage_decisions(_D5, [_decision("Y"), _decision("Z")], db_path=db)
+
+    assert rewrite_day_l2_board(_D5, [_candidate("Y", 1)], db_path=db) == 1
+
+    assert [row["symbol"] for row in list_l2_candidates(_D5, db_path=db)] == ["Y"]  # Z 出榜无残留
+    assert list_triage_decisions(trade_date=_D5, db_path=db) == []  # 旧决策同事务清除
+    assert [row["symbol"] for row in list_l2_candidates(_D4, db_path=db)] == ["PRIOR"]
+
+    # 空批：当日榜替换为空（清旧行），而非保留旧榜
+    assert rewrite_day_l2_board(_D5, [], db_path=db) == 0
+    assert list_l2_candidates(_D5, db_path=db) == []
 
 
 # ── 连续在榜计数（C4） ──────────────────────────────────────────────────────

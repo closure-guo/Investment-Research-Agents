@@ -31,9 +31,11 @@ from finance_agent.factors.library import add_factor, record_ic
 from finance_agent.screening import pipeline
 from finance_agent.screening.ranker import Candidate
 from finance_agent.screening.store import (
+    consecutive_days_in_top,
     latest_screening_batch,
     list_l2_candidates,
     list_selection_pool,
+    list_triage_decisions,
     record_l2_candidates,
     record_screening_batch,
 )
@@ -215,6 +217,18 @@ def _seed_pool_days(ws: _Workspace) -> None:
     _seed_l2(ws.screening_db, _CALENDAR[-2], ["600519", "000001", "300750"])
 
 
+def _drop_code_from_universe(ws: _Workspace, code: str) -> None:
+    """从快照库与面板移除一只标的（构造「同日重跑集合变小」场景；screening 库不动）。"""
+    conn = sqlite3.connect(ws.snapshot_db)
+    try:
+        conn.execute("DELETE FROM market_snapshot WHERE code = ?", (code,))
+        conn.commit()
+    finally:
+        conn.close()
+    frame = pd.DataFrame([row for row in _snapshot_rows() if row["code"] != code])
+    ws.panel = build_panel_from_rows(frame)
+
+
 def _count(db: Path, sql: str) -> int:
     conn = sqlite3.connect(db)
     try:
@@ -338,6 +352,34 @@ def test_rerun_same_day_overwrites_without_duplication(ws: _Workspace) -> None:
     assert _count(ws.screening_db, "SELECT COUNT(*) FROM screening_batches") == 1
     assert len(list_l2_candidates(_AS_OF, db_path=ws.screening_db)) == 3  # 当日榜不翻倍
     assert _count(ws.screening_db, "SELECT COUNT(*) FROM selection_pool") == 2
+
+
+def test_rerun_same_day_smaller_set_leaves_no_ghost_rows(ws: _Workspace) -> None:
+    """同日重跑换**小集合**：当日 L2/triage 行 = 本次集合精确相等（无幸存者）。
+
+    残留行会把已出榜标的的连续在榜天数虚增（C4 沿 ``l2_candidates`` 日期轴回溯），
+    故重跑必须原子替换当日榜（store ``rewrite_day_l2_board``）。
+    """
+    _seed_pool_days(ws)
+    assert _run(ws)["status"] == "ok"
+    assert {row["symbol"] for row in list_l2_candidates(_AS_OF, db_path=ws.screening_db)} == set(
+        _CODES
+    )
+
+    _drop_code_from_universe(ws, "300750")  # 重跑集合 = _CODES ∖ {300750}
+    result = _run(ws)
+
+    assert result["status"] == "ok"
+    assert result["l2_top"] == 2
+    assert sorted(row["symbol"] for row in list_l2_candidates(_AS_OF, db_path=ws.screening_db)) == [
+        "000001",
+        "600519",
+    ]
+    assert sorted(
+        row["symbol"] for row in list_triage_decisions(trade_date=_AS_OF, db_path=ws.screening_db)
+    ) == ["000001", "600519"]
+    # 出榜标的在当日轴上彻底消失：连续在榜天数不因旧行虚增
+    assert consecutive_days_in_top("300750", _AS_OF, db_path=ws.screening_db) == 0
 
 
 def test_latest_successful_pool_returns_latest_ok_batch_with_date(ws: _Workspace) -> None:

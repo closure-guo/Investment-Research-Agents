@@ -13,8 +13,12 @@ import { expect, test, type APIRequestContext } from '@playwright/test'
  *
  * 分析点击用例的确定性前提：E2E 快照库（data/test-e2e-snapshot.db）无
  * market_snapshot 行（无任何 spec 造快照行情行）→ analyze 端点的时效性校验
- * 以「无最新可得状态」跳过 → 池内标的全部入队（徽标可见）。若未来 spec 开始
- * 造快照行，本用例断言需同步修订（校验会按最新快照移除不在行内的标的）。
+ * 以「无最新可得状态」跳过 → 池内标的全部入队（徽标可见）。该前提**已在本用例内
+ * 显式断言**：捕获真实 POST /api/screening/analyze 响应并断言 removed === []。
+ * 若未来 spec/脚本写入池日期快照行（校验会按最新快照移除不在行内/命中新事件的
+ * 标的），本用例以「前提失效」显式失败，而不是徽标不可见的超时误读。
+ * （未选「seed 干净快照行」方案：那会让校验真正运行并触发 fetch_key_events 的
+ * 真实 WebSearch/litellm 网络调用——前提更脆、更慢，故取显式断言方案。）
  */
 test.describe.configure({ mode: 'serial', timeout: 60_000 })
 
@@ -174,7 +178,24 @@ test('点击批量分析 → 池内标的全量入队，显示排队/运行徽�
   await expect(page.getByTestId('screening-pool-table')).toBeVisible({ timeout: 15_000 })
 
   await expect(page.getByTestId('screening-analyze-btn')).toBeEnabled()
+  // 显式断言前提（见文件头「分析点击用例的确定性前提」）：校验若运行并移除标的，
+  // removed 非空 → 此处以「前提失效」显式失败，而非徽标不可见的超时误读
+  const analyzeResponse = page.waitForResponse(
+    (resp) => resp.url().includes('/api/screening/analyze') && resp.request().method() === 'POST',
+  )
   await page.getByTestId('screening-analyze-btn').click()
+  const analyzeResp = await analyzeResponse
+  expect(analyzeResp.ok()).toBeTruthy()
+  const payload = (await analyzeResp.json()) as {
+    started: { symbol: string }[]
+    queued: { symbol: string }[]
+    removed: unknown[]
+  }
+  expect(payload.removed).toEqual([])
+  expect([...payload.started, ...payload.queued].map((item) => item.symbol).sort()).toEqual([
+    '000001',
+    '600519',
+  ])
 
   // 入队即渲染徽标（并发上限 2：2 只标的均为 running/queued，必有徽标）
   await expect(page.getByTestId('screening-queue-badge-600519')).toBeVisible()

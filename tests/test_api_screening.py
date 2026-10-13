@@ -18,14 +18,21 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
+import os
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from finance_agent import session_store
 from finance_agent.api import app
-from finance_agent.data.snapshot import set_meta_many, write_snapshot_rows
+from finance_agent.data.snapshot import (
+    latest_snapshot_date,
+    set_meta_many,
+    write_snapshot_rows,
+)
 from finance_agent.screening.queue import AnalyzeQueue
 from finance_agent.screening.store import (
     list_screening_removals,
@@ -41,9 +48,17 @@ _PRIOR_TRADE_DATE = "2026-10-12"
 
 @pytest.fixture(autouse=True)
 def _screening_db(tmp_path, monkeypatch):
-    """screening 库指向 tmp（env 调用期读取；任何用例不得污染开发库）。"""
+    """screening / 快照两库路径均指向 tmp（env 调用期读取；任何用例不得污染开发库）。
+
+    SNAPSHOT_DB_PATH 必须一并钉死（评审修正 1）：analyze 端点的时效性校验经
+    ``latest_snapshot_date()`` 读 env 指向的快照库——不钉死时读 cwd 默认
+    ``data/market_snapshot.db``，该开发库一旦有行，未显式覆盖的 analyze 用例会真正
+    进入事件装配（WebSearch/litellm 网络调用）。显式覆盖的时效性用例不受影响
+    （monkeypatch.setenv 后设者胜）。
+    """
     path = tmp_path / "screening.db"
     monkeypatch.setenv("SCREENING_DB_PATH", str(path))
+    monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "market_snapshot.db"))
     return path
 
 
@@ -482,7 +497,36 @@ def test_seed_screening_queue_and_reset(testing_client, pool_seed) -> None:
     assert body["batch_date"] is None and body["pool"] == []
 
 
+def test_screening_reset_discards_in_process_queue(testing_client, _screening_db) -> None:
+    """screening_reset 同时丢弃进程内队列单例（评审修正）：seed/累积的徽标条目在库外
+    （内存），只清库会让 reset 后的页面仍显示旧队列条目。"""
+    testing_client.post(
+        "/api/test/seed",
+        json={"screening": {"queue": [{"symbol": "600001", "session_id": "s1", "state": "done"}]}},
+    )
+    assert [
+        item["state"] for item in TestClient(app).get("/api/screening/pool").json()["queue"]
+    ] == ["done"]
+
+    resp = testing_client.post("/api/test/seed", json={"screening_reset": True})
+
+    assert resp.status_code == 200
+    assert TestClient(app).get("/api/screening/pool").json()["queue"] == []
+
+
 # ── 分析前时效性校验接线（spec「信号时效性校验」：T2 校验接入 analyze 端点） ──
+
+
+def test_snapshot_db_path_pinned_to_tmp_not_cwd_default(pool_seed, tmp_path) -> None:
+    """回归（评审修正 1）：不显式覆盖的用例，快照库 = 逐用例 tmp 注入。
+
+    不钉死时校验读 cwd 默认 ``data/market_snapshot.db``——该开发库一旦有行，本文件
+    未显式覆盖的 analyze 用例会真正进入事件装配（WebSearch/litellm 网络调用）。
+    """
+    pinned = Path(os.environ["SNAPSHOT_DB_PATH"]).resolve()
+    assert pinned.parent == tmp_path.resolve()
+    assert pinned != Path("data/market_snapshot.db").resolve()
+    assert latest_snapshot_date() is None  # tmp 库无行 → 校验按「无最新可得状态」跳过
 
 
 def _install_snapshot(
@@ -568,9 +612,10 @@ def test_analyze_endpoint_flags_limit_locked_and_new_event(
 
 
 def test_analyze_endpoint_skips_freshness_without_snapshot_state(
-    pool_seed, monkeypatch, tmp_path
+    pool_seed, monkeypatch, tmp_path, caplog
 ) -> None:
-    """无快照数据（无「最新可得状态」可核对）→ 不臆造移除、不触达事件装配。"""
+    """无快照数据（无「最新可得状态」可核对）→ 不臆造移除、不触达事件装配；
+    跳过记 **WARNING**（spec 重校验被跳过必须可观测，非静默 info）。"""
     monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "never-written.db"))
 
     def _must_not_fetch(*args, **kwargs):
@@ -580,11 +625,51 @@ def test_analyze_endpoint_skips_freshness_without_snapshot_state(
     _stub_pipeline_start(monkeypatch)
     _stub_sessions(monkeypatch)
 
-    body = TestClient(app).post("/api/screening/analyze", json={}).json()
+    with caplog.at_level(logging.INFO, logger="finance_agent.api"):
+        body = TestClient(app).post("/api/screening/analyze", json={}).json()
 
     assert body["removed"] == []
     assert len(body["started"] + body["queued"]) == 5
     assert list_screening_removals(db_path=pool_seed) == []
+    skips = [record for record in caplog.records if "时效性校验跳过" in record.getMessage()]
+    assert skips and all(record.levelno >= logging.WARNING for record in skips)
+
+
+def test_analyze_endpoint_skips_and_warns_when_snapshot_older_than_batch(
+    pool_seed, monkeypatch, tmp_path, caplog
+) -> None:
+    """跳过路径 2：快照最新日期早于池批次日（无更新状态可核对）→ 不移除 + WARNING。"""
+    path = tmp_path / "older_snapshot.db"
+    monkeypatch.setenv("SNAPSHOT_DB_PATH", str(path))
+    write_snapshot_rows(
+        _PRIOR_TRADE_DATE,
+        [
+            {
+                "code": f"60000{index}",
+                "name": f"合成{index}",
+                "is_suspended": 0,
+                "limit_up_sealed": 0,
+                "limit_down_sealed": 0,
+            }
+            for index in range(1, 6)
+        ],
+        db_path=path,
+    )
+
+    def _must_not_fetch(*args, **kwargs):
+        raise AssertionError("快照无更新状态时不得触达事件装配")
+
+    monkeypatch.setattr("finance_agent.api.fetch_key_events", _must_not_fetch)
+    _stub_pipeline_start(monkeypatch)
+    _stub_sessions(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="finance_agent.api"):
+        body = TestClient(app).post("/api/screening/analyze", json={}).json()
+
+    assert body["removed"] == []
+    assert len(body["started"] + body["queued"]) == 5
+    skips = [record for record in caplog.records if "时效性校验跳过" in record.getMessage()]
+    assert skips and all(record.levelno >= logging.WARNING for record in skips)
 
 
 def test_analyze_endpoint_reads_snapshot_through_env_path(pool_seed, monkeypatch, tmp_path) -> None:

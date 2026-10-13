@@ -107,9 +107,11 @@ fetch_market_spot: FAILED (None)
 
 见「E2E 证据」归因段：两轮复跑分别为 17 failed / 25 passed（首轮含本 spec 自身超时 1 条，已修正）与 13 failed / 25 passed；失败集合 ⊆ 基线 `cc00bc0` 归因族，成员在单次运行间漂移。**本报告不声称全量绿灯**；本 change 新增 spec 单跑与套件内均全绿为其门禁证据。
 
-### 3. 测试对默认快照库的副作用（记录，不阻塞）
+### 3. 测试对默认快照库的副作用（评审修正 1 已关闭，措辞更正）
 
-`analyze` 端点接线后，未显式注入 `SNAPSHOT_DB_PATH` 的既有后端用例会经 `latest_snapshot_date()` 触碰默认路径 `data/market_snapshot.db`（空库 → 校验按「无最新可得状态」跳过 → 用例语义不变；该文件已入 `.gitignore`）。新增用例一律 monkeypatch `SNAPSHOT_DB_PATH` 到 tmp。若后续要把该隔离做成全局 conftest 纪律，宜单独立项（会改变既有用例的读取目标）。
+`analyze` 端点接线后，未显式注入 `SNAPSHOT_DB_PATH` 的既有后端用例会经 `latest_snapshot_date()` 触碰默认路径 `data/market_snapshot.db`（该文件已入 `.gitignore`）。**原报告「空库 → 校验按『无最新可得状态』跳过 → 用例语义不变」的前提仅在开发库为空时成立**：该库一旦有行且日期 ≥ 池批次日，未显式覆盖的 analyze 用例会真正进入事件装配（WebSearch/litellm 网络调用），语义随开发库内容漂移、并可能因网络失败而红（评审复现：向 `data/market_snapshot.db` 写 5 行 2026-10-13 数据后，修正前 `-k analyze` 3 例全部触达真实事件装配）。
+
+**修正**：隔离已做进 `tests/test_api_screening.py` 的 autouse fixture——`SCREENING_DB_PATH` 与 `SNAPSHOT_DB_PATH` 逐用例双双钉 tmp（快照用例显式 `monkeypatch.setenv` 后设者胜，不受影响）；新增回归用例 `test_snapshot_db_path_pinned_to_tmp_not_cwd_default`。**证明**：同一份「有行的开发库」下，修正后 `tests/test_api_screening.py` 25 例全绿（网络守卫 autouse 桩零触发 = 零事件装配/零网络）。全局 conftest 纪律（覆盖本文件以外的测试）仍如原记录所述待单独立项。新增用例一律 monkeypatch `SNAPSHOT_DB_PATH` 到 tmp。
 
 ### 4. 全量后端套件唯一失败 —— 父目录 .env 泄漏（既有，机器级；非本 change）
 

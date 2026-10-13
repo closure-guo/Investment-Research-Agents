@@ -741,8 +741,9 @@ if TESTING:
         快照三表）造行情快照告警态（add-market-snapshot D6），同样无需 chat_history。
         顶层可选 screening（dict：``batch`` 造批次行（含 error 造失败横幅）、``pool``
         造精选池行、``queue`` 造批量分析队列徽标态）与 screening_reset（bool：清
-        screening 五表）造选股页确定性状态（add-screening-pipeline S6）；库路径于
-        调用期读 SCREENING_DB_PATH（导入期冻结会让 E2E 注入失效）。
+        screening 五表**并丢弃进程内队列单例**）造选股页确定性状态
+        （add-screening-pipeline S6）；库路径于调用期读 SCREENING_DB_PATH（导入期
+        冻结会让 E2E 注入失效）。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
         # track_record / snapshot / screening 造数块不受 chat_history 前置约束
@@ -868,13 +869,15 @@ if TESTING:
                 "last_attempt_at", datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
             )
             set_meta_many(snapshot_meta)
-        # add-screening-pipeline S6：选股页造数——可选先 reset（清五表）再写批次/池/
-        # 队列。库路径调用期读 SCREENING_DB_PATH（store 各入口 env 口径）；队列为
-        # 进程内单例（徽标态造数，不启动轮询/补位）。
+        # add-screening-pipeline S6：选股页造数——可选先 reset（清五表 + 丢弃进程内
+        # 队列单例）再写批次/池/队列。库路径调用期读 SCREENING_DB_PATH（store 各入口
+        # env 口径）；队列为进程内单例（徽标态造数，不启动轮询/补位）。
         if req.get("screening_reset"):
             from finance_agent.screening.store import reset_screening_db
 
             reset_screening_db()
+            # 队列状态在内存（库外）：清库不换实例会让旧徽标条目跨 reset 残留
+            _reset_analyze_queue()
         screening_seed = req.get("screening")
         if isinstance(screening_seed, dict):
             from finance_agent.screening.store import record_screening_batch as _seed_batch
@@ -2941,6 +2944,16 @@ def _get_analyze_queue() -> AnalyzeQueue:
     return _analyze_queue
 
 
+def _reset_analyze_queue() -> None:
+    """丢弃进程内队列单例（TESTING ``screening_reset`` 用；下次取用懒建新实例）。
+
+    队列状态在进程内存里（库外）：只清 screening 库无法让徽标态归零——reset 后页面
+    仍会显示此前 seed/累积的条目。进程在跑的真实分析会话不受影响（仅队列条目清空）。
+    """
+    global _analyze_queue
+    _analyze_queue = None
+
+
 def _screening_pool_payload(queue_snapshot: list[dict]) -> dict[str, Any]:
     """池端点载荷（同步体，供 to_thread 包裹）：最近成功池 + 最近尝试状态 + 队列。"""
     latest = latest_screening_batch()
@@ -3031,14 +3044,15 @@ def _screening_freshness_removals(
     数据不可得 → 返回 ``[]``（记日志，不臆造移除）：① 快照库无行（无「最新可得
     状态」可核对）；② 快照最新日期早于池批次日（无更新状态）。读快照失败同样
     降级——本校验是重检（不是主门禁），可用性故障不得把批量分析端点打成 500、
-    也不得以空 findings 冒充「已校验通过」（故一律记 warning 日志）。
+    也不得以空 findings 冒充「已校验通过」。三条降级路径（含跳过）**一律记
+    WARNING 及以上**：spec 要求的重校验被跳过着对运维必须可见，不得静默通过。
     """
     snapshot_date = latest_snapshot_date()
     if snapshot_date is None:
-        _logger.info("选股时效性校验跳过：快照库无数据（无最新可得状态可核对）")
+        _logger.warning("选股时效性校验跳过：快照库无数据（无最新可得状态可核对）")
         return []
     if batch_date is not None and snapshot_date < batch_date:
-        _logger.info(
+        _logger.warning(
             "选股时效性校验跳过：快照最新日期 %s 早于池批次 %s（无更新状态可核对）",
             snapshot_date,
             batch_date,
