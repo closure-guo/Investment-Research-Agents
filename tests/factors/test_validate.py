@@ -2,9 +2,11 @@
 
 覆盖闸①（可计算性：全样本缺失率 ≤ ``MAX_MISSING_RATE``）与闸②（单因子检验：
 ``|ICIR| ≥ MIN_ABS_ICIR`` 且 ``|IC 均值| > 0``，E3）、``admit_candidates`` 编排
-（结构查重 → 闸①②③④⑤ → 入库 active；顺序保持、被拒不入库），以及 T4 的闸③
+（结构查重 → 闸①②③④⑤ → 入库 active；顺序保持、被拒不入库），T4 的闸③
 置换检验 + BH-FDR（同种子逐位可复现、强信号通过、纯噪声拒收、BH 单调性与手算
-对照、50 随机表达式批量注入入库 < 5）。
+对照、50 随机表达式批量注入入库 < 5），T5 的闸④（冗余 + 校验段增量）与闸⑤
+（训验切分 + 边界日剔除），以及评审修正新增的 BH 分辨率（K ≤ 100 / 守卫 / K>20
+端到端）与按候选位置计多重性用例。
 
 合成面板：固定种子；「强因子」= 用 volume 承载次日收益信号，且 amount = volume ×
 (-1)^t（横截面秩与次日收益逐日反号 → IC 序列均值≈0、标准差≈1 → 闸②必拒）。
@@ -19,6 +21,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from finance_agent.factors.constraints import (
+    BH_FDR_Q,
+    DEFAULT_IC_HORIZON,
+    MIN_OOS_IR_SAMPLES,
+    PERMUTATION_N,
+    TRAIN_FRACTION,
+)
 from finance_agent.factors.dsl import (
     AstNode,
     Call,
@@ -315,8 +324,8 @@ def test_admit_candidates_rejects_weak_icir(tmp_path):
 def test_admit_candidates_admits_strong_factor_end_to_end(tmp_path):
     """强预测因子走完闸 0–5 → 入库 active；状态机轨迹 created→candidate→active。
 
-    闸③④⑤ 本任务为 T4/T5 占位桩（恒通过）；本断言只钉编排形状（闸编号序列 +
-    不被拒 + 落库状态），真实统计判定由 T4/T5 的测试覆盖。
+    五道闸均为真实统计判定（T4/T5 已实装，占位桩全部删除）：本断言钉编排形状
+    （闸编号序列 + 不被拒 + 落库状态），各闸判定细节由本文件各闸专测覆盖。
     """
     db = _empty_db(tmp_path)
     results = admit_candidates([_candidate("volume")], _signal_panel(), seed=1, db_path=db)
@@ -405,9 +414,9 @@ def test_check_significance_strong_signal_passes():
     result = check_significance({"strong": _strong_ic_series()}, seed=3)["strong"]
     assert result.passed is True
     assert result.reason is None
-    assert result.detail["p_value"] == pytest.approx(1.0 / (1.0 + 200))
+    assert result.detail["p_value"] == pytest.approx(1.0 / (1.0 + PERMUTATION_N))
     assert result.detail["p_adj"] == pytest.approx(result.detail["p_value"])
-    assert result.detail["n_permutations"] == 200
+    assert result.detail["n_permutations"] == PERMUTATION_N
     assert result.detail["n_samples"] == 80
     assert result.detail["observed_mean"] == pytest.approx(0.08, abs=0.01)
 
@@ -468,6 +477,136 @@ def test_benjamini_hochberg_empty_and_single():
     """边界：空输入 → 空输出；单候选调整值 = 原 p（K=1，无多重性）。"""
     assert benjamini_hochberg_adjust({}) == {}
     assert benjamini_hochberg_adjust({"only": 0.03})["only"] == pytest.approx(0.03)
+
+
+# ── 评审修正：BH 分辨率 / K>20 批量 / 位置键多重性（fix 1/8/9） ──────────────
+
+
+def _spike_ic_series(*, days: int, spike: float = 1.0) -> pd.Series:
+    """尖峰 IC 序列（仅最后一日有幅度）：过闸②但置换检验必不显著（超额数 = N）。
+
+    ``[0]×(days−1) + [spike]`` 的 ``|ICIR|`` = 0.316–0.5（≥ 0.3）且均值 > 0 → 过闸②；
+    其余日幅度为 0 → 任一符号翻转都不改变 |置换均值|（恒 = 观测均值）→ 超额数 = N、
+    p = 1.0（超额数被构造完全钉死，不依赖抽样运气）。
+    """
+    return _ic_series([0.0] * (days - 1) + [spike])
+
+
+def _noise_batch(count: int, *, days: int = 80, seed: int = 303) -> dict[str, pd.Series]:
+    """``count`` 条互不相同的纯噪声 IC 序列（固定种子；均值≈0 → p ≈ 0.5）。"""
+    rng = np.random.default_rng(seed)
+    return {
+        f"noise-{index:02d}": _ic_series(list(0.15 * rng.normal(size=days)))
+        for index in range(count)
+    }
+
+
+def test_check_significance_k50_one_strong_candidate_passes_bh():
+    """fix 1：K=50 批量——零超额强候选 p_adj = 50/(N+1) = 0.05 ≤ 0.1 通过。
+
+    回归钉：``PERMUTATION_N`` 分辨率必须覆盖 ``K ≤ q·(N+1)``；旧值 N=200 时
+    p 值下界 1/201 → p_adj ≥ 50/201 ≈ 0.249 > 0.1，完美候选也必然被拒。
+    """
+    series_map = {"strong": _strong_ic_series(), **_noise_batch(49)}
+    results = check_significance(series_map, seed=17)
+    strong = results["strong"]
+    assert strong.passed is True
+    assert strong.reason is None
+    assert strong.detail["exceedances"] == 0
+    assert strong.detail["n_hypotheses"] == 50
+    assert strong.detail["p_adj"] == pytest.approx(50.0 / (PERMUTATION_N + 1))
+    assert strong.detail["p_adj"] <= BH_FDR_Q
+    rejected = [key for key in series_map if key != "strong" and not results[key].passed]
+    assert len(rejected) == 49  # 同批噪声候选取 p_adj ≫ q 被拒（BH 只放行强候选）
+
+
+def test_check_significance_k50_all_noise_all_rejected():
+    """fix 1：K=50 全噪声批量 → p_adj 全部 > q（无候选因分辨率不足/校正错误放行）。"""
+    series_map = _noise_batch(50, seed=404)
+    results = check_significance(series_map, seed=18)
+    assert len(results) == 50
+    for key, result in results.items():
+        assert result.passed is False, key
+        assert result.reason == ReasonCode.NOT_SIGNIFICANT
+        assert result.detail["n_hypotheses"] == 50
+        assert result.detail["p_adj"] > BH_FDR_Q
+
+
+def test_check_significance_k25_gate2_survivors_only_strong_passes():
+    """fix 8：K=25 批量（闸②存活者，逐条先验 ``check_single_factor`` 通过）端到端。
+
+    24 条尖峰序列（超额数 = N、p = 1.0）+ 1 条强信号（0 超额）→ BH 只放行强候选；
+    整批在旧 N=200（p 值下界 1/201 而 K > 20.1）下强候选也必被拒——本用例即该回归的
+    端到端钉子（K>20 大批次的分辨率要求）。
+    """
+    series_map: dict[str, pd.Series] = {"strong": _strong_ic_series()}
+    for index, days in enumerate((10, 9, 8, 6) * 6):
+        series_map[f"spike-{index:02d}"] = _spike_ic_series(days=days)
+    assert len(series_map) == 25
+    for key, series in series_map.items():  # 批量 = 闸①②存活者（②逐条验证）
+        gate2 = check_single_factor(series)
+        assert gate2.passed is True, (key, gate2.detail)
+    results = check_significance(series_map, seed=19)
+    strong = results["strong"]
+    assert strong.passed is True
+    assert strong.detail["p_adj"] == pytest.approx(25.0 / (PERMUTATION_N + 1))
+    assert strong.detail["p_adj"] <= BH_FDR_Q
+    spikes = [key for key in series_map if key.startswith("spike-")]
+    assert len(spikes) == 24
+    for key in spikes:
+        assert results[key].passed is False, key
+        assert results[key].reason == "NOT_SIGNIFICANT"
+        assert results[key].detail["exceedances"] == PERMUTATION_N
+        assert results[key].detail["p_adj"] == pytest.approx(1.0)
+
+
+def test_check_significance_guard_raises_when_resolution_cannot_reject(monkeypatch):
+    """fix 1：分辨率不足（p 值下界 > q/K）→ 抛清晰错误（fail loud，消息含两侧数值）。
+
+    N=50 → 下界 1/51 ≈ 0.01961：K=5 时阈值 q/K = 0.02（不触发）；K=6 时 0.01667
+    （触发）——边界两侧都钉住。
+    """
+    monkeypatch.setattr("finance_agent.factors.validate.PERMUTATION_N", 50)
+    quiet = {f"n{index}": _ic_series([0.01, -0.01]) for index in range(5)}
+    assert len(check_significance(quiet, seed=1)) == 5  # 1/51 ≤ q/5：分辨率仍可拒收
+    loud = {f"n{index}": _ic_series([0.01, -0.01]) for index in range(6)}
+    with pytest.raises(ValueError) as excinfo:
+        check_significance(loud, seed=1)
+    message = str(excinfo.value)
+    assert "1/(PERMUTATION_N+1)" in message and "BH_FDR_Q/K" in message  # 不等式两侧
+    assert "PERMUTATION_N=50" in message and "K=6" in message
+
+
+def test_check_significance_guard_boundary_default_resolution_covers_k100():
+    """fix 1：默认 N=999 覆盖 K ≤ 100（K=100 不触发；K=101 触发守卫）。"""
+    at_capacity = {f"c{index:03d}": _ic_series([0.02, -0.02]) for index in range(100)}
+    assert len(check_significance(at_capacity, seed=1)) == 100
+    over = {f"c{index:03d}": _ic_series([0.02, -0.02]) for index in range(101)}
+    with pytest.raises(ValueError, match="分辨率不足"):
+        check_significance(over, seed=1)
+
+
+def test_admit_candidates_duplicate_expressions_are_separate_hypotheses(tmp_path):
+    """fix 9：同批逐字重复表达式按候选**位置**各计一条假设（不塌缩）。
+
+    两个 volume（逐字重复）：闸③ 收到 2 条假设（``n_hypotheses == 2``；表达式为键时
+    会塌缩成 1），各取独立抽样下标；先入库者为 active，后到者被批内先入库者拦下。
+    """
+    db = _empty_db(tmp_path)
+    results = admit_candidates(
+        [_candidate("volume"), _candidate("volume")], _signal_panel(), seed=1, db_path=db
+    )
+    first = results[0]
+    assert first.status == "active"
+    gate3 = next(gate for gate in first.gates if gate.gate == 3)
+    assert gate3.detail["n_hypotheses"] == 2  # 位置键：重复表达式各占一条假设
+    assert gate3.detail["p_adj"] <= BH_FDR_Q
+    second = results[1]
+    assert second.status == "rejected"
+    assert second.rejected_gate is not None
+    second_gate3 = next(gate for gate in second.gates if gate.gate == 3)
+    assert second_gate3.detail["n_hypotheses"] == 2  # 同批假设数（映射回各自位置）
+    assert len([row for row in list_factors(db_path=db) if row["status"] == "active"]) == 1
 
 
 # ── 50 随机表达式批量注入（spec 场景：入库 < 5） ─────────────────────────────
@@ -649,6 +788,70 @@ def _pool_panel(
     )
 
 
+def _oos_increment_panel(*, dates: int = 60, codes: int = 40, seed: int = 999) -> MarketPanel:
+    """闸④样本外用例面板：amount 信号仅存在于训练段，验证段只由 volume 承载。
+
+    次日收益 ``r_{t+1} = 0.03·(z_volume,t + z_amount,t·[t 在训练段]) + 0.05·ε``
+    （验证段 = 日期排序后 30%）。实测：全样本 |IC 相关| ≈ 0.13（冗余闸不误伤）；
+    训练段加入 amount 有正增量（+2.46），验证段 amount 无信号（只稀释组合，−1.40）
+    → 旧实现（全样本增量）放行、新实现（验证段增量）拒收。
+    """
+    rng = np.random.default_rng(seed)
+    volume = rng.normal(size=(dates, codes))
+    amount = rng.normal(size=(dates, codes))
+    z_volume = (volume - volume.mean(axis=1, keepdims=True)) / volume.std(
+        axis=1, ddof=1, keepdims=True
+    )
+    z_amount = (amount - amount.mean(axis=1, keepdims=True)) / amount.std(
+        axis=1, ddof=1, keepdims=True
+    )
+    cut = int(dates * TRAIN_FRACTION)
+    signal = np.zeros((dates - 1, codes))
+    for step in range(dates - 1):
+        signal[step] = 0.03 * z_volume[step]
+        if step < cut:
+            signal[step] = signal[step] + 0.03 * z_amount[step]
+    returns = np.zeros((dates, codes))
+    returns[1:] = signal + 0.05 * rng.normal(size=(dates - 1, codes))
+    close = 100.0 * np.cumprod(1.0 + returns, axis=0)
+    day_labels = [
+        (date(2026, 2, 2) + timedelta(days=offset)).isoformat() for offset in range(dates)
+    ]
+    code_labels = [f"g{index:03d}" for index in range(codes)]
+
+    def frame(values: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame(values, index=day_labels, columns=code_labels)
+
+    return MarketPanel(
+        fields={
+            "open": frame(close),
+            "high": frame(close),
+            "low": frame(close),
+            "close": frame(close),
+            "volume": frame(volume),
+            "amount": frame(amount),
+        }
+    )
+    day_labels = [
+        (date(2026, 2, 2) + timedelta(days=offset)).isoformat() for offset in range(dates)
+    ]
+    code_labels = [f"g{index:03d}" for index in range(codes)]
+
+    def frame(values: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame(values, index=day_labels, columns=code_labels)
+
+    return MarketPanel(
+        fields={
+            "open": frame(close),
+            "high": frame(close),
+            "low": frame(close),
+            "close": frame(close),
+            "volume": frame(volume),
+            "amount": frame(amount),
+        }
+    )
+
+
 def _factor_ic(expression: str, panel: MarketPanel) -> pd.Series:
     """表达式 → 该面板上的 IC 序列（与被测编排同一求值路径）。"""
     return rank_ic_series(
@@ -744,7 +947,10 @@ def test_check_pool_increment_rejects_no_pool_increment(tmp_path):
 
 
 def test_check_pool_increment_accepts_positive_increment(tmp_path):
-    """候选给池组合带来正 IR 增量 → 通过；detail 必含 increment: float（E8 保种依赖）。"""
+    """候选给池组合带来正 IR 增量 → 通过；detail 必含 increment: float（E8 保种依赖）。
+
+    判定量为**验证段**增量（fix 2）；训练段增量同号 > 0（两段皆为真实信号载荷）。
+    """
     db = _empty_db(tmp_path)
     panel = _pool_panel(beta_volume=0.02, beta_amount=0.02)
     result = check_pool_increment(
@@ -759,6 +965,7 @@ def test_check_pool_increment_accepts_positive_increment(tmp_path):
     increment = result.detail["increment"]
     assert isinstance(increment, float)
     assert increment > 0.0
+    assert result.detail["increment_train"] > 0.0
     assert result.detail["ir_pool_with_candidate"] == pytest.approx(
         result.detail["ir_pool"] + increment, abs=1e-12
     )
@@ -784,6 +991,108 @@ def test_check_pool_increment_empty_pool_uses_candidate_ir(tmp_path):
     assert rejected.passed is False
     assert rejected.reason == "NO_POOL_INCREMENT"
     assert rejected.detail["increment"] <= 0.0
+
+
+def test_check_pool_increment_judges_on_validation_segment(tmp_path):
+    """fix 2：闸④判据 = 验证段增量（样本外）——样本内强但样本外平坦 → NO_POOL_INCREMENT。
+
+    面板见 ``_oos_increment_panel``：训练段 volume/amount 交替承载信号（候选样本内
+    增量 > 0），验证段只由 volume 承载（amount 无信号）→ 候选只稀释组合 →
+    验证段增量 ≤ 0 → 拒收。detail 同时记录训练/验证两段增量（判定取验证段）。
+    """
+    db = _empty_db(tmp_path)
+    panel = _oos_increment_panel()
+    result = check_pool_increment(
+        _factor_ic("amount", panel),
+        evaluate(parse("amount"), panel),
+        [_pool_row(1, "volume")],
+        panel,
+        db_path=db,
+    )
+    assert result.passed is False
+    assert result.reason == ReasonCode.NO_POOL_INCREMENT
+    assert result.detail["increment_train"] > 0.0  # 样本内强（旧实现在此放行）
+    assert result.detail["increment"] <= 0.0  # 样本外平坦：判定量
+    assert result.detail["increment"] == pytest.approx(
+        result.detail["ir_pool_with_candidate"] - result.detail["ir_pool"], abs=1e-12
+    )
+
+
+def test_check_pool_increment_insufficient_oos_dates_fails_closed(tmp_path):
+    """fix 2：验证段有效日 < ``MIN_OOS_IR_SAMPLES``（IR 不稳）→ 拒收且记原因。"""
+    db = _empty_db(tmp_path)
+    panel = _pool_panel(dates=12)  # 切点 8 → 验证段仅 4 日（其中末日 fwd 为 NaN）
+    result = check_pool_increment(
+        _factor_ic("amount", panel),
+        evaluate(parse("amount"), panel),
+        [_pool_row(1, "volume")],
+        panel,
+        db_path=db,
+    )
+    assert result.passed is False
+    assert result.reason == ReasonCode.NO_POOL_INCREMENT
+    assert result.detail["reason"] == "insufficient_oos_dates"
+    assert result.detail["n_val_days"] < MIN_OOS_IR_SAMPLES
+    assert result.detail["min_oos_days"] == MIN_OOS_IR_SAMPLES
+
+
+def test_check_pool_increment_boundary_matches_gate5_split(tmp_path):
+    """fix 2：闸④验证段边界 = 闸⑤同一切分（``TRAIN_FRACTION``，切点不跨日）。"""
+    db = _empty_db(tmp_path)
+    panel = _pool_panel(beta_volume=0.02, beta_amount=0.02)
+    candidate_values = evaluate(parse("amount"), panel)
+    result = check_pool_increment(
+        _factor_ic("amount", panel), candidate_values, [_pool_row(1, "volume")], panel, db_path=db
+    )
+    fwd = forward_returns(panel.fields["close"])
+    train_dates, val_dates = train_validation_split(candidate_values.index.intersection(fwd.index))
+    assert result.detail["train_fraction"] == TRAIN_FRACTION
+    assert result.detail["train_end"] == train_dates[-1]
+    assert result.detail["val_start"] == val_dates[0]
+    assert result.detail["val_end"] == val_dates[-1]
+    assert 0 < result.detail["n_val_days"] <= len(val_dates)
+    assert result.detail["n_train_days"] > 0
+
+
+def test_check_pool_increment_redundancy_sample_floor_is_five(tmp_path):
+    """fix 6：冗余比对的最少共同日阈值 = ``MIN_REDUNDANCY_SAMPLES``（单一来源 = 5）。
+
+    4 点共同日（2 点相关恒 ±1 → 不可信）→ 该对象跳过（``redundancy_skipped``）；
+    5 点起进入比对（``redundancy_checked``）。
+    """
+    db = _empty_db(tmp_path)
+    panel = _pool_panel(dates=40, beta_volume=0.02)
+    factor_id = add_factor(
+        expression="volume",
+        hypothesis="测试用经济学假设：成交额与未来收益存在关系。",
+        category="价量",
+        status="active",
+        ast_json=serialize(parse("volume")),
+        db_path=db,
+    )
+    dates = [(date(2026, 3, 2) + timedelta(days=offset)).isoformat() for offset in range(5)]
+    candidate_ic = _indexed_ic(np.array([0.01, -0.02, 0.03, -0.01, 0.02]), start=dates[0])
+    for trade_date, value in zip(dates[:4], [0.01, -0.02, 0.03, -0.01], strict=True):
+        record_ic(factor_id, trade_date, value, db_path=db)
+    skipped = check_pool_increment(
+        candidate_ic.iloc[:4],
+        evaluate(parse("amount"), panel),
+        [_pool_row(factor_id, "volume")],
+        panel,
+        db_path=db,
+    )
+    assert skipped.detail["redundancy_skipped"] == [factor_id]
+    assert skipped.detail["redundancy_checked"] == []
+    record_ic(factor_id, dates[4], 0.02, db_path=db)
+    checked = check_pool_increment(
+        candidate_ic,
+        evaluate(parse("amount"), panel),
+        [_pool_row(factor_id, "volume")],
+        panel,
+        db_path=db,
+    )
+    assert checked.detail["redundancy_checked"] == [factor_id]
+    assert checked.detail["redundancy_skipped"] == []
 
 
 # ── 闸⑤ 样本外复核（E6） ───────────────────────────────────────────────────
@@ -815,6 +1124,27 @@ def _oos_frames(*, dates: int = 200, codes: int = 40, mode: str, seed: int = 55)
     return values, fwd
 
 
+def _rank_shift_frames(shifts: list[int], *, codes: int = 40) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """逐日「秩平移」构造（每日 Spearman 精确已知、无抽样噪声）。
+
+    因子值恒为 ``0..codes−1``（逐日相同；本用例直接调用闸⑤，不经闸①）；
+    收益 = ``np.roll(values, −k)`` → 当日 Spearman 恒为 ``1 − 6k(n−k)/(n²−1)``。
+    """
+    values = np.arange(codes, dtype="float64")
+    labels = [
+        (date(2026, 6, 1) + timedelta(days=offset)).isoformat() for offset in range(len(shifts))
+    ]
+    code_labels = [f"q{index:03d}" for index in range(codes)]
+    return (
+        pd.DataFrame(np.tile(values, (len(shifts), 1)), index=labels, columns=code_labels),
+        pd.DataFrame(
+            np.stack([np.roll(values, -shift) for shift in shifts]),
+            index=labels,
+            columns=code_labels,
+        ),
+    )
+
+
 def test_train_validation_split_partitions_dates_without_overlap():
     """切分点不跨日：train/val 无交集、并集 = 全区间、均升序、前 70% 为训练段。"""
     dates = [(date(2026, 4, 1) + timedelta(days=offset)).isoformat() for offset in range(61)]
@@ -828,7 +1158,11 @@ def test_train_validation_split_partitions_dates_without_overlap():
 
 
 def test_check_out_of_sample_passes_when_both_segments_strong():
-    """训练/验证两段皆强且同号 → 通过；detail 记切分区间与两段 ICIR。"""
+    """训练/验证两段皆强且同号 → 通过；detail 记切分区间与两段 ICIR。
+
+    fix 4：训练段末端 ``DEFAULT_IC_HORIZON`` 日已剔除（边界泄漏），``train_days``
+    仍记切分天数、``purged_train_days`` 记被剔除天数。
+    """
     values, fwd = _oos_frames(mode="both_strong")
     result = check_out_of_sample(values, fwd)
     assert result.gate == 5
@@ -836,7 +1170,39 @@ def test_check_out_of_sample_passes_when_both_segments_strong():
     assert result.reason is None
     assert result.detail["icir_val"] > 0.3
     assert result.detail["train_days"] == 140 and result.detail["val_days"] == 60
+    assert result.detail["purged_train_days"] == DEFAULT_IC_HORIZON
     assert result.detail["val_start"] > result.detail["train_end"]
+
+
+def test_check_out_of_sample_purges_boundary_train_dates():
+    """fix 4：训练段末端 horizon 日的远期收益跨入验证段 → 剔除后再算训练统计量。
+
+    构造（秩平移，逐日 Spearman 精确）：训练段 14 日 = 7 日 ρ=−0.501 + 6 日 ρ=+0.460
+    + 末 1 日 ρ=+1.0（边界日）；验证段 6 日 ρ≈−0.47（强负、|ICIR| ≥ 0.3）。
+    **不剔除**时训练均值 = +0.2514/14 > 0 → 与验证段符号相反（错误拒收）；
+    **剔除**后训练均值 = −0.7486/13 < 0 → 同号通过。
+    """
+    shifts = [20] * 7 + [36] * 6 + [0] + [20] * 3 + [24] * 3  # 20 日：train 14 + val 6
+    values, fwd = _rank_shift_frames(shifts)
+    train_dates, val_dates = train_validation_split(values.index)
+    assert (len(train_dates), len(val_dates)) == (14, 6)  # 切点 int(20 × 0.7)
+    leaked = rank_ic_series(values.loc[train_dates], fwd.loc[train_dates])
+    assert float(leaked.mean()) > 0.0  # 含边界日：训练段均值为正（泄漏会翻转符号）
+    result = check_out_of_sample(values, fwd)
+    assert result.detail["sign_train"] == -1  # 剔除边界日后：为负（不再被泄漏翻转）
+    assert result.detail["sign_val"] == -1
+    assert result.detail["mean_train"] < 0.0
+    assert result.detail["purged_train_days"] == DEFAULT_IC_HORIZON
+    assert result.passed is True
+
+
+def test_check_out_of_sample_purge_empties_train_fails_closed():
+    """fix 4：训练段过短（剔除后为空）→ OOS_FAILED（``insufficient_dates``）。"""
+    values, fwd = _rank_shift_frames([0, 20])  # 2 日 → train 1 / val 1；剔除后 train 空
+    result = check_out_of_sample(values, fwd)
+    assert result.passed is False
+    assert result.reason == "OOS_FAILED"
+    assert result.detail["reason"] == "insufficient_dates"
 
 
 def test_check_out_of_sample_rejects_weak_validation_segment():

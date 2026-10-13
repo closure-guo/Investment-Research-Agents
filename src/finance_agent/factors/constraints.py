@@ -14,12 +14,20 @@
 - ``DECAY_WINDOW`` / ``DECAY_NEGATIVE_DAYS`` / ``DECAY_ICIR_FLOOR``：衰减监控——
   最近 ``DECAY_WINDOW`` 个交易日滚动 IC 的均值连续 ``DECAY_NEGATIVE_DAYS`` 日为负
   且每点 ``|mean/std| < DECAY_ICIR_FLOOR`` → 置 ``degraded``；
-- ``PERMUTATION_N``：闸③置换检验次数（同种子可复现）；
+- ``PERMUTATION_N``：闸③置换检验次数（同种子可复现）。**分辨率约束**：p 值下界
+  ``1/(PERMUTATION_N+1)`` 必须 ≤ ``BH_FDR_Q/K``（K = 同批候选数），否则 BH-FDR 在
+  该批次不可能拒收任何候选（``check_significance`` 对此 fail loud）。N=999 →
+  覆盖 K ≤ q·(N+1) = 100；
 - ``TRAIN_FRACTION``：闸⑤样本外——按日期排序的前 70% 交易日为训练段
-  （切点不跨日）；
-- ``DEFAULT_IC_HORIZON``：``forward_returns`` 默认期数（1 = 下一交易日）；
+  （切点不跨日）；闸④的池级增量亦按同一切分的**验证段**判定（样本外）；
+- ``MIN_OOS_IR_SAMPLES``：闸④验证段 IR 所需的最少共同有效交易日（不足 → IR 不稳，
+  fail closed 记 ``insufficient_oos_dates``）；
+- ``DEFAULT_IC_HORIZON``：``forward_returns`` 默认期数（1 = 下一交易日）；闸⑤
+  据此剔除训练段末端 horizon 日（其远期收益跨入验证段 → 边界泄漏）；
 - ``MIN_IC_SAMPLES``：``rank_ic_series`` 逐日有效样本下限（不足 → 该日 NaN，
-  样本太少不可信；E2 逐字 30）。
+  样本太少不可信；E2 逐字 30）；
+- ``MIN_REDUNDANCY_SAMPLES``：闸④冗余比对的最少共同有效交易日（2 点相关恒 ±1 →
+  会假阳性；5 点起才有意义）。
 
 消费方：``eval_engine``（``DEFAULT_IC_HORIZON``/``MIN_IC_SAMPLES``）、
 ``validate``（闸①–⑤）、``library``（``BUCKET_TOP_K``）、``monitor``（衰减三常量）。
@@ -44,11 +52,15 @@ DECAY_WINDOW: int = 60
 DECAY_NEGATIVE_DAYS: int = 20
 # 衰减监控：滚动 |ICIR| 下限
 DECAY_ICIR_FLOOR: float = 0.1
-# 闸③：置换检验次数
-PERMUTATION_N: int = 200
-# 闸⑤：训练段占比（前 70% 交易日）
+# 闸③：置换检验次数（分辨率覆盖 K ≤ BH_FDR_Q·(N+1) = 100）
+PERMUTATION_N: int = 999
+# 闸⑤：训练段占比（前 70% 交易日；闸④的增量判定亦用该切分的验证段）
 TRAIN_FRACTION: float = 0.7
+# 闸④：验证段 IR 所需的最少共同有效交易日（不足 → fail closed）
+MIN_OOS_IR_SAMPLES: int = 10
 # RankIC 默认远期收益期数（1 = 下一交易日）
 DEFAULT_IC_HORIZON: int = 1
 # RankIC 逐日有效样本下限（不足 → 该日 NaN）
 MIN_IC_SAMPLES: int = 30
+# 闸④：冗余比对的最少共同有效交易日（2 点相关恒 ±1）
+MIN_REDUNDANCY_SAMPLES: int = 5
