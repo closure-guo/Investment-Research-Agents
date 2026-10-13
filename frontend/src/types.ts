@@ -530,6 +530,21 @@ export interface TrackRecordAvoidance {
   avoidance_rate: number | null
 }
 
+// 虚拟 vs 仿真双曲线块（add-paper-broker B3：overview.paper；无数据时后端返回 null）
+export interface TrackRecordPaperPoint {
+  date: string
+  virtual_equity: number
+  paper_equity: number
+}
+
+export interface TrackRecordPaper {
+  series: TrackRecordPaperPoint[]
+  // 最新共同日 (paper/virtual − 1) × 100，后端已保留 1 位小数
+  loss_pct: number
+  base_date: string
+  note: string
+}
+
 export interface TrackRecordOverview {
   total: number
   open: number
@@ -552,6 +567,9 @@ export interface TrackRecordOverview {
   // update-track-record-display-clarity：旧口径进行中计数（与 legacy_settled 双计数分列；
   // 可选以容忍旧后端，0 或缺省时前端不渲染该分句）
   legacy_open?: number
+  // add-paper-broker（B3）：虚拟 vs 仿真双曲线块；null = 无 paper 数据（隐藏系列）。
+  // 可选以容忍旧后端（缺省视同 null，不伪造第二条曲线）
+  paper?: TrackRecordPaper | null
 }
 
 // 净值曲线点（add-track-record-stage-b）
