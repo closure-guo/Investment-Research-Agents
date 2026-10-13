@@ -13,8 +13,9 @@ spec 场景（factor-library delta）：「builtin 反转因子在准入评估�
 
 强信号面板（固定种子）：次日收益显式依赖五因子当日横截面 zscore
 （``r_{t+1} = Σ_k β_k z_k,t + σ ε_t``，异质持久波动供 volatility_20 有横截面结构）。
-实测结论（seed 20261013、120×40、β 见脚本、σ=0.03）：momentum_20 被拒于闸②
-（ICIR ≈ 0.23 < 0.3），其余四个 active——「至少一个 active」达标且闸②对 builtin
+实测结论（seed 20261013、120×40、β 见脚本、σ=0.03；以下数值为该合成面板专属，
+非因子的一般性结论）：reversal_5 被拒于闸②（ICIR ≈ 0.16 < 0.3），含 momentum_20
+（ICIR ≈ 0.82）在内的其余四个 active——「至少一个 active」达标且闸②对 builtin
 同样生效。所有断言在固定种子下逐位可复现。
 """
 
@@ -202,8 +203,8 @@ def test_builtin_expression_passes_default_complexity_caps(item: BuiltinFactor) 
 def test_register_builtins_admits_baseline_on_strong_panel(tmp_path) -> None:
     """强信号面板：builtin 走完整五道闸，至少一个 active 且 category/source 逐字。
 
-    实测（固定种子）：反转因子被拒于闸②（ICIR ≈ 0.23，与 LLM 因子同阈值）；
-    其余四个 active。
+    实测（固定种子，数值为该合成面板专属）：reversal_5 被拒于闸②（ICIR ≈ 0.16，
+    与 LLM 因子同阈值）；含 momentum_20（ICIR ≈ 0.82）在内其余四个 active。
     """
     db = str(tmp_path / "factor_library.db")
     results = register_builtins(panel=_strong_panel(), seed=_STRONG_SEED, db_path=db)

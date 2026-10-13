@@ -313,9 +313,9 @@ def test_zero_ic_information_raises() -> None:
 
 
 def test_as_of_absent_from_panel_raises() -> None:
-    """as_of 不在面板日期 → ValueError（含可用范围信息）。"""
+    """as_of 不在面板日期 → ValueError（消息含可用日期范围，供调用方定位）。"""
     panel = _panel(close={"a": 1.0, "b": 2.0}, volume={"a": 10.0, "b": 20.0})
-    with pytest.raises(ValueError, match="as_of"):
+    with pytest.raises(ValueError, match="as_of") as excinfo:
         rank_universe(
             panel=panel,
             as_of="2026-03-05",
@@ -323,6 +323,7 @@ def test_as_of_absent_from_panel_raises() -> None:
             factors=[_factor(1, "close")],
             ic_stats={1: (0.03, 0.5)},
         )
+    assert f"{_DATES[0]}..{_DATES[-1]}" in str(excinfo.value)
 
 
 def test_top_n_truncates_after_sorting() -> None:
@@ -584,7 +585,13 @@ def test_recent_ic_stats_reads_last_window_from_library(tmp_path) -> None:
 
 
 def test_recent_ic_stats_constant_series_icir_zero(tmp_path) -> None:
-    """常量 IC 序列 → std=0 → ICIR 记 0（不产生 inf）。"""
+    """常量 IC 序列 → ICIR 逐位记 0（不产生 inf / 5.9e15 量级假象）。
+
+    反例钉死（评审 finding）：DB 往返后的 ``[0.1, 0.1, 0.1]`` 其
+    ``fsum / count`` 均值与样本值差一个 ulp（0.1000…02 ≠ 0.1），若只按
+    ``std == 0.0`` 判定会漏检并算出 ~5.9e15 的 ICIR；本用例要求
+    ``max == min`` 守卫命中 → ICIR 逐位等于 0.0。
+    """
     db = str(tmp_path / "factor_library.db")
     factor_id = add_factor(
         expression="close",
@@ -594,9 +601,20 @@ def test_recent_ic_stats_constant_series_icir_zero(tmp_path) -> None:
     )
     for day in _iso_days(5):
         record_ic(factor_id, day, 0.02, db_path=db)
+    # 浮点反例：0.1 的三元常量序列（mean 非逐位等于样本值 → 旧守卫漏检）
+    float_factor = add_factor(
+        expression="volume",
+        hypothesis="测试假设文本（≥30 字长度达标）",
+        category="builtin",
+        db_path=db,
+    )
+    for day in _iso_days(3):
+        record_ic(float_factor, day, 0.1, db_path=db)
 
     stats = recent_ic_stats(list_factors(db_path=db), db_path=db)
     assert stats[factor_id] == pytest.approx((0.02, 0.0), abs=1e-15)
+    assert stats[float_factor][1] == 0.0  # 逐位零：非「近似为零的大数」通过
+    assert stats[float_factor] == pytest.approx((0.1, 0.0), abs=1e-15)
 
 
 def test_recent_ic_stats_rejects_invalid_window(tmp_path) -> None:

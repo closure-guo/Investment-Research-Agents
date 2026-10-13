@@ -107,7 +107,7 @@ def recent_ic_stats(
 ) -> dict[int, tuple[float, float]]:
     """R4：逐因子取库内近 ``window`` 个交易日 RankIC → ``(ic_mean, icir)``。
 
-    ICIR = mean/std（``ddof=1``）；有效样本 < 2 或常量序列（std=0）→ ICIR 记 0.0
+    ICIR = mean/std（``ddof=1``）；有效样本 < 2 或常量序列（``max == min``）→ ICIR 记 0.0
     （与 ``validate._ic_stats`` 同口径，不产生 inf）；无记录 → ``(0.0, 0.0)``
     （该因子权重 0，等价于不参与——见 ``factor_weights``）。``window`` 必须为正整数。
     """
@@ -125,12 +125,19 @@ def recent_ic_stats(
 
 
 def _mean_icir(values: list[float]) -> tuple[float, float]:
-    """``(mean, ICIR)`` 手算口径：NaN 样本 < 2 / std=0 → ICIR 记 0.0。"""
+    """``(mean, ICIR)`` 手算口径：有效样本 < 2 / 常量序列（``max == min``）→ ICIR 记 0.0。
+
+    常量守选用 ``min == max``（与 ``validate._ic_stats`` 同口径）而非 ``std == 0.0``：
+    DB 往返后的 0.1 序列其 mean 非逐位等于样本值（``fsum([0.1]*3) / 3`` 与 0.1 差
+    一个 ulp），按 std 判定会漏检并算出 ~5.9e15 量级的假 ICIR。
+    """
     count = len(values)
     if count == 0:
         return 0.0, 0.0
     mean = math.fsum(values) / count
     if count < 2:
+        return mean, 0.0
+    if min(values) == max(values):
         return mean, 0.0
     variance = math.fsum([(value - mean) ** 2 for value in values]) / (count - 1)
     std = math.sqrt(variance)
