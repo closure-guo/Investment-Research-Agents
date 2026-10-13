@@ -1,0 +1,513 @@
+{
+  "title": "选股前向跟踪与消融报告（合成数据样本）",
+  "data_source": "synthetic",
+  "generated_at": "2026-10-13",
+  "as_of": "2026-04-17",
+  "pool_dates": {
+    "count": 30,
+    "first": "2026-01-19",
+    "last": "2026-02-27"
+  },
+  "synthetic_parameters": {
+    "seed": 20261013,
+    "symbols": [
+      "600001",
+      "600002",
+      "600003",
+      "600004",
+      "600005",
+      "600006",
+      "600007",
+      "600008",
+      "600009",
+      "600010",
+      "600011",
+      "600012"
+    ],
+    "trading_days": 75,
+    "pool_dates": 30,
+    "l2_top_n": 10,
+    "arm_top_n": 6,
+    "l3_rule": "合成固定规则：剔除榜末 2 只",
+    "pool_rule": "keep ∩ 连续在榜 ≥ 3 个交易日",
+    "factors": [
+      {
+        "id": 1,
+        "expression": "delta(close,5)",
+        "source": "builtin"
+      },
+      {
+        "id": 2,
+        "expression": "delta(close,10)",
+        "source": "builtin"
+      },
+      {
+        "id": 3,
+        "expression": "ts_rank(close,5)",
+        "source": "proposal"
+      },
+      {
+        "id": 4,
+        "expression": "sub(0, delta(close,3))",
+        "source": "proposal"
+      }
+    ],
+    "sealed_entry_demo": {
+      "applied": true,
+      "pool_date": "2026-01-26",
+      "symbol": "600005",
+      "entry_date": "2026-01-27"
+    }
+  },
+  "forward": {
+    "as_of": "2026-04-17",
+    "pool_dates": [
+      "2026-01-19",
+      "2026-01-20",
+      "2026-01-21",
+      "2026-01-22",
+      "2026-01-23",
+      "2026-01-26",
+      "2026-01-27",
+      "2026-01-28",
+      "2026-01-29",
+      "2026-01-30",
+      "2026-02-02",
+      "2026-02-03",
+      "2026-02-04",
+      "2026-02-05",
+      "2026-02-06",
+      "2026-02-09",
+      "2026-02-10",
+      "2026-02-11",
+      "2026-02-12",
+      "2026-02-13",
+      "2026-02-16",
+      "2026-02-17",
+      "2026-02-18",
+      "2026-02-19",
+      "2026-02-20",
+      "2026-02-23",
+      "2026-02-24",
+      "2026-02-25",
+      "2026-02-26",
+      "2026-02-27"
+    ],
+    "horizons": {
+      "5": {
+        "selected": {
+          "n": 219,
+          "mean": 0.002747252357185057,
+          "win_rate": 0.54337899543379,
+          "days": 30,
+          "excluded_counts": {
+            "LIMIT_UP_UNFILLABLE": 1
+          },
+          "unfilled_counts": {
+            "LIMIT_UP_UNFILLABLE": 1
+          }
+        },
+        "rejected": {
+          "n": 80,
+          "mean": -0.008772239134640421,
+          "win_rate": 0.375,
+          "days": 30,
+          "excluded_counts": {},
+          "unfilled_counts": {}
+        },
+        "diff": {
+          "paired_days": 30,
+          "diff_mean": 0.012139066610166387,
+          "ci95": [
+            0.005770645167647453,
+            0.018317408649701026
+          ],
+          "bootstrap_B": 10000,
+          "seed": 42
+        },
+        "unfilled_counts": {
+          "LIMIT_UP_UNFILLABLE": 1
+        }
+      },
+      "10": {
+        "selected": {
+          "n": 219,
+          "mean": 0.0030249554993177223,
+          "win_rate": 0.5525114155251142,
+          "days": 30,
+          "excluded_counts": {
+            "LIMIT_UP_UNFILLABLE": 1
+          },
+          "unfilled_counts": {
+            "LIMIT_UP_UNFILLABLE": 1
+          }
+        },
+        "rejected": {
+          "n": 80,
+          "mean": -0.011454310819509901,
+          "win_rate": 0.3875,
+          "days": 30,
+          "excluded_counts": {},
+          "unfilled_counts": {}
+        },
+        "diff": {
+          "paired_days": 30,
+          "diff_mean": 0.01564953476563381,
+          "ci95": [
+            0.007364657638482578,
+            0.02417575326150479
+          ],
+          "bootstrap_B": 10000,
+          "seed": 42
+        },
+        "unfilled_counts": {
+          "LIMIT_UP_UNFILLABLE": 1
+        }
+      },
+      "20": {
+        "selected": {
+          "n": 219,
+          "mean": 0.005810937646603733,
+          "win_rate": 0.5388127853881278,
+          "days": 30,
+          "excluded_counts": {
+            "LIMIT_UP_UNFILLABLE": 1
+          },
+          "unfilled_counts": {
+            "LIMIT_UP_UNFILLABLE": 1
+          }
+        },
+        "rejected": {
+          "n": 80,
+          "mean": -0.020175483187182392,
+          "win_rate": 0.325,
+          "days": 30,
+          "excluded_counts": {},
+          "unfilled_counts": {}
+        },
+        "diff": {
+          "paired_days": 30,
+          "diff_mean": 0.02708891107569136,
+          "ci95": [
+            0.012206573639106549,
+            0.041569870188473176
+          ],
+          "bootstrap_B": 10000,
+          "seed": 42
+        },
+        "unfilled_counts": {
+          "LIMIT_UP_UNFILLABLE": 1
+        }
+      }
+    },
+    "methodology": {
+      "entry": "入场 = 池日次一交易日（D+1）开盘经撮合引擎成交（买 1 手；滑点取最保守档，无全市场成交额样本）；一字涨停不成交 → 记原因码剔除，不按涨停价假设成交",
+      "exit": "出场 = 入场日后第 horizon 个交易日收盘；收益 = exit/entry − 1（费用不折算）",
+      "truncation": "时点截断：as_of 给定则只用 ≤ as_of 的面板行；入场/出场超出截断 → 剔除并计原因码",
+      "bootstrap": "配对单元 = 池日；B=10000，seed=42；配对日 < 2 不产 CI"
+    }
+  },
+  "ablation": {
+    "horizon": 20,
+    "as_of": "2026-04-17",
+    "pool_dates": [
+      "2026-01-19",
+      "2026-01-20",
+      "2026-01-21",
+      "2026-01-22",
+      "2026-01-23",
+      "2026-01-26",
+      "2026-01-27",
+      "2026-01-28",
+      "2026-01-29",
+      "2026-01-30",
+      "2026-02-02",
+      "2026-02-03",
+      "2026-02-04",
+      "2026-02-05",
+      "2026-02-06",
+      "2026-02-09",
+      "2026-02-10",
+      "2026-02-11",
+      "2026-02-12",
+      "2026-02-13",
+      "2026-02-16",
+      "2026-02-17",
+      "2026-02-18",
+      "2026-02-19",
+      "2026-02-20",
+      "2026-02-23",
+      "2026-02-24",
+      "2026-02-25",
+      "2026-02-26",
+      "2026-02-27"
+    ],
+    "seed": 42,
+    "variants": {
+      "factor": {
+        "n": 179,
+        "mean": 0.005378557571108189,
+        "win_rate": 0.5307262569832403,
+        "days": 30,
+        "excluded_counts": {
+          "LIMIT_UP_UNFILLABLE": 1
+        },
+        "unfilled_counts": {
+          "LIMIT_UP_UNFILLABLE": 1
+        }
+      },
+      "random": {
+        "n": 180,
+        "mean": 0.00019234469538869647,
+        "win_rate": 0.4777777777777778,
+        "days": 30,
+        "excluded_counts": {},
+        "unfilled_counts": {}
+      },
+      "equal_weight": {
+        "n": 299,
+        "mean": -0.001141950870797237,
+        "win_rate": 0.4816053511705686,
+        "days": 30,
+        "excluded_counts": {
+          "LIMIT_UP_UNFILLABLE": 1
+        },
+        "unfilled_counts": {
+          "LIMIT_UP_UNFILLABLE": 1
+        }
+      }
+    },
+    "diffs": {
+      "factor_minus_random": {
+        "paired_days": 30,
+        "diff_mean": 0.0052138122873914465,
+        "ci95": [
+          -0.003907943709040189,
+          0.014079391498575606
+        ],
+        "bootstrap_B": 10000,
+        "seed": 42,
+        "conclusion": "无显著差异"
+      },
+      "factor_minus_equal_weight": {
+        "paired_days": 30,
+        "diff_mean": 0.006508293648088077,
+        "ci95": [
+          -0.0007117867415626059,
+          0.013676553575726062
+        ],
+        "bootstrap_B": 10000,
+        "seed": 42,
+        "conclusion": "无显著差异"
+      }
+    },
+    "methodology": {
+      "entry": "入场 = 池日次一交易日（D+1）开盘经撮合引擎成交（买 1 手，滑点取最保守档）；一字涨停不成交 → 记原因码剔除",
+      "exit": "出场 = 入场日后第 horizon 个交易日收盘；收益 = exit/entry − 1（费用不折算）",
+      "truncation": "时点截断：as_of 给定则只用 ≤ as_of 的面板行；超出截断 → 剔除并计原因码",
+      "variants": "factor = L2 composite Top-N；random = 同名单固定种子抽样（输入序无关，两次执行逐位一致）；equal_weight = 当期全部 L2 名单标的等权",
+      "bootstrap": "配对单元 = 池日；B=10000，seed=42"
+    }
+  },
+  "l3": {
+    "horizon": 20,
+    "as_of": "2026-04-17",
+    "pool_dates": [
+      "2026-01-19",
+      "2026-01-20",
+      "2026-01-21",
+      "2026-01-22",
+      "2026-01-23",
+      "2026-01-26",
+      "2026-01-27",
+      "2026-01-28",
+      "2026-01-29",
+      "2026-01-30",
+      "2026-02-02",
+      "2026-02-03",
+      "2026-02-04",
+      "2026-02-05",
+      "2026-02-06",
+      "2026-02-09",
+      "2026-02-10",
+      "2026-02-11",
+      "2026-02-12",
+      "2026-02-13",
+      "2026-02-16",
+      "2026-02-17",
+      "2026-02-18",
+      "2026-02-19",
+      "2026-02-20",
+      "2026-02-23",
+      "2026-02-24",
+      "2026-02-25",
+      "2026-02-26",
+      "2026-02-27"
+    ],
+    "blowup_threshold": -0.1,
+    "keep": {
+      "n": 219,
+      "mean": 0.005810937646603733,
+      "win_rate": 0.5388127853881278,
+      "days": 30,
+      "excluded_counts": {
+        "LIMIT_UP_UNFILLABLE": 1
+      },
+      "unfilled_counts": {
+        "LIMIT_UP_UNFILLABLE": 1
+      },
+      "blowup_rate": 0.0502283105022831
+    },
+    "drop": {
+      "n": 60,
+      "mean": -0.019191518907146075,
+      "win_rate": 0.35,
+      "days": 30,
+      "excluded_counts": {},
+      "unfilled_counts": {},
+      "blowup_rate": 0.13333333333333333
+    },
+    "diff": {
+      "paired_days": 30,
+      "diff_mean": 0.02514799232229179,
+      "ci95": [
+        0.00831645201970706,
+        0.041854684800004274
+      ],
+      "bootstrap_B": 10000,
+      "seed": 42,
+      "conclusion": "具有排雷价值"
+    },
+    "conclusion": "具有排雷价值",
+    "methodology": {
+      "entry": "入场 = 池日次一交易日（D+1）开盘经撮合引擎成交（买 1 手，滑点取最保守档）；一字涨停不成交 → 记原因码剔除",
+      "exit": "出场 = 入场日后第 horizon 个交易日收盘；收益 = exit/entry − 1（费用不折算）",
+      "truncation": "时点截断：as_of 给定则只用 ≤ as_of 的面板行；超出截断 → 剔除并计原因码",
+      "groups": "keep 组 = L3 keep ∩ 入池；drop 组 = L3 drop（未入池的 keep 不计入任何组）",
+      "blowup": "踩雷率 = 持有窗口收益 ≤ -10% 的样本占比",
+      "bootstrap": "配对单元 = 池日；B=10000，seed=42",
+      "wording": "仅 CI 整体 > 0（drop 显著低于 keep）方可陈述具有排雷价值"
+    }
+  },
+  "stratify": {
+    "horizon": 20,
+    "as_of": "2026-04-17",
+    "pool_dates": [
+      "2026-01-19",
+      "2026-01-20",
+      "2026-01-21",
+      "2026-01-22",
+      "2026-01-23",
+      "2026-01-26",
+      "2026-01-27",
+      "2026-01-28",
+      "2026-01-29",
+      "2026-01-30",
+      "2026-02-02",
+      "2026-02-03",
+      "2026-02-04",
+      "2026-02-05",
+      "2026-02-06",
+      "2026-02-09",
+      "2026-02-10",
+      "2026-02-11",
+      "2026-02-12",
+      "2026-02-13",
+      "2026-02-16",
+      "2026-02-17",
+      "2026-02-18",
+      "2026-02-19",
+      "2026-02-20",
+      "2026-02-23",
+      "2026-02-24",
+      "2026-02-25",
+      "2026-02-26",
+      "2026-02-27"
+    ],
+    "top_n": 6,
+    "strata": {
+      "builtin": {
+        "n": 179,
+        "mean": 0.007672265226491188,
+        "win_rate": 0.5418994413407822,
+        "days": 30,
+        "excluded_counts": {
+          "LIMIT_UP_UNFILLABLE": 1
+        },
+        "unfilled_counts": {
+          "LIMIT_UP_UNFILLABLE": 1
+        },
+        "factors": [
+          {
+            "id": 1,
+            "expression": "delta(close,5)",
+            "source": "builtin"
+          },
+          {
+            "id": 2,
+            "expression": "delta(close,10)",
+            "source": "builtin"
+          }
+        ]
+      },
+      "llm": {
+        "n": 179,
+        "mean": 0.0010438211636689032,
+        "win_rate": 0.5083798882681564,
+        "days": 30,
+        "excluded_counts": {
+          "LIMIT_UP_UNFILLABLE": 1
+        },
+        "unfilled_counts": {
+          "LIMIT_UP_UNFILLABLE": 1
+        },
+        "factors": [
+          {
+            "id": 3,
+            "expression": "ts_rank(close,5)",
+            "source": "proposal"
+          },
+          {
+            "id": 4,
+            "expression": "sub(0, delta(close,3))",
+            "source": "proposal"
+          }
+        ]
+      }
+    },
+    "diff": {
+      "paired_days": 30,
+      "diff_mean": -0.006746487016719205,
+      "ci95": [
+        -0.015265230484234804,
+        0.0026141385819932967
+      ],
+      "bootstrap_B": 10000,
+      "seed": 42,
+      "conclusion": "无显著差异"
+    },
+    "conclusion": "无显著差异",
+    "methodology": {
+      "strata": "builtin = source=='builtin'；llm = 其余 active 挖掘因子（proposal/llm 等）；两分层同面板、同 L1 通过集、同 top_n，唯一差异 = 因子子集（单变量）",
+      "ic": "两分层复用同一份近 60 日 RankIC 统计（recent_ic_stats，全 active 因子）",
+      "entry": "入场 = 池日次一交易日（D+1）开盘经撮合引擎成交（买 1 手，滑点取最保守档）",
+      "exit": "出场 = 入场日后第 horizon 个交易日收盘；收益 = exit/entry − 1（费用不折算）",
+      "truncation": "时点截断：as_of 给定则只用 ≤ as_of 的面板行；超出截断 → 剔除并计原因码",
+      "bootstrap": "配对单元 = 池日；B=10000，seed=42"
+    }
+  },
+  "checks": {
+    "forward_selected_n": true,
+    "forward_rejected_n": true,
+    "forward_paired_ci": true,
+    "unfilled_recorded": true,
+    "ablation_three_variants": true,
+    "ablation_paired_ci": true,
+    "l3_both_groups": true,
+    "l3_paired_ci": true,
+    "stratify_both_strata": true,
+    "stratify_paired_ci": true,
+    "report_written": true
+  },
+  "verdict": "PASS"
+}
