@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -456,6 +457,23 @@ def _trim_technical_indicators(
     return out, trimmed_any
 
 
+def _with_memory_block(builder: Callable[[dict], str]) -> Callable[[dict], str]:
+    """分析师上下文统一追加决策记忆块（add-decision-memory，spec agent-node-contracts）。
+
+    记忆块为**可选扩展**：state 无 `decision_memory` 键或记忆为空 → 逐字返回原上下文
+    （向后兼容：无记忆时产出与扩展前一致）。四个分析师统一装饰，避免逐节点重复接线。
+    """
+
+    @functools.wraps(builder)
+    def wrapped(state: dict) -> str:
+        from finance_agent.memory import append_memory_block
+
+        return append_memory_block(builder(state), state)
+
+    return wrapped
+
+
+@_with_memory_block
 def _build_technical_context(state: dict) -> str:
     """构建技术面分析的 LLM context。"""
     sections = []
@@ -559,6 +577,7 @@ def _validation_warnings_section(state: dict) -> str | None:
     return f"勾稽校验告警（机生，供交叉核对）:\n{lines}"
 
 
+@_with_memory_block
 def _build_macro_context(state: dict) -> str:
     """构建宏观分析的 LLM context。"""
     sections = []
@@ -647,6 +666,7 @@ def fundamental_analyst(state: dict) -> dict:
     }
 
 
+@_with_memory_block
 def _build_fundamental_context(state: dict) -> str:
     """构建基本面分析的 LLM context。"""
     sections = []
@@ -876,6 +896,7 @@ def sentiment_analyst(state: dict) -> dict:
     return {"analyst_reports": {"sentiment": _keep_valid_over_degraded(state, "sentiment", report)}}
 
 
+@_with_memory_block
 def _build_sentiment_context(state: dict) -> str:
     """构建舆情分析的 LLM context。"""
     sections = []

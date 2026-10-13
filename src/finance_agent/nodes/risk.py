@@ -13,6 +13,7 @@ import math
 from finance_agent.debate_anchors import anchor_stats, check_argument_anchors
 from finance_agent.execution.hysteresis import evaluate_direction_hysteresis
 from finance_agent.langfuse_tracing import update_current_span
+from finance_agent.memory import append_memory_block
 from finance_agent.metrics.decision_price_check import check_decision_prices
 from finance_agent.models import DebateMessage, TradeDecision
 from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint
@@ -694,4 +695,8 @@ def _build_risk_context(state: dict) -> str:
                 history_lines.append(f"{msg.get('role', '?')}: {msg.get('content', '')}")
         sections.append("风险辩论记录:\n" + "\n".join(history_lines))
 
-    return "\n\n".join(sections) if sections else "无可用数据"
+    # 决策记忆（add-decision-memory）：风控辩论层仅注入**已确认**语义条款
+    # （情景记忆只进分析师/Trader；未确认条款结构上不可达）；无条款 → 原上下文
+    return append_memory_block(
+        "\n\n".join(sections) if sections else "无可用数据", state, semantic_only=True
+    )
