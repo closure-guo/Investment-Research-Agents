@@ -1,0 +1,170 @@
+{
+  "probe": "analyst-factor-tool-live",
+  "ticker": "600519",
+  "fixture": {
+    "snapshot_db": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\tmp6mhrjqym\\market_snapshot.db",
+    "library_db": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\tmp6mhrjqym\\factor_library.db",
+    "as_of": "2026-10-13"
+  },
+  "factor_block": "因子库（工具 query_factor_library 输出：active 因子当前取值 / 全市场截面 z-score / 近 60 日 IC；缺失值记 null，直接引用不臆测）:\n{\"symbol\": \"600519\", \"as_of\": \"2026-10-13\", \"factors\": [{\"factor_id\": 1, \"expression\": \"delta(close,20)\", \"category\": \"动量\", \"value\": 60.0, \"zscore\": 1.1094003924504583, \"ic_mean_60d\": 0.12, \"icir_60d\": 4.0}]}",
+  "factor_block_has_value": true,
+  "factor_block_has_zscore": true,
+  "factor_block_has_ic": true,
+  "report": {
+    "summary": "短期均线与MACD/KDJ共振金叉引发反弹，但中期均线空头排列，属于弱势格局下的技术修复。",
+    "key_findings": [
+      "短期均线MA5上穿MA20形成金叉，短线趋势转强",
+      "MACD在零轴下方金叉且红柱放大至7.33，KDJ金叉且J值达103.12进入超买，短线动量共振向上",
+      "中期均线MA20低于MA60呈空头排列，偏离度达-2.18%，中期趋势依然偏弱",
+      "近5日上涨3.18%，RSI回升至51.00中性区域，价格运行于布林带中轨附近"
+    ],
+    "claims": 15,
+    "parse_degraded": false,
+    "markdown_head": "## 技术面分析\n\n### 趋势分析\n当前短期均线出现多头排列迹象，MA5（1268.06）已上穿MA20（1265.38），显示短期价格重心上移。但中期趋势依然偏空，MA20低于MA60（1293.52），且MA20与MA60的偏离度达-2.18%，呈现典型的中期均线空头排列，上方MA60构成重要压力。\n\n### 动量与交叉分析\nMACD指标在零轴下方运行，DIF为-7.20，DEA为-10.87，但MACD柱状图（Histogram）由负转正并放大至7.33，确认零轴下方金叉形成，释放弱势市场下的反弹信号。KDJ指标同步形成金叉，K值（70.67）上穿D值（54.45），J值已达到103.12进入超买区，短期上攻动能较强，但需警惕超买后的钝化或回落风险。\n\n### 波动与相对位置\nRSI14回升至51.00的中性区域，多空力量暂处均衡。布林带方面，上轨为1303.22，中轨为1265."
+  },
+  "citation": {
+    "buckets": {
+      "PASS": 15
+    },
+    "blocked": false,
+    "factor_related_claims": [],
+    "claims_detail": [
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": false,
+        "ground_truth": "1268.06",
+        "field_ref": "technical_indicators.MA.5.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": false,
+        "ground_truth": "1265.3825000000002",
+        "field_ref": "technical_indicators.MA.20.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": false,
+        "ground_truth": "1293.524666666667",
+        "field_ref": "technical_indicators.MA.60.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": true,
+        "ground_truth": "-7.203374734905765",
+        "field_ref": "technical_indicators.MACD.DIF.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": true,
+        "ground_truth": "-10.867869223960707",
+        "field_ref": "technical_indicators.MACD.DEA.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": true,
+        "ground_truth": "7.328988978109884",
+        "field_ref": "technical_indicators.MACD.histogram.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": false,
+        "ground_truth": "50.99557130579936",
+        "field_ref": "technical_indicators.RSI.14.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": false,
+        "ground_truth": "1303.2243692511402",
+        "field_ref": "technical_indicators.BOLL.upper.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": false,
+        "ground_truth": "1265.3825000000002",
+        "field_ref": "technical_indicators.BOLL.middle.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": false,
+        "ground_truth": "1227.5406307488602",
+        "field_ref": "technical_indicators.BOLL.lower.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": false,
+        "ground_truth": "70.67425573381149",
+        "field_ref": "technical_indicators.KDJ.K.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": false,
+        "ground_truth": "54.45345724937569",
+        "field_ref": "technical_indicators.KDJ.D.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": true,
+        "ground_truth": "103.1158527026831",
+        "field_ref": "technical_indicators.KDJ.J.-1",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": true,
+        "ground_truth": "0.0318",
+        "field_ref": "derived_series.chg_5d",
+        "claim_type": "numerical",
+        "statement": ""
+      },
+      {
+        "status": "PASS",
+        "bucket": null,
+        "coverage_gap": true,
+        "ground_truth": "-2.18",
+        "field_ref": "derived_series.ma_spread_20_60_pct",
+        "claim_type": "numerical",
+        "statement": ""
+      }
+    ]
+  },
+  "verdict": "ok"
+}
