@@ -1,5 +1,5 @@
-"""screening 库：L2 名单快照、L3 triage 决策、日批批次与精选池
-（add-screening-candidate-llm T1/T2 + add-screening-pipeline T1）。
+"""screening 库：L2 名单快照、L3 triage 决策、日批批次与精选池、移除审计
+（add-screening-candidate-llm T1/T2 + add-screening-pipeline T1 + 时效性校验接线）。
 
 表（C5 / pipeline Global Constraints，逐字）：
 
@@ -14,7 +14,10 @@
   失败批次与当日池零行的不变量由 ``record_screening_batch`` 单事务保证）；
 - ``selection_pool(trade_date, symbol, composite_score, rank, consecutive_days,
   l3_verdict, l3_reason, factor_contribs_json, PK(trade_date, symbol))``：
-  精选池（keep ∩ 连续在榜门槛达标），同日写入为**原子替换**。
+  精选池（keep ∩ 连续在榜门槛达标），同日写入为**原子替换**；
+- ``screening_removals(trade_date, symbol, reason, detail, removed_at,
+  PK(trade_date, symbol, reason))``：分析前时效性校验的移除审计行（``trade_date``
+  = 校验基准日 = 快照日；同标的多因多行，幂等覆盖）。
 
 稳定性口径（C4）：``consecutive_days_in_top`` 从 ``as_of`` 起向前沿**表内交易日
 轴**（``l2_candidates`` 的 DISTINCT ``trade_date``）逐日查该 symbol 是否在榜，
@@ -89,6 +92,14 @@ CREATE TABLE IF NOT EXISTS selection_pool (
 );
 CREATE INDEX IF NOT EXISTS idx_selection_pool_date_rank
   ON selection_pool (trade_date, rank);
+CREATE TABLE IF NOT EXISTS screening_removals (
+  trade_date TEXT NOT NULL,
+  symbol     TEXT NOT NULL,
+  reason     TEXT NOT NULL,
+  detail     TEXT NOT NULL,
+  removed_at TEXT NOT NULL,
+  PRIMARY KEY (trade_date, symbol, reason)
+);
 """
 
 # 批次状态（Global Constraints 逐字）：ok / failed
@@ -542,10 +553,16 @@ def latest_successful_batch(db_path: str | Path | None = None) -> dict[str, Any]
 
 
 def reset_screening_db(db_path: str | Path | None = None) -> dict[str, int]:
-    """清空 screening 四表（E2E ``screening_reset`` 造数用）；返回各表删除行数。"""
+    """清空 screening 五表（E2E ``screening_reset`` 造数用）；返回各表删除行数。"""
     init_screening_db(db_path)
     conn = _connect(db_path)
-    tables = ("l2_candidates", "triage_decisions", "screening_batches", "selection_pool")
+    tables = (
+        "l2_candidates",
+        "triage_decisions",
+        "screening_batches",
+        "selection_pool",
+        "screening_removals",
+    )
     removed: dict[str, int] = {}
     try:
         for table in tables:
@@ -553,5 +570,76 @@ def reset_screening_db(db_path: str | Path | None = None) -> dict[str, int]:
             removed[table] = int(cursor.rowcount)
         conn.commit()
         return removed
+    finally:
+        conn.close()
+
+
+# ── 分析前移除审计（时效性校验，spec「信号时效性校验」） ────────────────────
+
+
+def record_screening_removals(
+    trade_date: str,
+    removals: Sequence[dict[str, Any]],
+    db_path: str | Path | None = None,
+) -> int:
+    """写入某基准日（= 校验所用快照日）的分析前移除审计行；返回写入行数。
+
+    入参 = ``pipeline.check_signal_freshness`` 的 findings（``{symbol, reason,
+    detail}``）；同一标的可多因多行（主键 ``(trade_date, symbol, reason)``），
+    同键幂等覆盖（``removed_at`` 为本次写入时刻）。字段 fail loud（空 symbol/
+    空 reason/非字符串 detail → ``ValueError``，整批先校验后写）；空批 → 0。
+    """
+    normalized = _parse_trade_date(trade_date)
+    if not removals:
+        return 0
+    payload: list[tuple[str, str, str, str, str]] = []
+    now = datetime.now().isoformat()
+    for removal in removals:
+        if not isinstance(removal, dict):
+            raise ValueError(f"移除行必须是 dict: {removal!r}")
+        symbol = str(removal.get("symbol") or "").strip()
+        if not symbol:
+            raise ValueError(f"移除行 symbol 不能为空: {removal!r}")
+        reason = removal.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"移除行 reason 不能为空: {removal!r}（symbol={symbol}）")
+        detail = removal.get("detail")
+        if not isinstance(detail, str):
+            raise ValueError(f"移除行 detail 必须是字符串: {removal!r}（symbol={symbol}）")
+        payload.append((normalized, symbol, reason, detail, now))
+    init_screening_db(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.executemany(
+            "INSERT INTO screening_removals (trade_date, symbol, reason, detail, removed_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(trade_date, symbol, reason) DO UPDATE SET "
+            "detail = excluded.detail, removed_at = excluded.removed_at",
+            payload,
+        )
+        conn.commit()
+        return len(payload)
+    finally:
+        conn.close()
+
+
+def list_screening_removals(
+    *, trade_date: str | None = None, db_path: str | Path | None = None
+) -> list[dict[str, Any]]:
+    """移除审计行（按 trade_date、symbol、reason 升序）；``trade_date`` 可选过滤。
+
+    库不存在/为空 → 空列表（读写同库，E2E reset 后读取恒可重入）。
+    """
+    init_screening_db(db_path)
+    sql = "SELECT trade_date, symbol, reason, detail, removed_at FROM screening_removals"
+    params: list[Any] = []
+    if trade_date is not None:
+        sql += " WHERE trade_date = ?"
+        params.append(_parse_trade_date(trade_date))
+    sql += " ORDER BY trade_date, symbol, reason"
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
     finally:
         conn.close()

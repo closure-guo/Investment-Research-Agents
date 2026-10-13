@@ -93,20 +93,18 @@ def _canonical_date(value: str, field_name: str) -> str:
     return value
 
 
-def _read_trade_calendar(snapshot_db_path: str | Path | None) -> list[str]:
-    """快照 meta ``trade_calendar``（JSON 数组）→ 规范交易日升序列表。
+def _parse_calendar_entries(raw: str | None) -> list[str]:
+    """``trade_calendar`` 原始值 → 规范 ``YYYY-MM-DD`` 升序去重列表。
 
-    缺失/不可解析/非数组/无有效日期项 → ``ValueError``（fail loud：L1 上市天数与
-    事件时效判定都依赖交易日轴，缺历不猜）。数组内不可解析项跳过（与 filters
-    日历消费同纪律）。
+    缺失/空/坏 JSON/非数组 → ``[]``；数组内不可解析项跳过（与 filters 日历消费
+    同纪律）。严格版（日批）与容错版（时效性校验）共用本解析。
     """
-    raw = get_all_meta(snapshot_db_path).get("trade_calendar")
     days: list[str] = []
     if raw:
         try:
             decoded = json.loads(raw)
-        except ValueError as exc:
-            raise ValueError(f"快照 meta trade_calendar 不可解析: {exc}") from exc
+        except ValueError:
+            return []
         if isinstance(decoded, list):
             for entry in decoded:
                 text = str(entry)
@@ -116,11 +114,31 @@ def _read_trade_calendar(snapshot_db_path: str | Path | None) -> list[str]:
                     continue
                 if parsed.isoformat() == text:
                     days.append(text)
+    return sorted(set(days))
+
+
+def _read_trade_calendar(snapshot_db_path: str | Path | None) -> list[str]:
+    """快照 meta ``trade_calendar``（JSON 数组）→ 规范交易日升序列表（严格版）。
+
+    缺失/不可解析/非数组/无有效日期项 → ``ValueError``（fail loud：L1 上市天数与
+    事件时效判定都依赖交易日轴，缺历不猜）。
+    """
+    days = _parse_calendar_entries(get_all_meta(snapshot_db_path).get("trade_calendar"))
     if not days:
         raise ValueError(
             "快照 meta 缺 trade_calendar（交易日历）：拒绝在没有交易日轴的情况下跑日批"
         )
-    return sorted(set(days))
+    return days
+
+
+def read_snapshot_calendar(snapshot_db_path: str | Path | None = None) -> list[str] | None:
+    """快照 meta ``trade_calendar`` 的**容错**读取（分析前时效性校验用）。
+
+    与日批严格版（``_read_trade_calendar``）的区别：缺失/不可解析/无有效项 →
+    ``None``——调用方的时效性校验在无日历时把「新事件」下界退化为当日（保守下限
+    不猜，见 ``_recent_event_bound``），不因缺历拒绝整次分析。
+    """
+    return _parse_calendar_entries(get_all_meta(snapshot_db_path).get("trade_calendar")) or None
 
 
 def _build_default_panel(

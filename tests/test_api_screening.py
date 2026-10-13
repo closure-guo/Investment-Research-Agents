@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import time
 
 import pytest
@@ -24,14 +25,18 @@ from fastapi.testclient import TestClient
 
 from finance_agent import session_store
 from finance_agent.api import app
+from finance_agent.data.snapshot import set_meta_many, write_snapshot_rows
 from finance_agent.screening.queue import AnalyzeQueue
 from finance_agent.screening.store import (
+    list_screening_removals,
     list_selection_pool,
     record_screening_batch,
 )
 
 _AS_OF = "2026-10-13"
 _FAILED_DATE = "2026-10-14"
+# as_of 的前一交易日（NEW_EVENT 下界；见 pipeline._recent_event_bound）
+_PRIOR_TRADE_DATE = "2026-10-12"
 
 
 @pytest.fixture(autouse=True)
@@ -475,3 +480,120 @@ def test_seed_screening_queue_and_reset(testing_client, pool_seed) -> None:
     assert list_selection_pool(_AS_OF) == []
     body = TestClient(app).get("/api/screening/pool").json()
     assert body["batch_date"] is None and body["pool"] == []
+
+
+# ── 分析前时效性校验接线（spec「信号时效性校验」：T2 校验接入 analyze 端点） ──
+
+
+def _install_snapshot(
+    monkeypatch,
+    tmp_path,
+    *,
+    as_of: str = _AS_OF,
+    suspended: frozenset[str] = frozenset(),
+    limit_locked: frozenset[str] = frozenset(),
+) -> None:
+    """造快照库（SNAPSHOT_DB_PATH → tmp）：池内 5 只符号逐行状态位；日历含前一交易日。"""
+    path = tmp_path / "market_snapshot.db"
+    monkeypatch.setenv("SNAPSHOT_DB_PATH", str(path))
+    rows = [
+        {
+            "code": f"60000{index}",
+            "name": f"合成{index}",
+            "is_suspended": 1 if f"60000{index}" in suspended else 0,
+            "limit_up_sealed": 1 if f"60000{index}" in limit_locked else 0,
+            "limit_down_sealed": 0,
+        }
+        for index in range(1, 6)
+    ]
+    write_snapshot_rows(as_of, rows, db_path=path)
+    set_meta_many(
+        {"last_success_date": as_of, "trade_calendar": json.dumps([_PRIOR_TRADE_DATE, as_of])},
+        db_path=path,
+    )
+
+
+def test_analyze_endpoint_removes_suspended_symbol_and_starts_others(
+    pool_seed, monkeypatch, tmp_path
+) -> None:
+    """spec 场景「盘前停牌移除」：Z 停牌 → removed(SUSPENDED) 且不建会话，其余照常入队。"""
+    _install_snapshot(monkeypatch, tmp_path, suspended=frozenset({"600001"}))
+    monkeypatch.setattr("finance_agent.api.fetch_key_events", lambda *args, **kwargs: [])
+    started = _stub_pipeline_start(monkeypatch)
+    _stub_sessions(monkeypatch)
+
+    body = TestClient(app).post("/api/screening/analyze", json={}).json()
+
+    assert body["removed"] == [{"symbol": "600001", "reason": "SUSPENDED", "detail": "停牌"}]
+    assert [item["symbol"] for item in body["started"]] == ["600002", "600003"]
+    assert [item["symbol"] for item in body["queued"]] == ["600004", "600005"]
+    assert len(started) == 2  # 完好标的的并发上限语义不受校验影响
+    # 被移除者不建会话（不产生孤儿 session）
+    assert all("600001" not in item["display_name"] for item in session_store.list_sessions())
+    # 移除原因审计行落库：基准日 = 快照日
+    audit = list_screening_removals(db_path=pool_seed)
+    assert [(row["trade_date"], row["symbol"], row["reason"], row["detail"]) for row in audit] == [
+        (_AS_OF, "600001", "SUSPENDED", "停牌")
+    ]
+    assert audit[0]["removed_at"]  # 审计时间戳不空
+
+
+def test_analyze_endpoint_flags_limit_locked_and_new_event(
+    pool_seed, monkeypatch, tmp_path
+) -> None:
+    """LIMIT_LOCKED / NEW_EVENT 经端点透传（事件装配接线；桩零网络）。"""
+    _install_snapshot(monkeypatch, tmp_path, limit_locked=frozenset({"600002"}))
+    monkeypatch.setattr(
+        "finance_agent.api.fetch_key_events",
+        lambda symbol, *args, **kwargs: (
+            [{"date": _AS_OF, "title": "重大合同"}] if symbol == "600003" else []
+        ),
+    )
+    _stub_pipeline_start(monkeypatch)
+    _stub_sessions(monkeypatch)
+
+    body = TestClient(app).post("/api/screening/analyze", json={}).json()
+
+    assert body["removed"] == [
+        {"symbol": "600002", "reason": "LIMIT_LOCKED", "detail": "一字涨停封板"},
+        {"symbol": "600003", "reason": "NEW_EVENT", "detail": "新事件 2026-10-13：重大合同"},
+    ]
+    assert [item["symbol"] for item in body["started"]] == ["600001", "600004"]
+    assert [item["symbol"] for item in body["queued"]] == ["600005"]
+    audit = list_screening_removals(db_path=pool_seed)
+    assert [(row["symbol"], row["reason"]) for row in audit] == [
+        ("600002", "LIMIT_LOCKED"),
+        ("600003", "NEW_EVENT"),
+    ]
+
+
+def test_analyze_endpoint_skips_freshness_without_snapshot_state(
+    pool_seed, monkeypatch, tmp_path
+) -> None:
+    """无快照数据（无「最新可得状态」可核对）→ 不臆造移除、不触达事件装配。"""
+    monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "never-written.db"))
+
+    def _must_not_fetch(*args, **kwargs):
+        raise AssertionError("无快照状态时不得触达事件装配")
+
+    monkeypatch.setattr("finance_agent.api.fetch_key_events", _must_not_fetch)
+    _stub_pipeline_start(monkeypatch)
+    _stub_sessions(monkeypatch)
+
+    body = TestClient(app).post("/api/screening/analyze", json={}).json()
+
+    assert body["removed"] == []
+    assert len(body["started"] + body["queued"]) == 5
+    assert list_screening_removals(db_path=pool_seed) == []
+
+
+def test_analyze_endpoint_reads_snapshot_through_env_path(pool_seed, monkeypatch, tmp_path) -> None:
+    """库路径调用期读 SNAPSHOT_DB_PATH（导入期冻结会让 E2E/env 注入失效）。"""
+    _install_snapshot(monkeypatch, tmp_path, suspended=frozenset({"600005"}))
+    monkeypatch.setattr("finance_agent.api.fetch_key_events", lambda *args, **kwargs: [])
+    _stub_pipeline_start(monkeypatch)
+    _stub_sessions(monkeypatch)
+
+    body = TestClient(app).post("/api/screening/analyze", json={}).json()
+
+    assert [item["symbol"] for item in body["removed"]] == ["600005"]

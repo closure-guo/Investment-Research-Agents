@@ -26,10 +26,13 @@ from finance_agent.screening.store import (
     eligible_for_selection,
     init_screening_db,
     list_l2_candidates,
+    list_screening_removals,
     list_triage_decisions,
     record_l2_candidates,
+    record_screening_removals,
     record_triage_decision,
     record_triage_decisions,
+    reset_screening_db,
 )
 
 # 交易日序列（含跨周末：10-09 周五 → 10-12 周一，10-10/11 周末无行）
@@ -265,3 +268,80 @@ def test_record_triage_decisions_validates_all_before_write(tmp_path) -> None:
     assert list_triage_decisions(db_path=db) == []  # 合法行也未被写入
     with pytest.raises(ValueError, match="规范"):
         record_triage_decisions("2026-10-5", [_decision("600519")], db_path=db)
+
+
+# ── 分析前移除审计（add-screening-pipeline 时效性校验接线） ────────────────
+
+
+def test_record_screening_removals_upserts_and_lists(tmp_path) -> None:
+    """移除审计行：同 (trade_date, symbol, reason) 幂等覆盖；同标的多因多行。"""
+    db = tmp_path / "screening.db"
+    assert (
+        record_screening_removals(
+            _D5,
+            [
+                {"symbol": "000001", "reason": "SUSPENDED", "detail": "停牌"},
+                {"symbol": "000001", "reason": "LIMIT_LOCKED", "detail": "一字跌停封板"},
+                {"symbol": "600519", "reason": "NEW_EVENT", "detail": "新事件 2026-10-12：公告"},
+            ],
+            db_path=db,
+        )
+        == 3
+    )
+
+    rows = list_screening_removals(db_path=db)
+    assert [(row["symbol"], row["reason"]) for row in rows] == [
+        ("000001", "LIMIT_LOCKED"),
+        ("000001", "SUSPENDED"),
+        ("600519", "NEW_EVENT"),
+    ]
+    assert rows[1]["detail"] == "停牌" and rows[1]["trade_date"] == _D5
+    assert rows[1]["removed_at"]  # 审计时间戳不空
+
+    # 幂等：同日同因重复写入覆盖 detail，不翻倍
+    assert (
+        record_screening_removals(
+            _D5, [{"symbol": "000001", "reason": "SUSPENDED", "detail": "停牌（重检）"}], db_path=db
+        )
+        == 1
+    )
+    rows = list_screening_removals(trade_date=_D5, db_path=db)
+    assert len(rows) == 3
+    assert (
+        next(row for row in rows if row["symbol"] == "000001" and row["reason"] == "SUSPENDED")[
+            "detail"
+        ]
+        == "停牌（重检）"
+    )
+    assert list_screening_removals(trade_date=_D1, db_path=db) == []  # 按日过滤
+
+
+def test_record_screening_removals_validates_before_write(tmp_path) -> None:
+    """坏值 fail loud（不落坏行）：空 symbol / 空 reason / 非规范交易日 / 非 dict。"""
+    db = str(tmp_path / "screening.db")
+    for bad in (
+        [{"symbol": " ", "reason": "SUSPENDED", "detail": "x"}],
+        [{"symbol": "000001", "reason": "", "detail": "x"}],
+        [{"symbol": "000001", "reason": "SUSPENDED", "detail": 1.5}],
+        [{"symbol": "000001", "reason": "SUSPENDED"}],
+    ):
+        with pytest.raises(ValueError):
+            record_screening_removals(_D5, bad, db_path=db)
+    with pytest.raises(ValueError, match="规范"):
+        record_screening_removals(
+            "2026-10-5", [{"symbol": "000001", "reason": "SUSPENDED"}], db_path=db
+        )
+    assert list_screening_removals(db_path=db) == []
+
+
+def test_reset_screening_db_clears_removals(tmp_path) -> None:
+    """E2E reset 覆盖面：移除审计表一并清空。"""
+    db = tmp_path / "screening.db"
+    record_screening_removals(
+        _D5, [{"symbol": "000001", "reason": "SUSPENDED", "detail": "停牌"}], db_path=db
+    )
+
+    removed = reset_screening_db(db_path=db)
+
+    assert removed["screening_removals"] == 1
+    assert list_screening_removals(db_path=db) == []

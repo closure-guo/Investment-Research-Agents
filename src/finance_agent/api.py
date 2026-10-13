@@ -37,17 +37,25 @@ from finance_agent.data.monitoring import get_monitor  # noqa: E402
 from finance_agent.data.snapshot import (  # noqa: E402
     compute_snapshot_status,
     get_all_meta,
+    latest_snapshot_date,
+    read_universe,
 )
+from finance_agent.events.pipeline import fetch_key_events  # noqa: E402
 from finance_agent.graph import build_5layer_graph  # noqa: E402
 from finance_agent.langfuse_tracing import get_langfuse  # noqa: E402
 from finance_agent.llm import LLMConfig  # noqa: E402
 from finance_agent.llm.probe_cache import get_probe_cache  # noqa: E402
 from finance_agent.pipeline_runner import PipelineRunner, build_layer_tree  # noqa: E402
-from finance_agent.screening.pipeline import latest_successful_pool  # noqa: E402
+from finance_agent.screening.pipeline import (  # noqa: E402
+    check_signal_freshness,
+    latest_successful_pool,
+    read_snapshot_calendar,
+)
 from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
 from finance_agent.screening.store import (  # noqa: E402
     latest_screening_batch,
     latest_successful_batch,
+    record_screening_removals,
 )
 from finance_agent.session_store import (  # noqa: E402
     append_chat,
@@ -733,7 +741,7 @@ if TESTING:
         快照三表）造行情快照告警态（add-market-snapshot D6），同样无需 chat_history。
         顶层可选 screening（dict：``batch`` 造批次行（含 error 造失败横幅）、``pool``
         造精选池行、``queue`` 造批量分析队列徽标态）与 screening_reset（bool：清
-        screening 四表）造选股页确定性状态（add-screening-pipeline S6）；库路径于
+        screening 五表）造选股页确定性状态（add-screening-pipeline S6）；库路径于
         调用期读 SCREENING_DB_PATH（导入期冻结会让 E2E 注入失效）。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
@@ -860,7 +868,7 @@ if TESTING:
                 "last_attempt_at", datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
             )
             set_meta_many(snapshot_meta)
-        # add-screening-pipeline S6：选股页造数——可选先 reset（清四表）再写批次/池/
+        # add-screening-pipeline S6：选股页造数——可选先 reset（清五表）再写批次/池/
         # 队列。库路径调用期读 SCREENING_DB_PATH（store 各入口 env 口径）；队列为
         # 进程内单例（徽标态造数，不启动轮询/补位）。
         if req.get("screening_reset"):
@@ -3010,17 +3018,68 @@ async def screening_status() -> dict[str, Any]:
         return dict(_SCREENING_STATUS_DEGRADED)
 
 
+def _screening_freshness_removals(
+    pool_rows: list[dict[str, Any]], batch_date: str | None
+) -> list[dict[str, Any]]:
+    """深度分析前的信号时效性校验（spec「信号时效性校验」；T2 校验接入 analyze）。
+
+    以**最新可得快照**（``latest_snapshot_date``）为基准日，对池内符号重校验停牌/
+    一字涨跌停/新事件（``check_signal_freshness``）；不通过者返回 findings
+    （``[{symbol, reason, detail}]``）并落 ``screening_removals`` 审计行（基准日 =
+    快照日；审计写失败记 warning 不阻断返回）。
+
+    数据不可得 → 返回 ``[]``（记日志，不臆造移除）：① 快照库无行（无「最新可得
+    状态」可核对）；② 快照最新日期早于池批次日（无更新状态）。读快照失败同样
+    降级——本校验是重检（不是主门禁），可用性故障不得把批量分析端点打成 500、
+    也不得以空 findings 冒充「已校验通过」（故一律记 warning 日志）。
+    """
+    snapshot_date = latest_snapshot_date()
+    if snapshot_date is None:
+        _logger.info("选股时效性校验跳过：快照库无数据（无最新可得状态可核对）")
+        return []
+    if batch_date is not None and snapshot_date < batch_date:
+        _logger.info(
+            "选股时效性校验跳过：快照最新日期 %s 早于池批次 %s（无更新状态可核对）",
+            snapshot_date,
+            batch_date,
+        )
+        return []
+    try:
+        rows = read_universe(snapshot_date)
+        calendar = read_snapshot_calendar()
+    except Exception:  # noqa: BLE001 -- 校验输入不可得：降级跳过，不让端点 500
+        _logger.exception("选股时效性校验读取快照失败（%s），本次跳过校验", snapshot_date)
+        return []
+    symbols = [str(row.get("symbol") or "").strip() for row in pool_rows]
+    symbols = [symbol for symbol in symbols if symbol]
+    findings = check_signal_freshness(
+        symbols,
+        snapshot_rows={str(row.get("code") or "").strip(): row for row in rows},
+        events_by_symbol={symbol: fetch_key_events(symbol) for symbol in symbols},
+        as_of=snapshot_date,
+        calendar=calendar,
+    )
+    if findings:
+        try:
+            record_screening_removals(snapshot_date, findings)
+        except Exception:  # noqa: BLE001 -- 审计写失败不回滚已判定的移除（记日志）
+            _logger.exception("选股移除审计写库失败（%s）", snapshot_date)
+    return findings
+
+
 @app.post("/api/screening/analyze")
 async def screening_analyze() -> Any:
-    """精选池批量深度分析（S3/S4）：逐标的独立 session + 复用管线，队列并发上限 2。
+    """精选池批量深度分析（S3/S4 + 时效性校验）：独立 session + 复用管线，并发上限 2。
 
+    - 入队前**以最新可得快照状态重校验**（spec「信号时效性校验」）：停牌/一字
+      涨跌停/新事件标的不入队（``removed`` 返回 + 审计落库），其余标的照常；
     - 每个标的经 ``create_session`` + ``append_chat`` + ``set_pipeline_anchor`` +
       ``update_session_for_clarify``（与 ``/api/analyze`` 新会话路径同款）建独立
       session 并入队；**补位者才真正启动**（``PipelineRunner.start`` 由队列的
       starter 在空位时调用——并发上限约束真实在跑的分析数，事件仍经既有
       journal/subscribe SSE 通道，本端点不改流式纪律）；
     - 池空 → 409 显式错误（不静默返回空队列）；
-    - 返回队列当前态划分：``{started: [running...], queued: [queued...]}``；
+    - 返回 ``{started: [running...], queued: [queued...], removed: [校验移除...]}``；
       终态由队列按 session status 轮询驱动补位（并发始终 ≤ 上限）。
     """
     successful = await asyncio.to_thread(latest_successful_pool)
@@ -3033,9 +3092,14 @@ async def screening_analyze() -> Any:
                 "message": "精选池为空：无可分析的标的（先跑选股日批）",
             },
         )
+    batch_date = successful["batch"]["trade_date"] if successful else None
+    removals = await asyncio.to_thread(_screening_freshness_removals, pool, batch_date)
+    removed_symbols = {str(item["symbol"]) for item in removals}
     queue = _get_analyze_queue()
     for row in pool:
         symbol = str(row["symbol"])
+        if symbol in removed_symbols:
+            continue  # 时效性校验不通过：本次不移入深度分析（原因见 removed/审计行）
         display_name = f"{symbol} 选股分析"
         session_id = await asyncio.to_thread(
             create_session,
@@ -3068,6 +3132,7 @@ async def screening_analyze() -> Any:
     return {
         "started": [item for item in snapshot if item["state"] == "running"],
         "queued": [item for item in snapshot if item["state"] == "queued"],
+        "removed": removals,
     }
 
 
