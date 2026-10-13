@@ -27,8 +27,15 @@ from finance_agent.memory.episodic import (
 )
 from finance_agent.memory.semantic import (
     CLAUSE_STATUSES,
+    confirm_clause,
+    extract_candidate_clauses,
+    init_clauses,
+    list_clauses,
     list_confirmed_clauses,
     list_pending_clauses,
+    reject_clause,
+    run_monthly_extraction,
+    store_candidate_clauses,
 )
 
 __all__ = [
@@ -38,18 +45,25 @@ __all__ = [
     "PURPOSE_TAG_DECISION_MEMORY",
     "RATIONALE_MAX_CHARS",
     "SETTLED_STATUSES",
-    "apply_memory_budget",
     "append_memory_block",
+    "apply_memory_budget",
     "build_memory_block",
     "code_of",
+    "confirm_clause",
+    "extract_candidate_clauses",
     "industry_codes_from_state",
+    "init_clauses",
+    "list_clauses",
     "list_confirmed_clauses",
     "list_pending_clauses",
     "memory_block_for_state",
     "memory_recall_entry",
+    "reject_clause",
     "render_memory_state",
     "retrieve_episodic",
+    "run_monthly_extraction",
     "semantic_block_for_state",
     "settled_records",
+    "store_candidate_clauses",
     "symbol_for",
 ]
