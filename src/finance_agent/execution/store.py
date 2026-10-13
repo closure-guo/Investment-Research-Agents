@@ -1,4 +1,4 @@
-"""交易执行层落库（add-signal-portfolio-risk-gate G2）：signals + hysteresis_events。
+"""交易执行层落库（add-signal-portfolio-risk-gate G2 + add-paper-broker B1/B2）。
 
 连接纪律与 ``data/snapshot.py`` / ``outcome/store.py`` 同款：WAL + busy_timeout 短连接，
 DB 路径调用期读取 env ``EXECUTION_DB_PATH``（默认 ``data/execution.db``），测试经
@@ -10,19 +10,26 @@ DB 路径调用期读取 env ``EXECUTION_DB_PATH``（默认 ``data/execution.db`
   delta spec decision-hysteresis「滞回判定记录落库」）；``UNIQUE(signal_id,
   detail_json)`` + ``ON CONFLICT DO NOTHING``（评审修正）→ 判定内容不变的重跑
   幂等，不产生重复审计行。
+- ``orders``/``positions``/``cash``（add-paper-broker B1）：paper 账户落库；
+  复合读写（订单+持仓+资金）经 ``execution_conn`` 同事务提交；
+- ``paper_equity``（B2）：每日结算净值曲线（trade_date PK，幂等 upsert）。
 
-模块级只依赖 stdlib：``Signal`` 类型经 TYPE_CHECKING / 函数内 import 引入，
-避免 ``signals.py``（转换入口）与 ``store.py``（落库）的模块级循环依赖。
+模块级只依赖 stdlib：``Signal``/``OrderRecord`` 类型经 TYPE_CHECKING / 函数内
+import 引入，避免 ``signals.py``（转换入口）/ ``brokers/``（执行末端）与
+``store.py``（落库）的模块级循环依赖。
 """
 
 from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from finance_agent.execution.brokers.base import OrderRecord
     from finance_agent.execution.signals import Signal
 
 # 两表 DDL 集中定义（幂等 CREATE IF NOT EXISTS）。
@@ -56,6 +63,42 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_hysteresis_events_signal_detail
   ON hysteresis_events (signal_id, detail_json);
 CREATE INDEX IF NOT EXISTS idx_hysteresis_events_signal
   ON hysteresis_events (signal_id);
+
+-- add-paper-broker（B1/B2）：paper 账户三表 + 每日结算净值表（与 signals 同库
+-- 不同表）。列名与计划 B1/B2 逐字一致。
+CREATE TABLE IF NOT EXISTS orders (
+  order_id    TEXT PRIMARY KEY,
+  symbol      TEXT NOT NULL,
+  side        TEXT NOT NULL,
+  qty         INTEGER NOT NULL,
+  status      TEXT NOT NULL,
+  reason      TEXT,
+  fill_price  REAL,
+  fee         REAL NOT NULL DEFAULT 0,
+  decision_id TEXT NOT NULL,
+  signal_id   TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  attempts    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status);
+CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders (symbol);
+CREATE TABLE IF NOT EXISTS positions (
+  symbol     TEXT PRIMARY KEY,
+  qty        INTEGER NOT NULL,
+  avg_cost   REAL NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cash (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  balance    REAL NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_equity (
+  trade_date      TEXT PRIMARY KEY,
+  cash            REAL NOT NULL,
+  positions_value REAL NOT NULL,
+  equity          REAL NOT NULL
+);
 """
 
 _SIGNAL_COLUMNS = (
@@ -235,3 +278,222 @@ def list_hysteresis_events(
         }
         for row in rows
     ]
+
+
+# ── add-paper-broker：paper 账户落库（orders/positions/cash/paper_equity）──
+
+
+@contextmanager
+def execution_conn(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
+    """事务性短连接（复合读写的原子边界）。
+
+    paper 下单/重试/结算要跨订单+持仓+资金三表读改写，必须同事务提交；调用方在
+    同一 connection 上完成全部操作，正常退出统一 commit，异常回滚。连接纪律与
+    ``_connect`` 同款（WAL + busy_timeout）。
+    """
+    init_execution_db(db_path)
+    conn = _connect(db_path)
+    try:
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def ensure_account(conn: sqlite3.Connection, initial_cash: float, updated_at: str) -> None:
+    """惰性开户：cash(id=1) 不存在时以初始资金建行（幂等，已有余额不覆盖）。"""
+    conn.execute(
+        "INSERT INTO cash (id, balance, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO NOTHING",
+        (float(initial_cash), str(updated_at)),
+    )
+
+
+def read_cash(conn: sqlite3.Connection) -> float:
+    """读账户余额（要求同一事务内先 ``ensure_account``）。"""
+    row = conn.execute("SELECT balance FROM cash WHERE id = 1").fetchone()
+    if row is None:
+        raise RuntimeError("paper 账户未初始化（同一事务内先 ensure_account）")
+    return float(row["balance"])
+
+
+def write_cash(conn: sqlite3.Connection, balance: float, updated_at: str) -> None:
+    """写账户余额（upsert；正常路径先经 ensure_account 建行）。"""
+    conn.execute(
+        "INSERT INTO cash (id, balance, updated_at) VALUES (1, ?, ?)"
+        " ON CONFLICT(id) DO UPDATE SET balance=excluded.balance,"
+        " updated_at=excluded.updated_at",
+        (float(balance), str(updated_at)),
+    )
+
+
+def read_position(conn: sqlite3.Connection, symbol: str) -> dict[str, Any] | None:
+    """读单票持仓（无持仓 → None）。"""
+    row = conn.execute(
+        "SELECT symbol, qty, avg_cost, updated_at FROM positions WHERE symbol = ?",
+        (str(symbol),),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def write_position(
+    conn: sqlite3.Connection, symbol: str, qty: int, avg_cost: float, updated_at: str
+) -> None:
+    """写单票持仓（upsert：数量 + 加权成本价 + 更新时间）。"""
+    conn.execute(
+        "INSERT INTO positions (symbol, qty, avg_cost, updated_at) VALUES (?, ?, ?, ?)"
+        " ON CONFLICT(symbol) DO UPDATE SET qty=excluded.qty, avg_cost=excluded.avg_cost,"
+        " updated_at=excluded.updated_at",
+        (str(symbol), int(qty), float(avg_cost), str(updated_at)),
+    )
+
+
+def delete_position(conn: sqlite3.Connection, symbol: str) -> None:
+    """清仓（数量归零的行不保留，避免查询侧再过滤）。"""
+    conn.execute("DELETE FROM positions WHERE symbol = ?", (str(symbol),))
+
+
+def list_positions(db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    """全部持仓（symbol 升序；只读快照）。"""
+    init_execution_db(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT symbol, qty, avg_cost, updated_at FROM positions ORDER BY symbol ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
+
+_ORDER_COLUMNS = (
+    "order_id",
+    "symbol",
+    "side",
+    "qty",
+    "status",
+    "reason",
+    "fill_price",
+    "fee",
+    "decision_id",
+    "signal_id",
+    "created_at",
+    "attempts",
+)
+
+_SELECT_ORDERS = f"SELECT {', '.join(_ORDER_COLUMNS)} FROM orders"  # noqa: S608 - 拼接项为模块常量列名
+
+
+def insert_order(conn: sqlite3.Connection, record: OrderRecord) -> None:
+    """订单落库（PK=order_id；重复插入是编程错误，由调用方先读后写保幂等）。"""
+    conn.execute(
+        "INSERT INTO orders (order_id, symbol, side, qty, status, reason, fill_price, fee,"
+        " decision_id, signal_id, created_at, attempts)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            record.order_id,
+            record.symbol,
+            record.side,
+            int(record.qty),
+            record.status,
+            record.reason,
+            record.fill_price,
+            float(record.fee),
+            record.decision_id,
+            record.signal_id,
+            record.created_at,
+            int(record.attempts),
+        ),
+    )
+
+
+def read_order(conn: sqlite3.Connection, order_id: str) -> dict[str, Any] | None:
+    """读单笔订单（不存在 → None）。"""
+    row = conn.execute(_SELECT_ORDERS + " WHERE order_id = ?", (str(order_id),)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def update_order(
+    conn: sqlite3.Connection,
+    order_id: str,
+    *,
+    status: str,
+    reason: str | None,
+    fill_price: float | None,
+    fee: float,
+    attempts: int,
+) -> None:
+    """订单状态机更新（重试/成交/撤销共用；键不变量 order_id 不变）。"""
+    conn.execute(
+        "UPDATE orders SET status=?, reason=?, fill_price=?, fee=?, attempts=? WHERE order_id=?",
+        (str(status), reason, fill_price, float(fee), int(attempts), str(order_id)),
+    )
+
+
+def list_orders(
+    *, status: str | None = None, db_path: str | Path | None = None
+) -> list[dict[str, Any]]:
+    """订单列表（created_at、order_id 升序；可选状态过滤）。"""
+    init_execution_db(db_path)
+    conn = _connect(db_path)
+    try:
+        if status is None:
+            rows = conn.execute(
+                _SELECT_ORDERS + " ORDER BY created_at ASC, order_id ASC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                _SELECT_ORDERS + " WHERE status = ? ORDER BY created_at ASC, order_id ASC",
+                (str(status),),
+            ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
+
+def list_pending_orders(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """挂单列表（事务内读取；created_at、order_id 升序 → 重试顺序确定）。"""
+    rows = conn.execute(
+        _SELECT_ORDERS + " WHERE status = 'pending' ORDER BY created_at ASC, order_id ASC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def upsert_paper_equity(
+    trade_date: str,
+    cash: float,
+    positions_value: float,
+    equity: float,
+    *,
+    db_path: str | Path | None = None,
+) -> None:
+    """每日 paper 净值点落库（trade_date PK；重跑覆盖不翻倍）。"""
+    init_execution_db(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO paper_equity (trade_date, cash, positions_value, equity)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(trade_date) DO UPDATE SET cash=excluded.cash,"
+            " positions_value=excluded.positions_value, equity=excluded.equity",
+            (str(trade_date), float(cash), float(positions_value), float(equity)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_paper_equity(db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    """paper 净值曲线（trade_date 升序）。"""
+    init_execution_db(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT trade_date, cash, positions_value, equity FROM paper_equity"
+            " ORDER BY trade_date ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
