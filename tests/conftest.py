@@ -89,6 +89,10 @@ def _isolate_runtime_dbs(request, tmp_path):
     # ③ SCREENING_DB_PATH：env 调用期读取，无需预建表（store 各入口自身幂等 init）
     old_screening_env = os.environ.get("SCREENING_DB_PATH")
     os.environ["SCREENING_DB_PATH"] = str(tmp_path / "runtime-screening.db")
+    # ④ EXECUTION_DB_PATH：add-signal-portfolio-risk-gate（execution/store.py 同款
+    # 调用期读 env；未来用例省略 db_path 时同样不得写开发库 data/execution.db）
+    old_execution_env = os.environ.get("EXECUTION_DB_PATH")
+    os.environ["EXECUTION_DB_PATH"] = str(tmp_path / "runtime-execution.db")
     try:
         yield tmp_db
     finally:
@@ -101,6 +105,10 @@ def _isolate_runtime_dbs(request, tmp_path):
             os.environ.pop("SCREENING_DB_PATH", None)
         else:
             os.environ["SCREENING_DB_PATH"] = old_screening_env
+        if old_execution_env is None:
+            os.environ.pop("EXECUTION_DB_PATH", None)
+        else:
+            os.environ["EXECUTION_DB_PATH"] = old_execution_env
 
 
 @pytest.fixture
