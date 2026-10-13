@@ -1,13 +1,20 @@
-"""screening 库：L2 名单快照、L3 triage 决策与在榜稳定性查询（add-screening-candidate-llm T1/T2）。
+"""screening 库：L2 名单快照、L3 triage 决策、日批批次与精选池
+（add-screening-candidate-llm T1/T2 + add-screening-pipeline T1）。
 
-表（C5，逐字）：
+表（C5 / pipeline Global Constraints，逐字）：
 
 - ``l2_candidates(trade_date, symbol, composite_score, rank, PRIMARY KEY(trade_date, symbol))``：
   L2 打分名单日快照，幂等 upsert（同日重跑覆盖）；
 - ``triage_decisions(trade_date, symbol, verdict, reason, degraded, created_at,
   PRIMARY KEY(trade_date, symbol))``：L3 keep/drop 决策，幂等 upsert（同日重跑覆盖）。
   两表供消融（±L3 粗筛）与前向命中率分层（后续 change）查询，是稳定性门槛查询的
-  唯一数据源。
+  唯一数据源；
+- ``screening_batches(trade_date PK, status, error, started_at, finished_at,
+  l1_passed, l2_top, l3_keep, pool_size)``：日批批次行（``status ∈ {ok, failed}``；
+  失败批次与当日池零行的不变量由 ``record_screening_batch`` 单事务保证）；
+- ``selection_pool(trade_date, symbol, composite_score, rank, consecutive_days,
+  l3_verdict, l3_reason, factor_contribs_json, PK(trade_date, symbol))``：
+  精选池（keep ∩ 连续在榜门槛达标），同日写入为**原子替换**。
 
 稳定性口径（C4）：``consecutive_days_in_top`` 从 ``as_of`` 起向前沿**表内交易日
 轴**（``l2_candidates`` 的 DISTINCT ``trade_date``）逐日查该 symbol 是否在榜，
@@ -22,6 +29,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import sqlite3
@@ -57,7 +65,34 @@ CREATE TABLE IF NOT EXISTS triage_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_triage_decisions_symbol_date
   ON triage_decisions (symbol, trade_date);
+CREATE TABLE IF NOT EXISTS screening_batches (
+  trade_date  TEXT PRIMARY KEY,
+  status      TEXT NOT NULL,
+  error       TEXT,
+  started_at  TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  l1_passed   INTEGER NOT NULL DEFAULT 0,
+  l2_top      INTEGER NOT NULL DEFAULT 0,
+  l3_keep     INTEGER NOT NULL DEFAULT 0,
+  pool_size   INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS selection_pool (
+  trade_date           TEXT NOT NULL,
+  symbol               TEXT NOT NULL,
+  composite_score      REAL NOT NULL,
+  rank                 INTEGER NOT NULL,
+  consecutive_days     INTEGER NOT NULL,
+  l3_verdict           TEXT NOT NULL,
+  l3_reason            TEXT NOT NULL,
+  factor_contribs_json TEXT NOT NULL,
+  PRIMARY KEY (trade_date, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_selection_pool_date_rank
+  ON selection_pool (trade_date, rank);
 """
+
+# 批次状态（Global Constraints 逐字）：ok / failed
+BATCH_STATUSES: tuple[str, ...] = ("ok", "failed")
 
 # 稳定性门槛默认值（Global Constraints：默认连续 3 个交易日）
 DEFAULT_MIN_DAYS = 3
@@ -318,5 +353,205 @@ def list_triage_decisions(
     try:
         rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+# ── 日批批次与精选池（add-screening-pipeline T1；S1 落库口径） ──────────────
+
+
+def _non_negative_int(value: Any, field_name: str) -> int:
+    """计数入参：非负整数（bool 除外）→ int；否则 fail loud。"""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} 必须是非负整数: {value!r}")
+    return value
+
+
+def _pool_row_payload(trade_date: str, row: dict[str, Any]) -> tuple[Any, ...]:
+    """精选池行 dict → SQLite payload（字段 fail loud，坏值不入库）。"""
+    if not isinstance(row, dict):
+        raise ValueError(f"池行必须是 dict: {row!r}")
+    symbol = str(row.get("symbol") or "").strip()
+    if not symbol:
+        raise ValueError(f"池行 symbol 不能为空: {row!r}")
+    verdict = row.get("l3_verdict")
+    if verdict not in VERDICTS:
+        raise ValueError(f"非法 l3_verdict {verdict!r}；允许: {list(VERDICTS)}")
+    reason = row.get("l3_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError(f"池行 l3_reason 不能为空: {row!r}（symbol={symbol}）")
+    rank = row.get("rank")
+    if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
+        raise ValueError(f"池行 rank 必须是正整数: {rank!r}（symbol={symbol}）")
+    consecutive_days = row.get("consecutive_days")
+    if (
+        isinstance(consecutive_days, bool)
+        or not isinstance(consecutive_days, int)
+        or consecutive_days < 1
+    ):
+        raise ValueError(
+            f"池行 consecutive_days 必须是正整数: {consecutive_days!r}（symbol={symbol}）"
+        )
+    contribs = row.get("factor_contribs") or []
+    try:
+        contribs_json = json.dumps(contribs, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"池行 factor_contribs 不可 JSON 序列化: {exc}") from exc
+    return (
+        trade_date,
+        symbol,
+        _finite_float(row.get("composite_score"), "composite_score"),
+        rank,
+        consecutive_days,
+        verdict,
+        reason,
+        contribs_json,
+    )
+
+
+def record_screening_batch(
+    trade_date: str,
+    *,
+    status: str,
+    started_at: str,
+    finished_at: str,
+    error: str | None = None,
+    l1_passed: int = 0,
+    l2_top: int = 0,
+    l3_keep: int = 0,
+    pool_rows: Sequence[dict[str, Any]] = (),
+    db_path: str | Path | None = None,
+) -> int:
+    """批次行 + 当日精选池**单事务**写入（S1 落库口径；fail-closed 不变量）。
+
+    - ``status`` 逐字 ∈ {``"ok"``, ``"failed"``}；``pool_size`` 恒 = ``len(pool_rows)``
+      （不独立入参，避免与池行数漂移）；同 ``trade_date`` upsert 覆盖（幂等重跑）；
+    - **失败批次传 ``pool_rows=()`` → 当日池行先清空**：失败日零池行是不变量，不被
+      同日旧行/部分写入破坏；批次行与池行同一事务提交（ok 与池同生共死）；
+    - 池行字段 fail loud（见 ``_pool_row_payload``）；同批重复 ``symbol`` → ``ValueError``。
+
+    返回写入池行数（= ``pool_size``）。
+    """
+    normalized = _parse_trade_date(trade_date)
+    if status not in BATCH_STATUSES:
+        raise ValueError(f"非法批次 status {status!r}；允许: {list(BATCH_STATUSES)}")
+    if not isinstance(started_at, str) or not started_at:
+        raise ValueError(f"started_at 不能为空: {started_at!r}")
+    if not isinstance(finished_at, str) or not finished_at:
+        raise ValueError(f"finished_at 不能为空: {finished_at!r}")
+    if error is not None and not isinstance(error, str):
+        raise ValueError(f"error 必须是字符串或 None: {error!r}")
+    counts = [
+        _non_negative_int(l1_passed, "l1_passed"),
+        _non_negative_int(l2_top, "l2_top"),
+        _non_negative_int(l3_keep, "l3_keep"),
+    ]
+    payload = [_pool_row_payload(normalized, row) for row in pool_rows]
+    symbols = [row[1] for row in payload]
+    duplicated = sorted({symbol for symbol in symbols if symbols.count(symbol) > 1})
+    if duplicated:
+        raise ValueError(f"池行 symbol 重复: {duplicated}（每标的至多一行）")
+    init_screening_db(db_path)
+    conn = _connect(db_path)
+    try:
+        # 单事务：池行原子替换（失败批次 → 清空）与批次行 upsert 同生共死
+        conn.execute("DELETE FROM selection_pool WHERE trade_date = ?", (normalized,))
+        conn.execute(
+            "INSERT INTO screening_batches "
+            "(trade_date, status, error, started_at, finished_at, l1_passed, l2_top, l3_keep, pool_size) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(trade_date) DO UPDATE SET "
+            "status = excluded.status, error = excluded.error, "
+            "started_at = excluded.started_at, finished_at = excluded.finished_at, "
+            "l1_passed = excluded.l1_passed, l2_top = excluded.l2_top, "
+            "l3_keep = excluded.l3_keep, pool_size = excluded.pool_size",
+            (normalized, status, error, started_at, finished_at, *counts, len(payload)),
+        )
+        if payload:
+            conn.executemany(
+                "INSERT INTO selection_pool "
+                "(trade_date, symbol, composite_score, rank, consecutive_days, "
+                "l3_verdict, l3_reason, factor_contribs_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                payload,
+            )
+        conn.commit()
+        return len(payload)
+    finally:
+        conn.close()
+
+
+def list_selection_pool(trade_date: str, db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    """某交易日精选池（rank 升序，同 rank 按 symbol 升序）；无记录 → 空列表。
+
+    ``factor_contribs`` 由 ``factor_contribs_json`` 解析回列表（坏 JSON 防御性回退 ``[]``）。
+    """
+    normalized = _parse_trade_date(trade_date)
+    init_screening_db(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT trade_date, symbol, composite_score, rank, consecutive_days, "
+            "l3_verdict, l3_reason, factor_contribs_json FROM selection_pool "
+            "WHERE trade_date = ? ORDER BY rank, symbol",
+            (normalized,),
+        ).fetchall()
+    finally:
+        conn.close()
+    pool: list[dict[str, Any]] = []
+    for row in rows:
+        entry = dict(row)
+        raw = entry.pop("factor_contribs_json", None)
+        try:
+            parsed = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            parsed = []
+        entry["factor_contribs"] = parsed if isinstance(parsed, list) else []
+        pool.append(entry)
+    return pool
+
+
+def latest_screening_batch(db_path: str | Path | None = None) -> dict[str, Any] | None:
+    """最近一次日批尝试（``MAX(trade_date)`` 行，含 failed）；空库 → None。"""
+    init_screening_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT trade_date, status, error, started_at, finished_at, "
+            "l1_passed, l2_top, l3_keep, pool_size FROM screening_batches "
+            "ORDER BY trade_date DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def latest_successful_batch(db_path: str | Path | None = None) -> dict[str, Any] | None:
+    """最近一次成功批次（``status='ok'`` 且 ``trade_date`` 最大）；无 → None。"""
+    init_screening_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT trade_date, status, error, started_at, finished_at, "
+            "l1_passed, l2_top, l3_keep, pool_size FROM screening_batches "
+            "WHERE status = 'ok' ORDER BY trade_date DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def reset_screening_db(db_path: str | Path | None = None) -> dict[str, int]:
+    """清空 screening 四表（E2E ``screening_reset`` 造数用）；返回各表删除行数。"""
+    init_screening_db(db_path)
+    conn = _connect(db_path)
+    tables = ("l2_candidates", "triage_decisions", "screening_batches", "selection_pool")
+    removed: dict[str, int] = {}
+    try:
+        for table in tables:
+            cursor = conn.execute(f"DELETE FROM {table}")  # noqa: S608 -- 表名来自模块常量
+            removed[table] = int(cursor.rowcount)
+        conn.commit()
+        return removed
     finally:
         conn.close()
