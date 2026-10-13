@@ -127,3 +127,168 @@ class TestRunDeepAnalysisPeerCodes:
         )
         params = rda.get("function", rda).get("parameters", {})
         assert "peer_codes" in params.get("properties", {})
+
+
+# ── add-analyst-factor-tools Task 2：技术分析师因子库工具（注册 + 用途标签） ─────
+
+
+class TestAnalystFactorToolRegistration:
+    """技术分析师工具集（唯一消费方）与用途标签常量逐字。"""
+
+    def test_tool_name_and_purpose_tag_verbatim(self):
+        from finance_agent.agent_factory import (
+            PURPOSE_TAG_ANALYST_FACTOR_TOOL,
+            TOOL_QUERY_FACTOR_LIBRARY,
+        )
+
+        assert TOOL_QUERY_FACTOR_LIBRARY == "query_factor_library"
+        assert PURPOSE_TAG_ANALYST_FACTOR_TOOL == "analyst_factor_tool"
+
+    def test_technical_toolset_contains_factor_library(self):
+        from finance_agent.agent_factory import analyst_tool_names
+
+        assert analyst_tool_names("technical") == ("query_factor_library",)
+
+    def test_other_analysts_unchanged_no_factor_tool(self):
+        """非目标：其他三个分析师工具集保持空（零改动）。"""
+        from finance_agent.agent_factory import analyst_tool_names
+
+        for analyst in ("macro", "fundamental", "sentiment"):
+            assert analyst_tool_names(analyst) == ()
+            assert "query_factor_library" not in analyst_tool_names(analyst)
+
+    def test_unknown_analyst_rejected(self):
+        import pytest
+
+        from finance_agent.agent_factory import analyst_tool_names
+
+        with pytest.raises(KeyError):
+            analyst_tool_names("no_such_analyst")
+
+
+class TestAnalystFactorToolShell:
+    """LLM 面薄壳：symbol → 结构化 JSON；经既有 _trace_tool 记录 span/耗时/用途标签。"""
+
+    _DATES = [f"2026-01-{day:02d}" for day in range(1, 26)]
+    _CLOSES = {
+        "300750": [100.0 + i for i in range(25)],
+        "600519": [200.0 + 2 * i for i in range(25)],
+        "000858": [50.0 + 0.5 * i for i in range(25)],
+    }
+
+    def _seed_snapshot(self, path) -> None:
+        from finance_agent.data.snapshot import write_snapshot_rows
+
+        for day, index in zip(self._DATES, range(25), strict=True):
+            rows = []
+            for code, closes in self._CLOSES.items():
+                close = closes[index]
+                rows.append(
+                    {
+                        "code": code,
+                        "open": close,
+                        "high": close,
+                        "low": close,
+                        "close_raw": close,
+                        "close_qfq": close,
+                        "volume": 1000.0,
+                        "amount": 1000.0 * close,
+                    }
+                )
+            write_snapshot_rows(day, rows, db_path=path)
+
+    def _seed_library(self, path, as_of: str) -> None:
+        from finance_agent.factors.dsl import parse, serialize
+        from finance_agent.factors.library import add_factor, record_ic
+
+        factor_id = add_factor(
+            expression="delta(close,20)",
+            hypothesis="测试用假设文本，描述该因子与未来收益的关系。",
+            category="动量",
+            status="active",
+            ast_json=serialize(parse("delta(close,20)")),
+            db_path=path,
+        )
+        for day, value in zip(self._DATES[:3], (0.1, 0.2, 0.3), strict=True):
+            record_ic(factor_id, day, value, db_path=path)
+
+    def test_shell_payload_value_zscore_ic(self, tmp_path):
+        """端到端：快照库 → 面板 → 因子库 → JSON（value/zscore/近 60 日 IC 齐全）。"""
+        import json
+
+        from finance_agent.agent_factory import make_query_factor_library
+
+        snapshot_db = tmp_path / "snapshot.db"
+        library_db = tmp_path / "library.db"
+        self._seed_snapshot(snapshot_db)
+        self._seed_library(library_db, as_of=self._DATES[-1])
+        tool = make_query_factor_library(
+            snapshot_db_path=str(snapshot_db), library_db_path=str(library_db)
+        )
+        payload = json.loads(tool("300750"))
+        assert payload["as_of"] == self._DATES[-1]
+        entry = payload["factors"][0]
+        # 手算：delta(close,20) = close[-1] − close[-21]
+        assert abs(entry["value"] - (124.0 - 104.0)) < 1e-9
+        values = {code: closes[24] - closes[4] for code, closes in self._CLOSES.items()}
+        numbers = list(values.values())
+        mean = sum(numbers) / len(numbers)
+        std = (sum((v - mean) ** 2 for v in numbers) / (len(numbers) - 1)) ** 0.5
+        assert abs(entry["zscore"] - (values["300750"] - mean) / std) < 1e-9
+        assert abs(entry["ic_mean_60d"] - 0.2) < 1e-9
+        assert abs(entry["icir_60d"] - 2.0) < 1e-9
+
+    def test_shell_degrades_when_snapshot_empty(self, tmp_path):
+        """快照库建表但无行 → 空 factors + note，不抛错（不阻断分析师）。"""
+        import json
+
+        from finance_agent.agent_factory import make_query_factor_library
+        from finance_agent.data.snapshot import init_snapshot_db
+
+        snapshot_db = tmp_path / "snapshot.db"
+        init_snapshot_db(snapshot_db)
+        tool = make_query_factor_library(
+            snapshot_db_path=str(snapshot_db), library_db_path=str(tmp_path / "library.db")
+        )
+        payload = json.loads(tool("300750"))
+        assert payload["factors"] == []
+        assert payload["note"]
+
+    def test_shell_degrades_without_creating_missing_dbs(self, tmp_path):
+        """库文件不存在 → 诚实空因 + note，且**不**创建任何库文件（只读纪律）。"""
+        import json
+
+        from finance_agent.agent_factory import make_query_factor_library
+
+        snapshot_db = tmp_path / "absent_snapshot.db"
+        library_db = tmp_path / "absent_library.db"
+        tool = make_query_factor_library(
+            snapshot_db_path=str(snapshot_db), library_db_path=str(library_db)
+        )
+        payload = json.loads(tool("300750"))
+        assert payload["factors"] == []
+        assert payload["note"]
+        assert not snapshot_db.exists()
+        assert not library_db.exists()
+
+    def test_shell_span_records_purpose_tag_and_duration(self, tmp_path):
+        """经既有 _trace_tool 机制：span 名 tool_call:query_factor_library +
+        purpose_tag=analyst_factor_tool + 耗时 duration_ms（可观测性，按既有模式）。"""
+        from unittest.mock import patch
+
+        from finance_agent.agent_factory import make_query_factor_library
+        from tests.nodes.test_trace_tool import FakeClient
+
+        client = FakeClient()
+        with patch("finance_agent.langfuse_tracing.get_langfuse", return_value=client):
+            tool = make_query_factor_library(
+                snapshot_db_path=str(tmp_path / "absent_snapshot.db"),
+                library_db_path=str(tmp_path / "absent_library.db"),
+            )
+            tool(symbol="300750")
+        name, inputs, span = client.spans[0]
+        assert name == "tool_call:query_factor_library"
+        assert inputs == {"call": {"symbol": "300750"}}
+        assert span.metadata["purpose_tag"] == "analyst_factor_tool"
+        duration = span.metadata["duration_ms"]
+        assert isinstance(duration, int) and duration >= 0

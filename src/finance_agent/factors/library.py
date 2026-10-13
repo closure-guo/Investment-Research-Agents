@@ -1,0 +1,510 @@
+"""因子库 SQLite 存储层（add-factor-library-and-monitor Task 2）。
+
+三表（Global Constraints 逐字）：``factors``（因子主表 + 状态机）、``factor_ic``
+（逐日 RankIC，主键 ``(factor_id, trade_date)`` 幂等 upsert）、``factor_events``
+（状态/审计事件，detail 为 JSON 文本）。连接纪律与 ``data/snapshot.py`` 同款
+（WAL + busy_timeout 短连接、DB 路径调用期读 env、测试经 ``db_path`` 显式注入）。
+
+状态机（逐字）与合法迁移：``candidate → active``；``active → degraded``；
+``active → retired``；``degraded → retired``；``degraded → active``（复核恢复）；
+``retired → ∅``（无出边）。非法迁移 / 非法初始状态 / 目标因子不存在 →
+``FactorStateError``。**状态合法性由本模块代码单一来源把关**（DB 不加 CHECK 约束，
+避免两处枚举漂移，迁移错误一律以 ``FactorStateError`` 显式暴露）。
+
+关键设计决策：
+
+- **E7 结构层查重**：``find_structural_duplicate`` 对库内 ``candidate``/``active``/
+  ``degraded`` 全部因子做 ``is_subtree_isomorphic``（规范化后比较，数字只按「有」
+  匹配）；**``retired`` 不参与**（允许重提）。查重是入库前独立步骤（先于五道闸），
+  由调用方（``validate.admit_candidates``）执行；``add_factor`` 自身只校验初始状态。
+- **E8 分桶保种**：``apply_bucket_quota`` 对**单个 category 桶内 active** 按
+  ``pool_increment`` 降序保留 top ``k``（``BUCKET_TOP_K``），并列取 ``created_at``
+  早者优先（再并列取 id 小者）；``pool_increment`` 为 NULL（尚未评估）按最低优先级；
+  超出者 ``active → retired`` 并落事件（detail 含 ``reason="BUCKET_QUOTA"`` /
+  ``category`` / ``quota`` / ``pool_increment``）。其他桶一动不动。
+
+格式契约（与调用方之间）：``ast_json`` 为 ``dsl.serialize(parse(expression))`` 产出的
+**规范表达式字符串**；查重时以 ``parse(..., enforce_complexity=False)`` 回读
+（复杂度硬约束已在提案路径执行，库层不重复裁决）。库内行 ``ast_json`` 为 NULL 时
+回退用 ``expression`` 解析比较。
+
+``record_ic`` / ``set_pool_increment`` 是**指标写入**，不改变状态、不触碰
+``updated_at``、不落事件（审计只覆盖状态机迁移）；状态变化唯一入口是
+``set_status``（``add_factor`` 落 ``created`` 事件）。
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import sqlite3
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any
+
+from finance_agent.factors.constraints import BUCKET_TOP_K
+from finance_agent.factors.dsl import is_subtree_isomorphic, parse
+
+# 状态机（逐字；Global Constraints）
+FACTOR_STATES: tuple[str, ...] = ("candidate", "active", "degraded", "retired")
+# 允许作为 add_factor 初始状态的两态（degraded/retired 只能经监控/保种到达）
+_INITIAL_STATES: frozenset[str] = frozenset({"candidate", "active"})
+# 合法迁移表：retired → ∅（空集）
+_TRANSITIONS: dict[str, frozenset[str]] = {
+    "candidate": frozenset({"active"}),
+    "active": frozenset({"degraded", "retired"}),
+    "degraded": frozenset({"active", "retired"}),
+    "retired": frozenset(),
+}
+# 结构查重参与状态（retired 允许重提）
+_DEDUP_STATES: tuple[str, ...] = ("candidate", "active", "degraded")
+
+# 事件类型（逐字）
+EVENT_CREATED = "created"
+EVENT_STATUS_CHANGE = "status_change"
+
+# 三表 DDL（幂等 CREATE IF NOT EXISTS；列名与 Global Constraints 逐字一致）
+FACTOR_LIBRARY_DDL = """
+CREATE TABLE IF NOT EXISTS factors (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  expression      TEXT NOT NULL,
+  hypothesis      TEXT NOT NULL,
+  category        TEXT NOT NULL,
+  status          TEXT NOT NULL,
+  ast_json        TEXT,
+  source          TEXT NOT NULL DEFAULT 'proposal',
+  alignment_score REAL,
+  pool_increment  REAL,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_factors_status ON factors (status);
+CREATE INDEX IF NOT EXISTS idx_factors_category_status ON factors (category, status);
+CREATE TABLE IF NOT EXISTS factor_ic (
+  factor_id  INTEGER NOT NULL,
+  trade_date TEXT NOT NULL,
+  rank_ic    REAL NOT NULL,
+  PRIMARY KEY (factor_id, trade_date)
+);
+CREATE INDEX IF NOT EXISTS idx_factor_ic_factor_date ON factor_ic (factor_id, trade_date);
+CREATE TABLE IF NOT EXISTS factor_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  factor_id   INTEGER NOT NULL,
+  event       TEXT NOT NULL,
+  from_status TEXT,
+  to_status   TEXT,
+  detail      TEXT,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_factor_events_factor ON factor_events (factor_id);
+"""
+
+
+class FactorStateError(ValueError):
+    """状态机错误：非法状态迁移 / 非法初始状态 / 目标因子不存在。
+
+    ``ValueError`` 子类（调用方按 ``ValueError`` 兜底捕获亦成立）；消息说明
+    具体违法点（形如 ``非法状态迁移 'candidate' → 'degraded'``）。
+    """
+
+
+# ── 连接纪律（与 data/snapshot.py 同款） ────────────────────────────────────
+
+
+def _default_db_path() -> Path:
+    """默认因子库路径；调用期读取 env（测试/SOP 经 FACTOR_LIBRARY_DB_PATH 覆盖）。"""
+    return Path(os.getenv("FACTOR_LIBRARY_DB_PATH", "data/factor_library.db"))
+
+
+def _connect(db_path: str | Path | None) -> sqlite3.Connection:
+    """短连接：WAL + busy_timeout，row_factory=Row（snapshot.py 同款纪律）。"""
+    path = Path(db_path) if db_path else _default_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=15.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=15000")
+    return conn
+
+
+def init_library(db_path: str | Path | None = None) -> Path:
+    """幂等建 3 表 + 索引，返回实际使用的库路径。"""
+    path = Path(db_path) if db_path else _default_db_path()
+    conn = _connect(path)
+    try:
+        conn.executescript(FACTOR_LIBRARY_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+def _now_iso() -> str:
+    """事件/行时间戳（本地时区 ISO 文本，含微秒——并列由 id 兜底）。"""
+    return datetime.now().isoformat()
+
+
+def _parse_trade_date(value: str) -> str:
+    """交易日严格规范 ``YYYY-MM-DD``（字典序比较 / 序列表依赖规范形态）。"""
+    try:
+        parsed = date.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"非规范交易日: {value!r}，须为 YYYY-MM-DD") from exc
+    if parsed.isoformat() != value:
+        raise ValueError(f"非规范交易日: {value!r}，须为 YYYY-MM-DD")
+    return value
+
+
+def _finite_float(value: Any, field: str) -> float:
+    """数值入参 → float；None/NaN/±inf/不可解析 → ``ValueError``（不落坏值）。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} 必须是有限数值: {value!r}") from None
+    if not math.isfinite(number):
+        raise ValueError(f"{field} 必须是有限数值: {value!r}")
+    return number
+
+
+def _require_factor(conn: sqlite3.Connection, factor_id: int) -> sqlite3.Row:
+    """按 id 取因子行；不存在 → ``FactorStateError``（fail loud）。"""
+    row: sqlite3.Row | None = conn.execute(
+        "SELECT * FROM factors WHERE id = ?", (factor_id,)
+    ).fetchone()
+    if row is None:
+        raise FactorStateError(f"因子不存在: {factor_id}")
+    return row
+
+
+def _insert_event(
+    conn: sqlite3.Connection,
+    factor_id: int,
+    event: str,
+    from_status: str | None,
+    to_status: str | None,
+    detail: dict[str, Any] | None,
+    created_at: str,
+) -> None:
+    """落一条事件（detail → JSON 文本；None 存 NULL）。"""
+    conn.execute(
+        "INSERT INTO factor_events (factor_id, event, from_status, to_status, detail, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            factor_id,
+            event,
+            from_status,
+            to_status,
+            json.dumps(detail, ensure_ascii=False) if detail is not None else None,
+            created_at,
+        ),
+    )
+
+
+# ── 写入：新增 / 状态迁移 ───────────────────────────────────────────────────
+
+
+def add_factor(
+    *,
+    expression: str,
+    hypothesis: str,
+    category: str,
+    status: str = "candidate",
+    ast_json: str | None = None,
+    source: str = "proposal",
+    alignment_score: float | None = None,
+    db_path: str | Path | None = None,
+) -> int:
+    """新增因子行，返回 ``factors.id``；落 ``created`` 事件。
+
+    仅校验**初始状态合法性**（``candidate``/``active``；其余 → ``FactorStateError``）
+    ——结构查重与五道闸由调用方（``validate.admit_candidates``）在入库前完成，
+    本函数不做表达式解析、不复核类别词表（库层保持通用存储语义）。
+    """
+    if status not in _INITIAL_STATES:
+        raise FactorStateError(
+            f"非法初始状态 {status!r}；允许: {sorted(_INITIAL_STATES)}"
+            "（degraded/retired 只能经状态迁移到达）"
+        )
+    init_library(db_path)
+    now = _now_iso()
+    conn = _connect(db_path)
+    try:
+        cursor = conn.execute(
+            "INSERT INTO factors (expression, hypothesis, category, status, ast_json, source, "
+            "alignment_score, pool_increment, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+            (
+                expression,
+                hypothesis,
+                category,
+                status,
+                ast_json,
+                source,
+                alignment_score,
+                now,
+                now,
+            ),
+        )
+        factor_id = int(cursor.lastrowid or 0)
+        _insert_event(conn, factor_id, EVENT_CREATED, None, status, None, now)
+        conn.commit()
+        return factor_id
+    finally:
+        conn.close()
+
+
+def set_status(
+    factor_id: int,
+    status: str,
+    *,
+    detail: dict[str, Any] | None = None,
+    db_path: str | Path | None = None,
+) -> None:
+    """状态迁移（唯一状态写入口）：校验合法迁移 + 落 ``status_change`` 事件。
+
+    ``detail`` 为随事件持久化的 JSON 字典（降级事件带滚动 IC/ICIR 快照、保种事件带
+    ``reason="BUCKET_QUOTA"`` 等）。非法迁移 / 未知目标状态 / 因子不存在 →
+    ``FactorStateError``，且**不改状态、不落事件**（同事务回滚语义：先校验后写）。
+    """
+    init_library(db_path)
+    conn = _connect(db_path)
+    try:
+        row = _require_factor(conn, factor_id)
+        current = str(row["status"])
+        allowed = _TRANSITIONS.get(current, frozenset())
+        if status not in allowed:
+            raise FactorStateError(f"非法状态迁移 {current!r} → {status!r}")
+        now = _now_iso()
+        conn.execute(
+            "UPDATE factors SET status = ?, updated_at = ? WHERE id = ?",
+            (status, now, factor_id),
+        )
+        _insert_event(conn, factor_id, EVENT_STATUS_CHANGE, current, status, detail, now)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── 结构层查重（E7） ───────────────────────────────────────────────────────
+
+
+def find_structural_duplicate(ast_json: str, *, db_path: str | Path | None = None) -> int | None:
+    """库内（candidate/active/degraded）同构因子 id；无 → None。
+
+    ``ast_json`` 为规范表达式字符串（``dsl.serialize`` 产出；原始表达式亦可，
+    两者 ``parse`` 等价）；比较在 ``is_subtree_isomorphic``（规范化）下进行，
+    数字取值忽略。库内行 ``ast_json`` 为 NULL 时回退用 ``expression``。
+    解析失败 → ``DSLParseError``（fail loud，不当作无重复）。
+    """
+    init_library(db_path)
+    candidate = parse(ast_json, enforce_complexity=False)
+    placeholders = ", ".join("?" * len(_DEDUP_STATES))
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            # placeholders 仅为 "?" 序列；状态值全参数化
+            "SELECT id, expression, ast_json FROM factors "  # noqa: S608
+            f"WHERE status IN ({placeholders}) ORDER BY id",
+            list(_DEDUP_STATES),
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        stored = row["ast_json"] or row["expression"]
+        if is_subtree_isomorphic(candidate, parse(stored, enforce_complexity=False)):
+            return int(row["id"])
+    return None
+
+
+# ── factor_ic：幂等 upsert 与序列读取 ──────────────────────────────────────
+
+
+def record_ic(
+    factor_id: int,
+    trade_date: str,
+    rank_ic: float,
+    db_path: str | Path | None = None,
+) -> None:
+    """写入某因子某日 RankIC；同 ``(factor_id, trade_date)`` **幂等**覆盖（upsert）。
+
+    ``trade_date`` 须规范 ``YYYY-MM-DD``、``rank_ic`` 须有限、因子须存在
+    （fail loud，防坏值/悬挂行污染 IC 序列排序）。不落事件、不动 ``updated_at``
+    （这是指标刷新，不是状态变化）。
+    """
+    normalized_date = _parse_trade_date(trade_date)
+    value = _finite_float(rank_ic, "rank_ic")
+    init_library(db_path)
+    conn = _connect(db_path)
+    try:
+        _require_factor(conn, factor_id)
+        conn.execute(
+            "INSERT INTO factor_ic (factor_id, trade_date, rank_ic) VALUES (?, ?, ?) "
+            "ON CONFLICT(factor_id, trade_date) DO UPDATE SET rank_ic = excluded.rank_ic",
+            (factor_id, normalized_date, value),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_ic_series(
+    factor_id: int, *, limit: int | None = None, db_path: str | Path | None = None
+) -> list[tuple[str, float]]:
+    """因子 IC 序列 ``[(trade_date, rank_ic)...]``，**按日期升序**。
+
+    ``limit`` 给定时返回**最近 N 个交易日**（仍为升序；衰减监控取最近
+    ``DECAY_WINDOW`` 日即用此参数）。``limit`` 非正 → ``ValueError``；无记录 → ``[]``。
+    """
+    if limit is not None and limit < 1:
+        raise ValueError(f"limit 必须是正整数或 None: {limit!r}")
+    init_library(db_path)
+    conn = _connect(db_path)
+    try:
+        if limit is None:
+            rows = conn.execute(
+                "SELECT trade_date, rank_ic FROM factor_ic WHERE factor_id = ? ORDER BY trade_date",
+                (factor_id,),
+            ).fetchall()
+            return [(str(row[0]), float(row[1])) for row in rows]
+        rows = conn.execute(
+            "SELECT trade_date, rank_ic FROM factor_ic WHERE factor_id = ? "
+            "ORDER BY trade_date DESC LIMIT ?",
+            (factor_id, limit),
+        ).fetchall()
+        return [(str(row[0]), float(row[1])) for row in reversed(rows)]
+    finally:
+        conn.close()
+
+
+# ── 查询 ───────────────────────────────────────────────────────────────────
+
+
+def list_factors(
+    *,
+    status: str | None = None,
+    category: str | None = None,
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """因子行列表（按 id 升序）；可选 status/category 过滤。"""
+    init_library(db_path)
+    sql = "SELECT * FROM factors"
+    conditions: list[str] = []
+    params: list[Any] = []
+    if status is not None:
+        conditions.append("status = ?")
+        params.append(status)
+    if category is not None:
+        conditions.append("category = ?")
+        params.append(category)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+    sql += " ORDER BY id"
+    conn = _connect(db_path)
+    try:
+        return [dict(row) for row in conn.execute(sql, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def list_active_factors(
+    *, category: str | None = None, db_path: str | Path | None = None
+) -> list[dict[str, Any]]:
+    """在册（``status='active'``）因子；当日打分消费方据此过滤（降级因子自然剔除）。"""
+    return list_factors(status="active", category=category, db_path=db_path)
+
+
+def list_events(
+    factor_id: int | None = None, db_path: str | Path | None = None
+) -> list[dict[str, Any]]:
+    """事件审计列表（按写入序 id 升序）；``factor_id`` 给定时只返回该因子事件。
+
+    每行 dict：``id`` / ``factor_id`` / ``event`` / ``from_status`` / ``to_status`` /
+    ``detail``（JSON 解析回 dict，NULL → None）/ ``created_at``。
+    """
+    init_library(db_path)
+    sql = "SELECT * FROM factor_events"
+    params: list[Any] = []
+    if factor_id is not None:
+        sql += " WHERE factor_id = ?"
+        params.append(factor_id)
+    sql += " ORDER BY id"
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        event = dict(row)
+        raw_detail = event.get("detail")
+        event["detail"] = json.loads(raw_detail) if raw_detail else None
+        events.append(event)
+    return events
+
+
+# ── 池级增量指标 / 分桶保种（E8） ───────────────────────────────────────────
+
+
+def set_pool_increment(factor_id: int, value: float, db_path: str | Path | None = None) -> None:
+    """写入池级增量（闸④的 IR 增量）；非有限值 / 因子不存在 → 异常。"""
+    increment = _finite_float(value, "pool_increment")
+    init_library(db_path)
+    conn = _connect(db_path)
+    try:
+        _require_factor(conn, factor_id)
+        conn.execute("UPDATE factors SET pool_increment = ? WHERE id = ?", (increment, factor_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def apply_bucket_quota(
+    category: str, *, k: int = BUCKET_TOP_K, db_path: str | Path | None = None
+) -> list[int]:
+    """单桶保种：桶内 active 保留 ``pool_increment`` top ``k``，超出者退役。
+
+    排序键：``pool_increment`` 降序 → ``created_at`` 升序（早者优先）→ id 升序；
+    ``pool_increment`` 为 NULL 视为最低优先级（未评估者先让位）。仅动本 category
+    的 **active** 行（candidate/degraded/retired 不占配额），其他桶不动。返回被退役
+    的因子 id 列表（按淘汰顺序 = 排序序）；未超容 → ``[]``。``k < 0`` → ``ValueError``。
+    """
+    if k < 0:
+        raise ValueError(f"k 必须是非负整数: {k!r}")
+    init_library(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, pool_increment, created_at FROM factors "
+            "WHERE category = ? AND status = 'active'",
+            (category,),
+        ).fetchall()
+    finally:
+        conn.close()
+    ordered = sorted(rows, key=_quota_sort_key)
+    retired: list[int] = []
+    for position, row in enumerate(ordered[k:], start=k + 1):
+        factor_id = int(row["id"])
+        set_status(
+            factor_id,
+            "retired",
+            detail={
+                "reason": "BUCKET_QUOTA",
+                "category": category,
+                "quota": k,
+                "pool_increment": (
+                    float(row["pool_increment"]) if row["pool_increment"] is not None else None
+                ),
+                "rank": position,
+            },
+            db_path=db_path,
+        )
+        retired.append(factor_id)
+    return retired
+
+
+def _quota_sort_key(row: sqlite3.Row) -> tuple[float, str, int]:
+    """保种排序键：增量降序（NULL → +inf 最低优先）→ created_at 升序 → id 升序。"""
+    increment = row["pool_increment"]
+    rank_value = -float(increment) if increment is not None else math.inf
+    return (rank_value, str(row["created_at"]), int(row["id"]))

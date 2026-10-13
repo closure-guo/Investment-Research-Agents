@@ -199,6 +199,25 @@ class TestSharedCacheSingleton:
         assert c1 is c2, "nodes/cache 与 nodes/fetch 单例分裂"
         assert c1 is c3, "未统一到 get_shared_cache"
 
+    def test_cache_db_path_env_branch(self, monkeypatch, tmp_path):
+        """CACHE_DB_PATH 于调用期读 env；未设置时默认 "cache.db" 不变。
+
+        T1 视觉基线套件依赖该 env 分支把设置中心「缓存管理/数据监控」
+        隔离到专属测试库（cache.py 注释：导入期冻结会让 E2E 注入失效）。
+        默认分支先 chdir(tmp_path)，避免相对路径在 worktree 根落盘
+        cache.db（#248 教训）。
+        """
+        import finance_agent.data.cache as cache_pkg
+
+        monkeypatch.setenv("CACHE_DB_PATH", str(tmp_path / "env_cache.db"))
+        monkeypatch.setattr(cache_pkg, "_SHARED", None)
+        assert cache_pkg.get_shared_cache()._db_path == str(tmp_path / "env_cache.db")
+
+        monkeypatch.delenv("CACHE_DB_PATH")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cache_pkg, "_SHARED", None)
+        assert cache_pkg.get_shared_cache()._db_path == "cache.db"
+
 
 def test_stats_reports_per_type_and_totals(cache: DataCache):
     cache.set("600519:stock_quote", {"price": 100}, ttl_seconds=3600)

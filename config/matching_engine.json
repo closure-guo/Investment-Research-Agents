@@ -1,0 +1,1 @@
+{"commission_rate": 0.00025, "min_commission": 5.0, "stamp_tax_rate": 0.0005, "slippage_tiers": [{"quantile_max": 0.2, "slippage_rate": 0.002}, {"quantile_max": 0.6, "slippage_rate": 0.001}, {"quantile_max": 1.0, "slippage_rate": 0.0005}]}

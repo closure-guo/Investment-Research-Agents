@@ -59,6 +59,11 @@ export default defineConfig({
   // 与默认 config 的 CI 口径一致（playwright.config.ts: retries: CI ? 1 : 0）
   retries: 1,
   reporter: [['list'], ['html', { open: 'never' }]],
+  // 2026-10-13 E2E 修复：预热三前端（vite 冷启动 20–30s，见 global-setup-timeline.ts）。
+  // 注：曾试加宽运行窗（STUB_NODE_DELAY 1.5→3）以缓解「运行中瞬态」族抖动——实测仅把
+  // retries=0 抖动率从 2 减到 1 而套件时间 +60%，且失败态 UI 整段未渲染运行态（非窗口长度问题），
+  // 故回退；族根因证据见 tests/validation/2026-10-13-e2e-gate-run.md（挂 issue）。
+  globalSetup: './global-setup-timeline.ts',
 
   use: {
     baseURL: 'http://localhost:5174',

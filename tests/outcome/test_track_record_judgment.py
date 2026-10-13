@@ -352,3 +352,66 @@ class TestBenchCloseSortGuard:
             }
         )
         assert _bench_close_on_or_before(bench, "2026-08-11") == 2.0
+
+
+# ---- add-matching-engine T4: entry_override（回放侧经撮合引擎回填真实成交价） ----
+
+
+class TestEntryOverride:
+    """给定 ``(entry_date, entry_price)`` 时跳过 derive_entry，其余判定数学零改动。
+
+    用途（M1 回放语义）：决策在 D 收盘后产出 → 最早可执行价是 D+1 开盘经撮合约束
+    与滑点后的成交价；判定侧只需换入场基准，horizon / 中性带 / 超额 / 回避语义不变。
+    """
+
+    def test_override_wins_over_derived_entry_and_keeps_horizon_math(self):
+        # 派生入场 = 9/2 收盘 100；override = 次一交易日（9/3）撮合成交价 101.5
+        kline = _kline_prices([100, 101, 102, 103, 104, 105])
+        p = _pred(horizon=2)
+        r = resolve_prediction(p, kline, entry_override=("2026-09-03", 101.5))
+        assert r is not None
+        assert r.entry_date == "2026-09-03" and r.entry_price == 101.5
+        # 出场仍 = 入场（override）后第 horizon 个交易日收盘：9/3 后第 2 个交易日 = 9/5
+        assert r.exit_date == "2026-09-05" and r.exit_price == 103.0
+        assert r.hold_days == 2
+        assert abs(r.raw_return - (103.0 / 101.5 - 1.0)) < 1e-6
+        # 派生路径不受影响：无 override 时入场 = 9/2 收盘 100、出场 = 9/4 收盘 102
+        base = resolve_prediction(p, kline)
+        assert base is not None
+        assert base.entry_date == "2026-09-02" and base.entry_price == 100.0
+        assert base.exit_date == "2026-09-04" and base.exit_price == 102.0
+
+    def test_override_flows_into_excess_and_neutral_band(self):
+        """override 只换入场基准：超额按 override 入场日与价计算，中性带不动。"""
+        kline = _kline(
+            [
+                ("2026-09-02", 100.0),
+                ("2026-09-03", 101.0),
+                ("2026-09-04", 100.0),
+                ("2026-09-05", 103.0),
+            ]
+        )
+        bench = _kline(
+            [("2026-09-02", 100.0), ("2026-09-03", 100.0), ("2026-09-05", 100.0)]
+        )  # 基准持平
+        r = resolve_prediction(_pred(horizon=2), kline, bench, entry_override=("2026-09-03", 101.0))
+        assert r is not None
+        # raw = 103/101 − 1 ≈ +1.98% 落在 ±2% 带内 → neutral；若误用派生入场（103/100）会得 win
+        assert abs(r.excess_return - (103.0 / 101.0 - 1.0)) < 1e-6
+        assert r.status == "resolved_neutral"
+
+    def test_explicit_none_matches_omitted_argument(self):
+        """缺省路径零改动：显式 entry_override=None 与不传参结果逐字段相同。"""
+        kline = _kline_prices([100, 101, 103])
+        p = _pred(horizon=2)
+        assert resolve_prediction(p, kline, entry_override=None) == resolve_prediction(p, kline)
+
+    def test_override_nonpositive_price_returns_none(self):
+        """与既有派生入场同口径：entry_price <= 0 → None（不按零价/负价结算）。"""
+        kline = _kline_prices([100, 101, 103])
+        assert (
+            resolve_prediction(_pred(horizon=2), kline, entry_override=("2026-09-03", 0.0)) is None
+        )
+        assert (
+            resolve_prediction(_pred(horizon=2), kline, entry_override=("2026-09-03", -1.0)) is None
+        )

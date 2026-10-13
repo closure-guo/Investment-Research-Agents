@@ -3,6 +3,7 @@
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from finance_agent.memory import memory_recall_entry
 from finance_agent.nodes._timing import timed_node
 from finance_agent.nodes.analysts import (
     fundamental_analyst,
@@ -64,7 +65,10 @@ def build_5layer_graph() -> CompiledStateGraph:
     graph.add_node("compute_metrics", _t("compute_metrics")(compute_metrics))
 
     # ── Layer I: Analyst Team ──
-    graph.add_node("analysts_entry", _passthrough)
+    # analysts_entry 兼记忆召回（add-decision-memory）：深度分析启动时检索同标的/同行业
+    # 已结算历史 + 已确认语义条款 → state `decision_memory`（无历史 → 空结构，零行为增量）。
+    # 节点名不变（既有图结构/计时契约零修改）；citation 重试回边幂等复用已写入的快照。
+    graph.add_node("analysts_entry", memory_recall_entry)
     graph.add_node("technical_analyst", _t("technical_analyst")(technical_analyst))
     graph.add_node("macro_analyst", _t("macro_analyst")(macro_analyst))
     graph.add_node("fundamental_analyst", _t("fundamental_analyst")(fundamental_analyst))

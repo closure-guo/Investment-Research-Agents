@@ -1,0 +1,204 @@
+{
+  "change": "add-decision-memory",
+  "as_of": "2026-10-13",
+  "synthetic": true,
+  "monthly_batch": {
+    "new_clause_ids": [
+      "c_f1dcdb42f923",
+      "c_8a9be32b4940"
+    ],
+    "pending_texts": [
+      "看多方向历史决策 3 条：结算命中（占该方向 50%）",
+      "看多方向已结算读数 4 条：胜率 75%（命中 3 / 未中 1）"
+    ]
+  },
+  "confirmation": {
+    "candidates": 6,
+    "confirmed": [
+      "看多方向历史决策 3 条：结算命中（占该方向 50%）",
+      "候选条款二"
+    ],
+    "unconfirmed": [
+      "看多方向已结算读数 4 条：胜率 75%（命中 3 / 未中 1）",
+      "候选条款三",
+      "候选条款四",
+      "候选条款五"
+    ]
+  },
+  "recall": {
+    "episodic": [
+      {
+        "decision_id": "p_own_3",
+        "date": "2026-09-01",
+        "symbol": "300750",
+        "direction": "long",
+        "settlement_status": "resolved_neutral",
+        "raw_return": 0.011,
+        "rationale_summary": "区间震荡，未触达目标位，到期平仓"
+      },
+      {
+        "decision_id": "p_own_2",
+        "date": "2026-07-15",
+        "symbol": "300750",
+        "direction": "long",
+        "settlement_status": "resolved_loss",
+        "raw_return": -0.062,
+        "rationale_summary": "碳酸锂价格反弹挤压毛利，止损离场"
+      },
+      {
+        "decision_id": "p_own_1",
+        "date": "2026-06-02",
+        "symbol": "300750",
+        "direction": "long",
+        "settlement_status": "resolved_win",
+        "raw_return": 0.181,
+        "rationale_summary": "欧洲需求超预期，二季度出货环比高增"
+      },
+      {
+        "decision_id": "p_ind_2",
+        "date": "2026-09-20",
+        "symbol": "000858",
+        "direction": "long",
+        "settlement_status": "avoidance",
+        "raw_return": null,
+        "rationale_summary": "高位放量滞涨，回避观望"
+      },
+      {
+        "decision_id": "p_ind_1",
+        "date": "2026-08-03",
+        "symbol": "000858",
+        "direction": "long",
+        "settlement_status": "resolved_win",
+        "raw_return": 0.094,
+        "rationale_summary": "行业景气回升，龙头弹性占优"
+      }
+    ],
+    "semantic": [
+      {
+        "clause_id": "c_f1dcdb42f923",
+        "text": "看多方向历史决策 3 条：结算命中（占该方向 50%）",
+        "status": "confirmed",
+        "source": "monthly_batch",
+        "evidence": null,
+        "created_at": "2026-10-13T08:55:07.945414+00:00",
+        "updated_at": "2026-10-13T08:55:07.961081+00:00",
+        "confirmed_at": "2026-10-13T08:55:07.961081+00:00"
+      },
+      {
+        "clause_id": "c_27e119550b83",
+        "text": "候选条款二",
+        "status": "confirmed",
+        "source": "monthly_batch",
+        "evidence": null,
+        "created_at": "2026-10-13T08:55:07.955578+00:00",
+        "updated_at": "2026-10-13T08:55:07.965128+00:00",
+        "confirmed_at": "2026-10-13T08:55:07.965128+00:00"
+      }
+    ],
+    "as_of": "2026-10-13",
+    "trimmed": 0,
+    "budget_chars": 900,
+    "used_chars": 875,
+    "dropped_ids": []
+  },
+  "trace_metadata": {
+    "purpose_tag": "decision_memory",
+    "as_of": "2026-10-13",
+    "stock_code": "300750",
+    "top_k": 5,
+    "episodic_count": 5,
+    "semantic_count": 2,
+    "budget_chars": 900,
+    "used_chars": 875,
+    "trimmed": 0,
+    "dropped_ids": [],
+    "over_budget": false
+  },
+  "injection": {
+    "analyst_block_chars": {
+      "technical": 893,
+      "macro": 946,
+      "fundamental": 1126,
+      "sentiment": 996
+    },
+    "trader_block_chars": 882,
+    "risk_block_chars": 421
+  },
+  "citation": {
+    "status": "PASS",
+    "coverage_gap": false,
+    "field_ref": "decision_memory.episodic.0.raw_return"
+  },
+  "known_interactions": {
+    "id_digits_in_interpretation": {
+      "status": "FAIL",
+      "bucket": "internal_inconsistency",
+      "mitigation": "记忆块头部指令：interpretation 只写结论与数值、不写来源 ID",
+      "evidence": "tests/memory/test_episodic.py::TestCitationCoverage::test_source_id_digits_trip_echo_check"
+    }
+  },
+  "ablation": {
+    "variants": [
+      [
+        "tech_no_memory",
+        "tech_memory"
+      ]
+    ],
+    "aggregate": {
+      "pairing_unit": "ticker",
+      "pairing_units": 3,
+      "n_runs": 6,
+      "variants": {
+        "tech_no_memory": {
+          "n_runs": 3,
+          "judge_medians": {
+            "report_relevance": 3.0,
+            "debate_quality": null,
+            "decision_grounding": null,
+            "consistency": null
+          }
+        },
+        "tech_memory": {
+          "n_runs": 3,
+          "judge_medians": {
+            "report_relevance": 3.1,
+            "debate_quality": null,
+            "decision_grounding": null,
+            "consistency": null
+          }
+        }
+      },
+      "dims": {
+        "report_relevance": {
+          "diff_mean": 0.0667,
+          "ci": [
+            -0.1,
+            0.2
+          ],
+          "conclusion": "无显著差异"
+        }
+      }
+    },
+    "report_markdown": "# 记忆消融报告（分析师层 ± 决策记忆注入）\n\n- 配对：tech_no_memory（无记忆对照臂）→ tech_memory（召回已结算历史 + 已确认语义条款）\n- 配对单元：ticker（bootstrap 重采样单位）\n- 有效 n（配对单元数）：3\n- run 数：6\n\n## 两变体 run 数与 judge 中位数\n\n- tech_no_memory: n_runs=3；report_relevance=3.0, debate_quality=None, decision_grounding=None, consistency=None\n- tech_memory: n_runs=3；report_relevance=3.1, debate_quality=None, decision_grounding=None, consistency=None\n\n## judge 维度增量（tech_no_memory → tech_memory）\n\n- report_relevance: 点估计 Δ0.0667，95% CI [-0.1, 0.2] → 无显著差异\n\n## 适用口径\n\n- 两臂同为分析师层直出（无辩论/决策层）→ judge 维度按适用性过滤为 report_relevance；\n  未在报告中的维度 = 该变体不适用，非缺失。\n- CI 含 0 只写「无显著差异」；不得据此引申为对记忆价值的否定。\n- 本报告仅陈述统计口径与配对单元；采纳/裁剪决策须有独立证据（成本—收益）并\n  遵循项目评估 SOP（judge 校准先行、一次只动一个变量）。\n",
+    "synthetic_note": "合成配对读数：仅证明聚合/报告口径与变体构建，不构成增量价值判断"
+  },
+  "memory_block_sample": "【历史决策记忆（decision_memory；来源=已结算历史决策，只读；引用数值时 field_ref 用 decision_memory.episodic.<索引>.<字段>（如 decision_memory.episodic.0.raw_return），interpretation 只写结论与数值、不写来源 ID（来源 ID 含数字，会被 citation 回声校验读作数值而误判 internal_inconsistency）；MUST NOT 改写或臆测）】\n情景记忆（同标的/同行业已结算决策，相关性降序）:\n[记忆] 来源: p_own_3 (2026-09-01) 300750 long 结算:resolved_neutral 收益:+1.10% 论据:区间震荡，未触达目标位，到期平仓\n[记忆] 来源: p_own_2 (2026-07-15) 300750 long 结算:resolved_loss 收益:-6.20% 论据:碳酸锂价格反弹挤压毛利，止损离场\n已确认经验条款（人工确认后生效；引用时 field_ref 用 decision_memory.semantic.<索引>.text）:\n[记忆] 来源: c_f1dcdb42f923 (2026-10-13) 看多方向历史决策 3 条：结算命中（占该方向 50%）\n[记忆] 来源: c_27e119550b83 (2026-10-13) 候选条款二",
+  "checks": {
+    "月批提炼落 pending（规则式降级，零 LLM）": true,
+    "人工确认门禁：confirm 返回命中": true,
+    "检索相关性：同标的优先 → 同行业，均按日期降序，且不含非目标标的/未结算行": true,
+    "记忆条目标注来源决策 ID 与日期": true,
+    "trace 用途标签逐字 decision_memory": true,
+    "预算裁剪：情景被截断且裁剪事件计数一致": true,
+    "预算裁剪：语义条款完整保留": true,
+    "预算裁剪事件进 trace（trimmed/dropped_ids）": true,
+    "分析师×4 + Trader 上下文含记忆条目（来源 ID + 日期）": true,
+    "风控辩论上下文仅含已确认语义条款（无情景记忆）": true,
+    "未确认条款全 prompt 路径零命中": true,
+    "向后兼容：无记忆键 → 各上下文无记忆块": true,
+    "记忆条目纳入 citation 校验覆盖（PASS，无覆盖缺口）": true,
+    "消融变体可构建且节点集合一致（差异只在入口）": true,
+    "消融聚合含 CI 与有效 n 披露": true
+  },
+  "verdict": "PASS"
+}

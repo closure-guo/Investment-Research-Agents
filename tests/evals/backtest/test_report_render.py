@@ -265,3 +265,37 @@ class TestRenderSelfCheckWiring:
         monkeypatch.setattr("evals.backtest.report.assert_outcome_report", _boom)
         with pytest.raises(ValueError, match="契约守卫被触发"):
             _render()
+
+
+class TestMethodologyDisclosure:
+    """评审修正 A1/A2：未成交计数与 costs/unfilled 口径必须进 md。
+
+    变异实证：`_methodology_lines` 缺 costs/unfilled label 或无效未成交计数行
+    → 本类 RED（口径只在 JSON、不落报告正文，等于未披露）。"""
+
+    def test_md_renders_unfilled_counts_and_cost_caliber(self):
+        text = _render(
+            unfilled_counts={"LIMIT_UP_UNFILLABLE": 2, "LIMIT_DOWN_UNFILLABLE": 1},
+            methodology={
+                "entry": "D+1 开盘经撮合引擎成交",
+                "daily_returns": "单笔结算收益摊到持有期逐日",
+                "benchmark": "BENCHMARK_CODE 默认 000300",
+                "adjust": "结算/回测区间收益走后复权（hfq）",
+                "costs": "成交价含滑点；佣金/印花税逐笔记入 fill.fee，收益序列暂不折算费用",
+                "unfilled": "未成交笔数按原因码披露、不计入收益序列",
+                "system_population": "system 收益仅计 buy/sell 决策",
+            },
+        )
+        assert "未成交笔数（按原因码）" in text
+        assert "LIMIT_UP_UNFILLABLE: 2" in text
+        assert "LIMIT_DOWN_UNFILLABLE: 1" in text
+        assert "成本口径：成交价含滑点；佣金/印花税逐笔记入 fill.fee，收益序列暂不折算费用" in text
+        assert "未成交口径：未成交笔数按原因码披露、不计入收益序列" in text
+
+    def test_missing_unfilled_counts_rendered_not_provided(self):
+        """键缺失（旧报告 dict）→ 如实「未提供」，不抛错。"""
+        assert "未成交笔数（按原因码）：未提供" in _render()
+
+    def test_empty_unfilled_counts_rendered_as_none(self):
+        """键在但空计数（本批无未成交）→ 「无」，不静默省略该行。"""
+        assert "未成交笔数（按原因码）：无" in _render(unfilled_counts={})

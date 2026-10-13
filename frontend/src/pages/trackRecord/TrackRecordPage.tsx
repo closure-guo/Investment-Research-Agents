@@ -304,33 +304,74 @@ export function TrackRecordPage({ onBack }: { onBack: () => void }) {
   const showBenchmark = prefs.benchmark !== 'none'
   const isAreaForm = prefs.navChartForm === 'interval'
 
+  // add-paper-broker（B4）：overview.paper 有数据时净值图切换为「虚拟结算 vs 仿真成交」
+  // 双曲线——数据为接口对齐结果（共同日期、同一基准期、基期重合），前端不重算不插值；
+  // null/缺省（无 paper 数据或旧后端）保持既有单曲线渲染，绝不伪造第二条线。
+  // 基准叠加偏好沿用：沪深300 按共同日期取既有曲线序列（缺日断点，connectNulls:false）。
+  const paper = overview?.paper ?? null
+  const paperDates = paper !== null ? paper.series.map(p => p.date) : []
+  const benchmarkByDate = new Map((curve ?? []).map(p => [p.date, p.benchmark_nav]))
+  const lossText = paper !== null ? `${paper.loss_pct > 0 ? '+' : ''}${paper.loss_pct.toFixed(1)}%` : null
+
   const chartOption = {
     color: [cssVar('--chart-sky', '#228EBF'), cssVar('--chart-amber', '#CBB54C')],
     tooltip: { trigger: 'axis' as const, valueFormatter: (v: unknown) => (typeof v === 'number' ? v.toFixed(4) : String(v)) },
     grid: { left: 48, right: 16, top: 24, bottom: 28 },
-    xAxis: { type: 'category' as const, data: (curve ?? []).map(p => p.date), axisLabel: { fontSize: 10 } },
+    xAxis: {
+      type: 'category' as const,
+      data: paper !== null ? paperDates : (curve ?? []).map(p => p.date),
+      axisLabel: { fontSize: 10 },
+    },
     yAxis: { type: 'value' as const, axisLabel: { fontSize: 10 } },
-    series: [
-      {
-        name: '组合净值',
-        type: 'line' as const,
-        data: (curve ?? []).map(p => p.agent_nav),
-        showSymbol: false,
-        connectNulls: false,
-        // 净值图形态偏好：'interval'（区间收益）以面积填充突出区间变动；'cumulative'（累计净值）为纯折线
-        ...(isAreaForm ? { areaStyle: { opacity: 0.18 } } : {}),
-      },
-      // 基准偏好：'none' 不叠加基准线；其它值叠加现有沪深300序列（zz500/zz1000 序列待接入，见 trackPrefs.ts）
-      ...(showBenchmark
-        ? [{
-            name: '沪深300',
+    series: paper !== null
+      ? [
+          {
+            name: '虚拟结算',
             type: 'line' as const,
-            data: (curve ?? []).map(p => p.benchmark_nav),
+            data: paper.series.map(p => p.virtual_equity),
             showSymbol: false,
             connectNulls: false,
-          }]
-        : []),
-    ],
+            ...(isAreaForm ? { areaStyle: { opacity: 0.18 } } : {}),
+          },
+          {
+            name: '仿真成交',
+            type: 'line' as const,
+            data: paper.series.map(p => p.paper_equity),
+            showSymbol: false,
+            connectNulls: false,
+          },
+          // 基准偏好：'none' 不叠加；其它值按共同日期映射沪深300（缺日留空断点）
+          ...(showBenchmark
+            ? [{
+                name: '沪深300',
+                type: 'line' as const,
+                data: paperDates.map(d => benchmarkByDate.get(d) ?? null),
+                showSymbol: false,
+                connectNulls: false,
+              }]
+            : []),
+        ]
+      : [
+          {
+            name: '组合净值',
+            type: 'line' as const,
+            data: (curve ?? []).map(p => p.agent_nav),
+            showSymbol: false,
+            connectNulls: false,
+            // 净值图形态偏好：'interval'（区间收益）以面积填充突出区间变动；'cumulative'（累计净值）为纯折线
+            ...(isAreaForm ? { areaStyle: { opacity: 0.18 } } : {}),
+          },
+          // 基准偏好：'none' 不叠加基准线；其它值叠加现有沪深300序列（zz500/zz1000 序列待接入，见 trackPrefs.ts）
+          ...(showBenchmark
+            ? [{
+                name: '沪深300',
+                type: 'line' as const,
+                data: (curve ?? []).map(p => p.benchmark_nav),
+                showSymbol: false,
+                connectNulls: false,
+              }]
+            : []),
+        ],
   }
 
   return (
@@ -542,12 +583,31 @@ export function TrackRecordPage({ onBack }: { onBack: () => void }) {
             </div>
           ) : null}
 
-          {/* 净值曲线（stage-b：agent vs 沪深300，起点归一 1.0；数据缺口断点不插值） */}
+          {/* 净值曲线（stage-b：agent vs 沪深300，起点归一 1.0；数据缺口断点不插值）。
+              add-paper-broker（B4）：paper 数据存在时切换为「虚拟结算 vs 仿真成交」双曲线
+              + 执行损耗标注（图例为 DOM 文本——ECharts 图例画在 canvas 内，DOM 图例区
+              供 E2E/组件测试断言，spec 场景 1.043/1.031 → -1.2%） */}
           {showCurve && (
             <div className="rounded-xl p-4 mb-6" style={{ background: 'var(--bg-overlay-l1)' }} data-testid="track-record-curve">
               <div className="text-xs mb-2" style={{ color: 'var(--text-tertiary)' }}>
-                {showBenchmark ? '组合净值 vs 沪深300' : '组合净值'}（起点归一 1.0）
+                {paper !== null
+                  ? '虚拟结算 vs 仿真成交（同一批决策、同一基准期）'
+                  : showBenchmark ? '组合净值 vs 沪深300（起点归一 1.0）' : '组合净值（起点归一 1.0）'}
               </div>
+              {paper !== null && (
+                <div data-testid="curve-legend" className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-2 text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
+                  <span data-testid="legend-virtual" className="inline-flex items-center gap-1">
+                    <i aria-hidden="true" className="inline-block h-2 w-2 rounded-full" style={{ background: cssVar('--chart-sky', '#228EBF') }} />
+                    虚拟结算
+                  </span>
+                  <span data-testid="legend-paper" className="inline-flex items-center gap-1">
+                    <i aria-hidden="true" className="inline-block h-2 w-2 rounded-full" style={{ background: cssVar('--chart-amber', '#CBB54C') }} />
+                    仿真成交
+                  </span>
+                  <span data-testid="exec-loss" style={{ color: 'var(--status-warning-default)' }}>执行损耗: {lossText}</span>
+                  <span data-testid="paper-note">{paper.note}</span>
+                </div>
+              )}
               <ReactECharts option={chartOption} style={{ height: 240 }} notMerge />
             </div>
           )}

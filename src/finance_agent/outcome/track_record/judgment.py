@@ -135,15 +135,23 @@ def resolve_prediction(
     kline: pd.DataFrame,
     benchmark: pd.DataFrame | None = None,
     neutral_band: float = DEFAULT_NEUTRAL_BAND,
+    *,
+    entry_override: tuple[str, float] | None = None,
 ) -> Resolution | None:
     """horizon 到点判定。入场基准为派生 settle_entry_price（非参考价）。
+
+    ``entry_override``（add-matching-engine T4）：回放侧经撮合引擎得到真实成交价时传
+    ``(执行日, 成交价)`` 覆盖 derive_entry 的派生入场；给定时跳过派生，其余判定数学
+    （horizon / 中性带 / 超额 / 回避语义）零改动——「决策日收盘派生价」与「D+1 撮合价」
+    两种口径共用同一套判定，不另造一份（spec「单一撮合实现」）。``entry_price <= 0``
+    与既有派生入场同口径返回 None。
 
     未到点返回 None(保持 open)。区间收益:入场日之后第 horizon 个交易日的收盘价计算;
     short 方向取负(neutral 按 long 口径),判定输出 avoidance_*。
     超额 = raw_return - 同期基准收益(符号同样按方向取负)。
     停牌/一字板递延与数据缺失由 job 层处理,本函数只做到点判定。
     """
-    derived = derive_entry(prediction, kline)
+    derived = entry_override if entry_override is not None else derive_entry(prediction, kline)
     if derived is None:
         return None
     entry_date, entry_price = derived

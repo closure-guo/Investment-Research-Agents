@@ -1,0 +1,1059 @@
+{
+  "change": "add-signal-portfolio-risk-gate",
+  "date": "2026-10-13",
+  "spec": "delta trade-execution「确定性风控门禁」+ plan G4（检查顺序 ①–⑦）",
+  "constants": {
+    "script_copy": {
+      "MAX_SINGLE_POSITION": 0.2,
+      "MAX_TOTAL_POSITION": 0.8,
+      "LOT_SIZE": 100
+    },
+    "implementation": {
+      "MAX_SINGLE_POSITION": 0.2,
+      "MAX_TOTAL_POSITION": 0.8,
+      "LOT_SIZE": 100
+    }
+  },
+  "constants_match": true,
+  "forbidden_imports": [],
+  "cases": [
+    {
+      "case_id": "01_legal_buy",
+      "scenario": "合法买单（全检查通过）",
+      "inputs": {
+        "side": "buy",
+        "qty": 100,
+        "target_weight": 0.15,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.55,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": null,
+      "hand_calc": "ST=False / 停牌=False / 无板 → 0.15 ≤ 0.20 → 0.55 ≤ 0.80 → 买单免 T+1 → 100 % 100 == 0 → 通过",
+      "independent_reason": null,
+      "independent_matches_expected": true,
+      "actual_reason": null,
+      "approved": true,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "odd_lot",
+          "passed": true,
+          "reason": null
+        }
+      ]
+    },
+    {
+      "case_id": "02_legal_sell",
+      "scenario": "合法卖单（可卖足额）",
+      "inputs": {
+        "side": "sell",
+        "qty": 200,
+        "target_weight": 0.05,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.35,
+        "sellable_qty": 200,
+        "total_qty": 200,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": null,
+      "hand_calc": "0.05 ≤ 0.20 → 0.35 ≤ 0.80 → 200 ≤ 200（可卖）→ 200 % 100 == 0 → 通过",
+      "independent_reason": null,
+      "independent_matches_expected": true,
+      "actual_reason": null,
+      "approved": true,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "odd_lot",
+          "passed": true,
+          "reason": null
+        }
+      ]
+    },
+    {
+      "case_id": "03_st_flag",
+      "scenario": "ST 状态拒单",
+      "inputs": {
+        "side": "buy",
+        "qty": 100,
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.2,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": true,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": "ST_FLAG",
+      "hand_calc": "is_st=True → ① 命中（spec 场景：X 当日 ST）",
+      "independent_reason": "ST_FLAG",
+      "independent_matches_expected": true,
+      "actual_reason": "ST_FLAG",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": false,
+          "reason": "ST_FLAG"
+        }
+      ]
+    },
+    {
+      "case_id": "04_st_first_multi",
+      "scenario": "多因同单：ST 优先（五因）",
+      "inputs": {
+        "side": "buy",
+        "qty": 150,
+        "target_weight": 0.9,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.95,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": true,
+        "is_suspended": true,
+        "limit_up_sealed": true,
+        "limit_down_sealed": false
+      },
+      "expected_reason": "ST_FLAG",
+      "hand_calc": "同单命中 ①ST + ②停牌 + ③涨停 + ④0.90>0.20 + ⑦150%100≠0 → 取 ①",
+      "independent_reason": "ST_FLAG",
+      "independent_matches_expected": true,
+      "actual_reason": "ST_FLAG",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": false,
+          "reason": "ST_FLAG"
+        }
+      ]
+    },
+    {
+      "case_id": "05_suspended",
+      "scenario": "停牌拒单",
+      "inputs": {
+        "side": "buy",
+        "qty": 100,
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.2,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": false,
+        "is_suspended": true,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": "SUSPENDED",
+      "hand_calc": "is_suspended=True（非 ST）→ ② 命中",
+      "independent_reason": "SUSPENDED",
+      "independent_matches_expected": true,
+      "actual_reason": "SUSPENDED",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": false,
+          "reason": "SUSPENDED"
+        }
+      ]
+    },
+    {
+      "case_id": "06_suspended_before_t1_odd",
+      "scenario": "多因同单：停牌优先于 T+1/整手",
+      "inputs": {
+        "side": "sell",
+        "qty": 350,
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.2,
+        "sellable_qty": 100,
+        "total_qty": 1000,
+        "is_st": false,
+        "is_suspended": true,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": "SUSPENDED",
+      "hand_calc": "同单 ②停牌 + ⑥350>100 + ⑦350%100=50≠0 → 取 ②",
+      "independent_reason": "SUSPENDED",
+      "independent_matches_expected": true,
+      "actual_reason": "SUSPENDED",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": false,
+          "reason": "SUSPENDED"
+        }
+      ]
+    },
+    {
+      "case_id": "07_limit_up_buy",
+      "scenario": "一字涨停买不进",
+      "inputs": {
+        "side": "buy",
+        "qty": 100,
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.2,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": true,
+        "limit_down_sealed": false
+      },
+      "expected_reason": "LIMIT_UP_UNFILLABLE",
+      "hand_calc": "bar.limit_up_sealed=True 且 side=buy → ③ 命中",
+      "independent_reason": "LIMIT_UP_UNFILLABLE",
+      "independent_matches_expected": true,
+      "actual_reason": "LIMIT_UP_UNFILLABLE",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": false,
+          "reason": "LIMIT_UP_UNFILLABLE"
+        }
+      ]
+    },
+    {
+      "case_id": "08_limit_up_sell_ok",
+      "scenario": "一字涨停卖单可成交（负例）",
+      "inputs": {
+        "side": "sell",
+        "qty": 100,
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.2,
+        "sellable_qty": 100,
+        "total_qty": 100,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": true,
+        "limit_down_sealed": false
+      },
+      "expected_reason": null,
+      "hand_calc": "③ 仅拦买：涨停卖单不拒 → 0.10 ≤ 0.20 → 0.20 ≤ 0.80 → 100 ≤ 100 → 100%100==0 通过",
+      "independent_reason": null,
+      "independent_matches_expected": true,
+      "actual_reason": null,
+      "approved": true,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "odd_lot",
+          "passed": true,
+          "reason": null
+        }
+      ]
+    },
+    {
+      "case_id": "09_limit_down_sell_first",
+      "scenario": "一字跌停卖不出（且 T+1 同单）",
+      "inputs": {
+        "side": "sell",
+        "qty": 100,
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.15,
+        "sellable_qty": 50,
+        "total_qty": 50,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": true
+      },
+      "expected_reason": "LIMIT_DOWN_UNFILLABLE",
+      "hand_calc": "同单 ③跌停 + ⑥100>50 → ③ 先于 ⑥",
+      "independent_reason": "LIMIT_DOWN_UNFILLABLE",
+      "independent_matches_expected": true,
+      "actual_reason": "LIMIT_DOWN_UNFILLABLE",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": false,
+          "reason": "LIMIT_DOWN_UNFILLABLE"
+        }
+      ]
+    },
+    {
+      "case_id": "10_limit_down_buy_ok",
+      "scenario": "一字跌停买单不受阻（负例）",
+      "inputs": {
+        "side": "buy",
+        "qty": 100,
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.2,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": true
+      },
+      "expected_reason": null,
+      "hand_calc": "③ 仅拦卖：跌停买单不拒 → 0.10 ≤ 0.20 → 0.20 ≤ 0.80 → 买单免 T+1 → 整手通过",
+      "independent_reason": null,
+      "independent_matches_expected": true,
+      "actual_reason": null,
+      "approved": true,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "odd_lot",
+          "passed": true,
+          "reason": null
+        }
+      ]
+    },
+    {
+      "case_id": "11_single_cap",
+      "scenario": "单票超限 0.21 > 0.20",
+      "inputs": {
+        "side": "buy",
+        "qty": 100,
+        "target_weight": 0.21,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.2,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": "SINGLE_POSITION_CAP",
+      "hand_calc": "0.21 > 0.20 + 1e-9 → ④ 命中（③ 无板已过）",
+      "independent_reason": "SINGLE_POSITION_CAP",
+      "independent_matches_expected": true,
+      "actual_reason": "SINGLE_POSITION_CAP",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": false,
+          "reason": "SINGLE_POSITION_CAP"
+        }
+      ]
+    },
+    {
+      "case_id": "12_single_cap_boundary",
+      "scenario": "单票恰 0.20 边界不拒",
+      "inputs": {
+        "side": "buy",
+        "qty": 100,
+        "target_weight": 0.2,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.2,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": null,
+      "hand_calc": "0.20 ≤ 0.20 + 1e-9（严格大于才拒）→ 通过",
+      "independent_reason": null,
+      "independent_matches_expected": true,
+      "actual_reason": null,
+      "approved": true,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "odd_lot",
+          "passed": true,
+          "reason": null
+        }
+      ]
+    },
+    {
+      "case_id": "13_total_cap_full_add",
+      "scenario": "满仓加仓超总仓 0.85 > 0.80",
+      "inputs": {
+        "side": "buy",
+        "qty": 100,
+        "target_weight": 0.1,
+        "current_weight": 0.8,
+        "projected_total_weight": 0.85,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": "TOTAL_POSITION_CAP",
+      "hand_calc": "current=0.80（满仓）加 0.05 → projected=0.85 > 0.80 + 1e-9 → ⑤ 命中",
+      "independent_reason": "TOTAL_POSITION_CAP",
+      "independent_matches_expected": true,
+      "actual_reason": "TOTAL_POSITION_CAP",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": false,
+          "reason": "TOTAL_POSITION_CAP"
+        }
+      ]
+    },
+    {
+      "case_id": "14_total_cap_boundary",
+      "scenario": "总仓恰 0.80 边界不拒",
+      "inputs": {
+        "side": "buy",
+        "qty": 100,
+        "target_weight": 0.1,
+        "current_weight": 0.75,
+        "projected_total_weight": 0.8,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": null,
+      "hand_calc": "0.80 ≤ 0.80 + 1e-9 → 通过",
+      "independent_reason": null,
+      "independent_matches_expected": true,
+      "actual_reason": null,
+      "approved": true,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "odd_lot",
+          "passed": true,
+          "reason": null
+        }
+      ]
+    },
+    {
+      "case_id": "15_full_position_sell_frees",
+      "scenario": "满仓卖出腾挪（降总仓）",
+      "inputs": {
+        "side": "sell",
+        "qty": 100,
+        "target_weight": 0.05,
+        "current_weight": 0.8,
+        "projected_total_weight": 0.75,
+        "sellable_qty": 100,
+        "total_qty": 100,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": null,
+      "hand_calc": "current=0.80 减至 0.05 → projected=0.75 ≤ 0.80 → 100 ≤ 100 → 整手通过",
+      "independent_reason": null,
+      "independent_matches_expected": true,
+      "actual_reason": null,
+      "approved": true,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "odd_lot",
+          "passed": true,
+          "reason": null
+        }
+      ]
+    },
+    {
+      "case_id": "16_t1_sell_blocked",
+      "scenario": "T+1：卖出超可卖",
+      "inputs": {
+        "side": "sell",
+        "qty": 200,
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.35,
+        "sellable_qty": 100,
+        "total_qty": 600,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": "T1_SELL_BLOCKED",
+      "hand_calc": "600 股持仓仅 100 可卖（当日买入 500 未解禁）→ 200 > 100 → ⑥ 命中",
+      "independent_reason": "T1_SELL_BLOCKED",
+      "independent_matches_expected": true,
+      "actual_reason": "T1_SELL_BLOCKED",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": false,
+          "reason": "T1_SELL_BLOCKED"
+        }
+      ]
+    },
+    {
+      "case_id": "17_t1_no_position",
+      "scenario": "T+1：无持仓上下文（可卖视为 0）",
+      "inputs": {
+        "side": "sell",
+        "qty": 100,
+        "target_weight": 0.05,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.1,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": "T1_SELL_BLOCKED",
+      "hand_calc": "position 缺省 → 可卖 0 → 100 > 0 → ⑥ 命中（保守拒绝无持仓卖出）",
+      "independent_reason": "T1_SELL_BLOCKED",
+      "independent_matches_expected": true,
+      "actual_reason": "T1_SELL_BLOCKED",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": false,
+          "reason": "T1_SELL_BLOCKED"
+        }
+      ]
+    },
+    {
+      "case_id": "18_odd_lot_buy",
+      "scenario": "零股买单 150 股",
+      "inputs": {
+        "side": "buy",
+        "qty": 150,
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.2,
+        "sellable_qty": null,
+        "total_qty": 0,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": "ODD_LOT",
+      "hand_calc": "150 % 100 = 50 ≠ 0 → ⑦ 命中（买单无零股全卖例外）",
+      "independent_reason": "ODD_LOT",
+      "independent_matches_expected": true,
+      "actual_reason": "ODD_LOT",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "odd_lot",
+          "passed": false,
+          "reason": "ODD_LOT"
+        }
+      ]
+    },
+    {
+      "case_id": "19_odd_lot_full_sell_ok",
+      "scenario": "卖零股全卖例外（350 股全平）",
+      "inputs": {
+        "side": "sell",
+        "qty": 350,
+        "target_weight": 0.05,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.05,
+        "sellable_qty": 350,
+        "total_qty": 350,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": null,
+      "hand_calc": "350%100=50≠0 但 qty==total==350 且 350%100≠0 → 例外放行；350 ≤ 350 可卖",
+      "independent_reason": null,
+      "independent_matches_expected": true,
+      "actual_reason": null,
+      "approved": true,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "odd_lot",
+          "passed": true,
+          "reason": null
+        }
+      ]
+    },
+    {
+      "case_id": "20_multi_t1_before_odd",
+      "scenario": "多因同单：T+1 优先于整手",
+      "inputs": {
+        "side": "sell",
+        "qty": 150,
+        "target_weight": 0.1,
+        "current_weight": 0.0,
+        "projected_total_weight": 0.35,
+        "sellable_qty": 100,
+        "total_qty": 1000,
+        "is_st": false,
+        "is_suspended": false,
+        "limit_up_sealed": false,
+        "limit_down_sealed": false
+      },
+      "expected_reason": "T1_SELL_BLOCKED",
+      "hand_calc": "同单 ⑥150>100 + ⑦150%100=50≠0 → 取 ⑥（本门禁顺序，异于 matching M3）",
+      "independent_reason": "T1_SELL_BLOCKED",
+      "independent_matches_expected": true,
+      "actual_reason": "T1_SELL_BLOCKED",
+      "approved": false,
+      "matched": true,
+      "check_trace": [
+        {
+          "check": "st_flag",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "suspended",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "limit_seal",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "single_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "total_position_cap",
+          "passed": true,
+          "reason": null
+        },
+        {
+          "check": "t1_sellable",
+          "passed": false,
+          "reason": "T1_SELL_BLOCKED"
+        }
+      ]
+    }
+  ],
+  "verdict": {
+    "total": 20,
+    "matched": 20,
+    "independent_self_consistent": true,
+    "constants_match": true,
+    "forbidden_imports": [],
+    "passed": true
+  }
+}

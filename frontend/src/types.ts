@@ -530,6 +530,21 @@ export interface TrackRecordAvoidance {
   avoidance_rate: number | null
 }
 
+// 虚拟 vs 仿真双曲线块（add-paper-broker B3：overview.paper；无数据时后端返回 null）
+export interface TrackRecordPaperPoint {
+  date: string
+  virtual_equity: number
+  paper_equity: number
+}
+
+export interface TrackRecordPaper {
+  series: TrackRecordPaperPoint[]
+  // 最新共同日 (paper/virtual − 1) × 100，后端已保留 1 位小数
+  loss_pct: number
+  base_date: string
+  note: string
+}
+
 export interface TrackRecordOverview {
   total: number
   open: number
@@ -552,6 +567,9 @@ export interface TrackRecordOverview {
   // update-track-record-display-clarity：旧口径进行中计数（与 legacy_settled 双计数分列；
   // 可选以容忍旧后端，0 或缺省时前端不渲染该分句）
   legacy_open?: number
+  // add-paper-broker（B3）：虚拟 vs 仿真双曲线块；null = 无 paper 数据（隐藏系列）。
+  // 可选以容忍旧后端（缺省视同 null，不伪造第二条曲线）
+  paper?: TrackRecordPaper | null
 }
 
 // 净值曲线点（add-track-record-stage-b）
@@ -762,4 +780,51 @@ export interface OpsPreregVersion {
 export interface OpsCaliber {
   knobs: Record<string, number>
   source: string
+}
+
+// 选股池（add-screening-pipeline S4/S5：GET /api/screening/pool 载荷）
+export interface ScreeningFactorContrib {
+  factor_id: number
+  zscore?: number
+  weight?: number
+  contribution: number
+}
+
+export interface ScreeningPoolRow {
+  symbol: string
+  composite_score: number
+  rank: number
+  consecutive_days: number
+  l3_verdict: string
+  l3_reason: string
+  factor_contribs: ScreeningFactorContrib[]
+}
+
+// 批量分析队列条目（S3 四态；前端只对 queued/running 渲染徽标）
+export interface ScreeningQueueEntry {
+  symbol: string
+  session_id: string
+  state: string
+}
+
+// 深度分析前的时效性校验移除项（reason ∈ SUSPENDED/LIMIT_LOCKED/NEW_EVENT）
+export interface ScreeningRemoval {
+  symbol: string
+  reason: string
+  detail: string
+}
+
+export interface ScreeningPoolResponse {
+  batch_date: string | null
+  batch_status: string | null
+  stale: boolean
+  pool: ScreeningPoolRow[]
+  queue: ScreeningQueueEntry[]
+}
+
+// POST /api/screening/analyze 响应（池空为 409 显式错误）
+export interface ScreeningAnalyzeResponse {
+  started: ScreeningQueueEntry[]
+  queued: ScreeningQueueEntry[]
+  removed: ScreeningRemoval[]
 }

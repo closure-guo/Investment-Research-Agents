@@ -1,0 +1,580 @@
+{
+  "router_trace": {
+    "profile": "env:openai/k3-256k",
+    "provider": "openai",
+    "model": "openai/k3-256k",
+    "capability": {
+      "tools": "single",
+      "json_schema": "json_mode"
+    },
+    "fallback_chain": [
+      "env:openai/k3-256k"
+    ]
+  },
+  "endpoint_host": "api.kimi.com",
+  "presence": {
+    "LLM_API_KEY": true,
+    "LLM_BASE_URL": true,
+    "LLM_MODEL": true,
+    "LLM_QUICK_MODEL": true
+  },
+  "batches": [
+    {
+      "name": "batch-1（动量占优 70% → 跨桶引导）",
+      "bucket_stats": {
+        "动量": 7,
+        "价量": 2,
+        "反转": 1
+      },
+      "elapsed_seconds": 86.0,
+      "proposal_count": 25,
+      "rejected_count": 0,
+      "trace_metadata": {
+        "purpose_tag": "factor_proposal",
+        "mode": "broad",
+        "router": {
+          "profile": "env:openai/k3-256k",
+          "provider": "openai",
+          "model": "openai/k3-256k",
+          "capability": {
+            "tools": "single",
+            "json_schema": "json_mode"
+          },
+          "fallback_chain": [
+            "env:openai/k3-256k"
+          ]
+        },
+        "rejected": []
+      },
+      "rejected": [],
+      "review": {
+        "total": 25,
+        "dsl_parseable": 25,
+        "dsl_parse_rate": "25/25",
+        "hypothesis_ok": 25,
+        "hypothesis_rate": "25/25",
+        "category_distribution": {
+          "波动率": 6,
+          "反转": 6,
+          "价量": 7,
+          "流动性": 6
+        },
+        "alignment_distribution": {
+          "0.9": 2,
+          "0.8": 11,
+          "0.7": 11,
+          "0.6": 1
+        },
+        "rows": [
+          {
+            "expression": "ts_std(div(sub(high, low), close), 10)",
+            "hypothesis": "日内高低价差相对收盘价衡量单位价格承载的分歧程度，分歧持续放大后往往预示波动率状态切换与风险定价重估。",
+            "hypothesis_chars": 51,
+            "category": "波动率",
+            "alignment_score": 0.9,
+            "mode": "broad"
+          },
+          {
+            "expression": "rank(ts_std(close, 20))",
+            "hypothesis": "把个股一段时间收盘价离散度做截面排序，可刻画相对波动暴露，低波动异象与高波动风险补偿会由此形成区分度。",
+            "hypothesis_chars": 51,
+            "category": "波动率",
+            "alignment_score": 0.82,
+            "mode": "broad"
+          },
+          {
+            "expression": "zscore(ts_std(delta(close, 5), 20))",
+            "hypothesis": "短期收益增量在长期窗口中的不稳定度被标准化后，能识别波动冲击是否偏离自身常态，偏离越大越容易触发风险预算调整。",
+            "hypothesis_chars": 55,
+            "category": "波动率",
+            "alignment_score": 0.78,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(ts_std(sub(high, close), 10), ts_std(sub(close, low), 10))",
+            "hypothesis": "上影方向与下影方向波动之比反映冲高回落和探底回升力量的不对称，若上方波动占优，说明抛压更频繁地压制价格。",
+            "hypothesis_chars": 52,
+            "category": "波动率",
+            "alignment_score": 0.72,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_rank(abs(delta(close, 1)), 10)",
+            "hypothesis": "单日价格变化绝对值在自身历史中的位置刻画突发冲击强度，极端冲击常伴随流动性收缩和后续波动聚集。",
+            "hypothesis_chars": 47,
+            "category": "波动率",
+            "alignment_score": 0.8,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_corr(abs(delta(close, 1)), volume, 15)",
+            "hypothesis": "价格突变与成交同步放大的相关性，能区分噪声式波动与资金驱动的真实风险事件，相关性越高说明波动更有信息含量。",
+            "hypothesis_chars": 53,
+            "category": "波动率",
+            "alignment_score": 0.76,
+            "mode": "broad"
+          },
+          {
+            "expression": "sub(ts_mean(close, 10), close)",
+            "hypothesis": "当前收盘价低于近端均价时，短线持仓浮亏压力上升，悲观情绪过度释放后存在向均衡价格修复的反转动力。",
+            "hypothesis_chars": 48,
+            "category": "反转",
+            "alignment_score": 0.88,
+            "mode": "broad"
+          },
+          {
+            "expression": "rank(sub(ts_mean(close, 5), close))",
+            "hypothesis": "把现价相对五日均价缺口做截面排序，专门寻找超跌幅度更深的股票，均值回复力量在极端负缺口处通常更强。",
+            "hypothesis_chars": 49,
+            "category": "反转",
+            "alignment_score": 0.85,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(sub(close, low), sub(high, low))",
+            "hypothesis": "收盘价在当日区间中的位置越低，说明盘中承接虽弱但尾盘抛压已较充分，次日更容易出现技术性和情绪性回补。",
+            "hypothesis_chars": 50,
+            "category": "反转",
+            "alignment_score": 0.74,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_rank(sub(ts_mean(close, 3), close), 10)",
+            "hypothesis": "极短周期均价与现价的缺口再放入近十日历史中比较，可识别偏离是否达到自身罕见水平，罕见超跌更可能反转。",
+            "hypothesis_chars": 50,
+            "category": "反转",
+            "alignment_score": 0.79,
+            "mode": "broad"
+          },
+          {
+            "expression": "sub(rank(ts_mean(close, 20)), rank(close))",
+            "hypothesis": "长期均价的截面地位高于现价截面地位时，代表个股相对同类已明显落后，估值与情绪回归会推动排名收敛。",
+            "hypothesis_chars": 48,
+            "category": "反转",
+            "alignment_score": 0.7,
+            "mode": "broad"
+          },
+          {
+            "expression": "mul(rank(sub(low, close)), rank(volume))",
+            "hypothesis": "收盘贴近最低价且成交放大时，恐慌抛售特征更强，若卖压集中在末端释放，短期供给出清后反弹概率上升。",
+            "hypothesis_chars": 48,
+            "category": "反转",
+            "alignment_score": 0.68,
+            "mode": "broad"
+          },
+          {
+            "expression": "rank(ts_corr(close, volume, 10))",
+            "hypothesis": "价格与成交在一段时间内的协同度经截面排序后，可识别放量上涨或缩量下跌的差异，量价背离常隐含趋势质量下降。",
+            "hypothesis_chars": 52,
+            "category": "价量",
+            "alignment_score": 0.77,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_rank(div(amount, volume), 20)",
+            "hypothesis": "成交金额与成交量之比近似成交均价，其历史分位反映实际交易重心的迁移，比单纯收盘价更贴近真实撮合成本。",
+            "hypothesis_chars": 50,
+            "category": "价量",
+            "alignment_score": 0.73,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_corr(rank(close), rank(volume), 10)",
+            "hypothesis": "用截面排名削弱价格量纲影响后再度量量价相关，能观察相对强势是否由相对成交配合，配合不足时信号更脆弱。",
+            "hypothesis_chars": 50,
+            "category": "价量",
+            "alignment_score": 0.71,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(delta(amount, 5), delta(volume, 5))",
+            "hypothesis": "成交额增量相对成交量增量的弹性体现单笔交易价格抬升效率，效率异常时说明买卖盘口厚度或大单结构正在变化。",
+            "hypothesis_chars": 51,
+            "category": "价量",
+            "alignment_score": 0.66,
+            "mode": "broad"
+          },
+          {
+            "expression": "zscore(ts_mean(mul(close, volume), 15))",
+            "hypothesis": "价格乘以成交量近似以股数加权的价格暴露，其标准化水平可发现资金参与热度偏离常态的标的，热度异常会影响后续定价。",
+            "hypothesis_chars": 55,
+            "category": "价量",
+            "alignment_score": 0.69,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_corr(ts_rank(close, 5), ts_rank(volume, 5), 20)",
+            "hypothesis": "短周期价格分位与成交分位在更长窗口中的联动，刻画局部趋势是否被持续放量确认，确认度低的走势更容易衰减。",
+            "hypothesis_chars": 51,
+            "category": "价量",
+            "alignment_score": 0.75,
+            "mode": "broad"
+          },
+          {
+            "expression": "rank(ts_mean(amount, 20))",
+            "hypothesis": "近月成交金额的截面排名代表可交易容量和市场关注度，容量差异会影响冲击成本、机构参与度以及风险溢价补偿。",
+            "hypothesis_chars": 51,
+            "category": "流动性",
+            "alignment_score": 0.83,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_rank(div(volume, ts_mean(volume, 20)), 5)",
+            "hypothesis": "当期成交量相对过去均量的倍数再做短期排序，刻画突发放量是否连续，连续异常通常意味着流动性供给和需求同时重估。",
+            "hypothesis_chars": 54,
+            "category": "流动性",
+            "alignment_score": 0.8,
+            "mode": "broad"
+          },
+          {
+            "expression": "rank(ts_corr(volume, amount, 15))",
+            "hypothesis": "成交量与成交金额高度同步说明换手规模与资金规模一致扩张，若二者失配则可能由价格单边变动造成虚假流动性。",
+            "hypothesis_chars": 51,
+            "category": "流动性",
+            "alignment_score": 0.72,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_std(div(amount, volume), 20)",
+            "hypothesis": "单位成交量对应金额的波动可理解为平均撮合价格的不稳定性，稳定性越差，大额资金执行时面临的不确定性越高。",
+            "hypothesis_chars": 51,
+            "category": "流动性",
+            "alignment_score": 0.67,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(ts_mean(amount, 5), ts_mean(amount, 60))",
+            "hypothesis": "短长窗口成交额均值之比衡量资金活跃度迁移，快速抬升代表流动性涌入，持续低迷则提示交易机会和定价效率下降。",
+            "hypothesis_chars": 52,
+            "category": "流动性",
+            "alignment_score": 0.78,
+            "mode": "broad"
+          },
+          {
+            "expression": "sub(rank(volume), rank(ts_mean(volume, 20)))",
+            "hypothesis": "当前成交截面排名高于其历史活跃排名时，说明个股相对市场与相对自身同步升温，资金拥挤与流动性溢价会共同变化。",
+            "hypothesis_chars": 53,
+            "category": "流动性",
+            "alignment_score": 0.7,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_rank(max(high, close), 10)",
+            "hypothesis": "日内最高价与收盘价的较高者进入近端分位，可观察上沿压力是否被反复测试，强势收盘贴近高点时流动性买方更主动。",
+            "hypothesis_chars": 53,
+            "category": "价量",
+            "alignment_score": 0.62,
+            "mode": "broad"
+          }
+        ]
+      }
+    },
+    {
+      "name": "batch-2（均衡采样）",
+      "bucket_stats": {
+        "价量": 5,
+        "流动性": 4,
+        "波动率": 3,
+        "反转": 3,
+        "动量": 2
+      },
+      "elapsed_seconds": 79.1,
+      "proposal_count": 32,
+      "rejected_count": 0,
+      "trace_metadata": {
+        "purpose_tag": "factor_proposal",
+        "mode": "broad",
+        "router": {
+          "profile": "env:openai/k3-256k",
+          "provider": "openai",
+          "model": "openai/k3-256k",
+          "capability": {
+            "tools": "single",
+            "json_schema": "json_mode"
+          },
+          "fallback_chain": [
+            "env:openai/k3-256k"
+          ]
+        },
+        "rejected": []
+      },
+      "rejected": [],
+      "review": {
+        "total": 32,
+        "dsl_parseable": 32,
+        "dsl_parse_rate": "32/32",
+        "hypothesis_ok": 32,
+        "hypothesis_rate": "32/32",
+        "category_distribution": {
+          "价量": 12,
+          "流动性": 6,
+          "波动率": 5,
+          "反转": 5,
+          "动量": 4
+        },
+        "alignment_distribution": {
+          "0.8": 22,
+          "0.9": 10
+        },
+        "rows": [
+          {
+            "expression": "mul(zscore(delta(close, 5)), zscore(ts_std(volume, 10)))",
+            "hypothesis": "当价格变动与成交量波动同步异常放大时，说明短期博弈情绪极端，后续存在情绪均值回归带来的反向收益，二者乘积可捕捉量价共振的极端状态。",
+            "hypothesis_chars": 65,
+            "category": "价量",
+            "alignment_score": 0.82,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_corr(rank(close), rank(volume), 10)",
+            "hypothesis": "价格与成交量的秩相关反映量价配合程度，秩化处理降低极端值干扰；量价背离（负相关）往往预示趋势衰竭，正相关过热则隐含拥挤交易风险。",
+            "hypothesis_chars": 64,
+            "category": "价量",
+            "alignment_score": 0.88,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_corr(delta(close, 1), delta(volume, 1), 15)",
+            "hypothesis": "日内收益率与成交量增量的滚动相关刻画资金推动价格的效率，相关性转负说明放量滞涨或缩量上涨，是趋势反转的先行信号。",
+            "hypothesis_chars": 56,
+            "category": "价量",
+            "alignment_score": 0.85,
+            "mode": "broad"
+          },
+          {
+            "expression": "sub(close, div(amount, volume))",
+            "hypothesis": "收盘价相对当日成交均价（成交额/成交量近似）的偏离反映尾盘资金行为，收盘价显著高于均价说明尾盘抢筹，短期存在正向延续或过热回吐。",
+            "hypothesis_chars": 64,
+            "category": "价量",
+            "alignment_score": 0.86,
+            "mode": "broad"
+          },
+          {
+            "expression": "zscore(div(volume, ts_mean(volume, 20)))",
+            "hypothesis": "标准化后的量比刻画当前成交活跃度相对自身历史的异常程度，突发放量通常伴随信息冲击，其横截面差异蕴含显著的短期定价线索。",
+            "hypothesis_chars": 59,
+            "category": "流动性",
+            "alignment_score": 0.87,
+            "mode": "broad"
+          },
+          {
+            "expression": "rank(zscore(ts_mean(amount, 10)))",
+            "hypothesis": "近十日平均成交额经标准化与横截面排序后衡量股票的关注度与流动性水平，低关注股票存在流动性溢价与信息扩散不足带来的超额收益。",
+            "hypothesis_chars": 61,
+            "category": "流动性",
+            "alignment_score": 0.8,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(ts_mean(amount, 5), ts_mean(amount, 20))",
+            "hypothesis": "短周期成交额均值相对长周期的比值捕捉资金流入流出节奏，比值骤升代表增量资金快速介入，骤降则反映资金撤离导致的流动性枯竭。",
+            "hypothesis_chars": 60,
+            "category": "流动性",
+            "alignment_score": 0.84,
+            "mode": "broad"
+          },
+          {
+            "expression": "log(div(volume, ts_mean(volume, 20)))",
+            "hypothesis": "成交量比值取对数后压缩右尾，更稳健地刻画放量幅度；温和放量伴随健康换手，极端放量则多为情绪宣泄，二者对未来收益方向含义相反。",
+            "hypothesis_chars": 62,
+            "category": "流动性",
+            "alignment_score": 0.83,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(ts_mean(amount, 5), ts_std(amount, 20))",
+            "hypothesis": "成交额短期均值与长期波动之比衡量资金流入的相对强度，强于波动的流入代表趋势性资金建仓，而非噪声扰动，具有更好的持续性与预测力。",
+            "hypothesis_chars": 63,
+            "category": "流动性",
+            "alignment_score": 0.81,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(ts_std(close, 10), ts_mean(close, 10))",
+            "hypothesis": "价格标准差除以均值的变异系数消除股价量纲影响，实现波动率横截面可比；低波动异象表明高风险股票收益风险比恶化，低波动股票获得超额收益。",
+            "hypothesis_chars": 66,
+            "category": "波动率",
+            "alignment_score": 0.85,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_mean(div(sub(high, low), close), 10)",
+            "hypothesis": "日内振幅（高低价差除以收盘价）的滚动均值衡量常态波动水平，振幅持续偏高反映分歧加剧与不确定性上升，通常对应未来收益折价。",
+            "hypothesis_chars": 60,
+            "category": "波动率",
+            "alignment_score": 0.87,
+            "mode": "broad"
+          },
+          {
+            "expression": "zscore(ts_std(close, 20))",
+            "hypothesis": "对二十日收益波动率做横截面标准化，识别波动异常个股；波动骤增往往由事件驱动，随后波动回落伴随价格修复，形成可交易的波动率周期。",
+            "hypothesis_chars": 63,
+            "category": "波动率",
+            "alignment_score": 0.82,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(ts_std(close, 5), ts_std(close, 20))",
+            "hypothesis": "短期波动与长期波动之比刻画波动率的期限结构，比值高企说明近期不确定性陡增，根据波动率聚类与均值回复特性，未来波动将回落并伴随价格企稳。",
+            "hypothesis_chars": 67,
+            "category": "波动率",
+            "alignment_score": 0.86,
+            "mode": "broad"
+          },
+          {
+            "expression": "rank(ts_std(delta(close, 1), 20))",
+            "hypothesis": "日收益变动二十日标准差的横截面排序提供相对稳健的特殊波动度量，高特殊波动股票受博彩偏好投资者追捧而高估，未来收益系统性偏低。",
+            "hypothesis_chars": 62,
+            "category": "波动率",
+            "alignment_score": 0.84,
+            "mode": "broad"
+          },
+          {
+            "expression": "sub(ts_mean(close, 20), close)",
+            "hypothesis": "二十日均线减去现价衡量股价偏离长期均衡的程度，价格大幅跌破均线反映短期超卖，基于均值回复力量，超跌个股存在向上修复的超额收益。",
+            "hypothesis_chars": 63,
+            "category": "反转",
+            "alignment_score": 0.88,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(sub(close, ts_mean(close, 20)), ts_std(close, 20))",
+            "hypothesis": "价格相对均线偏离以其历史波动标准化，形成统计意义上的极端偏离度量；偏离超过正常波动范围时均值回复概率显著上升，是经典反转信号。",
+            "hypothesis_chars": 63,
+            "category": "反转",
+            "alignment_score": 0.9,
+            "mode": "broad"
+          },
+          {
+            "expression": "zscore(sub(close, ts_mean(close, 10)))",
+            "hypothesis": "短期均线偏离度经横截面标准化后识别相对超涨超跌个股，行为金融学上投资者过度反应导致短期价格偏离基本面，随后修正产生反转收益。",
+            "hypothesis_chars": 62,
+            "category": "反转",
+            "alignment_score": 0.86,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_rank(div(sub(high, close), sub(high, low)), 10)",
+            "hypothesis": "收盘价在日内高低区间中的相对位置经十日时序分位处理，持续收于区间低位表明抛压沉重，过度悲观定价后往往出现技术性反弹。",
+            "hypothesis_chars": 58,
+            "category": "反转",
+            "alignment_score": 0.83,
+            "mode": "broad"
+          },
+          {
+            "expression": "log(div(close, ts_mean(close, 20)))",
+            "hypothesis": "现价与二十日均线之比取对数得到近似二十日对数收益，平滑的单期动量刻画中期趋势强度，趋势惯性源于信息扩散缓慢与投资者锚定不足。",
+            "hypothesis_chars": 62,
+            "category": "动量",
+            "alignment_score": 0.84,
+            "mode": "broad"
+          },
+          {
+            "expression": "sub(ts_mean(close, 5), ts_mean(close, 20))",
+            "hypothesis": "短长期均线之差即均线多头排列度量，短期均线上穿长期均线确认上升趋势确立，动量效应下趋势将延续，带来正向预期收益。",
+            "hypothesis_chars": 56,
+            "category": "动量",
+            "alignment_score": 0.87,
+            "mode": "broad"
+          },
+          {
+            "expression": "rank(delta(close, 20))",
+            "hypothesis": "二十日价格变动的横截面排序构建相对强弱动量，截面动量效应表明前期强势股短期内继续跑赢弱势股，源于盈利动量与资金正反馈循环。",
+            "hypothesis_chars": 61,
+            "category": "动量",
+            "alignment_score": 0.85,
+            "mode": "broad"
+          },
+          {
+            "expression": "mul(delta(close, 5), ts_rank(volume, 10))",
+            "hypothesis": "五日价格变动与成交量时序分位相乘识别放量上涨与缩量下跌的组合，放量上涨得到资金确认更可持续，无量上涨则容易夭折，量价共振决定动量质量。",
+            "hypothesis_chars": 67,
+            "category": "价量",
+            "alignment_score": 0.84,
+            "mode": "broad"
+          },
+          {
+            "expression": "sub(ts_corr(high, volume, 10), ts_corr(low, volume, 10))",
+            "hypothesis": "最高价与最低价分别对成交量的相关之差刻画资金在价格上下沿的行为差异，高位放量相关性更强说明追涨盘主导，隐含情绪过热后的回撤风险。",
+            "hypothesis_chars": 64,
+            "category": "价量",
+            "alignment_score": 0.79,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(amount, mul(volume, close))",
+            "hypothesis": "成交额除以成交量与收盘价的乘积近似成交均价与收盘价之比，该比值偏离一说明盘中成交重心与收盘价背离，反映尾盘异动与资金意图分歧。",
+            "hypothesis_chars": 63,
+            "category": "价量",
+            "alignment_score": 0.81,
+            "mode": "broad"
+          },
+          {
+            "expression": "zscore(ts_corr(close, volume, 20))",
+            "hypothesis": "长周期量价相关的横截面标准化识别量价结构异常个股，量价相关性由正转负通常对应主力派发阶段，而负相关见底回升常伴随吸筹完成。",
+            "hypothesis_chars": 61,
+            "category": "价量",
+            "alignment_score": 0.82,
+            "mode": "broad"
+          },
+          {
+            "expression": "mul(ts_rank(close, 10), ts_rank(volume, 10))",
+            "hypothesis": "价格与成交量同时处于自身时序高位的乘积度量交易拥挤度，双高状态反映市场情绪过热与筹码充分交换，后续接力资金不足导致收益回落。",
+            "hypothesis_chars": 62,
+            "category": "价量",
+            "alignment_score": 0.8,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(sub(close, low), sub(high, low))",
+            "hypothesis": "收盘价在日内高低区间的归一化位置即随机指标原型，收盘持续逼近最高价说明买方控盘力强，该日内结构信息对次日开盘定价有预测作用。",
+            "hypothesis_chars": 62,
+            "category": "价量",
+            "alignment_score": 0.83,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_corr(ts_mean(close, 5), ts_mean(volume, 5), 20)",
+            "hypothesis": "平滑后的价格与成交量趋势相关性过滤日内噪声，刻画中期量价协同方向；平滑量价同步上行确认健康趋势，背离则预警趋势动能衰减。",
+            "hypothesis_chars": 60,
+            "category": "价量",
+            "alignment_score": 0.81,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(ts_rank(volume, 5), ts_rank(volume, 20))",
+            "hypothesis": "成交量短期与长期时序分位之比衡量换手率的边际变化方向，换手由低位快速抬升说明新资金介入，持续高位换手则暗示筹码松动与派发风险。",
+            "hypothesis_chars": 63,
+            "category": "流动性",
+            "alignment_score": 0.8,
+            "mode": "broad"
+          },
+          {
+            "expression": "sub(zscore(close), zscore(ts_mean(close, 20)))",
+            "hypothesis": "现价标准化值与长期均值标准化值之差度量横截面上的相对偏离速度，相对自身历史快速偏离的个股面临更大的估值修复压力，产生反转信号。",
+            "hypothesis_chars": 63,
+            "category": "反转",
+            "alignment_score": 0.82,
+            "mode": "broad"
+          },
+          {
+            "expression": "ts_mean(mul(delta(close, 1), delta(volume, 1)), 10)",
+            "hypothesis": "收益变动与成交量变动同号乘积的滚动均值累积量价同向信息，持续为正代表上涨有量下跌缩量的良性结构，为负则反映量价混乱的弱势特征。",
+            "hypothesis_chars": 63,
+            "category": "价量",
+            "alignment_score": 0.8,
+            "mode": "broad"
+          },
+          {
+            "expression": "div(delta(close, 10), ts_std(close, 10))",
+            "hypothesis": "十日价格变动除以同期波动得到单位风险动量（夏普化动量），剔除高波动伪趋势后，平稳上行的动量信号质量更高、回撤更小、持续性更强。",
+            "hypothesis_chars": 63,
+            "category": "动量",
+            "alignment_score": 0.86,
+            "mode": "broad"
+          }
+        ]
+      }
+    }
+  ]
+}

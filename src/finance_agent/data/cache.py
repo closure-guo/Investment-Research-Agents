@@ -18,6 +18,7 @@ execute 报 InterfaceError 且写入静默丢失（实测 400 并发写只成功
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -182,5 +183,9 @@ _SHARED: DataCache | None = None
 def get_shared_cache() -> DataCache:
     global _SHARED
     if _SHARED is None:
-        _SHARED = DataCache()
+        # 库路径于调用期读 env（同 SESSIONS_DB_PATH / SCREENING_DB_PATH 纪律，
+        # 导入期冻结会让 E2E 注入失效）：E2E 视觉基线套件注入 CACHE_DB_PATH 指向
+        # 专属测试库，避免读写开发/生产 cache.db——设置中心「缓存管理」「数据监控」
+        # 两分区会展示该库统计，跨进程共享会让截图随外部进程写入而变化。
+        _SHARED = DataCache(os.environ.get("CACHE_DB_PATH", "cache.db"))
     return _SHARED

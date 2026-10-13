@@ -62,7 +62,7 @@ MD_REPORT_DIR = Path("evals/backtest/results")
 
 def _trade_daily_returns(result: dict, kline: pd.DataFrame) -> list[float]:
     """单笔回放结果（Task 9 replay 返回：settlement + entry_price + action +
-    decision_date）→ 持有期日收益序列（entry=决策日收盘，exit=结算价）。
+    decision_date）→ 持有期日收益序列（entry=D+1 撮合成交价，exit=结算价）。
 
     近似：持有期内按逐日收盘 pct_change，末日修正到结算价；
     方法在报告 metadata.methodology 披露。方向符号：buy 为正、sell 为负；
@@ -198,6 +198,16 @@ def run_backtest(
     baseline_returns: dict[Strategy, list[float]] = {s: [] for s in BASELINE_STRATEGIES}
     regime_returns: dict[str, list[float]] = {}
     excluded_non_executable = 0
+    # M7（add-matching-engine T6）：未成交（T5 fail-closed 产物 settlement=None +
+    # unfilled_reason）逐原因码计数——不进收益序列（_trade_daily_returns 既有 [] 分支）
+    # 但必须披露：报告须可见「多少决策在撮合约束下无法执行」，不静默丢弃。
+    # 计数范围为一致率达标（进入绩效循环）的标的；原因码只由 buy/sell 回放产生。
+    unfilled_counts: dict[str, int] = {}
+    for r in consistent:
+        reason = r.get("unfilled_reason")
+        if reason:
+            key = str(reason)
+            unfilled_counts[key] = unfilled_counts.get(key, 0) + 1
     for r in consistent:
         kline = klines.get(r["code"])
         if kline is None:
@@ -274,6 +284,7 @@ def run_backtest(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "n_sample": len(sample),
         "n_consistent": len(consistent),
+        "unfilled_counts": unfilled_counts,
         "consistency": {
             "mean_agreement": (
                 round(sum(r["agreement"] for r in results) / len(results), 4) if results else None
@@ -298,9 +309,17 @@ def run_backtest(
         **disclosures,
         "methodology": {
             "entry": (
-                "结算语义与生产 track-record 判定同源（horizon/超额/±2% 带；入场价由行情派生）"
+                "结算语义与生产 track-record 判定同源（horizon/超额/±2% 带）；入场价 = 次一"
+                "交易日（D+1）开盘经撮合引擎成交（整手/涨跌停/T+1 约束 + 滑点取档），"
+                "D+1 一字涨停买单不成交（fail-closed），成交价经 entry_override 结算"
+            ),
+            "unfilled": (
+                "未成交笔数按原因码披露、不计入收益序列：未成交笔 settlement=None 且 "
+                "entry_price=None，既有 settlement=None 分支不产生任何日收益；逐原因码计数见 "
+                "unfilled_counts（范围 = 一致率达标、进入绩效循环的标的）"
             ),
             "daily_returns": "单笔结算收益摊到持有期逐日；基线为 T-1 信号 T 生效的逐日仓位收益",
+            "costs": "成交价含滑点；佣金/印花税逐笔记入 fill.fee，收益序列暂不折算费用",
             "adjust": (
                 "结算/回测区间收益走后复权（hfq，SETTLEMENT_ADJUST，Δ4 Task 1 统一）；"
                 "指数无复权概念，基准取原始点位"
