@@ -737,7 +737,8 @@ if TESTING:
         predictions, paper_equity}）写战绩页造数表（add-index-performance-compare /
         add-portfolio-beta-alpha / add-prediction-pool-integrity / add-paper-broker），
         无需 chat_history 也可单独使用，且不创建会话；track_record_reset（bool：清
-        equity_curve + paper_equity 两表，供双曲线 E2E 复位）同不受前置约束；
+        战绩造数面五表（predictions/daily_marks/equity_curve/agent_metrics_daily/
+        index_closes）+ paper_equity，供战绩页 E2E 套件全量复位）同不受前置约束；
         顶层可选 snapshot（dict：写 snapshot_meta 键）与 snapshot_reset（bool：先清
         快照三表）造行情快照告警态（add-market-snapshot D6），同样无需 chat_history。
         顶层可选 screening（dict：``batch`` 造批次行（含 error 造失败横幅）、``pool``
@@ -763,9 +764,12 @@ if TESTING:
         # screening_reset 同款）。库路径于调用期读 SESSIONS_DB_PATH / EXECUTION_DB_PATH。
         if req.get("track_record_reset"):
             from finance_agent.execution.store import delete_all_paper_equity
-            from finance_agent.outcome.track_record.model import delete_all_equity_points
+            from finance_agent.outcome.track_record.model import delete_all_track_record_state
 
-            delete_all_equity_points()
+            # 全量复位（2026-10-13 E2E 修复）：此前只清 equity_curve + paper_equity，
+            # 残留的 predictions/daily_marks 令「库内只有自己造的行」类断言误红；
+            # 现清五张造数面表 + paper_equity，与 CI 全新起库等价。
+            delete_all_track_record_state()
             delete_all_paper_equity()
         # add-index-performance-compare:战绩页 E2E 造数(equity_curve/index_closes
         # 写入真实存储层;SESSIONS_DB_PATH 已被 e2e webServer 指向独立测试库)。

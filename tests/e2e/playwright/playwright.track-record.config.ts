@@ -21,8 +21,10 @@ import { defineConfig } from '@playwright/test'
  * 种子不跨例残留。
  *
  * 端口对 8004/5177（避开默认 8000/5173 与 timeline 8001-8003/5174-5176）。
- * 本地重跑前需删 data/test-e2e-track-record.db*（serial 首用例依赖空库，
- * 上一轮种子残留会让空态断言变红）。
+ *
+ * 2026-10-13（E2E 修复）：不再要求「本地重跑前手动删 data/test-e2e-track-record.db*」
+ * ——本 config 的 globalSetup（global-setup-track-record.ts）在测试前经 TESTING 端点
+ * 全量复位（五张造数面表 + paper_equity），让本地重跑与 CI 全新起库等价。
  */
 export default defineConfig({
   testDir: './tests',
@@ -33,6 +35,7 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   reporter: [['list']],
+  globalSetup: './global-setup-track-record.ts',
 
   use: {
     baseURL: 'http://localhost:5177',

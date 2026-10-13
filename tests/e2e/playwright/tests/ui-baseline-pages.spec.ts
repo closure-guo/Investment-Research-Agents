@@ -79,8 +79,8 @@ test.beforeEach(({}, testInfo) => {
 })
 
 async function resetTrackRecord(request: APIRequestContext) {
-  // 注：track_record_reset 只清 equity_curve + paper_equity，不清 predictions；
-  // 空态前提由「本 spec 从不造 predictions + 专属库无其他写入方」保证。
+  // 2026-10-13 起 track_record_reset 为**全量复位**（五张造数面表 + paper_equity，
+  // 见 /api/test/seed 文档）：空态前提不再依赖「专属库无其他写入方」，基线状态更确定。
   const resp = await request.post(`${API_BASE}/api/test/seed`, { data: { track_record_reset: true } })
   expect(resp.ok()).toBeTruthy()
 }

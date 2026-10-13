@@ -784,3 +784,36 @@ def test_trigger_tracking_fields_are_write_frozen(db):
     pid = _insert(db, session_id="sess_watch_1")
     with pytest.raises(FrozenFieldError):
         update_prediction_status(pid, {"session_id": "sess_hack"}, db_path=db)
+
+
+def test_delete_all_track_record_state_clears_seed_surface(db):
+    """E2E 全量复位（2026-10-13）：五张造数面表清空且计数正确；二跑幂等。
+
+    背景：战绩页 E2E 套件多个 spec 假设「库内只有自己造的行」，本地重跑残留种子
+    （实测 49 条 predictions）致空态/行唯一断言误红；此助手让本地复位与 CI 全新起库
+    等价（由 track-record config 的 globalSetup 调用）。
+    """
+    from finance_agent.outcome.track_record.model import (
+        delete_all_track_record_state,
+        upsert_equity_point,
+        upsert_index_closes,
+        upsert_metrics_daily,
+    )
+
+    pid = _insert(db)
+    insert_daily_mark(pid, "2026-09-01", mark_price=101.0, db_path=db)
+    upsert_equity_point("2026-09-01", 1.0, benchmark_nav=1.0, db_path=db)
+    upsert_metrics_daily("2026-09-01", {"sample_size": 1}, db_path=db)
+    upsert_index_closes([("000300.SH", "2026-09-01", 4000.0)], db_path=db)
+
+    counts = delete_all_track_record_state(db_path=db)
+    assert counts == {
+        "predictions": 1,
+        "daily_marks": 1,
+        "equity_curve": 1,
+        "agent_metrics_daily": 1,
+        "index_closes": 1,
+    }
+    assert count_predictions(db_path=db) == 0
+    # 二跑幂等：全 0，不报错
+    assert set(delete_all_track_record_state(db_path=db).values()) == {0}

@@ -812,11 +812,13 @@ def test_seed_paper_equity_block(monkeypatch, tmp_path):
         importlib.reload(api_module)
 
 
-def test_seed_track_record_reset_clears_dual_curve_tables(monkeypatch, tmp_path):
-    """add-paper-broker T4：track_record_reset 清 equity_curve + paper_equity 两表。
+def test_seed_track_record_reset_clears_state_tables(monkeypatch, tmp_path):
+    """track_record_reset 全量复位：五张战绩造数面表 + paper_equity。
 
-    双曲线 E2E 每例前后复位用；predictions 等其它造数面不受影响（复位边界=
-    双曲线造数面）。
+    契约变更（2026-10-13，E2E 修复）：此前只清 equity_curve + paper_equity，
+    残留的 predictions/daily_marks 令「库内只有自己造的行」类断言在本地位库重跑时
+    误红（实测 49 条残留 → 6 例失败）；现与 CI 全新起库等价。非造数面
+    （agents/audit_log/risk_free_rates）仍不动。
     """
     curve_db = _use_db(monkeypatch, tmp_path)
     exec_db = _use_execution_db(monkeypatch, tmp_path)
@@ -824,7 +826,7 @@ def test_seed_track_record_reset_clears_dual_curve_tables(monkeypatch, tmp_path)
     upsert_equity_point("2026-09-30", 1.043, benchmark_nav=1.01, db_path=curve_db)
     upsert_paper_equity("2026-09-01", 1_000_000.0, 0.0, 1_000_000.0, db_path=exec_db)
     upsert_paper_equity("2026-09-30", 998_000.0, 33_000.0, 1_031_000.0, db_path=exec_db)
-    pred_id = _insert(curve_db)
+    _insert(curve_db)  # 造一条 predictions，验证全量复位一并清空
 
     monkeypatch.setenv("TESTING", "1")
     import importlib
@@ -843,9 +845,9 @@ def test_seed_track_record_reset_clears_dual_curve_tables(monkeypatch, tmp_path)
         assert resp.json() == {"status": "ok", "mode": "testing"}
         assert list_equity_curve(db_path=curve_db) == []
         assert list_paper_equity(db_path=exec_db) == []
-        # 复位边界：predictions 行原样保留
+        # 契约变更（2026-10-13）：predictions 一并清空（此前「原样保留」边界已废）
         preds = client.get("/api/v1/track-record/predictions").json()
-        assert [p["prediction_id"] for p in preds["predictions"]] == [pred_id]
+        assert preds["predictions"] == []
     finally:
         monkeypatch.delenv("TESTING", raising=False)
         importlib.reload(api_module)
