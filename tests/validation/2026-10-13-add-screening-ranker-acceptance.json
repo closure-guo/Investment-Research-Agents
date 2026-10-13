@@ -1,0 +1,2183 @@
+{
+  "panel": {
+    "dates": 170,
+    "codes": 120,
+    "seed": 20261013,
+    "return_noise": 0.03,
+    "vol_heterogeneity": 0.3,
+    "warmup_days": 22,
+    "signal_betas": {
+      "momentum_20": 0.006,
+      "reversal_5": 0.009,
+      "turnover_proxy": 0.006,
+      "volatility_20": 0.006,
+      "size_proxy": 0.006
+    },
+    "rank_days": [
+      "2026-05-15",
+      "2026-06-04",
+      "2026-06-23"
+    ]
+  },
+  "live_data_blocker": "spec 要求的 2026-09 真实快照核对受本机东财行情域 IP 封禁（incident 033 / issue #325）不可执行；本 artifact 为合成面板 + 独立手算的替代证据，不构成真实市场有效性证据",
+  "admission": [
+    {
+      "name": "momentum_20",
+      "factor_id": null,
+      "status": "rejected",
+      "rejected_gate": 2,
+      "reason": "WEAK_ICIR",
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.117647,
+            "missing_cells": 2400,
+            "total_cells": 20400,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": false,
+          "reason": "WEAK_ICIR",
+          "detail": {
+            "mean": 0.027482,
+            "std": 0.121032,
+            "icir": 0.227066,
+            "n_samples": 149,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "name": "reversal_5",
+      "factor_id": 1,
+      "status": "active",
+      "rejected_gate": null,
+      "reason": null,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.023529,
+            "missing_cells": 480,
+            "total_cells": 20400,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "mean": 0.104193,
+            "std": 0.102672,
+            "icir": 1.014813,
+            "n_samples": 165,
+            "min_abs_icir": 0.3
+          }
+        },
+        {
+          "gate": 3,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "observed_mean": 0.104193,
+            "n_samples": 165,
+            "n_permutations": 999,
+            "n_hypotheses": 4,
+            "exceedances": 0,
+            "seed": 20261013,
+            "method": "per_day_pairing_sign_randomization",
+            "p_value": 0.001,
+            "p_adj": 0.001,
+            "q": 0.1
+          }
+        },
+        {
+          "gate": 4,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "increment": 1.403063,
+            "increment_train": 0.87673,
+            "ir_pool": null,
+            "ir_pool_with_candidate": 1.403063,
+            "ir_pool_train": null,
+            "ir_pool_with_candidate_train": 0.87673,
+            "pool_size": 0,
+            "n_val_days": 51,
+            "n_train_days": 113,
+            "min_oos_days": 10,
+            "train_fraction": 0.7,
+            "train_end": "2026-05-02",
+            "val_start": "2026-05-03",
+            "val_end": "2026-06-23",
+            "redundancy_checked": [],
+            "redundancy_skipped": []
+          }
+        },
+        {
+          "gate": 5,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "train_fraction": 0.7,
+            "train_days": 118,
+            "val_days": 52,
+            "purged_train_days": 1,
+            "train_start": "2026-01-05",
+            "train_end": "2026-05-02",
+            "val_start": "2026-05-03",
+            "val_end": "2026-06-23",
+            "mean_train": 0.092771,
+            "mean_val": 0.129648,
+            "icir_train": 0.87673,
+            "icir_val": 1.403063,
+            "sign_train": 1,
+            "sign_val": 1,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "name": "turnover_proxy",
+      "factor_id": 2,
+      "status": "active",
+      "rejected_gate": null,
+      "reason": null,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.111765,
+            "missing_cells": 2280,
+            "total_cells": 20400,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "mean": 0.118613,
+            "std": 0.087601,
+            "icir": 1.354017,
+            "n_samples": 150,
+            "min_abs_icir": 0.3
+          }
+        },
+        {
+          "gate": 3,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "observed_mean": 0.118613,
+            "n_samples": 150,
+            "n_permutations": 999,
+            "n_hypotheses": 4,
+            "exceedances": 0,
+            "seed": 20261013,
+            "method": "per_day_pairing_sign_randomization",
+            "p_value": 0.001,
+            "p_adj": 0.001,
+            "q": 0.1
+          }
+        },
+        {
+          "gate": 4,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "increment": 0.664919,
+            "increment_train": 0.476358,
+            "ir_pool": 1.403063,
+            "ir_pool_with_candidate": 2.067982,
+            "ir_pool_train": 0.87673,
+            "ir_pool_with_candidate_train": 1.353088,
+            "pool_size": 1,
+            "n_val_days": 51,
+            "n_train_days": 113,
+            "min_oos_days": 10,
+            "train_fraction": 0.7,
+            "train_end": "2026-05-02",
+            "val_start": "2026-05-03",
+            "val_end": "2026-06-23",
+            "redundancy_checked": [
+              1
+            ],
+            "redundancy_skipped": []
+          }
+        },
+        {
+          "gate": 5,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "train_fraction": 0.7,
+            "train_days": 118,
+            "val_days": 52,
+            "purged_train_days": 1,
+            "train_start": "2026-01-05",
+            "train_end": "2026-05-02",
+            "val_start": "2026-05-03",
+            "val_end": "2026-06-23",
+            "mean_train": 0.113146,
+            "mean_val": 0.128022,
+            "icir_train": 1.294447,
+            "icir_val": 1.446352,
+            "sign_train": 1,
+            "sign_val": 1,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "name": "volatility_20",
+      "factor_id": 3,
+      "status": "active",
+      "rejected_gate": null,
+      "reason": null,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.117647,
+            "missing_cells": 2400,
+            "total_cells": 20400,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "mean": 0.073498,
+            "std": 0.111457,
+            "icir": 0.659436,
+            "n_samples": 149,
+            "min_abs_icir": 0.3
+          }
+        },
+        {
+          "gate": 3,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "observed_mean": 0.073498,
+            "n_samples": 149,
+            "n_permutations": 999,
+            "n_hypotheses": 4,
+            "exceedances": 0,
+            "seed": 20261013,
+            "method": "per_day_pairing_sign_randomization",
+            "p_value": 0.001,
+            "p_adj": 0.001,
+            "q": 0.1
+          }
+        },
+        {
+          "gate": 4,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "increment": 0.433579,
+            "increment_train": 0.415248,
+            "ir_pool": 2.067982,
+            "ir_pool_with_candidate": 2.50156,
+            "ir_pool_train": 1.353088,
+            "ir_pool_with_candidate_train": 1.768336,
+            "pool_size": 2,
+            "n_val_days": 51,
+            "n_train_days": 113,
+            "min_oos_days": 10,
+            "train_fraction": 0.7,
+            "train_end": "2026-05-02",
+            "val_start": "2026-05-03",
+            "val_end": "2026-06-23",
+            "redundancy_checked": [
+              1,
+              2
+            ],
+            "redundancy_skipped": []
+          }
+        },
+        {
+          "gate": 5,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "train_fraction": 0.7,
+            "train_days": 118,
+            "val_days": 52,
+            "purged_train_days": 1,
+            "train_start": "2026-01-05",
+            "train_end": "2026-05-02",
+            "val_start": "2026-05-03",
+            "val_end": "2026-06-23",
+            "mean_train": 0.095256,
+            "mean_val": 0.03193,
+            "icir_train": 0.825387,
+            "icir_val": 0.346016,
+            "sign_train": 1,
+            "sign_val": 1,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "name": "size_proxy",
+      "factor_id": 4,
+      "status": "active",
+      "rejected_gate": null,
+      "reason": null,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.111765,
+            "missing_cells": 2280,
+            "total_cells": 20400,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "mean": 0.126786,
+            "std": 0.088835,
+            "icir": 1.427204,
+            "n_samples": 150,
+            "min_abs_icir": 0.3
+          }
+        },
+        {
+          "gate": 3,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "observed_mean": 0.126786,
+            "n_samples": 150,
+            "n_permutations": 999,
+            "n_hypotheses": 4,
+            "exceedances": 0,
+            "seed": 20261013,
+            "method": "per_day_pairing_sign_randomization",
+            "p_value": 0.001,
+            "p_adj": 0.001,
+            "q": 0.1
+          }
+        },
+        {
+          "gate": 4,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "increment": 0.783705,
+            "increment_train": 0.220245,
+            "ir_pool": 2.50156,
+            "ir_pool_with_candidate": 3.285265,
+            "ir_pool_train": 1.768336,
+            "ir_pool_with_candidate_train": 1.988581,
+            "pool_size": 3,
+            "n_val_days": 51,
+            "n_train_days": 113,
+            "min_oos_days": 10,
+            "train_fraction": 0.7,
+            "train_end": "2026-05-02",
+            "val_start": "2026-05-03",
+            "val_end": "2026-06-23",
+            "redundancy_checked": [
+              1,
+              2,
+              3
+            ],
+            "redundancy_skipped": []
+          }
+        },
+        {
+          "gate": 5,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "train_fraction": 0.7,
+            "train_days": 118,
+            "val_days": 52,
+            "purged_train_days": 1,
+            "train_start": "2026-01-05",
+            "train_end": "2026-05-02",
+            "val_start": "2026-05-03",
+            "val_end": "2026-06-23",
+            "mean_train": 0.123948,
+            "mean_val": 0.130373,
+            "icir_train": 1.406862,
+            "icir_val": 1.435465,
+            "sign_train": 1,
+            "sign_val": 1,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    }
+  ],
+  "panel_diagnostics": {
+    "factors": {
+      "1": {
+        "expression": "div(ts_mean(close,5),close)",
+        "ic_mean": 0.104193,
+        "icir": 1.014813,
+        "ic_days": 165
+      },
+      "2": {
+        "expression": "div(volume,ts_mean(volume,20))",
+        "ic_mean": 0.118613,
+        "icir": 1.354017,
+        "ic_days": 150
+      },
+      "3": {
+        "expression": "ts_std(delta(close,1),20)",
+        "ic_mean": 0.073498,
+        "icir": 0.659436,
+        "ic_days": 149
+      },
+      "4": {
+        "expression": "ts_mean(amount,20)",
+        "ic_mean": 0.126786,
+        "icir": 1.427204,
+        "ic_days": 150
+      }
+    },
+    "ic_correlations": {
+      "1~2": 0.016203,
+      "1~3": -0.373396,
+      "1~4": -0.206752,
+      "2~3": -0.024355,
+      "2~4": -0.105185,
+      "3~4": 0.03117
+    }
+  },
+  "monitor": {
+    "calls": 100,
+    "degraded": []
+  },
+  "rank_days": [
+    {
+      "rank_day": "2026-05-15",
+      "active_ids": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "ic_stats": {
+        "1": {
+          "expression": "div(ts_mean(close,5),close)",
+          "ic_mean": 0.16451883232631895,
+          "icir": 1.8676196276149475,
+          "weight": 0.3781597363473077
+        },
+        "2": {
+          "expression": "div(volume,ts_mean(volume,20))",
+          "ic_mean": 0.12135217723453015,
+          "icir": 1.4182384299191577,
+          "weight": 0.2789377161221216
+        },
+        "3": {
+          "expression": "ts_std(delta(close,1),20)",
+          "ic_mean": 0.03805727249577516,
+          "icir": 0.4215990850398517,
+          "weight": 0.08747769437455251
+        },
+        "4": {
+          "expression": "ts_mean(amount,20)",
+          "ic_mean": 0.11112287890362754,
+          "icir": 1.283892691560463,
+          "weight": 0.25542485315601815
+        }
+      },
+      "recent_ic_stats_cross_check_max_abs_diff": 0.0,
+      "n_candidates": 100,
+      "rank_1_composite": 2.1289078993634467,
+      "rank_100_composite": -0.44022196407726577,
+      "reconciliation_max_abs_diff": 0.0,
+      "checks": [
+        {
+          "rank": 1,
+          "symbol": "c071",
+          "composite_ranker": 2.1289078993634467,
+          "composite_hand": 2.1289078993634445,
+          "diffs": {
+            "composite": 2.220446049250313e-15,
+            "zscore_max": 6.217248937900877e-15,
+            "weight_max": 0.0,
+            "contribution_max": 2.3314683517128287e-15
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 2.526139414833142,
+              "zscore_hand": 2.526139414833136,
+              "weight_ranker": 0.3781597363473077,
+              "weight_hand": 0.3781597363473077,
+              "contribution_ranker": 0.9552842150898432,
+              "contribution_hand": 0.9552842150898408
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 5.043098638648329,
+              "zscore_hand": 5.043098638648329,
+              "weight_ranker": 0.2789377161221216,
+              "weight_hand": 0.2789377161221216,
+              "contribution_ranker": 1.4067104164431457,
+              "contribution_hand": 1.4067104164431457
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09272867625095021,
+              "zscore_hand": -0.0927286762509502,
+              "weight_ranker": 0.08747769437455251,
+              "weight_hand": 0.08747769437455251,
+              "contribution_ranker": -0.008111690800837448,
+              "contribution_hand": -0.008111690800837448
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -0.8807875920801096,
+              "zscore_hand": -0.8807875920801096,
+              "weight_ranker": 0.25542485315601815,
+              "weight_hand": 0.25542485315601815,
+              "contribution_ranker": -0.2249750413687048,
+              "contribution_hand": -0.2249750413687048
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 12,
+          "symbol": "c043",
+          "composite_ranker": 0.617249056493516,
+          "composite_hand": 0.6172490564935138,
+          "diffs": {
+            "composite": 2.220446049250313e-15,
+            "zscore_max": 5.995204332975845e-15,
+            "weight_max": 0.0,
+            "contribution_max": 2.220446049250313e-15
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 1.5832134756352463,
+              "zscore_hand": 1.5832134756352403,
+              "weight_ranker": 0.3781597363473077,
+              "weight_hand": 0.3781597363473077,
+              "contribution_ranker": 0.5987075905277294,
+              "contribution_hand": 0.5987075905277272
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 0.5637559270465125,
+              "zscore_hand": 0.5637559270465129,
+              "weight_ranker": 0.2789377161221216,
+              "weight_hand": 0.2789377161221216,
+              "contribution_ranker": 0.1572527907406636,
+              "contribution_hand": 0.1572527907406637
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.07401015279215525,
+              "zscore_hand": -0.07401015279215524,
+              "weight_ranker": 0.08747769437455251,
+              "weight_hand": 0.08747769437455251,
+              "contribution_ranker": -0.006474237526566091,
+              "contribution_hand": -0.00647423752656609
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -0.5177142537791265,
+              "zscore_hand": -0.5177142537791265,
+              "weight_ranker": 0.25542485315601815,
+              "weight_hand": 0.25542485315601815,
+              "contribution_ranker": -0.1322370872483109,
+              "contribution_hand": -0.1322370872483109
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 23,
+          "symbol": "c040",
+          "composite_ranker": 0.4492434597966328,
+          "composite_hand": 0.44924345979663083,
+          "diffs": {
+            "composite": 1.9984014443252818e-15,
+            "zscore_max": 5.773159728050814e-15,
+            "weight_max": 0.0,
+            "contribution_max": 2.1649348980190553e-15
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 1.0989548919341476,
+              "zscore_hand": 1.0989548919341419,
+              "weight_ranker": 0.3781597363473077,
+              "weight_hand": 0.3781597363473077,
+              "contribution_ranker": 0.4155804921914013,
+              "contribution_hand": 0.41558049219139914
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 1.36801044667223,
+              "zscore_hand": 1.3680104466722305,
+              "weight_ranker": 0.2789377161221216,
+              "weight_hand": 0.2789377161221216,
+              "contribution_ranker": 0.3815897096259553,
+              "contribution_hand": 0.3815897096259554
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.08348487773439803,
+              "zscore_hand": -0.08348487773439803,
+              "weight_ranker": 0.08747769437455251,
+              "weight_hand": 0.08747769437455251,
+              "contribution_ranker": -0.007303064619346555,
+              "contribution_hand": -0.007303064619346555
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -1.3335572995056906,
+              "zscore_hand": -1.3335572995056906,
+              "weight_ranker": 0.25542485315601815,
+              "weight_hand": 0.25542485315601815,
+              "contribution_ranker": -0.3406236774013771,
+              "contribution_hand": -0.3406236774013771
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 34,
+          "symbol": "c074",
+          "composite_ranker": 0.166390004951952,
+          "composite_hand": 0.1663900049519499,
+          "diffs": {
+            "composite": 2.1094237467877974e-15,
+            "zscore_max": 5.88418203051333e-15,
+            "weight_max": 0.0,
+            "contribution_max": 2.220446049250313e-15
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.568106354673962,
+              "zscore_hand": 0.5681063546739561,
+              "weight_ranker": 0.3781597363473077,
+              "weight_hand": 0.3781597363473077,
+              "contribution_ranker": 0.21483494930073554,
+              "contribution_hand": 0.21483494930073332
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 0.13275453600124598,
+              "zscore_hand": 0.1327545360012464,
+              "weight_ranker": 0.2789377161221216,
+              "weight_hand": 0.2789377161221216,
+              "contribution_ranker": 0.03703024707703952,
+              "contribution_hand": 0.03703024707703964
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09274501594233335,
+              "zscore_hand": -0.09274501594233334,
+              "weight_ranker": 0.08747769437455251,
+              "weight_hand": 0.08747769437455251,
+              "contribution_ranker": -0.008113120159366436,
+              "contribution_hand": -0.008113120159366436
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -0.3028760526259458,
+              "zscore_hand": -0.3028760526259458,
+              "weight_ranker": 0.25542485315601815,
+              "weight_hand": 0.25542485315601815,
+              "contribution_ranker": -0.07736207126645663,
+              "contribution_hand": -0.07736207126645663
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 45,
+          "symbol": "c024",
+          "composite_ranker": 0.10809054585444666,
+          "composite_hand": 0.1080905458544445,
+          "diffs": {
+            "composite": 2.1649348980190553e-15,
+            "zscore_max": 5.995204332975845e-15,
+            "weight_max": 0.0,
+            "contribution_max": 2.275957200481571e-15
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -0.7243399413930184,
+              "zscore_hand": -0.7243399413930244,
+              "weight_ranker": 0.3781597363473077,
+              "weight_hand": 0.3781597363473077,
+              "contribution_ranker": -0.27391620126300814,
+              "contribution_hand": -0.2739162012630104
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -0.18362362429651696,
+              "zscore_hand": -0.18362362429651655,
+              "weight_ranker": 0.2789377161221216,
+              "weight_hand": 0.2789377161221216,
+              "contribution_ranker": -0.051219554387336955,
+              "contribution_hand": -0.051219554387336844
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.0921826692285248,
+              "zscore_hand": -0.09218266922852479,
+              "weight_ranker": 0.08747769437455251,
+              "weight_hand": 0.08747769437455251,
+              "contribution_ranker": -0.008063927365403359,
+              "contribution_hand": -0.008063927365403357
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 1.7276714596000844,
+              "zscore_hand": 1.7276714596000844,
+              "weight_ranker": 0.25542485315601815,
+              "weight_hand": 0.25542485315601815,
+              "contribution_ranker": 0.4412902288701951,
+              "contribution_hand": 0.4412902288701951
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 56,
+          "symbol": "c081",
+          "composite_ranker": 0.019575406173503423,
+          "composite_hand": 0.019575406173501286,
+          "diffs": {
+            "composite": 2.1371793224034263e-15,
+            "zscore_max": 5.9396931817445875e-15,
+            "weight_max": 0.0,
+            "contribution_max": 2.248201624865942e-15
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.19071136469056132,
+              "zscore_hand": 0.19071136469055538,
+              "weight_ranker": 0.3781597363473077,
+              "weight_hand": 0.3781597363473077,
+              "contribution_ranker": 0.07211935938981792,
+              "contribution_hand": 0.07211935938981567
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 0.09536899350623299,
+              "zscore_hand": 0.0953689935062334,
+              "weight_ranker": 0.2789377161221216,
+              "weight_hand": 0.2789377161221216,
+              "contribution_ranker": 0.026602009237494072,
+              "contribution_hand": 0.02660200923749419
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09794381840232351,
+              "zscore_hand": -0.0979438184023235,
+              "weight_ranker": 0.08747769437455251,
+              "weight_hand": 0.08747769437455251,
+              "contribution_ranker": -0.008567899412075128,
+              "contribution_hand": -0.008567899412075126
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -0.2763163496804404,
+              "zscore_hand": -0.2763163496804404,
+              "weight_ranker": 0.25542485315601815,
+              "weight_hand": 0.25542485315601815,
+              "contribution_ranker": -0.07057806304173345,
+              "contribution_hand": -0.07057806304173345
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 67,
+          "symbol": "c105",
+          "composite_ranker": -0.13149966453439327,
+          "composite_hand": -0.1314996645343954,
+          "diffs": {
+            "composite": 2.1371793224034263e-15,
+            "zscore_max": 5.9396931817445875e-15,
+            "weight_max": 0.0,
+            "contribution_max": 2.248201624865942e-15
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -0.22140659649844474,
+              "zscore_hand": -0.22140659649845068,
+              "weight_ranker": 0.3781597363473077,
+              "weight_hand": 0.3781597363473077,
+              "contribution_ranker": -0.08372706015740661,
+              "contribution_hand": -0.08372706015740886
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 0.7514221200728955,
+              "zscore_hand": 0.751422120072896,
+              "weight_ranker": 0.2789377161221216,
+              "weight_hand": 0.2789377161221216,
+              "contribution_ranker": 0.2095999700167761,
+              "contribution_hand": 0.20959997001677622
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09555944896622968,
+              "zscore_hand": -0.09555944896622967,
+              "weight_ranker": 0.08747769437455251,
+              "weight_hand": 0.08747769437455251,
+              "contribution_ranker": -0.008359320271268489,
+              "contribution_hand": -0.008359320271268487
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -0.9748982960964744,
+              "zscore_hand": -0.9748982960964744,
+              "weight_ranker": 0.25542485315601815,
+              "weight_hand": 0.25542485315601815,
+              "contribution_ranker": -0.24901325412249428,
+              "contribution_hand": -0.24901325412249428
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 78,
+          "symbol": "c001",
+          "composite_ranker": -0.20274976131307143,
+          "composite_hand": -0.20274976131307354,
+          "diffs": {
+            "composite": 2.1094237467877974e-15,
+            "zscore_max": 5.88418203051333e-15,
+            "weight_max": 0.0,
+            "contribution_max": 2.220446049250313e-15
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.3025856803762581,
+              "zscore_hand": 0.3025856803762522,
+              "weight_ranker": 0.3781597363473077,
+              "weight_hand": 0.3781597363473077,
+              "contribution_ranker": 0.11442572111355648,
+              "contribution_hand": 0.11442572111355426
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -0.021093122281413704,
+              "zscore_hand": -0.021093122281413287,
+              "weight_ranker": 0.2789377161221216,
+              "weight_hand": 0.2789377161221216,
+              "contribution_ranker": -0.005883667355062174,
+              "contribution_hand": -0.005883667355062057
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09741476085513993,
+              "zscore_hand": -0.09741476085513992,
+              "weight_ranker": 0.08747769437455251,
+              "weight_hand": 0.08747769437455251,
+              "contribution_ranker": -0.008521618677656053,
+              "contribution_hand": -0.008521618677656051
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -1.1853591874592255,
+              "zscore_hand": -1.1853591874592255,
+              "weight_ranker": 0.25542485315601815,
+              "weight_hand": 0.25542485315601815,
+              "contribution_ranker": -0.3027701963939097,
+              "contribution_hand": -0.3027701963939097
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 89,
+          "symbol": "c103",
+          "composite_ranker": -0.32328287480081225,
+          "composite_hand": -0.32328287480081436,
+          "diffs": {
+            "composite": 2.1094237467877974e-15,
+            "zscore_max": 5.88418203051333e-15,
+            "weight_max": 0.0,
+            "contribution_max": 2.220446049250313e-15
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -0.5366046407652239,
+              "zscore_hand": -0.5366046407652297,
+              "weight_ranker": 0.3781597363473077,
+              "weight_hand": 0.3781597363473077,
+              "contribution_ranker": -0.20292226947451883,
+              "contribution_hand": -0.20292226947452105
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -0.6701320050683949,
+              "zscore_hand": -0.6701320050683944,
+              "weight_ranker": 0.2789377161221216,
+              "weight_hand": 0.2789377161221216,
+              "contribution_ranker": -0.18692509099411608,
+              "contribution_hand": -0.18692509099411594
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09312540507269143,
+              "zscore_hand": -0.09312540507269142,
+              "weight_ranker": 0.08747769437455251,
+              "weight_hand": 0.08747769437455251,
+              "contribution_ranker": -0.008146395723455303,
+              "contribution_hand": -0.008146395723455302
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 0.292496522825221,
+              "zscore_hand": 0.292496522825221,
+              "weight_ranker": 0.25542485315601815,
+              "weight_hand": 0.25542485315601815,
+              "contribution_ranker": 0.07471088139127798,
+              "contribution_hand": 0.07471088139127798
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 100,
+          "symbol": "c009",
+          "composite_ranker": -0.44022196407726577,
+          "composite_hand": -0.44022196407726777,
+          "diffs": {
+            "composite": 1.9984014443252818e-15,
+            "zscore_max": 5.773159728050814e-15,
+            "weight_max": 0.0,
+            "contribution_max": 2.1094237467877974e-15
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -1.389870870932938,
+              "zscore_hand": -1.3898708709329437,
+              "weight_ranker": 0.3781597363473077,
+              "weight_hand": 0.3781597363473077,
+              "contribution_ranker": -0.5255932021088028,
+              "contribution_hand": -0.5255932021088049
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -0.25940153735487637,
+              "zscore_hand": -0.259401537354876,
+              "weight_ranker": 0.2789377161221216,
+              "weight_hand": 0.2789377161221216,
+              "contribution_ranker": -0.07235687238833642,
+              "contribution_hand": -0.07235687238833631
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09501485732621034,
+              "zscore_hand": -0.09501485732621033,
+              "weight_ranker": 0.08747769437455251,
+              "weight_hand": 0.08747769437455251,
+              "contribution_ranker": -0.008311680650223939,
+              "contribution_hand": -0.008311680650223939
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 0.6500533875952832,
+              "zscore_hand": 0.6500533875952832,
+              "weight_ranker": 0.25542485315601815,
+              "weight_hand": 0.25542485315601815,
+              "contribution_ranker": 0.16603979107009736,
+              "contribution_hand": 0.16603979107009736
+            }
+          ],
+          "matched": true
+        }
+      ]
+    },
+    {
+      "rank_day": "2026-06-04",
+      "active_ids": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "ic_stats": {
+        "1": {
+          "expression": "div(ts_mean(close,5),close)",
+          "ic_mean": 0.16440389378892048,
+          "icir": 2.0457332261127865,
+          "weight": 0.3911188936163416
+        },
+        "2": {
+          "expression": "div(volume,ts_mean(volume,20))",
+          "ic_mean": 0.11538845290182187,
+          "icir": 1.3527181056776012,
+          "weight": 0.27451055443373784
+        },
+        "3": {
+          "expression": "ts_std(delta(close,1),20)",
+          "ic_mean": 0.021542468226960203,
+          "icir": 0.2650761969627631,
+          "weight": 0.0512497979488956
+        },
+        "4": {
+          "expression": "ts_mean(amount,20)",
+          "ic_mean": 0.11900768571891565,
+          "icir": 1.3642974541495605,
+          "weight": 0.28312075400102493
+        }
+      },
+      "recent_ic_stats_cross_check_max_abs_diff": 0.0,
+      "n_candidates": 100,
+      "rank_1_composite": 2.370314441948966,
+      "rank_100_composite": -0.41922209963856044,
+      "reconciliation_max_abs_diff": 0.0,
+      "checks": [
+        {
+          "rank": 1,
+          "symbol": "c106",
+          "composite_ranker": 2.370314441948966,
+          "composite_hand": 2.370314441948966,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 4.163336342344337e-17,
+            "weight_max": 0.0,
+            "contribution_max": 1.734723475976807e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 2.437268408347481,
+              "zscore_hand": 2.437268408347481,
+              "weight_ranker": 0.3911188936163416,
+              "weight_hand": 0.3911188936163416,
+              "contribution_ranker": 0.9532617233189288,
+              "contribution_hand": 0.9532617233189288
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 3.453015664488925,
+              "zscore_hand": 3.453015664488925,
+              "weight_ranker": 0.27451055443373784,
+              "weight_hand": 0.27451055443373784,
+              "contribution_ranker": 0.9478892445272364,
+              "contribution_hand": 0.9478892445272364
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09146882283413048,
+              "zscore_hand": -0.09146882283413052,
+              "weight_ranker": 0.0512497979488956,
+              "weight_hand": 0.0512497979488956,
+              "contribution_ranker": -0.004687758688872516,
+              "contribution_hand": -0.004687758688872517
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 1.6736718382360547,
+              "zscore_hand": 1.6736718382360547,
+              "weight_ranker": 0.28312075400102493,
+              "weight_hand": 0.28312075400102493,
+              "contribution_ranker": 0.47385123279167324,
+              "contribution_hand": 0.47385123279167324
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 12,
+          "symbol": "c057",
+          "composite_ranker": 0.63421258055729,
+          "composite_hand": 0.63421258055729,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 8.673617379884035e-19
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.6311926458098127,
+              "zscore_hand": 0.6311926458098127,
+              "weight_ranker": 0.3911188936163416,
+              "weight_hand": 0.3911188936163416,
+              "contribution_ranker": 0.24687136928790532,
+              "contribution_hand": 0.24687136928790532
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -0.24153118544351332,
+              "zscore_hand": -0.24153118544351332,
+              "weight_ranker": 0.27451055443373784,
+              "weight_hand": 0.27451055443373784,
+              "contribution_ranker": -0.06630285962913679,
+              "contribution_hand": -0.06630285962913679
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09267956034954565,
+              "zscore_hand": -0.09267956034954568,
+              "weight_ranker": 0.0512497979488956,
+              "weight_hand": 0.0512497979488956,
+              "contribution_ranker": -0.004749808741906691,
+              "contribution_hand": -0.004749808741906692
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 1.6190755116411168,
+              "zscore_hand": 1.6190755116411168,
+              "weight_ranker": 0.28312075400102493,
+              "weight_hand": 0.28312075400102493,
+              "contribution_ranker": 0.4583938796404282,
+              "contribution_hand": 0.4583938796404282
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 23,
+          "symbol": "c058",
+          "composite_ranker": 0.40434240117221,
+          "composite_hand": 0.40434240117221,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 4.163336342344337e-17,
+            "weight_max": 0.0,
+            "contribution_max": 1.734723475976807e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -0.4725861415194101,
+              "zscore_hand": -0.4725861415194101,
+              "weight_ranker": 0.3911188936163416,
+              "weight_hand": 0.3911188936163416,
+              "contribution_ranker": -0.1848373688094875,
+              "contribution_hand": -0.1848373688094875
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 1.0955206697558322,
+              "zscore_hand": 1.0955206697558322,
+              "weight_ranker": 0.27451055443373784,
+              "weight_hand": 0.27451055443373784,
+              "contribution_ranker": 0.3007319864482933,
+              "contribution_hand": 0.3007319864482933
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09247765593920734,
+              "zscore_hand": -0.09247765593920738,
+              "weight_ranker": 0.0512497979488956,
+              "weight_hand": 0.0512497979488956,
+              "contribution_ranker": -0.004739461181671862,
+              "contribution_hand": -0.004739461181671864
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 1.0355554673113603,
+              "zscore_hand": 1.0355554673113603,
+              "weight_ranker": 0.28312075400102493,
+              "weight_hand": 0.28312075400102493,
+              "contribution_ranker": 0.29318724471507607,
+              "contribution_hand": 0.29318724471507607
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 34,
+          "symbol": "c110",
+          "composite_ranker": 0.2223957719413303,
+          "composite_hand": 0.2223957719413303,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 8.673617379884035e-19
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.3900882297188326,
+              "zscore_hand": 0.3900882297188326,
+              "weight_ranker": 0.3911188936163416,
+              "weight_hand": 0.3911188936163416,
+              "contribution_ranker": 0.1525708768203871,
+              "contribution_hand": 0.1525708768203871
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 0.14760377829082602,
+              "zscore_hand": 0.14760377829082602,
+              "weight_ranker": 0.27451055443373784,
+              "weight_hand": 0.27451055443373784,
+              "contribution_ranker": 0.040518795015129165,
+              "contribution_hand": 0.040518795015129165
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.0923318819386577,
+              "zscore_hand": -0.09233188193865773,
+              "weight_ranker": 0.0512497979488956,
+              "weight_hand": 0.0512497979488956,
+              "contribution_ranker": -0.00473199029359749,
+              "contribution_hand": -0.004731990293597491
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 0.12022463884540335,
+              "zscore_hand": 0.12022463884540335,
+              "weight_ranker": 0.28312075400102493,
+              "weight_hand": 0.28312075400102493,
+              "contribution_ranker": 0.03403809039941151,
+              "contribution_hand": 0.03403809039941151
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 45,
+          "symbol": "c078",
+          "composite_ranker": 0.13589929955625163,
+          "composite_hand": 0.13589929955625163,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 8.673617379884035e-19
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.0034440283526223597,
+              "zscore_hand": 0.0034440283526223597,
+              "weight_ranker": 0.3911188936163416,
+              "weight_hand": 0.3911188936163416,
+              "contribution_ranker": 0.001347024558860969,
+              "contribution_hand": 0.001347024558860969
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 1.9143026090857789,
+              "zscore_hand": 1.9143026090857789,
+              "weight_ranker": 0.27451055443373784,
+              "weight_hand": 0.27451055443373784,
+              "contribution_ranker": 0.5254962705740881,
+              "contribution_hand": 0.5254962705740881
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09258214210024943,
+              "zscore_hand": -0.09258214210024945,
+              "weight_ranker": 0.0512497979488956,
+              "weight_hand": 0.0512497979488956,
+              "contribution_ranker": -0.004744816076313724,
+              "contribution_hand": -0.004744816076313725
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -1.3640793691125364,
+              "zscore_hand": -1.3640793691125364,
+              "weight_ranker": 0.28312075400102493,
+              "weight_hand": 0.28312075400102493,
+              "contribution_ranker": -0.3861991795003837,
+              "contribution_hand": -0.3861991795003837
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 56,
+          "symbol": "c036",
+          "composite_ranker": 0.008243371807355876,
+          "composite_hand": 0.008243371807355876,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 1.734723475976807e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.44711853338004826,
+              "zscore_hand": 0.44711853338004826,
+              "weight_ranker": 0.3911188936163416,
+              "weight_hand": 0.3911188936163416,
+              "contribution_ranker": 0.17487650609096578,
+              "contribution_hand": 0.17487650609096578
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -1.2746499852147875,
+              "zscore_hand": -1.2746499852147875,
+              "weight_ranker": 0.27451055443373784,
+              "weight_hand": 0.27451055443373784,
+              "contribution_ranker": -0.34990487415026705,
+              "contribution_hand": -0.34990487415026705
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09063311488291975,
+              "zscore_hand": -0.09063311488291978,
+              "weight_ranker": 0.0512497979488956,
+              "weight_hand": 0.0512497979488956,
+              "contribution_ranker": -0.00464492882522868,
+              "contribution_hand": -0.004644928825228682
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 0.663733287073704,
+              "zscore_hand": 0.663733287073704,
+              "weight_ranker": 0.28312075400102493,
+              "weight_hand": 0.28312075400102493,
+              "contribution_ranker": 0.18791666869188584,
+              "contribution_hand": 0.18791666869188584
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 67,
+          "symbol": "c027",
+          "composite_ranker": -0.11583721776351827,
+          "composite_hand": -0.11583721776351827,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 8.673617379884035e-19
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -0.36230902016322775,
+              "zscore_hand": -0.36230902016322775,
+              "weight_ranker": 0.3911188936163416,
+              "weight_hand": 0.3911188936163416,
+              "contribution_ranker": -0.14170590311346243,
+              "contribution_hand": -0.14170590311346243
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -0.3834556119792468,
+              "zscore_hand": -0.3834556119792468,
+              "weight_ranker": 0.27451055443373784,
+              "weight_hand": 0.27451055443373784,
+              "contribution_ranker": -0.10526261264515129,
+              "contribution_hand": -0.10526261264515129
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09250108464214372,
+              "zscore_hand": -0.09250108464214375,
+              "weight_ranker": 0.0512497979488956,
+              "weight_hand": 0.0512497979488956,
+              "contribution_ranker": -0.004740661897963556,
+              "contribution_hand": -0.004740661897963557
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 0.47990815923218105,
+              "zscore_hand": 0.47990815923218105,
+              "weight_ranker": 0.28312075400102493,
+              "weight_hand": 0.28312075400102493,
+              "contribution_ranker": 0.13587195989305903,
+              "contribution_hand": 0.13587195989305903
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 78,
+          "symbol": "c005",
+          "composite_ranker": -0.1996189030201566,
+          "composite_hand": -0.1996189030201566,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 4.163336342344337e-17,
+            "weight_max": 0.0,
+            "contribution_max": 1.734723475976807e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -2.5231507520731804,
+              "zscore_hand": -2.5231507520731804,
+              "weight_ranker": 0.3911188936163416,
+              "weight_hand": 0.3911188936163416,
+              "contribution_ranker": -0.9868519305781026,
+              "contribution_hand": -0.9868519305781026
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 2.9716954766150714,
+              "zscore_hand": 2.9716954766150714,
+              "weight_ranker": 0.27451055443373784,
+              "weight_hand": 0.27451055443373784,
+              "contribution_ranker": 0.8157617728938341,
+              "contribution_hand": 0.8157617728938341
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09001386409274878,
+              "zscore_hand": -0.09001386409274882,
+              "weight_ranker": 0.0512497979488956,
+              "weight_hand": 0.0512497979488956,
+              "contribution_ranker": -0.004613192347352724,
+              "contribution_hand": -0.004613192347352726
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -0.0844712111371702,
+              "zscore_hand": -0.0844712111371702,
+              "weight_ranker": 0.28312075400102493,
+              "weight_hand": 0.28312075400102493,
+              "contribution_ranker": -0.0239155529885354,
+              "contribution_hand": -0.0239155529885354
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 89,
+          "symbol": "c051",
+          "composite_ranker": -0.2892660146958819,
+          "composite_hand": -0.2892660146958819,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 1.734723475976807e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.4033908761518772,
+              "zscore_hand": 0.4033908761518772,
+              "weight_ranker": 0.3911188936163416,
+              "weight_hand": 0.3911188936163416,
+              "contribution_ranker": 0.1577737931754489,
+              "contribution_hand": 0.1577737931754489
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -0.46556474555207555,
+              "zscore_hand": -0.46556474555207555,
+              "weight_ranker": 0.27451055443373784,
+              "weight_hand": 0.27451055443373784,
+              "contribution_ranker": -0.12780243642630235,
+              "contribution_hand": -0.12780243642630235
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09215185942582667,
+              "zscore_hand": -0.0921518594258267,
+              "weight_ranker": 0.0512497979488956,
+              "weight_hand": 0.0512497979488956,
+              "contribution_ranker": -0.004722764176188647,
+              "contribution_hand": -0.004722764176188649
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -1.1108850298826953,
+              "zscore_hand": -1.1108850298826953,
+              "weight_ranker": 0.28312075400102493,
+              "weight_hand": 0.28312075400102493,
+              "contribution_ranker": -0.31451460726883984,
+              "contribution_hand": -0.31451460726883984
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 100,
+          "symbol": "c116",
+          "composite_ranker": -0.41922209963856044,
+          "composite_hand": -0.41922209963856044,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 4.163336342344337e-17,
+            "weight_max": 0.0,
+            "contribution_max": 1.734723475976807e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.6059890543876336,
+              "zscore_hand": 0.6059890543876336,
+              "weight_ranker": 0.3911188936163416,
+              "weight_hand": 0.3911188936163416,
+              "contribution_ranker": 0.23701376849570432,
+              "contribution_hand": 0.23701376849570432
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -0.5673722545969171,
+              "zscore_hand": -0.5673722545969171,
+              "weight_ranker": 0.27451055443373784,
+              "weight_hand": 0.27451055443373784,
+              "contribution_ranker": -0.15574967217971958,
+              "contribution_hand": -0.15574967217971958
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09291934878436633,
+              "zscore_hand": -0.09291934878436638,
+              "weight_ranker": 0.0512497979488956,
+              "weight_hand": 0.0512497979488956,
+              "contribution_ranker": -0.004762097850741733,
+              "contribution_hand": -0.004762097850741735
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -1.7509281502620218,
+              "zscore_hand": -1.7509281502620218,
+              "weight_ranker": 0.28312075400102493,
+              "weight_hand": 0.28312075400102493,
+              "contribution_ranker": -0.49572409810380347,
+              "contribution_hand": -0.49572409810380347
+            }
+          ],
+          "matched": true
+        }
+      ]
+    },
+    {
+      "rank_day": "2026-06-23",
+      "active_ids": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "ic_stats": {
+        "1": {
+          "expression": "div(ts_mean(close,5),close)",
+          "ic_mean": 0.13783607657939206,
+          "icir": 1.5113147755680194,
+          "weight": 0.32525970742984633
+        },
+        "2": {
+          "expression": "div(volume,ts_mean(volume,20))",
+          "ic_mean": 0.12723117346111995,
+          "icir": 1.4918953875751568,
+          "weight": 0.30023470837900446
+        },
+        "3": {
+          "expression": "ts_std(delta(close,1),20)",
+          "ic_mean": 0.030166446743986844,
+          "icir": 0.34351408306639764,
+          "weight": 0.07118549719090152
+        },
+        "4": {
+          "expression": "ts_mean(amount,20)",
+          "ic_mean": 0.12853867166701388,
+          "icir": 1.4446450843817582,
+          "weight": 0.30332008700024776
+        }
+      },
+      "recent_ic_stats_cross_check_max_abs_diff": 0.0,
+      "n_candidates": 100,
+      "rank_1_composite": 0.9749839840413954,
+      "rank_100_composite": -0.39464424818484856,
+      "reconciliation_max_abs_diff": 0.0,
+      "checks": [
+        {
+          "rank": 1,
+          "symbol": "c056",
+          "composite_ranker": 0.9749839840413954,
+          "composite_hand": 0.9749839840413952,
+          "diffs": {
+            "composite": 2.220446049250313e-16,
+            "zscore_max": 4.163336342344337e-17,
+            "weight_max": 0.0,
+            "contribution_max": 2.6020852139652106e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.895086651616952,
+              "zscore_hand": 0.895086651616952,
+              "weight_ranker": 0.32525970742984633,
+              "weight_hand": 0.32525970742984633,
+              "contribution_ranker": 0.2911356224292906,
+              "contribution_hand": 0.2911356224292906
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 0.7742582822718218,
+              "zscore_hand": 0.7742582822718218,
+              "weight_ranker": 0.30023470837900446,
+              "weight_hand": 0.30023470837900446,
+              "contribution_ranker": 0.23245920958790933,
+              "contribution_hand": 0.23245920958790933
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09127370320817353,
+              "zscore_hand": -0.09127370320817357,
+              "weight_ranker": 0.07118549719090152,
+              "weight_hand": 0.07118549719090152,
+              "contribution_ranker": -0.006497363943328616,
+              "contribution_hand": -0.006497363943328618
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 1.5095819089856386,
+              "zscore_hand": 1.5095819089856386,
+              "weight_ranker": 0.30332008700024776,
+              "weight_hand": 0.30332008700024776,
+              "contribution_ranker": 0.457886515967524,
+              "contribution_hand": 0.457886515967524
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 12,
+          "symbol": "c076",
+          "composite_ranker": 0.6929054620805626,
+          "composite_hand": 0.6929054620805626,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 2.6020852139652106e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.7885147189898778,
+              "zscore_hand": 0.7885147189898778,
+              "weight_ranker": 0.32525970742984633,
+              "weight_hand": 0.32525970742984633,
+              "contribution_ranker": 0.2564720668027751,
+              "contribution_hand": 0.2564720668027751
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -0.4454058968015521,
+              "zscore_hand": -0.4454058968015521,
+              "weight_ranker": 0.30023470837900446,
+              "weight_hand": 0.30023470837900446,
+              "contribution_ranker": -0.13372630953650297,
+              "contribution_hand": -0.13372630953650297
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09145861254330624,
+              "zscore_hand": -0.09145861254330627,
+              "weight_ranker": 0.07118549719090152,
+              "weight_hand": 0.07118549719090152,
+              "contribution_ranker": -0.006510526806285276,
+              "contribution_hand": -0.006510526806285279
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 1.9011936773580862,
+              "zscore_hand": 1.9011936773580862,
+              "weight_ranker": 0.30332008700024776,
+              "weight_hand": 0.30332008700024776,
+              "contribution_ranker": 0.5766702316205757,
+              "contribution_hand": 0.5766702316205757
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 23,
+          "symbol": "c018",
+          "composite_ranker": 0.4573192113998972,
+          "composite_hand": 0.4573192113998972,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 4.163336342344337e-17,
+            "weight_max": 0.0,
+            "contribution_max": 3.469446951953614e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -0.7579250162401077,
+              "zscore_hand": -0.7579250162401077,
+              "weight_ranker": 0.32525970742984633,
+              "weight_hand": 0.32525970742984633,
+              "contribution_ranker": -0.24652246903601896,
+              "contribution_hand": -0.24652246903601896
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 1.045193989498591,
+              "zscore_hand": 1.045193989498591,
+              "weight_ranker": 0.30023470837900446,
+              "weight_hand": 0.30023470837900446,
+              "contribution_ranker": 0.3138035126365977,
+              "contribution_hand": 0.3138035126365977
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09146580253676835,
+              "zscore_hand": -0.09146580253676839,
+              "weight_ranker": 0.07118549719090152,
+              "weight_hand": 0.07118549719090152,
+              "contribution_ranker": -0.006511038629544676,
+              "contribution_hand": -0.00651103862954468
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 1.3073621676382388,
+              "zscore_hand": 1.3073621676382388,
+              "weight_ranker": 0.30332008700024776,
+              "weight_hand": 0.30332008700024776,
+              "contribution_ranker": 0.3965492064288631,
+              "contribution_hand": 0.3965492064288631
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 34,
+          "symbol": "c091",
+          "composite_ranker": 0.20599946391704127,
+          "composite_hand": 0.20599946391704127,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 2.6020852139652106e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -0.07042260430326046,
+              "zscore_hand": -0.07042260430326046,
+              "weight_ranker": 0.32525970742984633,
+              "weight_hand": 0.32525970742984633,
+              "contribution_ranker": -0.022905635672126334,
+              "contribution_hand": -0.022905635672126334
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 1.0973218846007398,
+              "zscore_hand": 1.0973218846007398,
+              "weight_ranker": 0.30023470837900446,
+              "weight_hand": 0.30023470837900446,
+              "contribution_ranker": 0.32945411602100266,
+              "contribution_hand": 0.32945411602100266
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09140743257064333,
+              "zscore_hand": -0.09140743257064336,
+              "weight_ranker": 0.07118549719090152,
+              "weight_hand": 0.07118549719090152,
+              "contribution_ranker": -0.006506883534485051,
+              "contribution_hand": -0.006506883534485053
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -0.310042548871065,
+              "zscore_hand": -0.310042548871065,
+              "weight_ranker": 0.30332008700024776,
+              "weight_hand": 0.30332008700024776,
+              "contribution_ranker": -0.09404213289735001,
+              "contribution_hand": -0.09404213289735001
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 45,
+          "symbol": "c097",
+          "composite_ranker": 0.12999156406829016,
+          "composite_hand": 0.12999156406829016,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 1.734723475976807e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -0.4600111051700275,
+              "zscore_hand": -0.4600111051700275,
+              "weight_ranker": 0.32525970742984633,
+              "weight_hand": 0.32525970742984633,
+              "contribution_ranker": -0.14962307748208342,
+              "contribution_hand": -0.14962307748208342
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 2.1608506833524976,
+              "zscore_hand": 2.1608506833524976,
+              "weight_ranker": 0.30023470837900446,
+              "weight_hand": 0.30023470837900446,
+              "contribution_ranker": 0.6487623747669097,
+              "contribution_hand": 0.6487623747669097
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09137272412166583,
+              "zscore_hand": -0.09137272412166586,
+              "weight_ranker": 0.07118549719090152,
+              "weight_hand": 0.07118549719090152,
+              "contribution_ranker": -0.006504412796287862,
+              "contribution_hand": -0.006504412796287864
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -1.195579639999088,
+              "zscore_hand": -1.195579639999088,
+              "weight_ranker": 0.30332008700024776,
+              "weight_hand": 0.30332008700024776,
+              "contribution_ranker": -0.3626433204202482,
+              "contribution_hand": -0.3626433204202482
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 56,
+          "symbol": "c043",
+          "composite_ranker": 0.026255357313384856,
+          "composite_hand": 0.026255357313384853,
+          "diffs": {
+            "composite": 3.469446951953614e-18,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 2.6020852139652106e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.319057635758405,
+              "zscore_hand": 0.319057635758405,
+              "weight_ranker": 0.32525970742984633,
+              "weight_hand": 0.32525970742984633,
+              "contribution_ranker": 0.1037765932600373,
+              "contribution_hand": 0.1037765932600373
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -0.4126616500067788,
+              "zscore_hand": -0.4126616500067788,
+              "weight_ranker": 0.30023470837900446,
+              "weight_hand": 0.30023470837900446,
+              "contribution_ranker": -0.12389535014898403,
+              "contribution_hand": -0.12389535014898403
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09110823237506252,
+              "zscore_hand": -0.09110823237506255,
+              "weight_ranker": 0.07118549719090152,
+              "weight_hand": 0.07118549719090152,
+              "contribution_ranker": -0.006485584819803015,
+              "contribution_hand": -0.006485584819803018
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 0.1742703542811902,
+              "zscore_hand": 0.1742703542811902,
+              "weight_ranker": 0.30332008700024776,
+              "weight_hand": 0.30332008700024776,
+              "contribution_ranker": 0.05285969902213461,
+              "contribution_hand": 0.05285969902213461
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 67,
+          "symbol": "c027",
+          "composite_ranker": -0.10639757000459293,
+          "composite_hand": -0.10639757000459293,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 1.734723475976807e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -0.43967504616764647,
+              "zscore_hand": -0.43967504616764647,
+              "weight_ranker": 0.32525970742984633,
+              "weight_hand": 0.32525970742984633,
+              "contribution_ranker": -0.14300857688069288,
+              "contribution_hand": -0.14300857688069288
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 0.7828052001211658,
+              "zscore_hand": 0.7828052001211658,
+              "weight_ranker": 0.30023470837900446,
+              "weight_hand": 0.30023470837900446,
+              "contribution_ranker": 0.23502529097594646,
+              "contribution_hand": 0.23502529097594646
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09143083448572373,
+              "zscore_hand": -0.09143083448572376,
+              "weight_ranker": 0.07118549719090152,
+              "weight_hand": 0.07118549719090152,
+              "contribution_ranker": -0.006508549411445268,
+              "contribution_hand": -0.00650854941144527
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -0.6326838970221068,
+              "zscore_hand": -0.6326838970221068,
+              "weight_ranker": 0.30332008700024776,
+              "weight_hand": 0.30332008700024776,
+              "contribution_ranker": -0.19190573468840125,
+              "contribution_hand": -0.19190573468840125
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 78,
+          "symbol": "c114",
+          "composite_ranker": -0.20705020807797989,
+          "composite_hand": -0.20705020807797989,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 2.6020852139652106e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": 0.06922787789341744,
+              "zscore_hand": 0.06922787789341744,
+              "weight_ranker": 0.32525970742984633,
+              "weight_hand": 0.32525970742984633,
+              "contribution_ranker": 0.022517039309602086,
+              "contribution_hand": 0.022517039309602086
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -1.1622345450237512,
+              "zscore_hand": -1.1622345450237512,
+              "weight_ranker": 0.30023470837900446,
+              "weight_hand": 0.30023470837900446,
+              "contribution_ranker": -0.3489431496932109,
+              "contribution_hand": -0.3489431496932109
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09119969430333726,
+              "zscore_hand": -0.09119969430333728,
+              "weight_ranker": 0.07118549719090152,
+              "weight_hand": 0.07118549719090152,
+              "contribution_ranker": -0.006492095582641291,
+              "contribution_hand": -0.0064920955826412935
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 0.41496756490171854,
+              "zscore_hand": 0.41496756490171854,
+              "weight_ranker": 0.30332008700024776,
+              "weight_hand": 0.30332008700024776,
+              "contribution_ranker": 0.12586799788827022,
+              "contribution_hand": 0.12586799788827022
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 89,
+          "symbol": "c074",
+          "composite_ranker": -0.2878330387934802,
+          "composite_hand": -0.2878330387934802,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 4.163336342344337e-17,
+            "weight_max": 0.0,
+            "contribution_max": 2.6020852139652106e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -0.5089235729012452,
+              "zscore_hand": -0.5089235729012452,
+              "weight_ranker": 0.32525970742984633,
+              "weight_hand": 0.32525970742984633,
+              "contribution_ranker": -0.1655323324260111,
+              "contribution_hand": -0.1655323324260111
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": -0.5879924102587971,
+              "zscore_hand": -0.5879924102587971,
+              "weight_ranker": 0.30023470837900446,
+              "weight_hand": 0.30023470837900446,
+              "contribution_ranker": -0.1765357298231179,
+              "contribution_hand": -0.1765357298231179
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09138249137225317,
+              "zscore_hand": -0.09138249137225321,
+              "weight_ranker": 0.07118549719090152,
+              "weight_hand": 0.07118549719090152,
+              "contribution_ranker": -0.0065051080828771105,
+              "contribution_hand": -0.006505108082877113
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": 0.20025093668945274,
+              "zscore_hand": 0.20025093668945274,
+              "weight_ranker": 0.30332008700024776,
+              "weight_hand": 0.30332008700024776,
+              "contribution_ranker": 0.06074013153852591,
+              "contribution_hand": 0.06074013153852591
+            }
+          ],
+          "matched": true
+        },
+        {
+          "rank": 100,
+          "symbol": "c105",
+          "composite_ranker": -0.39464424818484856,
+          "composite_hand": -0.39464424818484856,
+          "diffs": {
+            "composite": 0.0,
+            "zscore_max": 2.7755575615628914e-17,
+            "weight_max": 0.0,
+            "contribution_max": 1.734723475976807e-18
+          },
+          "contributions": [
+            {
+              "factor_id": 1,
+              "zscore_ranker": -0.044318615293783746,
+              "zscore_hand": -0.044318615293783746,
+              "weight_ranker": 0.32525970742984633,
+              "weight_hand": 0.32525970742984633,
+              "contribution_ranker": -0.014415059844152015,
+              "contribution_hand": -0.014415059844152015
+            },
+            {
+              "factor_id": 2,
+              "zscore_ranker": 0.2669584932862212,
+              "zscore_hand": 0.2669584932862212,
+              "weight_ranker": 0.30023470837900446,
+              "weight_hand": 0.30023470837900446,
+              "contribution_ranker": 0.08015020538108704,
+              "contribution_hand": 0.08015020538108704
+            },
+            {
+              "factor_id": 3,
+              "zscore_ranker": -0.09142052841239574,
+              "zscore_hand": -0.09142052841239577,
+              "weight_ranker": 0.07118549719090152,
+              "weight_hand": 0.07118549719090152,
+              "contribution_ranker": -0.00650781576849133,
+              "contribution_hand": -0.0065078157684913315
+            },
+            {
+              "factor_id": 4,
+              "zscore_ranker": -1.496345271564298,
+              "zscore_hand": -1.496345271564298,
+              "weight_ranker": 0.30332008700024776,
+              "weight_hand": 0.30332008700024776,
+              "contribution_ranker": -0.45387157795329225,
+              "contribution_hand": -0.45387157795329225
+            }
+          ],
+          "matched": true
+        }
+      ]
+    }
+  ],
+  "verdict": {
+    "sampled_total": 30,
+    "sampled_matched": 30,
+    "sampled_days": 3,
+    "reconciliation_max_abs_diff": 0.0,
+    "active_factor_ids": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "passed": true
+  }
+}
