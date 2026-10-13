@@ -8,6 +8,13 @@
 所有变体接收完全相同的 fetch_data+compute_metrics state 快照（重放，不重取数），
 差异只可归因于编排架构。每标的先构建一次快照，三变体 × repeats 次共用。
 
+因子工具配对变体（add-analyst-factor-tools；spec causal-ablation）：
+- tech_factor_tool: 技术分析师带只读因子库工具（agent_factory 工具集声明）
+- tech_bare: 裸技术分析师（同一分析师层，去掉该工具）
+两臂唯一差异 = 技术分析师节点的工具绑定（单变量），共享同一 state 快照；judge 维度
+按变体适用性过滤（无辩论/决策层 → 只评 report_relevance）。报告口径：CI 含 0 只写
+「无显著差异」，禁止「无效/无价值」类引申（`render_factor_tool_ablation_report` 守卫）。
+
 连线与主图（finance_agent.graph.build_5layer_graph）语义一致（对 brief 的修正）：
 - StateGraph(AnalysisState) 而非 dict：analyst_reports 的 merge_dicts、
   debate/risk_history 的 add reducer 只在 TypedDict schema 下生效，dict 会因
@@ -41,6 +48,7 @@ from evals.stats import paired_bootstrap_ci
 from finance_agent.nodes.analysts import (
     fundamental_analyst,
     macro_analyst,
+    make_technical_analyst,
     sentiment_analyst,
     technical_analyst,
 )
@@ -61,11 +69,29 @@ from finance_agent.nodes.trader import trader
 from finance_agent.routing import after_citation, after_fund_manager
 from finance_agent.state import AnalysisState
 
-Variant = Literal["analysts", "plus_debate", "through_trader", "full"]
+Variant = Literal[
+    "analysts", "plus_debate", "through_trader", "full", "tech_factor_tool", "tech_bare"
+]
 JUDGE_DIMS = ["report_relevance", "debate_quality", "decision_grounding", "consistency"]
 _VARIANTS: tuple[Variant, ...] = ("analysts", "plus_debate", "through_trader", "full")
+# 因子工具配对变体（add-analyst-factor-tools）：独立于分层四变体（_VARIANTS 语义与
+# 既有报告不变——捷径：跑批/聚合不混两套变体，各自出口）。顺序 = 对照臂 → 处理臂。
+_TECH_VARIANTS: tuple[Variant, ...] = ("tech_bare", "tech_factor_tool")
+# 变体 → 技术分析师是否绑定因子库工具（单变量：两臂唯一差异）
+_TECH_VARIANT_FACTOR_TOOL: dict[str, bool] = {"tech_factor_tool": True, "tech_bare": False}
 # through_trader（B5 修正臂，2026-09-18）：analysts+辩论+研究经理+Trader，无风控辩论/FM——
 # 两臂都含决策层，修 analysts 对 full 的同义反复口径（analysts 臂无决策章节而判据问决策）。
+
+
+def _variant_technical_analyst(variant: Variant) -> Callable[[dict], dict]:
+    """该变体绑定的技术分析师节点（消融单变量开关的唯一接线点）。
+
+    tech_factor_tool → 带因子库工具；tech_bare → 裸臂（不调工具、不注入因子库段）；
+    其余分层变体 → 生产入口（带工具，与 ``ANALYST_TOOLSETS`` 声明同源）。
+    """
+    if variant in _TECH_VARIANT_FACTOR_TOOL:
+        return make_technical_analyst(with_factor_tool=_TECH_VARIANT_FACTOR_TOOL[variant])
+    return technical_analyst
 
 
 def _applicable_dims(variant: Variant) -> tuple[str, ...]:
@@ -75,6 +101,9 @@ def _applicable_dims(variant: Variant) -> tuple[str, ...]:
     评不存在的层只会产伪影（宽容评虚层 vs 挑剔评真层的不对称）。
     """
     if variant == "analysts":
+        return ("report_relevance",)
+    if variant in _TECH_VARIANTS:
+        # 因子工具配对臂同为分析师层直出（无辩论/决策层）——同 analysts 口径
         return ("report_relevance",)
     if variant == "plus_debate":
         return ("report_relevance", "debate_quality")
@@ -112,14 +141,18 @@ def build_variant_graph(variant: Variant) -> CompiledStateGraph:
 
     并行扇出用直连边（entry→N 节点）：与主图 Send 派发语义等价——同一份
     state 并行进入各节点，输出经 reducer（merge_dicts/add）合并。
+
+    因子工具配对臂（tech_factor_tool / tech_bare）同为分析师层直出（无辩论/
+    决策层），差异只在 ``_variant_technical_analyst`` 绑定的技术分析师节点。
     """
-    if variant not in _VARIANTS:
+    if variant not in _VARIANTS and variant not in _TECH_VARIANTS:
         raise ValueError(f"未知变体: {variant}")
     g = StateGraph(AnalysisState)  # pyrefly: ignore[bad-specialization]
 
     # ── 共用前段：分析师并行扇出 → 引用校验汇聚 ──
     g.add_node("analysts_entry", _node(_entry))
-    g.add_node("technical_analyst", _node(technical_analyst))
+    # 技术分析师按变体绑定（因子工具臂带工具 / 裸臂不带；其余变体 = 生产入口）
+    g.add_node("technical_analyst", _node(_variant_technical_analyst(variant)))
     g.add_node("macro_analyst", _node(macro_analyst))
     g.add_node("fundamental_analyst", _node(fundamental_analyst))
     g.add_node("sentiment_analyst", _node(sentiment_analyst))
@@ -510,6 +543,164 @@ def aggregate_results(runs: list[dict], *, B: int = 10_000, seed: int = 42) -> d
     return report
 
 
+# ── 因子工具配对消融（add-analyst-factor-tools Task 3） ──────────────────────
+# 报告措辞守卫（spec causal-ablation 场景）：CI 含 0 只写「无显著差异」，
+# 禁止引申为「无效/无价值」类表述——渲染前结构校验（fail loud，坏措辞不进报告）
+_FORBIDDEN_INTERPRETATIONS: tuple[str, ...] = ("无效", "无价值", "无用", "没有价值")
+_FACTOR_TOOL_OUTCOME_DIMS: tuple[str, ...] = tuple(_applicable_dims("tech_factor_tool"))
+
+
+def conclusion_for_factor_tool_increment(ci: tuple[float, float]) -> str:
+    """因子工具增量结论（措辞逐字，spec causal-ablation）：
+
+    CI 整体 >0 → 显著改进；整体 <0 → 显著退步；**含 0 → 无显著差异**（不得引申为
+    工具「无效」——该措辞被 `_FORBIDDEN_INTERPRETATIONS` 守卫拒绝）。
+    """
+    lo, hi = ci
+    if lo > 0:
+        return "显著改进"
+    if hi < 0:
+        return "显著退步"
+    return "无显著差异"
+
+
+def aggregate_factor_tool_ablation(
+    runs: list[dict],
+    *,
+    B: int = 10_000,  # noqa: N803 - 接口冻结：与既有 paired_bootstrap_ci 参数名一致
+    seed: int = 42,
+) -> dict:
+    """因子工具配对变体（tech_bare → tech_factor_tool）的 judge 维度增量与结论。
+
+    口径与 `aggregate_results` 同源：逐标的中位数配对（bootstrap 重采样单位 =
+    标的）+ mean-diff 配对 bootstrap CI；judge 维度按变体适用性过滤（无辩论/决策层
+    → 只评 report_relevance）；两侧无共同标的/维度不适用 → 不产伪结论（整条跳过）。
+    """
+    report: dict[str, Any] = {
+        "pairing_unit": "ticker",
+        "pairing_units": 0,
+        "n_runs": len(runs),
+        "variants": {},
+        "dims": {},
+    }
+    for variant in _TECH_VARIANTS:
+        v_runs = [r for r in runs if r["variant"] == variant]
+        report["variants"][variant] = {
+            "n_runs": len(v_runs),
+            "judge_medians": {
+                dim: _median([r["judge"][dim] for r in v_runs if r["judge"].get(dim) is not None])
+                for dim in JUDGE_DIMS
+            },
+        }
+    prev_by_ticker = _by_ticker_median(runs, "tech_bare")
+    cur_by_ticker = _by_ticker_median(runs, "tech_factor_tool")
+    common = sorted(set(prev_by_ticker) & set(cur_by_ticker))
+    report["pairing_units"] = len(common)
+    for dim in _FACTOR_TOOL_OUTCOME_DIMS:
+        seq_prev: list[float] = []
+        seq_cur: list[float] = []
+        for ticker in common:
+            prev_value = prev_by_ticker[ticker].get(dim)
+            cur_value = cur_by_ticker[ticker].get(dim)
+            if prev_value is not None and cur_value is not None:
+                seq_prev.append(prev_value)
+                seq_cur.append(cur_value)
+        if not seq_prev:
+            continue
+        lo, hi = paired_bootstrap_ci(seq_cur, seq_prev, B=B, seed=seed)
+        report["dims"][dim] = {
+            "diff_mean": round(sum(seq_cur) / len(seq_cur) - sum(seq_prev) / len(seq_prev), 4),
+            "ci": (round(lo, 4), round(hi, 4)),
+            "conclusion": conclusion_for_factor_tool_increment((lo, hi)),
+        }
+    return report
+
+
+def render_factor_tool_ablation_report(report: dict) -> str:
+    """因子工具消融报告（markdown）模板渲染；措辞守卫在此强制（fail loud）。
+
+    CI 含 0 的维度结论逐字「无显著差异」；报告任何位置出现
+    `_FORBIDDEN_INTERPRETATIONS` 措辞 → ``ValueError``（禁止「无效」类引申）。
+    """
+    lines = [
+        "# 因子工具消融报告（技术分析师 ± query_factor_library）",
+        "",
+        f"- 配对单元：{report.get('pairing_unit', 'ticker')}（bootstrap 重采样单位）",
+        f"- 配对单元数（有效 n）：{report.get('pairing_units', 0)}",
+        f"- run 数：{report.get('n_runs', 0)}",
+        "",
+        "## judge 维度增量（tech_bare → tech_factor_tool）",
+        "",
+    ]
+    dims = report.get("dims") or {}
+    if not dims:
+        lines.append("无可配对的 judge 维度（两侧无共同标的或维度不适用）：不产出结论。")
+    for dim, entry in dims.items():
+        lo, hi = entry["ci"]
+        lines.append(
+            f"- {dim}: 点估计 Δ{entry['diff_mean']}，95% CI [{lo}, {hi}] → {entry['conclusion']}"
+        )
+    lines += [
+        "",
+        "## 结论口径",
+        "",
+        "- CI 含 0 只写「无显著差异」；不得据此引申为对工具价值的否定。",
+        "- 本报告仅陈述统计口径与配对单元；采纳/裁剪决策须有独立证据（成本—收益）并",
+        "  遵循项目评估 SOP（judge 校准先行、一次只动一个变量）。",
+    ]
+    text = "\n".join(lines) + "\n"
+    for forbidden in _FORBIDDEN_INTERPRETATIONS:
+        if forbidden in text:
+            raise ValueError(
+                f"消融报告出现禁用措辞 {forbidden!r}：CI 含 0 不得引申为「无效/无价值」"
+            )
+    return text
+
+
+def run_factor_tool_ablation(
+    tickers: Sequence[str],
+    *,
+    repeats: int = 1,
+    judge_repeats: int = 3,
+    snapshot_builder: Callable[[str], dict] | None = None,
+    query: str = "综合评估投资价值",
+) -> dict:
+    """因子工具配对跑批：每标的同一快照 → 两臂 × repeats 次 → 聚合报告。
+
+    判分只经库侧唯一入口 `score_run`（spec「跑批入口唯一化」）；两臂共享同一
+    snapshot digest（输入对齐证据）。实际跑批消耗 LLM token（2 臂 × repeats ×
+    完整分析师层分析），属人工触发的评估动作；本函数不做静默降级。
+    """
+    builder = snapshot_builder or build_snapshot
+    runs: list[dict] = []
+    snapshots: dict[str, str] = {}
+    for ticker in tickers:
+        snapshot = builder(ticker)
+        snapshots[ticker] = snapshot_digest(snapshot)
+        for variant in _TECH_VARIANTS:
+            for repeat in range(repeats):
+                out = run_variant_once(variant, snapshot, query)
+                runs.append(
+                    {
+                        "variant": variant,
+                        "ticker": ticker,
+                        **score_run(
+                            variant, out, ticker=ticker, repeat=repeat, judge_repeats=judge_repeats
+                        ),
+                        "citation_pass": out["citation_pass"],
+                        "citation_buckets": out["citation_buckets"],
+                    }
+                )
+    report = aggregate_factor_tool_ablation(runs)
+    from evals.run import _collect_prompt_versions
+
+    report["prompt_versions"] = _collect_prompt_versions()  # 复现证据：prompt 版本随报告落盘
+    report["snapshot_digests"] = snapshots  # 两臂共用同一 digest = 输入对齐证据
+    report["generated_at"] = datetime.now().isoformat(timespec="seconds")
+    report["report_markdown"] = render_factor_tool_ablation_report(report)
+    return report
+
+
 def _median(values: list[float]) -> float | None:
     if not values:
         return None
@@ -649,15 +840,27 @@ def main() -> None:
         default=3,
         help="judge 每维度重复次数（取均值，降 5/4 边界噪声）",
     )
-    args = parser.parse_args()
-    report = run_ablation(
-        list(args.tickers), repeats=args.repeats, judge_repeats=args.judge_repeats
+    parser.add_argument(
+        "--suite",
+        choices=("layers", "factor-tool"),
+        default="layers",
+        help="layers=分层消融（既有四变体）；factor-tool=技术分析师 ± 因子库工具配对变体",
     )
+    args = parser.parse_args()
+    if args.suite == "factor-tool":
+        report = run_factor_tool_ablation(
+            list(args.tickers), repeats=args.repeats, judge_repeats=args.judge_repeats
+        )
+        print(report["report_markdown"])
+    else:
+        report = run_ablation(
+            list(args.tickers), repeats=args.repeats, judge_repeats=args.judge_repeats
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
     out_dir = Path("reports/ablation")
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"ablation-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
     print(f"消融报告已写入 {path}")
 
 
