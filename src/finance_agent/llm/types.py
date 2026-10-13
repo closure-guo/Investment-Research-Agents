@@ -18,7 +18,15 @@ from typing import Any, Literal
 ToolsCap = Literal["none", "single", "parallel"]
 JsonCap = Literal["none", "json_mode", "strict_schema"]
 Purpose = Literal[
-    "deep", "quick", "followup", "extract", "react", "pipeline_node", "probe", "judge"
+    "deep",
+    "quick",
+    "followup",
+    "extract",
+    "react",
+    "pipeline_node",
+    "probe",
+    "judge",
+    "factor_proposal",
 ]
 
 

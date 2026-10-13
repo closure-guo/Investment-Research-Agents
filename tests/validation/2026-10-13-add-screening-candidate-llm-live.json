@@ -1,0 +1,286 @@
+{
+  "change": "add-screening-candidate-llm",
+  "task": "T3 live 抽检（合成候选 + 注入事件）",
+  "run_at": "2026-10-13T09:20:55",
+  "elapsed_seconds": 34.6,
+  "status": "ok",
+  "blocked_reason": null,
+  "profile": {
+    "name": "env:openai/k3-256k",
+    "model": "openai/k3-256k",
+    "base_url_host": "api.kimi.com",
+    "api_key_present": true
+  },
+  "candidate_count": 25,
+  "risky_count": 5,
+  "neutral_count": 20,
+  "distribution": {
+    "keep": 20,
+    "drop": 5,
+    "degraded": 0
+  },
+  "reason_lengths": {
+    "max": 39,
+    "limit": 50,
+    "all_le_limit": true,
+    "values": [
+      33,
+      27,
+      17,
+      21,
+      24,
+      22,
+      23,
+      25,
+      20,
+      23,
+      37,
+      22,
+      35,
+      22,
+      25,
+      21,
+      25,
+      27,
+      27,
+      22,
+      30,
+      27,
+      39,
+      25,
+      24
+    ]
+  },
+  "risky_drop_rate": 1.0,
+  "risky_verdicts": {
+    "600519": "drop",
+    "000858": "drop",
+    "300750": "drop",
+    "002594": "drop",
+    "601318": "drop"
+  },
+  "neutral_keep_rate": 1.0,
+  "spec_scenario_rank5_lizhan": {
+    "symbol": "600519",
+    "rank": 5,
+    "event": "收到中国证监会立案告知书",
+    "verdict": "drop",
+    "reason": "2026-09-28被证监会立案调查，属重大风险",
+    "reason_mentions_lizhan": true
+  },
+  "warnings": [],
+  "trace_metadata": {
+    "purpose_tag": "quick",
+    "trade_date": "2026-10-13",
+    "candidate_count": 25,
+    "keep_count": 20,
+    "drop_count": 5,
+    "degraded_count": 0,
+    "max_workers": 8,
+    "warnings": []
+  },
+  "db_readback_rows": 25,
+  "samples": [
+    {
+      "symbol": "600519",
+      "group": "risky",
+      "event": "收到中国证监会立案告知书",
+      "verdict": "drop",
+      "reason": "2026-09-28被证监会立案调查，属重大风险",
+      "reason_len": 24,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：600519\n- 交易日：2026-10-13\n- 综合分：2.6000（L2 排名第 5）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.6000，weight=0.6000，co"
+    },
+    {
+      "symbol": "000858",
+      "group": "risky",
+      "event": "控股股东因涉嫌信息披露违法违规被证监会立案",
+      "verdict": "drop",
+      "reason": "控股股东涉嫌信披违法违规被证监会立案，重大风险",
+      "reason_len": 23,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：000858\n- 交易日：2026-10-13\n- 综合分：2.4000（L2 排名第 7）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.5000，weight=0.6000，co"
+    },
+    {
+      "symbol": "300750",
+      "group": "risky",
+      "event": "控股股东拟减持不超过 3% 公司股份",
+      "verdict": "drop",
+      "reason": "控股股东拟减持不超过3%，属大额减持风险",
+      "reason_len": 20,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：300750\n- 交易日：2026-10-13\n- 综合分：2.2000（L2 排名第 9）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.4000，weight=0.6000，co"
+    },
+    {
+      "symbol": "002594",
+      "group": "risky",
+      "event": "董事及高级管理人员集中减持计划公告",
+      "verdict": "drop",
+      "reason": "2026-10-09公告董事及高管集中减持计划，属大额减持重大风险事件",
+      "reason_len": 35,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：002594\n- 交易日：2026-10-13\n- 综合分：1.8000（L2 排名第 13）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.2000，weight=0.6000，c"
+    },
+    {
+      "symbol": "601318",
+      "group": "risky",
+      "event": "2026 年三季报业绩预亏公告",
+      "verdict": "drop",
+      "reason": "2026-10-10公告三季报业绩预亏，属重大风险事件",
+      "reason_len": 27,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：601318\n- 交易日：2026-10-13\n- 综合分：1.3000（L2 排名第 18）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=-0.0500，weight=0.6000，"
+    },
+    {
+      "symbol": "600036",
+      "group": "neutral",
+      "event": "发布 2026 年半年度报告",
+      "verdict": "keep",
+      "reason": "综合分排名第1，近期仅披露半年报，无立案、减持或业绩暴雷等风险事件",
+      "reason_len": 33,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：600036\n- 交易日：2026-10-13\n- 综合分：3.0000（L2 排名第 1）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.8000，weight=0.6000，co"
+    },
+    {
+      "symbol": "601398",
+      "group": "neutral",
+      "event": "股东大会决议公告",
+      "verdict": "keep",
+      "reason": "综合分第2且无重大风险事件，股东大会决议属常规治理公告",
+      "reason_len": 27,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：601398\n- 交易日：2026-10-13\n- 综合分：2.9000（L2 排名第 2）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.7500，weight=0.6000，co"
+    },
+    {
+      "symbol": "600030",
+      "group": "neutral",
+      "event": "获得政府补助的公告",
+      "verdict": "keep",
+      "reason": "综合分靠前，仅政府补助，无重大风险",
+      "reason_len": 17,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：600030\n- 交易日：2026-10-13\n- 综合分：2.8000（L2 排名第 3）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.7000，weight=0.6000，co"
+    },
+    {
+      "symbol": "000001",
+      "group": "neutral",
+      "event": "关于回购公司股份的进展公告",
+      "verdict": "keep",
+      "reason": "综合分第4，仅回购进展公告，无重大风险事件",
+      "reason_len": 21,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：000001\n- 交易日：2026-10-13\n- 综合分：2.7000（L2 排名第 4）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.6500，weight=0.6000，co"
+    },
+    {
+      "symbol": "600887",
+      "group": "neutral",
+      "event": "新产品上市发布会纪要",
+      "verdict": "keep",
+      "reason": "综合分第6，近期仅新品发布会，无重大风险事件",
+      "reason_len": 22,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：600887\n- 交易日：2026-10-13\n- 综合分：2.5000（L2 排名第 6）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.5500，weight=0.6000，co"
+    },
+    {
+      "symbol": "601166",
+      "group": "neutral",
+      "event": "董事会换届选举完成",
+      "verdict": "keep",
+      "reason": "综合分靠前，仅董事会换届属正常治理事件，无风险信号",
+      "reason_len": 25,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：601166\n- 交易日：2026-10-13\n- 综合分：2.3000（L2 排名第 8）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.4500，weight=0.6000，co"
+    },
+    {
+      "symbol": "000333",
+      "group": "neutral",
+      "event": "2026 年中期分红派息实施公告",
+      "verdict": "keep",
+      "reason": "综合分第10，仅见中期分红实施，无重大风险事件",
+      "reason_len": 23,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：000333\n- 交易日：2026-10-13\n- 综合分：2.1000（L2 排名第 10）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.3500，weight=0.6000，c"
+    },
+    {
+      "symbol": "600276",
+      "group": "neutral",
+      "event": "获得药品注册证书的公告",
+      "verdict": "keep",
+      "reason": "综合分2.0排名第11，近期仅获药品注册证书属正面经营动态，无重大风险事件",
+      "reason_len": 37,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：600276\n- 交易日：2026-10-13\n- 综合分：2.0000（L2 排名第 11）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.3000，weight=0.6000，c"
+    },
+    {
+      "symbol": "002415",
+      "group": "neutral",
+      "event": "签署日常经营重大合同",
+      "verdict": "keep",
+      "reason": "综合分靠前，重大合同属经营事项，未见风险事件",
+      "reason_len": 22,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：002415\n- 交易日：2026-10-13\n- 综合分：1.9000（L2 排名第 12）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.2500，weight=0.6000，c"
+    },
+    {
+      "symbol": "600309",
+      "group": "neutral",
+      "event": "关于全资子公司完成工商变更登记的公告",
+      "verdict": "keep",
+      "reason": "综合分靠前，仅子公司工商变更，无重大风险事件",
+      "reason_len": 22,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：600309\n- 交易日：2026-10-13\n- 综合分：1.7000（L2 排名第 14）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.1500，weight=0.6000，c"
+    },
+    {
+      "symbol": "601012",
+      "group": "neutral",
+      "event": "员工持股计划实施进展",
+      "verdict": "keep",
+      "reason": "无重大风险事件，员工持股进展属中性，综合分排名靠前",
+      "reason_len": 25,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：601012\n- 交易日：2026-10-13\n- 综合分：1.6000（L2 排名第 15）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.1000，weight=0.6000，c"
+    },
+    {
+      "symbol": "000651",
+      "group": "neutral",
+      "event": "2026 年第三季度经营情况简报",
+      "verdict": "keep",
+      "reason": "综合分靠前，近期仅经营简报，无重大风险事件",
+      "reason_len": 21,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：000651\n- 交易日：2026-10-13\n- 综合分：1.5000（L2 排名第 16）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.0500，weight=0.6000，c"
+    },
+    {
+      "symbol": "600900",
+      "group": "neutral",
+      "event": "关于参与设立产业基金的公告",
+      "verdict": "keep",
+      "reason": "综合分靠前，近期仅参与设立产业基金，无重大风险事件",
+      "reason_len": 25,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：600900\n- 交易日：2026-10-13\n- 综合分：1.4000（L2 排名第 17）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=0.0000，weight=0.6000，c"
+    },
+    {
+      "symbol": "601888",
+      "group": "neutral",
+      "event": "接待投资者调研活动记录",
+      "verdict": "keep",
+      "reason": "综合分排名第19，近期仅接待投资者调研，无重大风险事件",
+      "reason_len": 27,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：601888\n- 交易日：2026-10-13\n- 综合分：1.2000（L2 排名第 19）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=-0.1000，weight=0.6000，"
+    },
+    {
+      "symbol": "002475",
+      "group": "neutral",
+      "event": "关于变更公司注册资本并修订公司章程的公告",
+      "verdict": "keep",
+      "reason": "L2第20，仅注册资本与章程变更，无重大风险",
+      "reason_len": 22,
+      "degraded": false,
+      "prompt_excerpt": "# Identity\n你是 A 股量化选股漏斗的 L3 排雷粗筛员。你的产出是「保留（keep）或剔除（drop）」的粗筛判断与理由，不是投资建议，也不做交易决策。\n\n# 输出合同\n仅输出一个 JSON 对象（不要额外解释文本），形如：\n{\"verdict\": \"keep\", \"reason\": \"综合分靠前且无风险事件\"}\n- verdict：仅 keep（保留进入后续深度分析）或 drop（因重大风险剔除）两值\n- reason：不超过 50 字的中文理由（按字符数计，去首尾空白）\n\n# 候选信息\n- 股票代码：002475\n- 交易日：2026-10-13\n- 综合分：1.1000（L2 排名第 20）\n- 因子贡献摘要（factor_id / zscore / weight / contribution）：\n- 因子 1: zscore=-0.1500，weight=0.6000，"
+    }
+  ],
+  "honesty_note": "2026-09 真实候选不可得（东财行情域 IP 封禁，incident 033 / issue #325）→ 合成候选 + 注入事件替代；本真跑验证输出合同与 LLM 行为，不构成真实市场有效性证据。"
+}

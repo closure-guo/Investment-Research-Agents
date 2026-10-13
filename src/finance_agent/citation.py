@@ -480,7 +480,11 @@ def _looks_numeric(text: str) -> bool:
         return False
 
 
-_SIGNED_ROOTS = frozenset({"growth_rates", "quarterly_trend", "derived_series"})
+_SIGNED_ROOTS = frozenset(
+    # decision_memory（add-decision-memory 注册）：记忆条目的结算收益 raw_return 为
+    # 有符号量（正/负），direction 申报在此根上参与符号比对（而非字面误读降级）
+    {"growth_rates", "quarterly_trend", "derived_series", "decision_memory"}
+)
 _SIGNED_NAME_KEYWORDS = ("同比", "环比", "增速", "变动", "变化", "涨跌", "差额")
 
 
@@ -970,7 +974,10 @@ def _resolve_index_period(field_ref: str, state: dict) -> str | None:
     macro_indicators.<key>.<idx>.<列> → records[idx]["月份"]
         （4 段式索引在 parts[2]，亦接受键上括号 macro_indicators.<key>[<idx>].<列>；
         T3 修复：旧实现只看 parts[-1]，macro 期次恒解析不出、静默降级为缺口）；
-    quarterly_trend.<key>[<idx>] → quarters[idx]。
+    quarterly_trend.<key>[<idx>] → quarters[idx]；
+    decision_memory.episodic.<idx>.<字段> → 该记忆条目的决策日期（add-decision-memory
+        注册：记忆源纳入既有校验覆盖，期次可解析——未注册时该根下所有带 period 的
+        claim 恒计覆盖缺口）。
     """
     import re as _re
 
@@ -978,6 +985,17 @@ def _resolve_index_period(field_ref: str, state: dict) -> str | None:
     root = parts[0] if parts else ""
     idx: int | None = None
     try:
+        if (
+            root == "decision_memory"
+            and len(parts) >= 3
+            and parts[1] == "episodic"
+            and _re.match(r"^-?\d+$", parts[2])
+        ):
+            memory = state.get("decision_memory")
+            entries = memory.get("episodic") if isinstance(memory, dict) else None
+            if not isinstance(entries, list):
+                return None
+            return str((entries[int(parts[2])] or {}).get("date") or "") or None
         if root == "macro_indicators":
             if len(parts) < 3:
                 return None

@@ -548,6 +548,53 @@ def list_equity_curve(db_path: str | Path | None = None) -> list[dict[str, Any]]
         conn.close()
 
 
+_TRACK_RECORD_STATE_TABLES: tuple[str, ...] = (
+    "predictions",
+    "daily_marks",
+    "equity_curve",
+    "agent_metrics_daily",
+    "index_closes",
+)
+
+
+def delete_all_track_record_state(db_path: str | Path | None = None) -> dict[str, int]:
+    """清空战绩造数面五表（predictions/daily_marks/equity_curve/agent_metrics_daily/index_closes）。
+
+    用途：TESTING seed 的 ``track_record_reset`` 全量复位——战绩页 E2E 套件（serial 单
+    worker、专属库）中多个 spec 假设「库内只有自己造的行」，本地重跑若残留上一轮种子会
+    令空态/行唯一类断言误红（2026-10-13 实测：残留 49 条 predictions 致 6 例失败）。
+    CI 每次全新起库天然干净；本函数让本地复位与 CI 等价（由 config 的 globalSetup 调用）。
+
+    **不动** agents/audit_log/risk_free_rates（非造数面，另有生命周期语义）；
+    不删表结构（DELETE 行，幂等）。返回 {表名: 删除行数}。
+    """
+    conn = _connect(db_path)
+    try:
+        counts: dict[str, int] = {}
+        for table in _TRACK_RECORD_STATE_TABLES:
+            cursor = conn.execute(f"DELETE FROM {table}")  # noqa: S608 - 表名来自模块常量
+            counts[table] = int(cursor.rowcount)
+        conn.commit()
+        return counts
+    finally:
+        conn.close()
+
+
+def delete_all_equity_points(db_path: str | Path | None = None) -> int:
+    """清空 equity_curve（add-paper-broker：TESTING seed 造数清理，供 E2E 复位）。
+
+    仅清本表；predictions/index_closes 等其它造数面不涉（各 spec 的清理策略独立）。
+    返回删除行数。
+    """
+    conn = _connect(db_path)
+    try:
+        cursor = conn.execute("DELETE FROM equity_curve")
+        conn.commit()
+        return int(cursor.rowcount)
+    finally:
+        conn.close()
+
+
 # ── index_closes:指数收盘(add-index-performance-compare;展示层对比用,判定链不读)──
 def upsert_index_closes(
     rows: list[tuple[str, str, float]],

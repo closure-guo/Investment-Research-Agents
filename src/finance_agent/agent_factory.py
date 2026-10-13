@@ -22,7 +22,9 @@ import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from finance_agent.harness import Agent, PermissionMode
@@ -1373,6 +1375,127 @@ def _stream_graph(
 
 
 # ───────────────────────────────────────────────
+# 分析师层工具集（add-analyst-factor-tools Task 2）
+# ───────────────────────────────────────────────
+
+# 工具名（逐字；LLM 面工具与注册声明同源）
+TOOL_QUERY_FACTOR_LIBRARY = "query_factor_library"
+# 用途标签（逐字）：因子库工具调用计入 Langfuse trace 与节点耗时追踪
+PURPOSE_TAG_ANALYST_FACTOR_TOOL = "analyst_factor_tool"
+
+# 各分析师工具集声明（权威表；技术分析师唯一含只读因子库工具，其余三个为空——
+# 非目标：不改动其他分析师）。消费方（nodes/analysts.py）按本表取工具，
+# 消融变体（evals/ablation.py）按本表开关，三处口径单一来源。
+ANALYST_TOOLSETS: dict[str, tuple[str, ...]] = {
+    "technical": (TOOL_QUERY_FACTOR_LIBRARY,),
+    "macro": (),
+    "fundamental": (),
+    "sentiment": (),
+}
+
+# 因子库工具的面板回看窗口（交易日）：覆盖 builtin 因子的 20 日窗口与近 60 日 IC 口径
+_FACTOR_TOOL_LOOKBACK_DAYS = 60
+
+
+def analyst_tool_names(analyst: str) -> tuple[str, ...]:
+    """该分析师的工具清单（技术分析师 = 因子库只读工具；其余三个为空）。
+
+    未知分析师 → ``KeyError``（fail loud：工具集声明是权威表，不做静默兜底）。
+    """
+    return ANALYST_TOOLSETS[analyst]
+
+
+def make_query_factor_library(
+    *,
+    snapshot_db_path: str | Path | None = None,
+    library_db_path: str | Path | None = None,
+    lookback: int = _FACTOR_TOOL_LOOKBACK_DAYS,
+) -> Callable[..., str]:
+    """构造技术分析师 LLM 面因子库工具薄壳：``symbol`` → 结构化 JSON 字符串。
+
+    数据来源（全为既有读原语）：市场快照库（``data/snapshot.py`` 读盘 → 逐日
+    ``build_panel_from_rows`` 拼装全市场面板，近 ``lookback`` 交易日）+ 因子库
+    （``factors/tools.query_factor_library``：active 因子取值 / 全市场截面
+    z-score / 近 60 日 IC）。
+
+    只读与降级纪律：**不创建任何库文件、不写任何行**；快照库/因子库不存在或无数据
+    → 诚实空因（``{"symbol","as_of","factors":[],"note":...}``），不抛错、不编造。
+
+    追踪：复用既有 ``_trace_tool`` 机制（span ``tool_call:query_factor_library``
+    + 入参/输出 + 耗时 ``duration_ms`` + 用途标签 ``purpose_tag``）。
+    """
+
+    def query_factor_library(symbol: str) -> str:
+        """按标的查询因子库 active 因子的当前取值、全市场截面 z-score 与近 60 日 IC。
+
+        Args:
+            symbol: A 股 6 位代码（如 "300750"）
+        """
+        return _factor_library_payload(
+            symbol,
+            snapshot_db_path=snapshot_db_path,
+            library_db_path=library_db_path,
+            lookback=lookback,
+        )
+
+    query_factor_library.__name__ = TOOL_QUERY_FACTOR_LIBRARY
+    query_factor_library.__qualname__ = TOOL_QUERY_FACTOR_LIBRARY
+    return _trace_tool(
+        TOOL_QUERY_FACTOR_LIBRARY, metadata={"purpose_tag": PURPOSE_TAG_ANALYST_FACTOR_TOOL}
+    )(query_factor_library)
+
+
+def _factor_library_payload(
+    symbol: str,
+    *,
+    snapshot_db_path: str | Path | None,
+    library_db_path: str | Path | None,
+    lookback: int,
+) -> str:
+    """工具薄壳载荷：快照库 → 面板 → 因子库工具（任一环缺失 → 诚实空因 + note）。"""
+    from finance_agent.data.snapshot import _default_db_path as _snapshot_default_path
+    from finance_agent.data.snapshot import latest_snapshot_date
+    from finance_agent.factors.library import _default_db_path as _library_default_path
+
+    normalized_symbol = str(symbol).strip()
+    snapshot_path = Path(snapshot_db_path) if snapshot_db_path else _snapshot_default_path()
+    library_path = Path(library_db_path) if library_db_path else _library_default_path()
+    # 只读纪律：库文件不存在即按空库处理（绝不触发 init/建表→不产新文件）
+    if not snapshot_path.exists():
+        return _factor_tool_empty_payload(
+            normalized_symbol, "行情快照库不存在（未初始化）：无因子值"
+        )
+    as_of = latest_snapshot_date(snapshot_path)
+    if as_of is None:
+        return _factor_tool_empty_payload(normalized_symbol, "行情快照库无数据：无因子值")
+    if not library_path.exists():
+        return _factor_tool_empty_payload(
+            normalized_symbol, "因子库不存在（未初始化）：无 active 因子"
+        )
+    try:
+        from finance_agent.factors.monitor import _load_panel, _recent_trade_dates
+        from finance_agent.factors.tools import query_factor_library as _query_factor_library
+
+        dates = _recent_trade_dates(snapshot_path, as_of=as_of, limit=lookback)
+        panel = _load_panel(snapshot_path, dates=dates)
+        return _query_factor_library(
+            normalized_symbol, panel=panel, as_of=as_of, db_path=library_path
+        )
+    except Exception as exc:  # noqa: BLE001 - 读路径故障降级为诚实空因（不阻断分析师）
+        logger.warning("因子库工具读路径失败（降级为空因）: %s: %s", type(exc).__name__, exc)
+        return _factor_tool_empty_payload(
+            normalized_symbol, f"因子库数据不可用（{type(exc).__name__}）：无因子值"
+        )
+
+
+def _factor_tool_empty_payload(symbol: str, note: str) -> str:
+    """诚实空因载荷（as_of 未知记空串；键与 factors/tools.py 同 schema）。"""
+    return json.dumps(
+        {"symbol": symbol, "as_of": "", "factors": [], "note": note}, ensure_ascii=False
+    )
+
+
+# ───────────────────────────────────────────────
 # 工厂函数
 # ───────────────────────────────────────────────
 
@@ -1398,11 +1521,31 @@ def _build_context_budget(
         return ContextBudget()
 
 
-def _trace_tool(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def _span_metadata(
+    metadata: dict[str, Any] | None, started: float, **extra: Any
+) -> dict[str, Any] | None:
+    """span metadata 组装：固定元数据（如用途标签）+ 本次调用耗时（毫秒）；无元数据 → None。
+
+    ``metadata`` 非空时额外落 ``duration_ms``（工具调用耗时随 span 可见）；
+    ``extra``（如 ``tool_error``）最后合并、覆盖同键。两者皆无 → None（不产空 metadata）。
+    """
+    merged: dict[str, Any] = dict(metadata) if metadata else {}
+    if metadata is not None:
+        merged["duration_ms"] = int((time.perf_counter() - started) * 1000)
+    merged.update(extra)
+    return merged or None
+
+
+def _trace_tool(
+    name: str, metadata: dict[str, Any] | None = None
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """工具调用埋点（add-toolcall-evaluation 取证依赖）：Langfuse span。
 
     纯可观测性：Langfuse 未配置（get_langfuse()=None）时原样直通零开销；
     span 记录 name=tool_call:<工具名>、入参、执行耗时、异常标记 metadata.tool_error。
+    ``metadata``（可选）为随 span 落库的固定元数据（如用途标签 ``purpose_tag``）；
+    提供时同 span 追加本次调用耗时 ``duration_ms``（add-analyst-factor-tools：
+    工具调用计入节点耗时追踪与 trace）。
     同步/异步工具双路支持（functools.wraps 保留原签名；行为/异常传播不变）。
     """
 
@@ -1417,17 +1560,24 @@ def _trace_tool(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]
                 if client is None:
                     return await fn(*args, **kwargs)
                 call_arg = kwargs if kwargs else (args[0] if args else None)
+                started = time.perf_counter()
                 try:
                     with client.start_as_current_observation(
                         as_type="span", name=f"tool_call:{name}", input={"call": call_arg}
                     ) as span:
                         result = await fn(*args, **kwargs)
                         with contextlib.suppress(Exception):  # 埋点写 output 失败不影响业务
-                            span.update(output=str(result)[:2000])
+                            span.update(
+                                output=str(result)[:2000],
+                                metadata=_span_metadata(metadata, started),
+                            )
                         return result
                 except Exception as e:  # noqa: BLE001 - 业务异常照常传播，埋点标记错误
                     with contextlib.suppress(Exception):
-                        span.update(output={"error": str(e)}, metadata={"tool_error": str(e)})
+                        span.update(
+                            output={"error": str(e)},
+                            metadata=_span_metadata(metadata, started, tool_error=str(e)),
+                        )
                     raise
 
             return wrapped
@@ -1440,17 +1590,24 @@ def _trace_tool(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]
             if client is None:
                 return fn(*args, **kwargs)
             call_arg = kwargs if kwargs else (args[0] if args else None)
+            started = time.perf_counter()
             try:
                 with client.start_as_current_observation(
                     as_type="span", name=f"tool_call:{name}", input={"call": call_arg}
                 ) as span:
                     result = fn(*args, **kwargs)
                     with contextlib.suppress(Exception):  # 埋点写 output 失败不影响业务
-                        span.update(output=str(result)[:2000])
+                        span.update(
+                            output=str(result)[:2000],
+                            metadata=_span_metadata(metadata, started),
+                        )
                     return result
             except Exception as e:  # noqa: BLE001
                 with contextlib.suppress(Exception):
-                    span.update(output={"error": str(e)}, metadata={"tool_error": str(e)})
+                    span.update(
+                        output={"error": str(e)},
+                        metadata=_span_metadata(metadata, started, tool_error=str(e)),
+                    )
                 raise
 
         return wrapped

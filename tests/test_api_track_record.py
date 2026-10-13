@@ -4,9 +4,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from finance_agent.api import app
+from finance_agent.execution.store import list_paper_equity, upsert_paper_equity
 from finance_agent.outcome.track_record.model import (
     init_track_record_tables,
     insert_prediction,
+    list_equity_curve,
     update_prediction_status,
     upsert_equity_point,
     upsert_index_closes,
@@ -681,6 +683,171 @@ def test_seed_predictions_settle_fields_passthrough(monkeypatch, tmp_path):
         api_rows = client.get("/api/v1/track-record/predictions").json()["predictions"]
         assert api_rows[0]["settle_entry_price"] == 6.39
         assert api_rows[0]["exit_price"] == 6.5
+    finally:
+        monkeypatch.delenv("TESTING", raising=False)
+        importlib.reload(api_module)
+
+
+# ── add-paper-broker Task 2：overview paper 块（虚拟 vs 仿真双曲线）──
+
+
+def _use_execution_db(monkeypatch, tmp_path):
+    """execution 库指向独立 tmp（store 调用期读 EXECUTION_DB_PATH）。"""
+    db = tmp_path / "execution.db"
+    monkeypatch.setenv("EXECUTION_DB_PATH", str(db))
+    return db
+
+
+def test_overview_paper_block_aligns_common_dates(monkeypatch, tmp_path):
+    """spec 场景：虚拟 1.043 / 仿真 1.031 → loss_pct -1.2；只保留共同日期。
+
+    基期两线重合（paper 序列按共同基期缩放到虚拟净值同一标尺）；无对冲日期的
+    行（曲线独有 10-09 / paper 独有 10-13）一律排除。
+    """
+    curve_db = _use_db(monkeypatch, tmp_path)
+    exec_db = _use_execution_db(monkeypatch, tmp_path)
+    upsert_equity_point("2026-09-01", 1.0, benchmark_nav=1.0, db_path=curve_db)
+    upsert_equity_point("2026-09-30", 1.043, benchmark_nav=1.01, db_path=curve_db)
+    upsert_equity_point("2026-10-09", 1.05, benchmark_nav=1.02, db_path=curve_db)  # 无 paper → 排除
+    upsert_paper_equity("2026-09-01", 1_000_000.0, 0.0, 1_000_000.0, db_path=exec_db)
+    upsert_paper_equity("2026-09-30", 998_000.0, 33_000.0, 1_031_000.0, db_path=exec_db)
+    upsert_paper_equity(
+        "2026-10-13", 1_000_000.0, 0.0, 1_000_000.0, db_path=exec_db
+    )  # 无曲线 → 排除
+
+    paper = TestClient(app).get("/api/v1/track-record/overview").json()["paper"]
+
+    assert [p["date"] for p in paper["series"]] == ["2026-09-01", "2026-09-30"]
+    assert paper["series"][0]["virtual_equity"] == 1.0
+    assert paper["series"][0]["paper_equity"] == 1.0  # 基期两线重合
+    assert paper["series"][1]["virtual_equity"] == 1.043
+    assert paper["series"][1]["paper_equity"] == pytest.approx(1.031)  # 1,031,000/1,000,000
+    assert paper["loss_pct"] == -1.2  # (1.031/1.043 − 1) × 100 = −1.1505 → 保留 1 位
+    assert paper["base_date"] == "2026-09-01"
+    assert paper["note"] == "两条曲线同一批决策同一基准期；差值为执行损耗"
+
+
+def test_overview_paper_null_without_paper_data(monkeypatch, tmp_path):
+    """无 paper_equity 行 → paper: null（前端隐藏系列）。"""
+    curve_db = _use_db(monkeypatch, tmp_path)
+    _use_execution_db(monkeypatch, tmp_path)
+    upsert_equity_point("2026-09-30", 1.043, benchmark_nav=1.01, db_path=curve_db)
+    data = TestClient(app).get("/api/v1/track-record/overview").json()
+    assert data["paper"] is None
+
+
+def test_overview_paper_null_without_common_dates(monkeypatch, tmp_path):
+    """两表都有数据但日期无交集 → 无可对齐基期 → paper: null。"""
+    curve_db = _use_db(monkeypatch, tmp_path)
+    exec_db = _use_execution_db(monkeypatch, tmp_path)
+    upsert_equity_point("2026-09-30", 1.043, benchmark_nav=1.01, db_path=curve_db)
+    upsert_paper_equity("2026-10-08", 1_000_000.0, 0.0, 1_000_000.0, db_path=exec_db)
+    data = TestClient(app).get("/api/v1/track-record/overview").json()
+    assert data["paper"] is None
+
+
+def test_overview_paper_excludes_future_rows(monkeypatch, tmp_path):
+    """防前视：as_of（今天）之后的行不进对齐（虚拟与 paper 两序列同禁）。"""
+    curve_db = _use_db(monkeypatch, tmp_path)
+    exec_db = _use_execution_db(monkeypatch, tmp_path)
+    upsert_equity_point("2026-09-01", 1.0, benchmark_nav=1.0, db_path=curve_db)
+    upsert_equity_point("2099-01-01", 1.5, benchmark_nav=1.1, db_path=curve_db)
+    upsert_paper_equity("2026-09-01", 1_000_000.0, 0.0, 1_000_000.0, db_path=exec_db)
+    upsert_paper_equity("2099-01-01", 900_000.0, 0.0, 900_000.0, db_path=exec_db)
+    paper = TestClient(app).get("/api/v1/track-record/overview").json()["paper"]
+    assert [p["date"] for p in paper["series"]] == ["2026-09-01"]
+    assert paper["loss_pct"] == 0.0
+
+
+# ── add-paper-broker Task 2：test/seed 的 paper_equity 造数 ──
+
+
+def test_seed_paper_equity_block(monkeypatch, tmp_path):
+    """seed track_record.paper_equity → 落 execution 库（E2E 双曲线造数通道）。"""
+    _use_db(monkeypatch, tmp_path)
+    exec_db = _use_execution_db(monkeypatch, tmp_path)
+    # reload 模式沿 test_seed_track_record_block（TESTING=1 + importlib.reload + finally 恢复）
+    monkeypatch.setenv("TESTING", "1")
+    import importlib
+
+    import finance_agent.api as api_module
+    import finance_agent.session_store as session_store_module
+
+    monkeypatch.setattr(session_store_module, "_DB_PATH", tmp_path / "sessions.db")
+    session_store_module.init_db()
+
+    importlib.reload(api_module)
+    try:
+        client = TestClient(api_module.app)
+        resp = client.post(
+            "/api/test/seed",
+            json={
+                "track_record": {
+                    "paper_equity": [
+                        {
+                            "trade_date": "2026-09-01",
+                            "cash": 1_000_000.0,
+                            "positions_value": 0.0,
+                            "equity": 1_000_000.0,
+                        },
+                        {
+                            "trade_date": "2026-09-30",
+                            "cash": 998_000.0,
+                            "positions_value": 33_000.0,
+                            "equity": 1_031_000.0,
+                        },
+                    ]
+                }
+            },
+        )
+        assert resp.status_code == 200
+        # track_record-only 造数返回占位响应（不创建会话）
+        assert resp.json() == {"status": "ok", "mode": "testing"}
+        assert client.get("/api/sessions").json()["sessions"] == []
+        rows = list_paper_equity(db_path=exec_db)
+        assert [r["trade_date"] for r in rows] == ["2026-09-01", "2026-09-30"]
+        assert rows[1]["equity"] == 1_031_000.0
+    finally:
+        monkeypatch.delenv("TESTING", raising=False)
+        importlib.reload(api_module)
+
+
+def test_seed_track_record_reset_clears_state_tables(monkeypatch, tmp_path):
+    """track_record_reset 全量复位：五张战绩造数面表 + paper_equity。
+
+    契约变更（2026-10-13，E2E 修复）：此前只清 equity_curve + paper_equity，
+    残留的 predictions/daily_marks 令「库内只有自己造的行」类断言在本地位库重跑时
+    误红（实测 49 条残留 → 6 例失败）；现与 CI 全新起库等价。非造数面
+    （agents/audit_log/risk_free_rates）仍不动。
+    """
+    curve_db = _use_db(monkeypatch, tmp_path)
+    exec_db = _use_execution_db(monkeypatch, tmp_path)
+    upsert_equity_point("2026-09-01", 1.0, benchmark_nav=1.0, db_path=curve_db)
+    upsert_equity_point("2026-09-30", 1.043, benchmark_nav=1.01, db_path=curve_db)
+    upsert_paper_equity("2026-09-01", 1_000_000.0, 0.0, 1_000_000.0, db_path=exec_db)
+    upsert_paper_equity("2026-09-30", 998_000.0, 33_000.0, 1_031_000.0, db_path=exec_db)
+    _insert(curve_db)  # 造一条 predictions，验证全量复位一并清空
+
+    monkeypatch.setenv("TESTING", "1")
+    import importlib
+
+    import finance_agent.api as api_module
+    import finance_agent.session_store as session_store_module
+
+    monkeypatch.setattr(session_store_module, "_DB_PATH", tmp_path / "sessions.db")
+    session_store_module.init_db()
+
+    importlib.reload(api_module)
+    try:
+        client = TestClient(api_module.app)
+        resp = client.post("/api/test/seed", json={"track_record_reset": True})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok", "mode": "testing"}
+        assert list_equity_curve(db_path=curve_db) == []
+        assert list_paper_equity(db_path=exec_db) == []
+        # 契约变更（2026-10-13）：predictions 一并清空（此前「原样保留」边界已废）
+        preds = client.get("/api/v1/track-record/predictions").json()
+        assert preds["predictions"] == []
     finally:
         monkeypatch.delenv("TESTING", raising=False)
         importlib.reload(api_module)

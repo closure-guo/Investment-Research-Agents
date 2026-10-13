@@ -226,6 +226,7 @@ def complete_text(
     top_fields: list[str] | None = None,
     llm_config: dict[str, Any] | None = None,
     preset: str | None = None,
+    profile: ModelProfile | None = None,
     temperature: float | None = None,
     trace: dict[str, Any] | None = None,
     output_guard: dict[str, Any] | None = None,
@@ -244,6 +245,9 @@ def complete_text(
     ``trace``（可选）开启 Langfuse generation 观测（name/metadata），
     观测失败不阻断业务；output 结构 ``{answer, reasoning}`` + usage_details。
     ``preset``：显式命名 preset（透传 resolve_profile，fallback 链成员用）。
+    ``profile``：显式给出已解析的 ModelProfile（路由调用点钉死本次档位用）——
+    给出时**跳过** purpose/preset/llm_config 解析，直接以该 profile 发起请求，
+    杜绝「路由选 A、调用解析成 B」的静默漂移（add-factor-proposal-agent 评审修正 1）。
 
     断点续写（llm-output-resume Task 5）：finish_reason=length 且正文非空时
     以「已生成正文尾部(+进度标注) + 剩余配额」构造续写请求二次调用拼接，
@@ -255,7 +259,8 @@ def complete_text(
     传 ``{"target_lang": "zh"}`` 时对 content 执行泄露/截断校验，判定落返回
     metadata ``guard`` 与观测 metadata（仅遥测；处置决策在调用侧）。
     """
-    profile = resolve_profile(purpose=purpose, llm_config=llm_config, preset=preset)
+    if profile is None:
+        profile = resolve_profile(purpose=purpose, llm_config=llm_config, preset=preset)
     ensure_litellm_runtime()
     guard_params_supported(profile.capability, tools=tools, tool_choice="auto")
     from finance_agent.llm.adapters.litellm_adapter import (

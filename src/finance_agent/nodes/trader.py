@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from finance_agent.memory import append_memory_block
 from finance_agent.models import TradeDecision
 from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint
 from finance_agent.nodes.validate import apply_payout_self_check as _apply_payout_self_check
@@ -106,4 +107,6 @@ def _build_trader_context(state: dict) -> str:
                 history_lines.append(f"{msg.get('role', '?')}: {msg.get('content', '')}")
         sections.append("辩论记录:\n" + "\n".join(history_lines))
 
-    return "\n\n".join(sections) if sections else "无可用数据"
+    # 决策记忆（add-decision-memory）：同标的/同行业已结算历史 Top-5 + 已确认语义条款；
+    # 无记忆时逐字返回原上下文（向后兼容）
+    return append_memory_block("\n\n".join(sections) if sections else "无可用数据", state)

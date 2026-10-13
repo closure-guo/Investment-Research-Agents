@@ -97,6 +97,7 @@
 - **WHEN** 前端通过轮询获取到会话详情
 - **THEN** 前端 SHALL 展示 failure_reason 中的具体中断原因
 - **AND** SHALL NOT 仅显示笼统的"管线可能已中断"
+
 ### Requirement: LLM 调用错误传播
 
 系统 SHALL 确保 LLM 调用失败时正确传播异常而非静默吞没：`chat_stream` 在重试耗尽后 SHALL raise 异常，使 Agent 主循环能捕获并产生 ERROR 事件，而非将错误文本作为正常回复 yield。
@@ -209,4 +210,14 @@
 - **GIVEN** 管线正常产出最终报告
 - **WHEN** 图流结束且报告已下发
 - **THEN** 会话 status SHALL 照常更新为 completed，MUST NOT 被误标 failed
+
+### Requirement: 批量分析进度复用
+
+选股页触发的批量深度分析 SHALL 为每个标的创建独立 session 并复用现有 SSE 流式进度（终态事件优先送达等韧性纪律不变）；批量并发上限默认 2，超出部分排队。
+
+#### Scenario: 并发上限
+
+- **GIVEN** 精选池 5 只标的，并发上限 2
+- **WHEN** 触发批量深度分析
+- **THEN** 同时进行中的分析 ≤ 2，其余处于排队态并在前端展示排队标识
 

@@ -527,6 +527,19 @@ def _perf_table_lines(report: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _unfilled_counts_text(counts: Any) -> str:
+    """未成交计数 → 单行文本：键缺失 → 未提供；空计数 → 无；否则逐原因码（排序）列出。
+
+    未成交计数是「多少决策在撮合约束下无法执行」的唯一披露入口，不得静默省略：
+    缺键（旧报告 dict）如实写「未提供」而不抛错（评审修正 A1）。
+    """
+    if counts is None:
+        return NOT_PROVIDED
+    if not counts:
+        return "无"
+    return "，".join(f"{key}: {value}" for key, value in sorted(counts.items()))
+
+
 def _methodology_lines(report: dict[str, Any]) -> list[str]:
     methodology = report.get("methodology") or {}
     labels = (
@@ -534,9 +547,15 @@ def _methodology_lines(report: dict[str, Any]) -> list[str]:
         ("daily_returns", "日收益口径"),
         ("benchmark", "基准"),
         ("adjust", "复权口径（hfq）"),
+        ("costs", "成本口径"),
+        ("unfilled", "未成交口径"),
         ("system_population", "非可执行决策排除"),
     )
     lines = [f"- {label}：{methodology.get(key) or NOT_PROVIDED}" for key, label in labels]
+    # 评审修正 A1：未成交笔数按原因码进 md（此前只在 JSON 端计数，报告正文不可见）
+    lines.append(
+        f"- 未成交笔数（按原因码）：{_unfilled_counts_text(report.get('unfilled_counts'))}"
+    )
     lines.append("- 复权：结算/回测区间收益走后复权（hfq），非可执行决策（hold/watch）整条排除。")
     return lines
 

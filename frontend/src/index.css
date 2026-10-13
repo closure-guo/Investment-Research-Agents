@@ -76,6 +76,35 @@
   --input: rgba(47, 49, 50, 0.24);
   --ring: #228EBF;
   --radius: 8px;
+
+  /* ── unify-ui-design-system 语义令牌（浅色）──
+     涨跌：A 股惯例红涨绿跌，与 status-error/success 同色族（本块内取同值） */
+  --rise: #EF4444;
+  --fall: #10B981;
+  --flat: #888A8C;
+
+  /* 五态徽章：active 实心绿底 / degraded 琥珀描边 / retired 灰底 / running 蓝底 / failed 红底 */
+  --badge-active-bg: #10B981;
+  --badge-active-fg: #FFFFFF;
+  --badge-active-border: #10B981;
+  --badge-degraded-bg: rgba(203, 181, 76, 0.10);
+  --badge-degraded-fg: #8A6B12;
+  --badge-degraded-border: #CBB54C;
+  --badge-retired-bg: #E1E3E3;
+  --badge-retired-fg: #54585A;
+  --badge-retired-border: #D5D8D8;
+  --badge-running-bg: #228EBF;
+  --badge-running-fg: #FFFFFF;
+  --badge-running-border: #228EBF;
+  --badge-failed-bg: #EF4444;
+  --badge-failed-fg: #FFFFFF;
+  --badge-failed-border: #EF4444;
+
+  /* AI 生成内容标识（紫系；非历史 TRAE 品牌紫，见 themePalette 冻结用例） */
+  --ai-accent: #8B5CF6;
+  --ai-accent-bg: rgba(139, 92, 246, 0.12);
+  --ai-accent-fg: #7C3AED;
+  --ai-accent-border: rgba(139, 92, 246, 0.35);
 }
 
 /* ── Arknights UI Dark Theme（明日方舟·深灰面板）：.dark 覆盖全部设计令牌 ──
@@ -135,6 +164,35 @@
   --border: rgba(252, 251, 251, 0.10);
   --input: rgba(252, 251, 251, 0.18);
   --ring: #228EBF;
+
+  /* ── unify-ui-design-system 语义令牌（深色）──
+     涨跌语义不变：rise 红 / fall 绿（取深色族提亮值，与 status-error/success 同值） */
+  --rise: #F87171;
+  --fall: #34D399;
+  --flat: #888A8C;
+
+  /* 五态徽章（深色）：语义与浅色一致，仅对比度取向适配深底 */
+  --badge-active-bg: #10B981;
+  --badge-active-fg: #0A0B0D;
+  --badge-active-border: #10B981;
+  --badge-degraded-bg: rgba(214, 194, 104, 0.14);
+  --badge-degraded-fg: #D6C268;
+  --badge-degraded-border: #D6C268;
+  --badge-retired-bg: #4E5355;
+  --badge-retired-fg: #C0C4C5;
+  --badge-retired-border: #5A5F61;
+  --badge-running-bg: #228EBF;
+  --badge-running-fg: #FFFFFF;
+  --badge-running-border: #228EBF;
+  --badge-failed-bg: #F87171;
+  --badge-failed-fg: #0A0B0D;
+  --badge-failed-border: #F87171;
+
+  /* AI 生成内容标识（深色紫系提亮） */
+  --ai-accent: #A78BFA;
+  --ai-accent-bg: rgba(167, 139, 250, 0.16);
+  --ai-accent-fg: #C4B5FD;
+  --ai-accent-border: rgba(167, 139, 250, 0.40);
 }
 
 * { font-family: var(--font-family-default); }
@@ -244,4 +302,31 @@ input:focus, textarea:focus { outline: none; }
 @media (max-width: 768px) {
   .pipeline-grid { grid-template-columns: repeat(2, 1fr) !important; }
   .debate-layout { flex-direction: column !important; }
+}
+
+/* ── unify-ui-design-system：新组件动效（新增选择器，不影响既有规则）──
+   - status-badge-running：running 态徽章呼吸动画（1.6s 循环）
+   - status-badge：徽章变色过渡 200ms ease-out（与 design/motion.ts BADGE_TRANSITION_MS 对齐）
+   - animate-tab-fade：Tab 内容区 150ms 淡入（与 TAB_FADE_MS 对齐）
+   prefers-reduced-motion: reduce 时全部禁用（JS 侧另有 useReducedMotion 门控与
+   Tailwind motion-reduce:animate-none 兜底，三重保障）。 */
+@keyframes badge-breath {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+@keyframes tabFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.status-badge {
+  transition: background-color 200ms ease-out, color 200ms ease-out, border-color 200ms ease-out;
+}
+.status-badge-running { animation: badge-breath 1.6s ease-in-out infinite; }
+.animate-tab-fade { animation: tabFadeIn 150ms ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .status-badge { transition: none; }
+  .status-badge-running { animation: none; }
+  .animate-tab-fade { animation: none; }
 }

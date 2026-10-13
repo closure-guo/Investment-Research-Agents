@@ -63,6 +63,10 @@ export default defineConfig({
     // 战绩页 track-record-*.spec.ts 造数会污染共享测试库的空态前提（decisions.spec 依赖），
     // 迁入 playwright.track-record.config.ts 独立测试库，见该文件头注释
     'track-record-*.spec.ts',
+    // add-paper-broker T4：paper-broker.spec.ts 同属战绩页造数套件（equity_curve +
+    // paper_equity 双曲线种子）→ 同迁入 track-record 专属 config（testMatch 显式收录，
+    // 后端带 SESSIONS_DB_PATH + EXECUTION_DB_PATH 双隔离）
+    'paper-broker.spec.ts',
     // eval-ops 手动补跑用例在服务端同步执行 20-60s（AKShare 重试退避），与本套件并行时
     // 独占单进程后端+共享 SQLite 写窗口致流式用例随机红（issue #252，trace 实证）——
     // 迁入 playwright.eval-ops.config.ts 专属端口对（8005/5178）物理隔离，默认套件恢复并行门禁
@@ -85,8 +89,10 @@ export default defineConfig({
       // Python 后端：TESTING=1 开启测试模式（/api/test/* 端点可用，LLM stub 占位）
       // SESSIONS_DB_PATH 指向独立测试库：与生产 data/sessions.db 共用同一文件时，
       // 两个后端进程并发写会导致 SQLite 主库被 WAL 帧覆盖而彻底损坏（不可恢复）
+      // SCREENING_DB_PATH 同理指向独立测试库（add-screening-pipeline T5）：选股 E2E
+      // 的 seed/screening_reset 会清表，绝不能落到开发库 data/screening.db
       command: 'uv run uvicorn finance_agent.api:app --port 8000',
-      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', REPORTS_DIR: 'tmp/e2e-reports-8000' },
+      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', REPORTS_DIR: 'tmp/e2e-reports-8000' },
       url: 'http://localhost:8000/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,

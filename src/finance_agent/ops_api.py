@@ -6,7 +6,7 @@
 
 设计要点
 --------
-- **状态**：五任务排程 / 下次触发 / 最近运行 / 历史。``scheduler_running`` 以「句柄是真实
+- **状态**：六任务排程 / 下次触发 / 最近运行 / 历史。``scheduler_running`` 以「句柄是真实
   ``BackgroundScheduler`` 且 ``running``」判定,不只看非 None——其它测试模块会把
   ``scheduler._scheduler`` 泄漏成 Mock,不得据此冒充「已运行」;未运行(TESTING=1 或
   显式禁用)如实返回 ``false``(200),不以 500 或空列表冒充正常。
@@ -22,7 +22,7 @@
   ``history`` 保留最近 ``HISTORY_LIMIT`` 行供「重试了几次」可查;单条运行经
   ``get_job_run`` 直读(不依赖列表窗口,旧行仍可查)。
 - **``GET /jobs`` 不得 500**：载荷组装整段兜底——意外 DB 故障(如 ``last_job_run`` 抛错)
-  时返回降级但合法的载荷(调度器态 + 五任务骨架 ``last_run=null`` + 默认 cohort 块)
+  时返回降级但合法的载荷(调度器态 + 六任务骨架 ``last_run=null`` + 默认 cohort 块)
   并在顶层带 ``error`` 字段说明降级原因(spec「调度器未启动显式态」的「SHALL NOT 500」
   同款意图,故障不得表现为空白页或 500)。
 - **手动补跑**：``run_job`` 在 ``asyncio.to_thread`` 中执行(不阻塞事件循环)。任务失败
@@ -202,7 +202,7 @@ def _is_clean_window_refusal(exc: BaseException) -> bool:
     return isinstance(exc, CleanWindowError)
 
 
-# ── 状态:五任务 + cohort ──
+# ── 状态:六任务 + cohort ──
 
 
 def _scheduler_running() -> bool:
@@ -312,7 +312,7 @@ def _cohort_block(settings: dict[str, Any]) -> dict[str, Any]:
 
 
 def _job_rows(cohort: dict[str, Any]) -> list[dict[str, Any]]:
-    """五任务状态行(顺序 = JOB_IDS = 调度注册顺序)。"""
+    """六任务状态行(顺序 = JOB_IDS = 调度注册顺序)。"""
     rows: list[dict[str, Any]] = []
     for job_id in JOB_IDS:
         spec = dict(SCHEDULES[job_id])
@@ -355,7 +355,7 @@ def _jobs_payload() -> dict[str, Any]:
 
 
 def _degraded_jobs_payload(exc: BaseException) -> dict[str, Any]:
-    """降级载荷:调度器态 + 五任务骨架(``last_run=None``)+ 默认 cohort 块 + ``error``。
+    """降级载荷:调度器态 + 六任务骨架(``last_run=None``)+ 默认 cohort 块 + ``error``。
 
     ``error`` 是本端点正常载荷没有的**额外字段**(前端按可选字段消费):出现即表示
     状态读数不完整,界面应显式披露而不是把 ``last_run=null`` 读成「从未运行过」。
@@ -411,7 +411,7 @@ async def get_stream_backlog() -> dict[str, Any]:
 
 @router.get("/jobs")
 async def get_jobs() -> dict[str, Any]:
-    """五任务排程 / 下次触发 / 最近运行 / 历史 + cohort 块(调度器未运行显式披露)。
+    """六任务排程 / 下次触发 / 最近运行 / 历史 + cohort 块(调度器未运行显式披露)。
 
     正常载荷键:``scheduler_running`` / ``jobs`` / ``cohort``;降级时额外带顶层 ``error``
     字符串(见 :func:`_degraded_jobs_payload`),前端按可选字段消费。

@@ -1,0 +1,851 @@
+{
+  "panel": {
+    "dates": 150,
+    "codes": 80,
+    "seed": 20261018,
+    "return_noise": 0.02,
+    "signal_betas": {
+      "动量": 0.006,
+      "反转": 0.009,
+      "波动": 0.006,
+      "流动性": 0.006,
+      "量价协同": 0.006
+    }
+  },
+  "classic_factor_diagnostics": {
+    "动量": {
+      "expression": "delta(close,20)",
+      "beta": 0.006,
+      "ic_mean": 0.0638,
+      "ic_std": 0.1177,
+      "icir": 0.5423,
+      "ic_days": 129
+    },
+    "反转": {
+      "expression": "div(ts_mean(close,5),close)",
+      "beta": 0.009,
+      "ic_mean": 0.0854,
+      "ic_std": 0.1266,
+      "icir": 0.6746,
+      "ic_days": 145
+    },
+    "波动": {
+      "expression": "div(1,ts_std(delta(close,1),10))",
+      "beta": 0.006,
+      "ic_mean": 0.1229,
+      "ic_std": 0.1121,
+      "icir": 1.0965,
+      "ic_days": 139
+    },
+    "流动性": {
+      "expression": "div(1,ts_mean(amount,5))",
+      "beta": 0.006,
+      "ic_mean": 0.1434,
+      "ic_std": 0.1141,
+      "icir": 1.2572,
+      "ic_days": 145
+    },
+    "量价协同": {
+      "expression": "ts_corr(close,volume,10)",
+      "beta": 0.006,
+      "ic_mean": 0.1413,
+      "ic_std": 0.1397,
+      "icir": 1.0112,
+      "ic_days": 140
+    }
+  },
+  "classic_ic_correlations": {
+    "动量~反转": -0.5677,
+    "动量~波动": -0.036,
+    "动量~流动性": 0.2001,
+    "动量~量价协同": -0.0611,
+    "反转~波动": -0.0667,
+    "反转~流动性": -0.2109,
+    "反转~量价协同": -0.0483,
+    "波动~流动性": 0.1295,
+    "波动~量价协同": 0.0757,
+    "流动性~量价协同": 0.1103
+  },
+  "noise_expressions": [
+    "delta(volume,5)",
+    "sub(volume,ts_mean(volume,10))",
+    "abs(delta(volume,3))",
+    "ts_std(volume,8)",
+    "ts_rank(volume,7)"
+  ],
+  "library_rows": [
+    {
+      "id": 1,
+      "expression": "delta(close,20)",
+      "status": "active",
+      "pool_increment": 0.5497549359014403
+    },
+    {
+      "id": 2,
+      "expression": "div(ts_mean(close,5),close)",
+      "status": "active",
+      "pool_increment": 0.9181231016350385
+    },
+    {
+      "id": 3,
+      "expression": "div(1,ts_std(delta(close,1),10))",
+      "status": "active",
+      "pool_increment": 0.8620850594402214
+    },
+    {
+      "id": 4,
+      "expression": "div(1,ts_mean(amount,5))",
+      "status": "active",
+      "pool_increment": 0.9884676009663171
+    },
+    {
+      "id": 5,
+      "expression": "ts_corr(close,volume,10)",
+      "status": "active",
+      "pool_increment": 1.086875484444862
+    }
+  ],
+  "candidates": [
+    {
+      "label": "经典:动量",
+      "expression": "delta(close,20)",
+      "status": "active",
+      "factor_id": 1,
+      "rejected_gate": null,
+      "reason": null,
+      "ic_mean": 0.0638,
+      "icir": 0.5423,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.133333,
+            "missing_cells": 1600,
+            "total_cells": 12000,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "mean": 0.063838,
+            "std": 0.117715,
+            "icir": 0.542311,
+            "n_samples": 129,
+            "min_abs_icir": 0.3
+          }
+        },
+        {
+          "gate": 3,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "observed_mean": 0.063838,
+            "n_samples": 129,
+            "n_permutations": 999,
+            "n_hypotheses": 5,
+            "exceedances": 0,
+            "seed": 20261018,
+            "method": "per_day_pairing_sign_randomization",
+            "p_value": 0.001,
+            "p_adj": 0.001,
+            "q": 0.1
+          }
+        },
+        {
+          "gate": 4,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "increment": 0.549755,
+            "increment_train": 0.527972,
+            "ir_pool": null,
+            "ir_pool_with_candidate": 0.549755,
+            "ir_pool_train": null,
+            "ir_pool_with_candidate_train": 0.527972,
+            "pool_size": 0,
+            "n_val_days": 44,
+            "n_train_days": 84,
+            "min_oos_days": 10,
+            "train_fraction": 0.7,
+            "train_end": "2026-04-19",
+            "val_start": "2026-04-20",
+            "val_end": "2026-06-03",
+            "redundancy_checked": [],
+            "redundancy_skipped": []
+          }
+        },
+        {
+          "gate": 5,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "train_fraction": 0.7,
+            "train_days": 105,
+            "val_days": 45,
+            "purged_train_days": 1,
+            "train_start": "2026-01-05",
+            "train_end": "2026-04-19",
+            "val_start": "2026-04-20",
+            "val_end": "2026-06-03",
+            "mean_train": 0.062041,
+            "mean_val": 0.06629,
+            "icir_train": 0.527972,
+            "icir_val": 0.549755,
+            "sign_train": 1,
+            "sign_val": 1,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "label": "经典:反转",
+      "expression": "div(ts_mean(close,5),close)",
+      "status": "active",
+      "factor_id": 2,
+      "rejected_gate": null,
+      "reason": null,
+      "ic_mean": 0.0854,
+      "icir": 0.6746,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.026667,
+            "missing_cells": 320,
+            "total_cells": 12000,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "mean": 0.085381,
+            "std": 0.126572,
+            "icir": 0.674568,
+            "n_samples": 145,
+            "min_abs_icir": 0.3
+          }
+        },
+        {
+          "gate": 3,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "observed_mean": 0.085381,
+            "n_samples": 145,
+            "n_permutations": 999,
+            "n_hypotheses": 5,
+            "exceedances": 0,
+            "seed": 20261018,
+            "method": "per_day_pairing_sign_randomization",
+            "p_value": 0.001,
+            "p_adj": 0.001,
+            "q": 0.1
+          }
+        },
+        {
+          "gate": 4,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "increment": 0.918123,
+            "increment_train": 0.968725,
+            "ir_pool": 0.549755,
+            "ir_pool_with_candidate": 1.467878,
+            "ir_pool_train": 0.527972,
+            "ir_pool_with_candidate_train": 1.496697,
+            "pool_size": 1,
+            "n_val_days": 44,
+            "n_train_days": 84,
+            "min_oos_days": 10,
+            "train_fraction": 0.7,
+            "train_end": "2026-04-19",
+            "val_start": "2026-04-20",
+            "val_end": "2026-06-03",
+            "redundancy_checked": [
+              1
+            ],
+            "redundancy_skipped": []
+          }
+        },
+        {
+          "gate": 5,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "train_fraction": 0.7,
+            "train_days": 105,
+            "val_days": 45,
+            "purged_train_days": 1,
+            "train_start": "2026-01-05",
+            "train_end": "2026-04-19",
+            "val_start": "2026-04-20",
+            "val_end": "2026-06-03",
+            "mean_train": 0.088085,
+            "mean_val": 0.079558,
+            "icir_train": 0.68443,
+            "icir_val": 0.639852,
+            "sign_train": 1,
+            "sign_val": 1,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "label": "经典:波动",
+      "expression": "div(1,ts_std(delta(close,1),10))",
+      "status": "active",
+      "factor_id": 3,
+      "rejected_gate": null,
+      "reason": null,
+      "ic_mean": 0.1229,
+      "icir": 1.0965,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.066667,
+            "missing_cells": 800,
+            "total_cells": 12000,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "mean": 0.12294,
+            "std": 0.112116,
+            "icir": 1.096545,
+            "n_samples": 139,
+            "min_abs_icir": 0.3
+          }
+        },
+        {
+          "gate": 3,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "observed_mean": 0.12294,
+            "n_samples": 139,
+            "n_permutations": 999,
+            "n_hypotheses": 5,
+            "exceedances": 0,
+            "seed": 20261018,
+            "method": "per_day_pairing_sign_randomization",
+            "p_value": 0.001,
+            "p_adj": 0.001,
+            "q": 0.1
+          }
+        },
+        {
+          "gate": 4,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "increment": 0.862085,
+            "increment_train": 0.343766,
+            "ir_pool": 1.467878,
+            "ir_pool_with_candidate": 2.329963,
+            "ir_pool_train": 1.174724,
+            "ir_pool_with_candidate_train": 1.51849,
+            "pool_size": 2,
+            "n_val_days": 44,
+            "n_train_days": 100,
+            "min_oos_days": 10,
+            "train_fraction": 0.7,
+            "train_end": "2026-04-19",
+            "val_start": "2026-04-20",
+            "val_end": "2026-06-03",
+            "redundancy_checked": [
+              1,
+              2
+            ],
+            "redundancy_skipped": []
+          }
+        },
+        {
+          "gate": 5,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "train_fraction": 0.7,
+            "train_days": 105,
+            "val_days": 45,
+            "purged_train_days": 1,
+            "train_start": "2026-01-05",
+            "train_end": "2026-04-19",
+            "val_start": "2026-04-20",
+            "val_end": "2026-06-03",
+            "mean_train": 0.124629,
+            "mean_val": 0.122733,
+            "icir_train": 1.104744,
+            "icir_val": 1.107192,
+            "sign_train": 1,
+            "sign_val": 1,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "label": "经典:流动性",
+      "expression": "div(1,ts_mean(amount,5))",
+      "status": "active",
+      "factor_id": 4,
+      "rejected_gate": null,
+      "reason": null,
+      "ic_mean": 0.1434,
+      "icir": 1.2572,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.026667,
+            "missing_cells": 320,
+            "total_cells": 12000,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "mean": 0.143439,
+            "std": 0.114093,
+            "icir": 1.257213,
+            "n_samples": 145,
+            "min_abs_icir": 0.3
+          }
+        },
+        {
+          "gate": 3,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "observed_mean": 0.143439,
+            "n_samples": 145,
+            "n_permutations": 999,
+            "n_hypotheses": 5,
+            "exceedances": 0,
+            "seed": 20261018,
+            "method": "per_day_pairing_sign_randomization",
+            "p_value": 0.001,
+            "p_adj": 0.001,
+            "q": 0.1
+          }
+        },
+        {
+          "gate": 4,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "increment": 0.988468,
+            "increment_train": 0.214282,
+            "ir_pool": 2.329963,
+            "ir_pool_with_candidate": 3.318431,
+            "ir_pool_train": 1.51849,
+            "ir_pool_with_candidate_train": 1.732772,
+            "pool_size": 3,
+            "n_val_days": 44,
+            "n_train_days": 100,
+            "min_oos_days": 10,
+            "train_fraction": 0.7,
+            "train_end": "2026-04-19",
+            "val_start": "2026-04-20",
+            "val_end": "2026-06-03",
+            "redundancy_checked": [
+              1,
+              2,
+              3
+            ],
+            "redundancy_skipped": []
+          }
+        },
+        {
+          "gate": 5,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "train_fraction": 0.7,
+            "train_days": 105,
+            "val_days": 45,
+            "purged_train_days": 1,
+            "train_start": "2026-01-05",
+            "train_end": "2026-04-19",
+            "val_start": "2026-04-20",
+            "val_end": "2026-06-03",
+            "mean_train": 0.126264,
+            "mean_val": 0.185749,
+            "icir_train": 1.091451,
+            "icir_val": 1.878397,
+            "sign_train": 1,
+            "sign_val": 1,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "label": "经典:量价协同",
+      "expression": "ts_corr(close,volume,10)",
+      "status": "active",
+      "factor_id": 5,
+      "rejected_gate": null,
+      "reason": null,
+      "ic_mean": 0.1413,
+      "icir": 1.0112,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.06,
+            "missing_cells": 720,
+            "total_cells": 12000,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "mean": 0.141283,
+            "std": 0.13972,
+            "icir": 1.011187,
+            "n_samples": 140,
+            "min_abs_icir": 0.3
+          }
+        },
+        {
+          "gate": 3,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "observed_mean": 0.141283,
+            "n_samples": 140,
+            "n_permutations": 999,
+            "n_hypotheses": 5,
+            "exceedances": 0,
+            "seed": 20261018,
+            "method": "per_day_pairing_sign_randomization",
+            "p_value": 0.001,
+            "p_adj": 0.001,
+            "q": 0.1
+          }
+        },
+        {
+          "gate": 4,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "increment": 1.086875,
+            "increment_train": 0.075296,
+            "ir_pool": 3.318431,
+            "ir_pool_with_candidate": 4.405306,
+            "ir_pool_train": 1.732772,
+            "ir_pool_with_candidate_train": 1.808068,
+            "pool_size": 4,
+            "n_val_days": 44,
+            "n_train_days": 100,
+            "min_oos_days": 10,
+            "train_fraction": 0.7,
+            "train_end": "2026-04-19",
+            "val_start": "2026-04-20",
+            "val_end": "2026-06-03",
+            "redundancy_checked": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "redundancy_skipped": []
+          }
+        },
+        {
+          "gate": 5,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "train_fraction": 0.7,
+            "train_days": 105,
+            "val_days": 45,
+            "purged_train_days": 1,
+            "train_start": "2026-01-05",
+            "train_end": "2026-04-19",
+            "val_start": "2026-04-20",
+            "val_end": "2026-06-03",
+            "mean_train": 0.128909,
+            "mean_val": 0.165877,
+            "icir_train": 0.864947,
+            "icir_val": 1.433582,
+            "sign_train": 1,
+            "sign_val": 1,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "label": "噪声:1",
+      "expression": "delta(volume,5)",
+      "status": "rejected",
+      "factor_id": null,
+      "rejected_gate": 2,
+      "reason": "WEAK_ICIR",
+      "ic_mean": -0.0008,
+      "icir": -0.0064,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.033333,
+            "missing_cells": 400,
+            "total_cells": 12000,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": false,
+          "reason": "WEAK_ICIR",
+          "detail": {
+            "mean": -0.000779,
+            "std": 0.121884,
+            "icir": -0.006392,
+            "n_samples": 144,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "label": "噪声:2",
+      "expression": "sub(volume,ts_mean(volume,10))",
+      "status": "rejected",
+      "factor_id": null,
+      "rejected_gate": 2,
+      "reason": "WEAK_ICIR",
+      "ic_mean": 0.0003,
+      "icir": 0.0028,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.06,
+            "missing_cells": 720,
+            "total_cells": 12000,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": false,
+          "reason": "WEAK_ICIR",
+          "detail": {
+            "mean": 0.00032,
+            "std": 0.114299,
+            "icir": 0.002796,
+            "n_samples": 140,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "label": "噪声:3",
+      "expression": "abs(delta(volume,3))",
+      "status": "rejected",
+      "factor_id": null,
+      "rejected_gate": 2,
+      "reason": "WEAK_ICIR",
+      "ic_mean": -0.016,
+      "icir": -0.1427,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.02,
+            "missing_cells": 240,
+            "total_cells": 12000,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": false,
+          "reason": "WEAK_ICIR",
+          "detail": {
+            "mean": -0.016037,
+            "std": 0.112361,
+            "icir": -0.142727,
+            "n_samples": 146,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "label": "噪声:4",
+      "expression": "ts_std(volume,8)",
+      "status": "rejected",
+      "factor_id": null,
+      "rejected_gate": 2,
+      "reason": "WEAK_ICIR",
+      "ic_mean": -0.0177,
+      "icir": -0.161,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.046667,
+            "missing_cells": 560,
+            "total_cells": 12000,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": false,
+          "reason": "WEAK_ICIR",
+          "detail": {
+            "mean": -0.017685,
+            "std": 0.109877,
+            "icir": -0.160953,
+            "n_samples": 142,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "label": "噪声:5",
+      "expression": "ts_rank(volume,7)",
+      "status": "rejected",
+      "factor_id": null,
+      "rejected_gate": 2,
+      "reason": "WEAK_ICIR",
+      "ic_mean": -0.0042,
+      "icir": -0.0356,
+      "gates": [
+        {
+          "gate": 0,
+          "passed": true,
+          "reason": null,
+          "detail": {}
+        },
+        {
+          "gate": 1,
+          "passed": true,
+          "reason": null,
+          "detail": {
+            "missing_rate": 0.04,
+            "missing_cells": 480,
+            "total_cells": 12000,
+            "threshold": 0.2
+          }
+        },
+        {
+          "gate": 2,
+          "passed": false,
+          "reason": "WEAK_ICIR",
+          "detail": {
+            "mean": -0.004245,
+            "std": 0.119364,
+            "icir": -0.035566,
+            "n_samples": 143,
+            "min_abs_icir": 0.3
+          }
+        }
+      ]
+    }
+  ],
+  "verdict": {
+    "classic_active": 5,
+    "classic_total": 5,
+    "noise_rejected": 5,
+    "noise_total": 5,
+    "passed": true
+  }
+}

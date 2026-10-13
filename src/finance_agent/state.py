@@ -219,6 +219,11 @@ class AnalysisState(TypedDict, total=False):
     # 均衡带/翻转判定与处置标注（「维持前判（无证据增量）」/「证据均衡无增量，
     # 默认观望」），trace 可观测，报告不渲染
     decision_hysteresis: dict
+    # 决策记忆（add-decision-memory）：{episodic: [...], semantic: [...], as_of, trimmed,
+    # budget_chars, used_chars, dropped_ids}——analysts_entry 检索组装（无历史 → 空结构），
+    # 分析师/Trader 上下文 → 情景+已确认语义；风控辩论 → 仅已确认语义条款；
+    # 未声明会被图合并静默丢弃（incident 027 同族）
+    decision_memory: dict
     # 价位交叉校验门禁（update-decision-price-gate）：{result: pass|fail, note}——
     # anomaly 打回重试后修正放行（note「打回后已修正」）；仍异常 fail，
     # after_risk_judge 据此阻断（不进 FM 审批、不产出报告）

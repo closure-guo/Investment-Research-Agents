@@ -684,6 +684,7 @@ report_relevance SHALL 仅对 deep 条目评估：quick 条目 SHALL 跳过 repo
 - **WHEN** 本变更合入并首轮实验收口
 - **THEN** `docs/evals/metrics.md` 时间线 SHALL 新增切点行（report_relevance 转为 deep-only + rubric v4）
 - **AND** 跨切点的 report_relevance 均值 SHALL 标注不可直接比较
+
 ### Requirement: Outcome 收益指标口径与预登记
 
 系统 SHALL 在产出任何「赚钱能力」（outcome 收益）读数之前，于 `docs/evals/metrics.md` §1 登记 outcome 收益指标口径，并完成有效预登记。口径登记 SHALL 至少含：主指标（逐决策 T+20 交易日相对沪深300 超额收益的均值与胜率）、胜率定义（沿用 track-record ±2% 中性带 resolved 口径，SHALL NOT 另造定义）、人口划分（主结论仅基于可执行决策 long/short；neutral 以回避正确率作辅助指标，SHALL NOT 进主结论）、辅助观测窗口（T+5/T+10，由每日盯市派生，只观测不判定）、红线（settled 可执行样本 <10 SHALL NOT 报任何胜率类结论）、泄漏控制声明（回测腿须带泄漏探针披露与干净窗口判定）。预登记文档 SHALL 沿用 `evals/ablation/preregister/` 门禁字段格式：主指标 / MDE / 决策阈值 / 样本量依据 / 停止规则 / 成本分型 / 泄漏控制，门禁字段不齐 SHALL NOT 开跑正式批。
@@ -762,4 +763,25 @@ forward（真实管线定时跑批）与回测（历史 as-of 重放）两条 ou
 
 - **WHEN** 回测腿批次报告生成
 - **THEN** 报告 SHALL 含泄漏探针读数（或探针失败时的未知占比披露）与模型知识截止假设声明
+
+### Requirement: 候选池前向命中率
+
+系统 SHALL 对每日候选池自动跟踪入选后 5/10/20 交易日收益，并给出入选组与落选对照组的分层统计；收益计算 SHALL 使用与决策回放相同的时点截断纪律与撮合口径（matching-engine）。
+
+#### Scenario: 前向跟踪数据产出
+
+- **GIVEN** 候选池已持续落库 30 个交易日
+- **WHEN** 生成前向跟踪报告
+- **THEN** 报告含 Top-N 入选组与落选组在 5/10/20 日窗口的收益均值、胜率与配对置信区间
+- **AND** 报告披露有效 n
+
+### Requirement: 因子来源分层考核
+
+前向统计 SHALL 按因子来源（builtin / LLM 挖掘）分层：分别报告两组因子各自驱动打分时的候选池前向表现；该对照 SHALL 作为因子挖掘管线的考核指标登记。
+
+#### Scenario: 分层报告
+
+- **GIVEN** 因子库同时含 active 的 builtin 与 LLM 因子
+- **WHEN** 生成前向跟踪报告
+- **THEN** 报告含「仅 builtin 打分」与「仅 LLM 因子打分」两个分层的前向收益对照
 

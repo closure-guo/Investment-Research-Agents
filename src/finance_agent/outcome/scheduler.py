@@ -21,6 +21,10 @@ settle/marking/metrics/integrity)。
 (cohort 页签保存后立即生效,无需重启);未运行时(``TESTING=1`` 或未启动)返回
 ``False`` 而非抛错——状态接口在 TESTING 下必须可用。
 
+paper 仿真结算(add-paper-broker):工作日 16:20 触发 ``run_paper_settle_daily``
+(读快照最新收盘价 mark 持仓 → ``paper_equity`` 曲线),经同一 ``_with_retry``
+入口(单飞锁 + 运行历史 + 3 次退避重试);与虚拟结算链互不依赖。
+
 注:定时任务框架选型建议人工落 ADR(design 决策 6 注),agent 不自建 ADR。
 """
 
@@ -35,6 +39,9 @@ from typing import Any
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from finance_agent.data.snapshot_job import run_market_snapshot_batch
+from finance_agent.execution.brokers.paper import run_paper_settle_daily
+from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.ops.jobs import (
     SCHEDULES,
@@ -120,8 +127,31 @@ def _mark_retries(outcome: dict[str, Any] | None) -> None:
         logger.exception("job_runs 重试计数落库失败 run_id=%s", run_id)
 
 
+def _snapshot_job() -> None:
+    """add-market-snapshot：全市场行情快照日批（15:30，收盘后；次日开盘前可读）。"""
+    _with_retry("market_snapshot_daily", "market snapshot", run_market_snapshot_batch)
+
+
+def _factor_monitor_job() -> None:
+    """add-factor-library-and-monitor：因子衰减监控日批（15:45，快照之后）。
+
+    快照 15:30 先落库，监控据此构造面板记录上一交易日 IC 并判定滚动降级；
+    job 幂等（同日重跑覆盖同一 ``(factor, date)``），重试安全。
+    """
+    _with_retry("factor_decay_monitor", "factor decay monitor", run_factor_decay_monitor)
+
+
 def _settle_job() -> None:
     _with_retry("decision_settle_daily", "prediction settle", settle_open_predictions)
+
+
+def _paper_settle_job() -> None:
+    """add-paper-broker：paper 仿真账户日结算（16:20，settle 之后、marking 之前）。
+
+    读快照库最新交易日收盘价 mark 持仓 → paper_equity 曲线（幂等 upsert）；
+    快照库为空时返回跳过摘要（job 记 ok），持仓缺价时抛错走重试。
+    """
+    _with_retry("paper_settle_daily", "paper settle", run_paper_settle_daily)
 
 
 def _marking_job() -> None:
@@ -179,10 +209,37 @@ def start_scheduler() -> BackgroundScheduler | None:
     cohort = get_cohort_settings()
     _apply_cohort_schedule(cohort["hour"], cohort["minute"])
     scheduler = BackgroundScheduler()
+    # add-market-snapshot：行情快照日批（15:30）先跑——结算/盯市链（16:00 起）
+    # 与快照解耦，互不阻塞；job 幂等（同日重跑不二次复权）。
+    scheduler.add_job(
+        _snapshot_job,
+        _cron_for("market_snapshot_daily"),
+        id="market_snapshot_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-factor-library-and-monitor：因子衰减监控（15:45）——快照（15:30）之后、
+    # 结算链（16:00 起）之前；读快照库 + 因子库，无 LLM 调用。
+    scheduler.add_job(
+        _factor_monitor_job,
+        _cron_for("factor_decay_monitor"),
+        id="factor_decay_monitor",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     scheduler.add_job(
         _settle_job,
         _cron_for("decision_settle_daily"),
         id="decision_settle_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-paper-broker：paper 仿真账户日结算（16:20）——快照收盘价 mark 持仓；
+    # 排在 decision settle（16:00）与 daily marking（16:30）之间，三条链互不依赖。
+    scheduler.add_job(
+        _paper_settle_job,
+        _cron_for("paper_settle_daily"),
+        id="paper_settle_daily",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
@@ -223,8 +280,9 @@ def start_scheduler() -> BackgroundScheduler | None:
     scheduler.start()
     _scheduler = scheduler
     logger.info(
-        "decision settle scheduler 已启动(工作日 16:00);daily marking 16:30;"
-        "metrics snapshot 16:35;integrity check 16:40;"
+        "decision settle scheduler 已启动(market snapshot 15:30;factor decay monitor 15:45;"
+        "decision settle 16:00;paper settle 16:20);"
+        "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"
         "cohort batch %02d:%02d(开关关闭时记 skipped-disabled,零 LLM 调用)",
         cohort["hour"],
         cohort["minute"],
