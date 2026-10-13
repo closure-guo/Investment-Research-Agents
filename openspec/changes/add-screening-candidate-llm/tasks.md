@@ -29,7 +29,7 @@
 - [x] 4.2 一周候选 L3 抽 20 条 drop 理由人工核对，报告落 `tests/validation/`
       —— **诚实注记**：2026-09 真实候选不可得（东财行情域 IP 封禁，incident 033 / issue #325）
       → 以 25 只合成候选（5 风险：立案×2/大额减持×2/业绩预亏×1 + 20 中性）注入事件真跑替代；
-      5 风险全 drop、20 中性全 keep、reason 最长 41 字（≤50）、25/25 落库回读；
+      5 风险全 drop、20 中性全 keep、reason 最长 39 字（≤50）、25/25 落库回读；
       20 条理由（5 风险 + 前 15 中性固定抽样）逐条含 prompt 摘要落 JSON 供人工终审
       （`tests/validation/2026-10-13-add-screening-candidate-llm-live*.py/.json`）。
       验证的是输出合同与 LLM 行为，**不构成真实市场有效性证据**。

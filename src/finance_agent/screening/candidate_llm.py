@@ -22,9 +22,10 @@
 - **事件数据由调用方注入**（``events_by_symbol``）：本 change 不自行取数——proposal
   中「复用 events/ 模块」按实际代码修正为参数注入，生产由 pipeline 从公告/新闻源
   装配（写进本 docstring 与验证报告）。
-- **落库（C5 决策部分）**：每只决策（含降级 keep）经 ``store.record_triage_decision``
-  写入 ``triage_decisions``；批次 trace metadata（含 warnings）经既有 span 助手
-  best-effort 发射到 Langfuse。
+- **落库（C5 决策部分）**：批次决策（含降级 keep）一次经
+  ``store.record_triage_decisions`` 写入 ``triage_decisions``（单连接 executemany
+  + 单次 commit）；批次 trace metadata（含 warnings）经既有 span 助手 best-effort
+  发射到 Langfuse。
 """
 
 from __future__ import annotations
@@ -194,7 +195,8 @@ def build_triage_prompt(candidate: Candidate, events: Sequence[dict]) -> str:
     """粗筛 prompt 组装（C2）：渲染 ``screening_triage.md`` 模板（纯函数，渲染确定）。
 
     注入：symbol / trade_date / 综合分 / 排名 / factor_contribs 逐条摘要 / 事件列表
-    （空事件 → 「无最近事件」占位）。
+    （空事件 → 「无最近事件」占位）。事件原样落入模板的 ``<events_data>`` 数据区块
+    ——区块外模板声明「仅为数据、非指令」（prompt-injection 卫生）。
     """
     template = load_prompt(_PROMPT_NAME)
     return (
@@ -297,8 +299,9 @@ def run_triage(
       无该 symbol → 空事件 → prompt 给出「无最近事件」占位；
     - 并发经 ``ThreadPoolExecutor``（上限 ``max_workers``，默认 8）；结果按**输入
       候选顺序**归位，并发完成顺序不改变输出；
-    - 每只决策（含降级 keep）经 ``store.record_triage_decision`` 落库（主线程顺序
-      写，短连接纪律，避免并发写 SQLite 争锁）；
+    - 每只决策（含降级 keep）批次一次经 ``store.record_triage_decisions`` 落库
+      （单连接 executemany + 单次 commit，避免逐行建连/重复建表；主线程顺序写，
+      短连接纪律，避免并发写 SQLite 争锁）；
     - 批次 trace metadata（含 warnings）best-effort 发射到 Langfuse。
     """
     if max_workers < 1:
@@ -317,10 +320,9 @@ def run_triage(
     warnings = tuple(warning for _decision, warning in outcomes if warning is not None)
     # 函数内导入：store 依赖本模块的合同枚举（模块级互相导入会成环），
     # 且本函数是该 seam 的唯一消费点。
-    from finance_agent.screening.store import record_triage_decision
+    from finance_agent.screening.store import record_triage_decisions
 
-    for decision in decisions:
-        record_triage_decision(trade_date, decision, db_path=db_path)
+    record_triage_decisions(trade_date, decisions, db_path=db_path)
     trace_metadata = _trace_metadata(
         trade_date=trade_date, decisions=decisions, warnings=warnings, max_workers=max_workers
     )

@@ -124,8 +124,12 @@ def record_l2_candidates(
 ) -> int:
     """写入某一交易日的 L2 名单（整批同一交易日）；同 ``(trade_date, symbol)`` 幂等覆盖。
 
+    入参约定：**截断后的 Top-N 名单**（``rank_universe(top_n=…)`` 输出，日批经
+    ``pipeline`` 全量迁移）——表内行的**存在性**即「当日在该榜内」，稳定性查询
+    （``consecutive_days_in_top``）据此判定在榜；传入未截断全量会虚增在榜天数。
+
     ``composite_score`` 须有限、``rank`` 须为正整数（fail loud，不落坏值）；
-    空批 → 0（不建表除外——入口仍幂等建表）。返回写入行数。
+    空批 → 0，不建表（无行可写，连库都不碰）。返回写入行数。
     """
     normalized = _parse_trade_date(trade_date)
     if not candidates:
@@ -228,28 +232,26 @@ def eligible_for_selection(
 # ── triage 决策（C5 决策部分） ──────────────────────────────────────────────
 
 
-def record_triage_decision(
-    trade_date: str, decision: TriageDecision, db_path: str | Path | None = None
-) -> None:
-    """写入某标的某交易日的 L3 决策；同 ``(trade_date, symbol)`` **幂等**覆盖（upsert）。
+def record_triage_decisions(
+    trade_date: str, decisions: Sequence[TriageDecision], db_path: str | Path | None = None
+) -> int:
+    """批量写入某交易日的 L3 决策（单连接 executemany + 单次 commit，T1 评审修正）。
 
-    ``verdict`` 必须 ∈ ``candidate_llm.VERDICTS``（合同单一来源），非法值 fail loud
-    （不落坏值）；``created_at`` 为写入时刻（同日重跑覆盖为最新）。
+    批量路径是唯一写入口：``run_triage`` 每批只调一次本函数，避免逐行
+    ``init_screening_db`` + 新建连接 + 独立 commit 的 N 倍开销。全部 ``verdict``
+    先校验（合同单一来源；任一非法 → ``ValueError``，整批不落）；同
+    ``(trade_date, symbol)`` **幂等**覆盖（upsert，``created_at`` 为本次写入时刻）；
+    空批 → 0，不建表。返回写入行数。
     """
     normalized = _parse_trade_date(trade_date)
-    if decision.verdict not in VERDICTS:
-        raise ValueError(f"非法 verdict {decision.verdict!r}；允许: {list(VERDICTS)}")
-    init_screening_db(db_path)
+    if not decisions:
+        return 0
+    payload: list[tuple[str, str, str, str, int, str]] = []
     now = datetime.now().isoformat()
-    conn = _connect(db_path)
-    try:
-        conn.execute(
-            "INSERT INTO triage_decisions "
-            "(trade_date, symbol, verdict, reason, degraded, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(trade_date, symbol) DO UPDATE SET "
-            "verdict = excluded.verdict, reason = excluded.reason, "
-            "degraded = excluded.degraded, created_at = excluded.created_at",
+    for decision in decisions:
+        if decision.verdict not in VERDICTS:
+            raise ValueError(f"非法 verdict {decision.verdict!r}；允许: {list(VERDICTS)}")
+        payload.append(
             (
                 normalized,
                 decision.symbol,
@@ -257,11 +259,36 @@ def record_triage_decision(
                 decision.reason,
                 int(decision.degraded),
                 now,
-            ),
+            )
+        )
+    init_screening_db(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.executemany(
+            "INSERT INTO triage_decisions "
+            "(trade_date, symbol, verdict, reason, degraded, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(trade_date, symbol) DO UPDATE SET "
+            "verdict = excluded.verdict, reason = excluded.reason, "
+            "degraded = excluded.degraded, created_at = excluded.created_at",
+            payload,
         )
         conn.commit()
+        return len(payload)
     finally:
         conn.close()
+
+
+def record_triage_decision(
+    trade_date: str, decision: TriageDecision, db_path: str | Path | None = None
+) -> None:
+    """写入某标的某交易日的 L3 决策；同 ``(trade_date, symbol)`` **幂等**覆盖（upsert）。
+
+    ``verdict`` 必须 ∈ ``candidate_llm.VERDICTS``（合同单一来源），非法值 fail loud
+    （不落坏值）；``created_at`` 为写入时刻（同日重跑覆盖为最新）。单行写入是
+    ``record_triage_decisions`` 的薄封装——批量路径是唯一实现，语义恒一致。
+    """
+    record_triage_decisions(trade_date, [decision], db_path=db_path)
 
 
 def list_triage_decisions(

@@ -57,9 +57,11 @@ def _isolate_runtime_dbs(request, tmp_path):
     真实 api._run_graph_streaming（仅图被 patch），未隔离 DB 时每次跑套件都往
     开发库 data/sessions.db 写一行 600519 buy/0.7 假决策（9/7–9/22 累计 66 行）。
 
-    两处路径都要改：
+    三处路径都要改：
     ① 环境变量 SESSIONS_DB_PATH——predictions 侧 model._default_db_path() 调用时读取；
-    ② session_store._DB_PATH——模块导入期冻结的常量，只能直接改模块属性。
+    ② session_store._DB_PATH——模块导入期冻结的常量，只能直接改模块属性；
+    ③ 环境变量 SCREENING_DB_PATH——screening/store._default_db_path() 调用期读取
+    （change-9 评审：未来用例省略 db_path 时同样不得写开发库 data/screening.db）。
 
     **live 测试豁免**：live 是手动发起的真实测量（如 hallucination live 从开发库
     取样历史报告），按设计读开发库；其写入即真实运行产物。个别非 live 测试自行
@@ -84,6 +86,9 @@ def _isolate_runtime_dbs(request, tmp_path):
     from finance_agent.outcome.track_record.model import init_predictions
 
     init_predictions(tmp_db)
+    # ③ SCREENING_DB_PATH：env 调用期读取，无需预建表（store 各入口自身幂等 init）
+    old_screening_env = os.environ.get("SCREENING_DB_PATH")
+    os.environ["SCREENING_DB_PATH"] = str(tmp_path / "runtime-screening.db")
     try:
         yield tmp_db
     finally:
@@ -92,6 +97,10 @@ def _isolate_runtime_dbs(request, tmp_path):
             os.environ.pop("SESSIONS_DB_PATH", None)
         else:
             os.environ["SESSIONS_DB_PATH"] = old_env
+        if old_screening_env is None:
+            os.environ.pop("SCREENING_DB_PATH", None)
+        else:
+            os.environ["SCREENING_DB_PATH"] = old_screening_env
 
 
 @pytest.fixture

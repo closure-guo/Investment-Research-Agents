@@ -29,6 +29,7 @@ from finance_agent.screening.store import (
     list_triage_decisions,
     record_l2_candidates,
     record_triage_decision,
+    record_triage_decisions,
 )
 
 # 交易日序列（含跨周末：10-09 周五 → 10-12 周一，10-10/11 周末无行）
@@ -225,3 +226,42 @@ def test_list_triage_decisions_filters(tmp_path) -> None:
     assert len(both) == 1 and both[0]["verdict"] == "drop"
     # 落库文件确实在注入路径（隔离纪律），非默认库
     assert Path(db).exists()
+
+
+# ── 批量落库（T1 评审修正：单连接 executemany + 单次 commit） ───────────────
+
+
+def test_record_triage_decisions_batch_upsert_is_idempotent(tmp_path) -> None:
+    """整批一次写入：N 行落库；同日重跑覆盖不增行（与单行写路径同语义）。"""
+    db = str(tmp_path / "screening.db")
+    first = [_decision("600519", "keep"), _decision("000001", "drop", "立案", degraded=True)]
+    assert record_triage_decisions("2026-10-13", first, db_path=db) == 2
+    second = [_decision("600519", "drop", "减持"), _decision("000001", "keep")]
+    assert record_triage_decisions("2026-10-13", second, db_path=db) == 2
+
+    rows = list_triage_decisions(trade_date="2026-10-13", db_path=db)
+    assert len(rows) == 2  # 幂等覆盖不翻倍
+    by_symbol = {row["symbol"]: row for row in rows}
+    assert by_symbol["600519"]["verdict"] == "drop"
+    assert by_symbol["600519"]["reason"] == "减持"
+    assert by_symbol["000001"]["verdict"] == "keep"
+    assert by_symbol["000001"]["degraded"] == 0  # 覆盖后降级位同步复位
+
+
+def test_record_triage_decisions_empty_batch_writes_nothing(tmp_path) -> None:
+    """空批 → 0 且不建表（连库都不碰）。"""
+    db = tmp_path / "screening.db"
+    assert record_triage_decisions("2026-10-13", [], db_path=db) == 0
+    assert not db.exists()
+
+
+def test_record_triage_decisions_validates_all_before_write(tmp_path) -> None:
+    """任一 verdict 非法 → ValueError，整批不落（先全量校验再写）。"""
+    db = str(tmp_path / "screening.db")
+    with pytest.raises(ValueError, match="verdict"):
+        record_triage_decisions(
+            "2026-10-13", [_decision("600519", "keep"), _decision("000001", "maybe")], db_path=db
+        )
+    assert list_triage_decisions(db_path=db) == []  # 合法行也未被写入
+    with pytest.raises(ValueError, match="规范"):
+        record_triage_decisions("2026-10-5", [_decision("600519")], db_path=db)
