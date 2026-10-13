@@ -440,3 +440,124 @@ def test_record_screening_batch_rejects_bad_input(ws: _Workspace) -> None:
         db_path=ws.screening_db,
     )
     assert list_selection_pool("2026-10-09", db_path=ws.screening_db) == []
+
+
+# ── T2 时效性校验（S2） ─────────────────────────────────────────────────────
+
+
+def _fresh_row(**overrides) -> dict:
+    row = {
+        "code": "600519",
+        "is_suspended": 0,
+        "limit_up_sealed": 0,
+        "limit_down_sealed": 0,
+    }
+    row.update(overrides)
+    return row
+
+
+def _freshness(
+    symbols, snapshot_rows, events_by_symbol, *, as_of: str = _AS_OF, calendar=None
+) -> list[dict]:
+    return pipeline.check_signal_freshness(
+        symbols,
+        snapshot_rows=snapshot_rows,
+        events_by_symbol=events_by_symbol,
+        as_of=as_of,
+        calendar=_CALENDAR if calendar is None else calendar,
+    )
+
+
+def test_freshness_flags_suspended_and_leaves_others_untouched_spec_scenario() -> None:
+    """spec 场景「盘前停牌移除」：Z 停牌 → 仅 Z/SUSPENDED，其余标的不受影响。"""
+    rows = {
+        "600519": _fresh_row(),
+        "000001": _fresh_row(code="000001", is_suspended=1),
+        "300750": _fresh_row(code="300750"),
+    }
+
+    findings = _freshness(["600519", "000001", "300750"], rows, {})
+
+    assert findings == [{"symbol": "000001", "reason": "SUSPENDED", "detail": "停牌"}]
+
+
+def test_freshness_flags_limit_locked() -> None:
+    """一字涨停/跌停封板 → LIMIT_LOCKED（逐字原因码）。"""
+    rows = {
+        "600519": _fresh_row(limit_up_sealed=1),
+        "000001": _fresh_row(code="000001", limit_down_sealed=1),
+        "300750": _fresh_row(code="300750"),
+    }
+
+    findings = _freshness(["600519", "000001", "300750"], rows, {})
+
+    assert [(item["symbol"], item["reason"]) for item in findings] == [
+        ("600519", "LIMIT_LOCKED"),
+        ("000001", "LIMIT_LOCKED"),
+    ]
+    assert "涨停" in findings[0]["detail"] and "跌停" in findings[1]["detail"]
+
+
+def test_freshness_flags_new_event_on_previous_trading_day() -> None:
+    """新事件 → NEW_EVENT：按**交易日**（as_of 的前一交易日）而非自然日；
+    干净标的与无日期事件不入返回列表。"""
+    # 周一 2026-10-12 是 as_of（周二 10-13）的前一交易日；10-12 的事件算「新」，
+    # 而 10-09（上周五）的事件不算。
+    rows = {
+        "600519": _fresh_row(),
+        "000001": _fresh_row(code="000001"),
+        "300750": _fresh_row(code="300750"),
+    }
+    events = {
+        "600519": [{"date": "2026-10-12", "type": "立案调查", "title": "收到证监会立案告知书"}],
+        "000001": [{"date": "2026-10-09", "type": "公告", "title": "上周五旧事件"}],
+        "300750": [{"date": "", "type": "数据状态", "title": "事件数据暂时不可用"}],
+    }
+
+    findings = _freshness(["600519", "000001", "300750"], rows, events)
+
+    assert [(item["symbol"], item["reason"]) for item in findings] == [("600519", "NEW_EVENT")]
+    assert "2026-10-12" in findings[0]["detail"]
+
+
+def test_freshness_without_calendar_only_counts_same_day_events() -> None:
+    """无交易日历 → 只认 as_of 当日事件（保守下限：不猜前一交易日）。"""
+    rows = {"600519": _fresh_row(), "000001": _fresh_row(code="000001")}
+    events = {
+        "600519": [{"date": _AS_OF, "title": "当日公告"}],
+        "000001": [{"date": "2026-10-12", "title": "前一交易日公告"}],
+    }
+
+    findings = _freshness(["600519", "000001"], rows, events, calendar=[])
+
+    assert [(item["symbol"], item["reason"]) for item in findings] == [("600519", "NEW_EVENT")]
+
+
+def test_freshness_returns_all_reasons_in_s2_order() -> None:
+    """一次可多因：SUSPENDED → LIMIT_LOCKED → NEW_EVENT（逐字顺序）全量返回。"""
+    rows = {"600519": _fresh_row(is_suspended=1, limit_up_sealed=1)}
+    events = {"600519": [{"date": _AS_OF, "title": "当日立案"}]}
+
+    findings = _freshness(["600519"], rows, events)
+
+    assert [(item["symbol"], item["reason"]) for item in findings] == [
+        ("600519", "SUSPENDED"),
+        ("600519", "LIMIT_LOCKED"),
+        ("600519", "NEW_EVENT"),
+    ]
+
+
+def test_freshness_treats_missing_snapshot_row_as_suspended() -> None:
+    """无当日快照行 → 视同不可交易（fail-closed；原因码仍为 SUSPENDED）。"""
+    findings = _freshness(["600519"], {}, {})
+
+    assert findings == [
+        {"symbol": "600519", "reason": "SUSPENDED", "detail": "无当日快照行（视同不可交易）"}
+    ]
+
+
+def test_freshness_clean_symbols_return_empty() -> None:
+    """干净标的（快照正常、无新事件）→ 不在返回列表。"""
+    rows = {"600519": _fresh_row()}
+
+    assert _freshness(["600519"], rows, {"600519": []}) == []

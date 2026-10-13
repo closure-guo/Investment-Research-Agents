@@ -388,3 +388,94 @@ def latest_successful_pool(*, db_path: str | Path | None = None) -> dict[str, An
     if batch is None:
         return None
     return {"batch": batch, "pool": list_selection_pool(batch["trade_date"], db_path=db_path)}
+
+
+# ── 信号时效性校验（T2 / S2） ───────────────────────────────────────────────
+
+# 原因码（Global Constraints 逐字；供前端/审计消费）
+FRESHNESS_SUSPENDED = "SUSPENDED"
+FRESHNESS_LIMIT_LOCKED = "LIMIT_LOCKED"
+FRESHNESS_NEW_EVENT = "NEW_EVENT"
+
+
+def _canonical_date_or_none(value: Any) -> str | None:
+    """宽松解析（事件日期等外部数据）：非规范/缺失 → None（不猜、不抛）。"""
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return None
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        return None
+    return text if parsed.isoformat() == text else None
+
+
+def _recent_event_bound(as_of: str, calendar: Sequence[str] | None) -> str:
+    """「新事件」下界：``as_of`` 有日历取前一交易日，否则只认当日（保守下限）。"""
+    if not calendar:
+        return as_of
+    prior = sorted({day for day in (_canonical_date_or_none(entry) for entry in calendar) if day})
+    earlier = [day for day in prior if day < as_of]
+    return earlier[-1] if earlier else as_of
+
+
+def check_signal_freshness(
+    symbols: Sequence[str],
+    *,
+    snapshot_rows: dict[str, dict],
+    events_by_symbol: dict[str, list[dict]],
+    as_of: str,
+    calendar: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """深度分析前的信号时效性校验（S2）：最新可得状态重校验，问题者移除。
+
+    检查顺序逐字（全部命中原因都返回，不短路）：``SUSPENDED``（快照行缺失或
+    ``is_suspended`` 为真——缺失视同不可交易，fail-closed）→ ``LIMIT_LOCKED``
+    （``limit_up_sealed``/``limit_down_sealed``）→ ``NEW_EVENT``（任一事件日期 ≥
+    ``as_of`` 的**前一交易日**；``calendar`` 缺省/为空时下界退化为 ``as_of`` 当日，
+    保守下限不猜前一交易日）。事件日期缺失/不可解析 → 不计入（events 模块兜底占位
+    无日期，不得一律判「新」）。
+
+    返回 ``[{"symbol", "reason", "detail"}]``（``symbols`` 输入序 × S2 原因序）；
+    干净标的**不出现**在返回列表。
+    """
+    normalized_as_of = _canonical_date(as_of, "as_of")
+    bound = _recent_event_bound(normalized_as_of, calendar)
+    findings: list[dict[str, Any]] = []
+    for symbol in symbols:
+        row = snapshot_rows.get(symbol) or {}
+        if symbol not in snapshot_rows:
+            findings.append(
+                {
+                    "symbol": symbol,
+                    "reason": FRESHNESS_SUSPENDED,
+                    "detail": "无当日快照行（视同不可交易）",
+                }
+            )
+        elif row.get("is_suspended"):
+            findings.append({"symbol": symbol, "reason": FRESHNESS_SUSPENDED, "detail": "停牌"})
+        if row.get("limit_up_sealed") and row.get("limit_down_sealed"):
+            locked_detail = "一字涨跌停封板"
+        elif row.get("limit_up_sealed"):
+            locked_detail = "一字涨停封板"
+        elif row.get("limit_down_sealed"):
+            locked_detail = "一字跌停封板"
+        else:
+            locked_detail = ""
+        if locked_detail:
+            findings.append(
+                {"symbol": symbol, "reason": FRESHNESS_LIMIT_LOCKED, "detail": locked_detail}
+            )
+        fresh_events = []
+        for event in events_by_symbol.get(symbol, []):
+            if not isinstance(event, dict):
+                continue
+            event_date = _canonical_date_or_none(event.get("date"))
+            if event_date is not None and event_date >= bound:
+                fresh_events.append((event_date, event))
+        if fresh_events:
+            event_date, event = max(fresh_events, key=lambda item: item[0])
+            title = str(event.get("title") or "").strip()
+            detail = f"新事件 {event_date}" + (f"：{title}" if title else "")
+            findings.append({"symbol": symbol, "reason": FRESHNESS_NEW_EVENT, "detail": detail})
+    return findings
