@@ -33,14 +33,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from finance_agent.screening.constraints import LOT_SIZE
+
 # 原因码常量（spec 逐字；消费方比较时不得改写）
 REASON_LIMIT_UP_UNFILLABLE = "LIMIT_UP_UNFILLABLE"
 REASON_LIMIT_DOWN_UNFILLABLE = "LIMIT_DOWN_UNFILLABLE"
 REASON_T1_SELL_BLOCKED = "T1_SELL_BLOCKED"
 REASON_ODD_LOT = "ODD_LOT"
 
-# A 股整手（买入须为整数倍；卖出零股例外见 match_order）
-_LOT_SIZE = 100
+# A 股整手（买入须为整数倍；卖出零股例外见 match_order）——单一来源
+# screening/constraints.py LOT_SIZE（add-signal-portfolio-risk-gate：风控门禁
+# risk_gate.py 共用同一常量；本模块 import 期取值，撮合口径进程内不漂移）
 
 # 一字板判定默认阈值（M2：覆盖 ST 5% 档；与 snapshot D3 的 4.8 同源）
 _SEALED_THRESHOLD = 0.048
@@ -223,12 +226,12 @@ def match_order(
         raise ValueError(f"委托方向必须为 buy/sell: {order.side!r}")
 
     # ① 整手约束（卖零股全卖例外）
-    if order.qty % _LOT_SIZE != 0:
+    if order.qty % LOT_SIZE != 0:
         full_odd_lot_sell = (
             order.side == "sell"
             and position is not None
             and order.qty == position.total_qty
-            and position.total_qty % _LOT_SIZE != 0
+            and position.total_qty % LOT_SIZE != 0
         )
         if not full_odd_lot_sell:
             return _rejected(REASON_ODD_LOT)

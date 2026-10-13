@@ -41,6 +41,9 @@ MIN_LIQUIDITY_HISTORY_DAYS: int = 20
 MAX_SINGLE_POSITION: float = 0.2
 # 组合总仓位上限（组合聚合/风控门禁共用单一来源）
 MAX_TOTAL_POSITION: float = 0.8
+# A 股整手（买入须为整数倍；卖出零股全卖例外见 execution/matching.py 与
+# execution/risk_gate.py，两处判定语义一致、常量同源）
+LOT_SIZE: int = 100
 
 
 @dataclass(frozen=True)
