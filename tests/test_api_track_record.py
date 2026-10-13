@@ -8,6 +8,7 @@ from finance_agent.execution.store import list_paper_equity, upsert_paper_equity
 from finance_agent.outcome.track_record.model import (
     init_track_record_tables,
     insert_prediction,
+    list_equity_curve,
     update_prediction_status,
     upsert_equity_point,
     upsert_index_closes,
@@ -806,6 +807,45 @@ def test_seed_paper_equity_block(monkeypatch, tmp_path):
         rows = list_paper_equity(db_path=exec_db)
         assert [r["trade_date"] for r in rows] == ["2026-09-01", "2026-09-30"]
         assert rows[1]["equity"] == 1_031_000.0
+    finally:
+        monkeypatch.delenv("TESTING", raising=False)
+        importlib.reload(api_module)
+
+
+def test_seed_track_record_reset_clears_dual_curve_tables(monkeypatch, tmp_path):
+    """add-paper-broker T4：track_record_reset 清 equity_curve + paper_equity 两表。
+
+    双曲线 E2E 每例前后复位用；predictions 等其它造数面不受影响（复位边界=
+    双曲线造数面）。
+    """
+    curve_db = _use_db(monkeypatch, tmp_path)
+    exec_db = _use_execution_db(monkeypatch, tmp_path)
+    upsert_equity_point("2026-09-01", 1.0, benchmark_nav=1.0, db_path=curve_db)
+    upsert_equity_point("2026-09-30", 1.043, benchmark_nav=1.01, db_path=curve_db)
+    upsert_paper_equity("2026-09-01", 1_000_000.0, 0.0, 1_000_000.0, db_path=exec_db)
+    upsert_paper_equity("2026-09-30", 998_000.0, 33_000.0, 1_031_000.0, db_path=exec_db)
+    pred_id = _insert(curve_db)
+
+    monkeypatch.setenv("TESTING", "1")
+    import importlib
+
+    import finance_agent.api as api_module
+    import finance_agent.session_store as session_store_module
+
+    monkeypatch.setattr(session_store_module, "_DB_PATH", tmp_path / "sessions.db")
+    session_store_module.init_db()
+
+    importlib.reload(api_module)
+    try:
+        client = TestClient(api_module.app)
+        resp = client.post("/api/test/seed", json={"track_record_reset": True})
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok", "mode": "testing"}
+        assert list_equity_curve(db_path=curve_db) == []
+        assert list_paper_equity(db_path=exec_db) == []
+        # 复位边界：predictions 行原样保留
+        preds = client.get("/api/v1/track-record/predictions").json()
+        assert [p["prediction_id"] for p in preds["predictions"]] == [pred_id]
     finally:
         monkeypatch.delenv("TESTING", raising=False)
         importlib.reload(api_module)

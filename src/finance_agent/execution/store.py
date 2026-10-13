@@ -518,3 +518,19 @@ def list_paper_equity(db_path: str | Path | None = None) -> list[dict[str, Any]]
     finally:
         conn.close()
     return [dict(row) for row in rows]
+
+
+def delete_all_paper_equity(db_path: str | Path | None = None) -> int:
+    """清空 paper_equity（add-paper-broker：TESTING seed 造数清理，供 E2E 复位）。
+
+    仅清本表；orders/positions/cash 账户三表不涉（那是 paper 交易账本，
+    造数复位不应抹掉账户状态）。返回删除行数。
+    """
+    init_execution_db(db_path)
+    conn = _connect(db_path)
+    try:
+        cursor = conn.execute("DELETE FROM paper_equity")
+        conn.commit()
+        return int(cursor.rowcount)
+    finally:
+        conn.close()

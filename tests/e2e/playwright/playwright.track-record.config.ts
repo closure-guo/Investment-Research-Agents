@@ -1,8 +1,9 @@
 import { defineConfig } from '@playwright/test'
 
 /**
- * 战绩页专属 E2E 配置（track-record-*.spec.ts 套件;
- * 现含 add-index-performance-compare 与 add-portfolio-beta-alpha 两个 spec）
+ * 战绩页专属 E2E 配置（track-record-*.spec.ts 套件 + paper-broker.spec.ts;
+ * 现含 add-index-performance-compare / add-portfolio-beta-alpha / add-paper-broker
+ * 三个 spec）
  *
  * 为什么独立 config（数据竞争，review fix）：
  * 本 spec 经 /api/test/seed 写 equity_curve/index_closes 造数行，而默认 config 的
@@ -13,13 +14,19 @@ import { defineConfig } from '@playwright/test'
  * （特殊前提 spec → 专属 config + 独立 CI step）为本套件拆专属库：
  * SESSIONS_DB_PATH=data/test-e2e-track-record.db，与共享库彻底互不影响。
  *
+ * add-paper-broker（T4）：paper-broker.spec.ts 造数还写 execution 库
+ * （track_record.paper_equity → paper_equity 表），故后端 env 追加
+ * EXECUTION_DB_PATH 隔离——否则种子会落到开发库 data/execution.db（与
+ * SCREENING_DB_PATH 同款纪律）；该 spec 每例前后经 track_record_reset 复位，
+ * 种子不跨例残留。
+ *
  * 端口对 8004/5177（避开默认 8000/5173 与 timeline 8001-8003/5174-5176）。
  * 本地重跑前需删 data/test-e2e-track-record.db*（serial 首用例依赖空库，
  * 上一轮种子残留会让空态断言变红）。
  */
 export default defineConfig({
   testDir: './tests',
-  testMatch: ['track-record-*.spec.ts'],
+  testMatch: ['track-record-*.spec.ts', 'paper-broker.spec.ts'],
   timeout: 60_000,
   expect: { timeout: 5_000 },
   fullyParallel: false,
@@ -42,6 +49,7 @@ export default defineConfig({
       env: {
         TESTING: '1',
         SESSIONS_DB_PATH: 'data/test-e2e-track-record.db',
+        EXECUTION_DB_PATH: 'data/test-e2e-track-record-execution.db',
         REPORTS_DIR: 'tmp/e2e-reports-8004',
       },
       url: 'http://localhost:8004/api/health',

@@ -63,6 +63,10 @@ export default defineConfig({
     // 战绩页 track-record-*.spec.ts 造数会污染共享测试库的空态前提（decisions.spec 依赖），
     // 迁入 playwright.track-record.config.ts 独立测试库，见该文件头注释
     'track-record-*.spec.ts',
+    // add-paper-broker T4：paper-broker.spec.ts 同属战绩页造数套件（equity_curve +
+    // paper_equity 双曲线种子）→ 同迁入 track-record 专属 config（testMatch 显式收录，
+    // 后端带 SESSIONS_DB_PATH + EXECUTION_DB_PATH 双隔离）
+    'paper-broker.spec.ts',
     // eval-ops 手动补跑用例在服务端同步执行 20-60s（AKShare 重试退避），与本套件并行时
     // 独占单进程后端+共享 SQLite 写窗口致流式用例随机红（issue #252，trace 实证）——
     // 迁入 playwright.eval-ops.config.ts 专属端口对（8005/5178）物理隔离，默认套件恢复并行门禁

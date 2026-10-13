@@ -548,6 +548,21 @@ def list_equity_curve(db_path: str | Path | None = None) -> list[dict[str, Any]]
         conn.close()
 
 
+def delete_all_equity_points(db_path: str | Path | None = None) -> int:
+    """清空 equity_curve（add-paper-broker：TESTING seed 造数清理，供 E2E 复位）。
+
+    仅清本表；predictions/index_closes 等其它造数面不涉（各 spec 的清理策略独立）。
+    返回删除行数。
+    """
+    conn = _connect(db_path)
+    try:
+        cursor = conn.execute("DELETE FROM equity_curve")
+        conn.commit()
+        return int(cursor.rowcount)
+    finally:
+        conn.close()
+
+
 # ── index_closes:指数收盘(add-index-performance-compare;展示层对比用,判定链不读)──
 def upsert_index_closes(
     rows: list[tuple[str, str, float]],

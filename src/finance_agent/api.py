@@ -736,7 +736,8 @@ if TESTING:
         顶层可选 track_record（{equity_curve, index_closes, metrics_snapshot,
         predictions, paper_equity}）写战绩页造数表（add-index-performance-compare /
         add-portfolio-beta-alpha / add-prediction-pool-integrity / add-paper-broker），
-        无需 chat_history 也可单独使用，且不创建会话；
+        无需 chat_history 也可单独使用，且不创建会话；track_record_reset（bool：清
+        equity_curve + paper_equity 两表，供双曲线 E2E 复位）同不受前置约束；
         顶层可选 snapshot（dict：写 snapshot_meta 键）与 snapshot_reset（bool：先清
         快照三表）造行情快照告警态（add-market-snapshot D6），同样无需 chat_history。
         顶层可选 screening（dict：``batch`` 造批次行（含 error 造失败横幅）、``pool``
@@ -754,8 +755,18 @@ if TESTING:
             and not req.get("snapshot_reset")
             and not isinstance(req.get("screening"), dict)
             and not req.get("screening_reset")
+            and not req.get("track_record_reset")
         ):
             return {"status": "ok", "mode": "testing"}
+        # add-paper-broker：战绩造数复位（清 equity_curve + paper_equity 两表）。双曲线
+        # E2E 每例前后 reset，避免种子残留破坏同套件其它 spec 的空态前提（隔离纪律与
+        # screening_reset 同款）。库路径于调用期读 SESSIONS_DB_PATH / EXECUTION_DB_PATH。
+        if req.get("track_record_reset"):
+            from finance_agent.execution.store import delete_all_paper_equity
+            from finance_agent.outcome.track_record.model import delete_all_equity_points
+
+            delete_all_equity_points()
+            delete_all_paper_equity()
         # add-index-performance-compare:战绩页 E2E 造数(equity_curve/index_closes
         # 写入真实存储层;SESSIONS_DB_PATH 已被 e2e webServer 指向独立测试库)。
         # seed 是纯造数:track_record-only 请求到此为止,不创建会话,避免 E2E 会话
