@@ -107,6 +107,16 @@ def test_explicit_direction_in_enum_accepted():
     assert _convert(_decision(action="hold", direction="flat")).direction == "flat"
 
 
+@pytest.mark.parametrize("declared", [123, ""])
+def test_non_string_or_blank_declared_direction_rejected(declared):
+    """声明了 direction 但不是合法枚举字符串 → 拒收（不得静默回退 action 映射）。
+
+    ``None``（未声明）才走 action 映射；``123``/``""`` 是显式申报的非法值。
+    """
+    with pytest.raises(SignalContractError, match="direction 非法值"):
+        _convert(_decision(direction=declared))
+
+
 # ── G1：审批门禁（仅 approve 生成）─────────────────────────────────────────
 
 

@@ -8,7 +8,8 @@
   不建模做空，SHALL 拒收，消息逐字「direction 非法值: short」；``exit``/未申报 →
   ``flat``（持有者减仓/退出敞口 = 平掉敞口）；
 - 显式 ``direction`` 键（spec 场景「一条 direction 为 short 的转换输入」）声明优先：
-  枚举内即采用，枚举外拒收（同一消息）；
+  枚举内即采用，枚举外拒收（同一消息）；声明为非字符串/空串（评审修正）同样拒收，
+  不静默回退 action 映射（``None`` = 未声明才走映射）；
 - ``strength = confidence``（0-1 数值校验）；``horizon_days = DEFAULT_HORIZON_DAYS``
   （口径同源 import，禁止本地复制）；
 - ``signal_id = f"{symbol}:{trade_date}"``（确定性 → 同日同标的重跑幂等 upsert 不翻倍）。
@@ -115,11 +116,11 @@ def signal_from_decision(
         raise SignalContractError("缺少必填字段: trade_date")
     strength = _coerce_strength(decision.get("confidence"))
 
-    # 显式 direction 声明优先（spec 场景逐字）；否则由 action/sell_type 推导
+    # 显式 direction 声明优先（spec 场景逐字）；否则由 action/sell_type 推导。
+    # 申报了（非 None）但不是合法枚举字符串（含非字符串/空串）→ 拒收：静默回退
+    # action 映射会把「错值」当成「未声明」，把非法输入洗成合法信号（评审修正）。
     declared = decision.get("direction")
-    direction = str(declared).strip() if isinstance(declared, str) and declared.strip() else None
-    if direction is None:
-        direction = _direction_for_action(decision)
+    direction = _direction_for_action(decision) if declared is None else str(declared).strip()
     if direction not in SIGNAL_DIRECTIONS:
         raise SignalContractError(f"direction 非法值: {direction}")
 
@@ -155,6 +156,11 @@ def generate_signal(
     后的方向落库，并把判定记录写入 ``hysteresis_events``。``prior_direction`` 由
     调用方解析（如前一日 ``list_signals(symbol=...)``）后传入；无历史且非均衡带时
     判定为 no-op（原样落库，不写判定记录）。
+
+    契约边界（评审修正）：``prior_direction`` 必须落在信号枚举 {long, flat} 内——
+    keep-prior 分支会把 prior 原样作为最终方向，若传入决策侧方向（``short``/
+    ``neutral``，``nodes/risk.py`` 的历史方向即为此类）则会在落库前拒收
+    （``SignalContractError``），信号表不得出现枚举外方向。
     """
     signal = signal_from_decision(
         decision,
@@ -171,6 +177,8 @@ def generate_signal(
         balanced_zone=balanced_zone,
         incremental_claimed=incremental_claimed,
     )
+    if direction not in SIGNAL_DIRECTIONS:
+        raise SignalContractError(f"prior_direction 非法值: {direction}")
     if direction != raw_direction:
         signal = replace(signal, direction=cast(SignalDirection, direction))
     record_signal(signal, db_path=db_path)

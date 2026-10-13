@@ -26,7 +26,7 @@ from finance_agent.execution.hysteresis import (
     apply_signal_hysteresis,
     evaluate_direction_hysteresis,
 )
-from finance_agent.execution.signals import generate_signal
+from finance_agent.execution.signals import SignalContractError, generate_signal
 from finance_agent.execution.store import list_hysteresis_events, list_signals
 from finance_agent.models import TradeDecision
 
@@ -322,3 +322,50 @@ def test_signal_path_noop_records_no_event(tmp_path):
     )
     assert signal.direction == "long"
     assert list_hysteresis_events(db_path=db) == []
+
+
+def test_signal_path_illegal_prior_direction_rejected(tmp_path):
+    """评审修正：prior_direction 非 {long, flat}（如决策侧 short）→ 拒收，不落库。
+
+    keep-prior 分支会原样返回 prior；若 prior 是决策侧方向（short/neutral），
+    落库即产生枚举外 signal。契约边界（信号路径只认 long/flat）必须在此拦截。
+    """
+    db = tmp_path / "execution.db"
+    generate_signal(
+        _decision(), decision_id="dec-1", source="risk_judge", trade_date="2026-10-12", db_path=db
+    )
+    with pytest.raises(SignalContractError) as exc:
+        generate_signal(
+            _decision(),  # 裸输出 long
+            decision_id="dec-2",
+            source="risk_judge",
+            trade_date="2026-10-13",
+            prior_direction="short",  # 决策侧历史方向，信号路径非法
+            balanced_zone=False,
+            incremental_claimed=False,
+            db_path=db,
+        )
+    assert str(exc.value) == "prior_direction 非法值: short"
+    # 拒收即不落库：无 10-13 signal、无判定事件
+    assert list_signals(trade_date="2026-10-13", db_path=db) == []
+    assert list_hysteresis_events(db_path=db) == []
+
+
+def test_signal_path_rerun_does_not_duplicate_hysteresis_event(tmp_path):
+    """评审修正：同日同判定的重跑 → hysteresis_events 幂等（UNIQUE + DO NOTHING）。"""
+    db = tmp_path / "execution.db"
+    kwargs: dict = {
+        "decision": _decision(action="hold"),
+        "decision_id": "dec-2",
+        "source": "risk_judge",
+        "trade_date": "2026-10-13",
+        "prior_direction": "long",
+        "balanced_zone": True,
+        "incremental_claimed": False,
+        "db_path": db,
+    }
+    first = generate_signal(**kwargs)
+    second = generate_signal(**kwargs)
+    assert first == second
+    assert list_signals(db_path=db) == [first]
+    assert len(list_hysteresis_events(signal_id=first.signal_id, db_path=db)) == 1

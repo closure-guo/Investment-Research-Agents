@@ -7,7 +7,9 @@ DB 路径调用期读取 env ``EXECUTION_DB_PATH``（默认 ``data/execution.db`
 - ``signals``：Signal 契约落库表，PK=signal_id（确定性 id → 同日同标的重跑幂等
   upsert，不翻倍）；
 - ``hysteresis_events``：滞回判定记录（applied 非空的判定逐条落库，供审计——
-  delta spec decision-hysteresis「滞回判定记录落库」）。
+  delta spec decision-hysteresis「滞回判定记录落库」）；``UNIQUE(signal_id,
+  detail_json)`` + ``ON CONFLICT DO NOTHING``（评审修正）→ 判定内容不变的重跑
+  幂等，不产生重复审计行。
 
 模块级只依赖 stdlib：``Signal`` 类型经 TYPE_CHECKING / 函数内 import 引入，
 避免 ``signals.py``（转换入口）与 ``store.py``（落库）的模块级循环依赖。
@@ -43,6 +45,15 @@ CREATE TABLE IF NOT EXISTS hysteresis_events (
   detail_json TEXT NOT NULL,
   created_at  TEXT NOT NULL
 );
+-- 幂等去重（评审修正）：同 signal_id + 同 detail_json 视为同一条判定记录。
+-- 先清理历史重跑可能留下的重复行（保留最小 event_id），再建唯一索引供
+-- INSERT ... ON CONFLICT DO NOTHING 使用；无重复的库上该 DELETE 是廉价 no-op。
+DELETE FROM hysteresis_events
+ WHERE event_id NOT IN (
+   SELECT MIN(event_id) FROM hysteresis_events GROUP BY signal_id, detail_json
+ );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hysteresis_events_signal_detail
+  ON hysteresis_events (signal_id, detail_json);
 CREATE INDEX IF NOT EXISTS idx_hysteresis_events_signal
   ON hysteresis_events (signal_id);
 """
@@ -176,12 +187,18 @@ def record_hysteresis_event(
     *,
     db_path: str | Path | None = None,
 ) -> None:
-    """滞回判定记录落库（detail_json 为 JSON 字符串，序列化归调用方）。"""
+    """滞回判定记录落库（幂等：同 signal_id + 同 detail_json 重复写入 → no-op）。
+
+    detail_json 为 JSON 字符串，序列化归调用方。判定内容不变的 rerun（同日重跑）
+    不得把事件表写成重复行；判定输入变化（detail 不同）仍各留一条审计记录。
+    """
     init_execution_db(db_path)
     conn = _connect(db_path)
     try:
         conn.execute(
-            "INSERT INTO hysteresis_events (signal_id, detail_json, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO hysteresis_events (signal_id, detail_json, created_at)"
+            " VALUES (?, ?, ?)"
+            " ON CONFLICT(signal_id, detail_json) DO NOTHING",
             (str(signal_id), str(detail_json), str(created_at)),
         )
         conn.commit()

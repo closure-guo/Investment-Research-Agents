@@ -2,7 +2,7 @@
 
 覆盖计划 G3 与 delta spec trade-execution「组合仓位聚合」：
 
-- 仅 direction=="long" 参与（flat 退出计入分母）；
+- 仅 direction=="long" 参与（flat 退出不计入分母）；
 - 等权 = 1/n；强度加权 = strength/Σstrength（分母只含 long）；
 - 先单票 clip（>20% → 20% + SINGLE_CAP_CLIP）；再总仓缩减（Σ>80% → 全体按
   80%/Σ 等比缩 + TOTAL_CAP_SCALE_DOWN；spec 场景「6 条 long 强度加权合计 96% → 80%」）；
