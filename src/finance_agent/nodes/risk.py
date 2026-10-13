@@ -11,6 +11,7 @@ import logging
 import math
 
 from finance_agent.debate_anchors import anchor_stats, check_argument_anchors
+from finance_agent.execution.hysteresis import evaluate_direction_hysteresis
 from finance_agent.langfuse_tracing import update_current_span
 from finance_agent.metrics.decision_price_check import check_decision_prices
 from finance_agent.models import DebateMessage, TradeDecision
@@ -111,26 +112,33 @@ def _has_incremental_claim(reasoning: object) -> bool:
 
 def _evaluate_hysteresis(state: dict, decision: TradeDecision) -> dict:
     """均衡带/滞回判定（纯判定，不改决策）：balanced_zone / prior / flip /
-    incremental_claimed / needs_reaffirm。历史查询 fail-open（空序列即不翻转）。"""
+    incremental_claimed / needs_reaffirm。历史查询 fail-open（空序列即不翻转）。
+
+    判定本体为共享纯函数 ``execution/hysteresis.evaluate_direction_hysteresis``
+    （add-signal-portfolio-risk-gate G5：决策侧与信号路径同一判定，行为保持抽取）；
+    本函数只做 state/decision → 判定输入的适配与外围字段（prior_date 等）组装。
+    """
     rating = str(state.get("research_manager_rating") or "")
     balanced_zone = "中性" in rating
     history = recent_directions(str(state.get("stock_code") or ""))
     prior = history[-1] if history else None
+    prior_direction = str(prior["direction"]) if prior else None
     cur_direction = _ACTION_DIRECTION.get(str(getattr(decision, "action", "")), "neutral")
-    flip = prior is not None and str(prior["direction"]) != cur_direction
     incremental = _has_incremental_claim(getattr(decision, "reasoning", None))
-    action_is_exec = str(getattr(decision, "action", "")) in ("buy", "sell")
-    needs_reaffirm = (balanced_zone and action_is_exec and not incremental) or (
-        flip and not incremental
+    judgment = evaluate_direction_hysteresis(
+        prior_direction,
+        cur_direction,
+        balanced_zone=balanced_zone,
+        incremental_claimed=incremental,
     )
     return {
         "balanced_zone": balanced_zone,
-        "prior_direction": str(prior["direction"]) if prior else None,
+        "prior_direction": prior_direction,
         "prior_date": str(prior["date"]) if prior else None,
-        "flip": flip,
+        "flip": judgment["flip"],
         "incremental_claimed": incremental,
-        "needs_reaffirm": needs_reaffirm,
-        "applied": "",
+        "needs_reaffirm": judgment["needs_reaffirm"],
+        "applied": judgment["applied"],
     }
 
 

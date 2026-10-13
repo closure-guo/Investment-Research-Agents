@@ -13,18 +13,22 @@
   （口径同源 import，禁止本地复制）；
 - ``signal_id = f"{symbol}:{trade_date}"``（确定性 → 同日同标的重跑幂等 upsert 不翻倍）。
 
-信号生成路径入口 ``generate_signal``：契约转换 → 落库（滞回应用见 Task 4 扩展）。
+信号生成路径入口 ``generate_signal``：契约转换 → 共享滞回判定 → 落库
+（``execution/hysteresis.apply_signal_hysteresis``，判定被应用时写
+``hysteresis_events``）。
 """
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from finance_agent.execution.store import record_signal
+from finance_agent.execution.hysteresis import apply_signal_hysteresis
+from finance_agent.execution.store import record_hysteresis_event, record_signal
 from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS
 
 SignalDirection = Literal["long", "flat"]
@@ -139,9 +143,19 @@ def generate_signal(
     trade_date: str,
     created_at: str | None = None,
     approved: bool | None = None,
+    prior_direction: str | None = None,
+    balanced_zone: bool = False,
+    incremental_claimed: bool = False,
     db_path: str | Path | None = None,
 ) -> Signal:
-    """信号生成路径入口：契约转换 → 落库（幂等 upsert by signal_id）。"""
+    """信号生成路径入口：契约转换 → 共享滞回判定 → 落库（幂等 upsert）。
+
+    滞回（delta spec decision-hysteresis）：信号方向翻转（或均衡带内执行）经过与
+    决策侧相同的共享判定；被应用时（``keep_prior``/``downgrade_balanced``）以判定
+    后的方向落库，并把判定记录写入 ``hysteresis_events``。``prior_direction`` 由
+    调用方解析（如前一日 ``list_signals(symbol=...)``）后传入；无历史且非均衡带时
+    判定为 no-op（原样落库，不写判定记录）。
+    """
     signal = signal_from_decision(
         decision,
         decision_id=decision_id,
@@ -150,5 +164,29 @@ def generate_signal(
         created_at=created_at,
         approved=approved,
     )
+    raw_direction = signal.direction
+    direction, judgment = apply_signal_hysteresis(
+        raw_direction,
+        prior_direction,
+        balanced_zone=balanced_zone,
+        incremental_claimed=incremental_claimed,
+    )
+    if direction != raw_direction:
+        signal = replace(signal, direction=cast(SignalDirection, direction))
     record_signal(signal, db_path=db_path)
+    if judgment["applied"]:
+        record_hysteresis_event(
+            signal.signal_id,
+            json.dumps(
+                {
+                    **judgment,
+                    "raw_direction": raw_direction,
+                    "source": signal.source,
+                    "decision_id": signal.decision_id,
+                },
+                ensure_ascii=False,
+            ),
+            signal.created_at,
+            db_path=db_path,
+        )
     return signal
