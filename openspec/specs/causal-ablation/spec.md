@@ -222,3 +222,13 @@ evals 实验报告 SHALL 在头部携带 `status: active | superseded-by: <path>
 - **WHEN** 生成消融报告
 - **THEN** 报告陈述 L3 粗筛在该窗口具有排雷价值，并披露窗口范围与有效 n
 
+### Requirement: 记忆消融变体
+
+消融框架 SHALL 支持「+记忆注入 / 无记忆」配对变体（同 state 快照、配对 bootstrap）；judge 维度按适用性过滤与「CI 含 0 只写无显著差异」的既有纪律 SHALL 适用。
+
+#### Scenario: 记忆消融报告
+
+- **GIVEN** n=10 消融批次完成
+- **WHEN** 生成报告
+- **THEN** 报告含两变体各 judge 维度增量及 95% CI，并披露有效 n 与适用口径
+
