@@ -38,3 +38,20 @@
       6→7（`tests/outcome/test_ops_jobs.py` / `tests/outcome/test_scheduler.py`，change 1 先例，报告 §3.4 披露），
       另 `tests/factors/test_validate.py` 模块 docstring 随 T4/T5 实装更新（纯文字，断言未动）；
       T3 端到端 fixture 未被调整（真闸下原样通过，报告 §3.7）
+
+## 5. 评审修正（review fixes，2026-10-13）
+- [x] 5.1 BH-FDR 分辨率：`PERMUTATION_N` 200 → 999（覆盖 K ≤ 100）+ `check_significance`
+      分辨率守卫（`1/(N+1) > q/K` → fail loud）；测试 K=50 强/全噪声、守卫边界、K=100↔101
+- [x] 5.2 闸④判据改**验证段**（与闸⑤同一 `TRAIN_FRACTION` 切分）；detail 记训练/验证两段增量；
+      验证段有效日 < `MIN_OOS_IR_SAMPLES=10` → `NO_POOL_INCREMENT` + `insufficient_oos_dates`
+- [x] 5.3 置换口径替代（逐日符号随机化）获控制器批准，口径写入 `validate.py` 模块 docstring
+- [x] 5.4 闸⑤剔除训练段末端 `DEFAULT_IC_HORIZON` 日（边界泄漏），`purged_train_days` 落 detail
+- [x] 5.5 delta spec 查重措辞改为 candidate/active/degraded（retired 允许重提）；
+      `openspec validate add-factor-library-and-monitor --strict` 通过
+- [x] 5.6 `MIN_REDUNDANCY_SAMPLES=5` 移入 `constraints.py` 单一来源
+- [x] 5.7 `test_validate.py` 陈旧 docstring（占位桩表述）更新
+- [x] 5.8 K>20 端到端批量用例（K=25 闸②存活者，仅零超额强候选过闸③）
+- [x] 5.9 BH 多重性按候选**位置**计（零填充位置键；逐字重复各计一条假设），`n_hypotheses` 落 detail
+- [x] 5.10 验收重跑 + 报告「评审修正」章节 + 计划「评审修正记录」；
+      验证：`uv run pytest tests/factors tests/outcome/test_ops_jobs.py tests/outcome/test_scheduler.py -q`
+      → 303 passed；ruff / mypy（factors）全绿；verdict 不变、artifact 已刷新

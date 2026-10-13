@@ -143,3 +143,42 @@ def run_factor_monitor(panel: MarketPanel, as_of: str, *, db_path=None) -> dict 
 - [ ] `uv run pytest tests/factors -q` + 全量 `tests/ -m "not live"`（记录；既有 env flake 归因）；ruff/mypy。
 - [ ] 报告 `tests/validation/2026-10-13-add-factor-library-and-monitor-validation.md`（命令证据、对照表、异常记录、结论）；`tasks.md` 全勾 + 逐条注明 →（控制器执行 archive）。
 - [ ] Commit `docs(openspec): add-factor-library-and-monitor validation report + tasks 回填`。
+
+---
+
+## 评审修正记录（review fixes，2026-10-13）
+
+评审发现 T3–T7 实装后的三处缺陷/口径问题，修正如下（TDD 红→绿，逐项有测试钉子）：
+
+1. **BH-FDR 分辨率缺陷（重要）**：`PERMUTATION_N=200` 时 p 值下界 1/201，BH 在
+   ``K > q·(N+1) = 20.1`` 的批次不可能通过（完美候选在 K=21+ 也必被拒）。修正：
+   ① `constraints.PERMUTATION_N` 200 → **999**（覆盖 ``K ≤ 100``）；②
+   `check_significance` 加 fail-loud 守卫：``1/(PERMUTATION_N+1) > BH_FDR_Q/K`` →
+   抛 ``ValueError``（消息给出不等式两侧数值与 N/K/q），阻止「配置错误静默全拒/全过」。
+   测试：K=50 单强候选零超额 → `p_adj = 50/1000 = 0.05 ≤ q` 通过；K=50 全噪声全拒收；
+   K=100 不触发 / K=101 触发守卫；monkeypatch N=50 时 K=5 不触发、K=6 触发。
+2. **闸④判据改为样本外（重要）**：spec 要求「池级组合的**样本外** IR 增量 > 0」，
+   原实现用全样本增量（含训练段）——改为与闸⑤同一 ``TRAIN_FRACTION`` 切分的
+   **验证段**上计算（候选与池组合同受验证段日期与同一远期收益约束），判定
+   ``increment > 0``；``detail`` 同时记 `increment_train`（训练段，仅审计）与
+   `increment`（= 验证段，E8 保种排序沿用此值）。验证段共同有效日 <
+   `MIN_OOS_IR_SAMPLES=10` → 拒收并记 `detail["reason"]="insufficient_oos_dates"`。
+   冗余检查（|ρ|>0.7，共同日期 IC 相关）口径不变（全样本）。测试：样本内强但样本外
+   平坦 → `NO_POOL_INCREMENT`（旧实现在此放行）；验证段强 → 通过；验证段过短 →
+   fail closed；切分边界与闸⑤同源（`train_end`/`val_start`/`val_end` 对齐）。
+3. **置换口径替代方案获批（ratification）**：闸③接口只接收 IC 序列
+   （``check_significance(ic_series_map, *, seed)``，编排契约逐字），无法「重排横截面
+   因子值」；实现用**逐日符号随机化**（per-day sign-flip）等效该零分布——H0 下逐日
+   Spearman IC 以 0 为中心对称，符号随机化构成精确条件检验（保留观测幅度 → 对强信号
+   保守）。**控制器批准该替代**：口径已写入 `validate.py` 模块 docstring「置换口径」段
+   与 `check_significance` docstring；若日后要求真实横截面重排，属接口/行为变更，
+   须走 OpenSpec。
+4. **双层查重措辞（随 fix 5 修 spec 文字）**：delta spec 的「与库内全部因子做 AST
+   子树同构检测」措辞与实现不符（实现只查 `candidate`/`active`/`degraded`，
+   `retired` 允许重提，E7 逐字）——spec 文字改为「与库内 candidate/active/degraded
+   因子做 AST 子树同构检测（retired 允许重提）」，`openspec validate --strict` 通过。
+
+另有小项：闸⑤训练段末端 ``DEFAULT_IC_HORIZON`` 日剔除（边界泄漏）；`MIN_REDUNDANCY_SAMPLES`
+移入 `constraints.py` 单一来源；BH 多重性按候选**位置**计并用零填充位置串作闸③键
+（逐字重复表达式不塌缩）；`n_hypotheses` 进 detail；K>20 端到端批量用例；
+测试 docstring 陈旧表述修正。详见验证报告「评审修正」章节。

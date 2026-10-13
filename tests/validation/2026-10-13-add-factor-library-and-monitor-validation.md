@@ -6,6 +6,8 @@
 **执行环境**: worktree `D:\WorkSpace\finance_analysis_agent\.worktrees\screen-stack`
 **验证范围**: Task 1–7（求值引擎 → 库 schema/状态机 → 闸①② → 闸③置换/BH-FDR → 闸④⑤ → 衰减监控 + 日批接线 → 对照验收）
 **全量回归时 HEAD**: `4514c173`（T1–T6 六个 feat 提交之上的工作区；此后仅新增本报告、验收脚本/artifact 与 `tasks.md` 回填，**零 src 改动**）
+**评审修正后 HEAD**: `36105b9c`（fix 提交；修正 1–9 落地后重跑全部命令，§0 与 §1 数字已按修正版刷新；
+其后的 docs 提交（本报告/计划/spec/tasks/artifact）零 src 改动）
 
 > **边界声明（只记录实际发生）**：本 change 为**纯计算/存储层**，零网络、零 LLM 调用；
 > 全部证据来自合成面板（固定种子）。§1 的对照验收是**合成世界**的管线验收（因子在生成过程中
@@ -17,12 +19,15 @@
 
 ```
 $ uv run pytest tests/factors -q
-240 passed in 7.64s
+252 passed in 8.18s
+
+$ uv run pytest tests/factors tests/outcome/test_ops_jobs.py tests/outcome/test_scheduler.py -q
+303 passed in 9.78s
 
 $ uv run pytest tests/ -q -m "not live"
 1 failed, 5076 passed, 6 skipped, 12 deselected, 30 warnings in 782.16s (0:13:02)
 （唯一失败：tests/llm/test_resolver.py::TestContextLengthOverride::test_empty_follows_registry_default
- ——既有环境性 flake，归因见 §3.6）
+ ——既有环境性 flake，归因见 §3.6；评审修正仅触 factors 层，未重跑全量）
 
 $ uv run pytest "tests/llm/test_resolver.py::TestContextLengthOverride::test_empty_follows_registry_default" -q
 1 passed in 0.05s
@@ -32,14 +37,14 @@ $ uv run pytest tests/outcome/test_ops_jobs.py tests/outcome/test_scheduler.py -
 
 $ uv run python tests/validation/2026-10-13-add-factor-library-and-monitor-acceptance.py
 [verdict] {'classic_active': 5, 'classic_total': 5, 'noise_rejected': 5, 'noise_total': 5, 'passed': True}
-（退出码 0；耗时约 3.3s；全量输出见 §1）
+（退出码 0；耗时约 3.3s；全量输出见 §1；评审修正后重跑，artifact 已刷新）
 
 $ diff <(第 1 次 stdout) <(第 2 次 stdout) && diff <(第 1 次 artifact) <(第 2 次 artifact)
 （两次运行 stdout 与 artifact 逐位相同 → 固定种子逐位可复现；artifact 不落临时 db 路径）
 ```
 
-分文件计数：`test_dsl` 86 / `test_eval_engine` 33 / `test_library` 25 / `test_propose` 46 /
-`test_validate` 37（含 T3 编排 + T4 闸③ + T5 闸④⑤）/ `test_monitor` 13（新增）。
+分文件计数（评审修正后）：`test_dsl` 86 / `test_eval_engine` 33 / `test_library` 25 / `test_propose` 46 /
+`test_validate` 49（T3 编排 + T4 闸③ + T5 闸④⑤ + 评审修正 12 例）/ `test_monitor` 13。
 
 ### 0.2 Lint 与类型检查
 
@@ -125,27 +130,32 @@ r_{t+1} = Σ_k β_k · z_k,t + σ · ε        β = (动量 0.006, 反转 0.009,
 
 ### 1.4 闸④/⑤ 明细（artifact 摘录）
 
-入库后 `factors.pool_increment` 已由编排写入（E8 保种排序的真实输入）：
+入库后 `factors.pool_increment` 已由编排写入（= 闸④**验证段**增量，E8 保种排序的真实输入；
+评审修正后为验证段口径）：
 
 ```
-id=1 delta(close,20)                  pool_increment=0.5423
-id=2 div(ts_mean(close,5),close)      pool_increment=0.9578
-id=3 div(1,ts_std(delta(close,1),10)) pool_increment=0.4329
-id=4 div(1,ts_mean(amount,5))         pool_increment=0.3078
-id=5 ts_corr(close,volume,10)         pool_increment=0.1563
+id=1 delta(close,20)                  pool_increment=0.5498
+id=2 div(ts_mean(close,5),close)      pool_increment=0.9181
+id=3 div(1,ts_std(delta(close,1),10)) pool_increment=0.8621
+id=4 div(1,ts_mean(amount,5))         pool_increment=0.9885
+id=5 ts_corr(close,volume,10)         pool_increment=1.0869
 ```
 
-逐条闸④（冗余 → 增量）与闸⑤（训验切分）：
+逐条闸④（冗余 → 验证段增量）与闸⑤（训验切分 + 边界日剔除）：
 
-| 候选 | 闸④ 最大 \|ρ\|（对象） | IR(池) → IR(池+候选) | 增量 | 闸⑤ ICIR_val |
-|---|---|---|---|---|
-| 反转 | 0.568（动量） | 0.542 → 1.500 | **+0.958** | 通过 |
-| 波动 | 0.053（反转） | 1.500 → 1.933 | **+0.433** | 通过 |
-| 流动性 | 0.211（反转） | 1.933 → 2.241 | **+0.308** | 通过 |
-| 量价协同 | 0.110（流动性） | 2.241 → 2.397 | **+0.156** | 1.434 |
+| 候选 | 闸④ 最大 \|ρ\|（对象） | IR(池) → IR(池+候选)（验证段） | 增量 | 训练段增量（审计） | 闸⑤ ICIR_val |
+|---|---|---|---|---|---|
+| 反转 | 0.568（动量） | 0.550 → 1.468 | **+0.918** | +0.969 | 0.640 |
+| 波动 | 0.067（反转） | 1.468 → 2.330 | **+0.862** | +0.344 | 1.107 |
+| 流动性 | 0.211（反转） | 2.330 → 3.318 | **+0.988** | +0.214 | 1.878 |
+| 量价协同 | 0.110（流动性） | 3.318 → 4.405 | **+1.087** | +0.075 | 1.434 |
 
-闸③（置换 + BH-FDR）逐条 `p_value = p_adj = 0.004975 = 1/201`（强信号：200 次置换无一
-达到观测均值 → 下界 p）。
+（|ρ| 仍为全样本 IC 序列相关，冗余口径不变；增量/IR 全部为验证段 44 个共同有效日；
+第 1 条候选入空池，增量 = 验证段 IR(候选) = 0.5498。闸⑤ `purged_train_days = 1`
+——训练段末端 1 日已剔除，见 §5 修正 4。）
+
+闸③（置换 + BH-FDR）逐条 `p_value = p_adj = 0.001 = 1/(N+1)`（N=999；5 个候选全为
+零超额 → step-up 后缀最小被末位项 `K·p/K = p` 压住），`n_hypotheses = 5`。
 
 ## 2. 单测覆盖（T1–T6 逐闸）
 
@@ -157,6 +167,12 @@ id=5 ts_corr(close,volume,10)         pool_increment=0.1563
 step-up 特征）；50 个 p 值批量单调不减、≥ 原值、≤ 1；50 随机表达式（互不同构，`is_subtree_isomorphic`
 去重）注入纯噪声面板（120 日 × 60 票）→ 入库 0 < 5。
 
+评审修正再增 6 例（§5 修正 1/8/9）：K=50 单强候选零超额 → `p_adj = 50/1000 = 0.05 ≤ q` 通过
+（旧 N=200 时下界 1/201 → 必拒，回归钉）；K=50 全噪声全部拒收；K=25 闸②存活者批量
+（24 条尖峰序列超额数 = N 全被拒 + 1 条强信号通过，K>20 端到端）；分辨率守卫 N=50：K=5 不触发 /
+K=6 抛 `ValueError`（消息含不等式两侧 `1/(PERMUTATION_N+1)` 与 `BH_FDR_Q/K` + N/K/q 数值）；
+默认 N=999：K=100 不触发 / K=101 触发；同批逐字重复表达式按位置各计假设（`n_hypotheses = 2`）。
+
 ### 2.2 闸④ 池级增量 + 闸⑤ 样本外（T5，`eca7f599`）
 
 13 例：冗余 |ρ| = 0.92 → `REDUNDANT_WITH_POOL` 且 `detail.duplicate_of` 记相关对象 id；
@@ -165,6 +181,13 @@ step-up 特征）；50 个 p 值批量单调不减、≥ 原值、≤ 1；50 随
 通过且 `detail.increment` 为 `float`；空池语义（增量 = IR(候选)，`ir_pool is None`；负 IR 候选被拒）；
 闸⑤两段皆强通过 / 验证段无信号 `OOS_FAILED` / 符号相反 `OOS_FAILED`（|ICIR| 达标不等于通过）/
 样本过短 fail-closed；切分点不跨日（train/val 无交集、并集 = 全区间、`max(train) < min(val)`）。
+
+评审修正再增 5 例（§5 修正 2/4/6）：闸④判据 = 验证段增量（样本内强但样本外平坦 → 拒收，
+`increment_train > 0` 记审计）；验证段有效日 < 10 → `NO_POOL_INCREMENT` +
+`reason="insufficient_oos_dates"`；闸④验证段边界与闸⑤同一切分（`train_end`/`val_start`/
+`val_end` 对齐）；冗余最少共同日阈值 = `MIN_REDUNDANCY_SAMPLES`（4 点跳过 / 5 点比对）；
+闸⑤剔除训练段末端 horizon 日（秩平移构造：不剔除时训练均值被边界日翻转成正、剔除后为负 →
+由拒收变通过）；剔除后训练段为空 → fail closed。
 
 ### 2.3 衰减监控 + 日批接线（T6，`4514c173`）
 
@@ -186,14 +209,16 @@ source="scheduled", func=run_factor_decay_monitor)` 且失败退避重试；`run
 「5 经典因子入库」证明的是**管线判定正确性**（真预测 → 过五闸；无预测 → 被拦），
 **不是**这些因子在真实 A 股上有效。真实数据验收需快照库接入后另行发起（本 change 非目标）。
 
-### 3.2 闸③置换口径的实现披露
+### 3.2 闸③置换口径的实现披露（评审已批准，见 §5 修正 3）
 
 计划 E4 写「逐日横截面重排因子值」，但接口（`check_significance(ic_series_map, *, seed)`，
 编排契约逐字）只传 IC 序列——横截面数据不在闸③输入内。实现取该零分布的**条件随机化**
 等价形式：横截面重排后当日 IC 在零假设下以 0 为中心对称，逐日独立随机化其符号即该零分布的
 置换实现（保留观测幅度 → 对强信号保守：观测幅度越大越难被置换达到，不会放松判定）。
-统计量、双侧 p 公式、BH-FDR、种子可复现均按 E4 逐字。若后续要求「真实横截面重排」，
-需扩展编排把因子值传给闸③（接口变更，属行为变更，须走 OpenSpec）。
+统计量、双侧 p 公式、BH-FDR、种子可复现均按 E4 逐字。**控制器已批准该替代**（H0 下逐日
+Spearman IC 关于 0 对称 → 符号随机化是精确条件检验；对 H1 保守）；口径已写入
+`validate.py` 模块 docstring「置换口径」段。若后续要求「真实横截面重排」，需扩展编排把因子值
+传给闸③（接口变更，属行为变更，须走 OpenSpec）。
 
 ### 3.3 验收面板的调参过程（披露取舍，非事后挑数据）
 
@@ -247,10 +272,42 @@ T5 把它改为公开 `cross_section_zscore`（DSL `zscore` 算子同一实现�
 ### open items（未闭环，如实列出）
 
 1. **真实数据验收未做**：需 market-snapshot 实盘库接入后跑同一验收脚本（脚本只需替换面板来源）。
-2. **闸③置换口径的最终裁决**：见 §3.2——如需「真实横截面重排」，属接口/行为变更，须另行提案。
+2. ~~**闸③置换口径的最终裁决**~~：**已闭环**——控制器批准逐日符号随机化的条件检验替代
+   （§3.2 / §5 修正 3）；若日后要求真实横截面重排，属接口/行为变更，须另行提案。
 3. **衰减监控的落库面板窗口**：`_PANEL_LOOKBACK_DAYS = DECAY_WINDOW + 30 = 90` 交易日；
    窗口超过 90 日的因子在日批中会因值全 NaN 被 skipped（口径已写入模块 docstring），
    真实运行后若出现需评估是否放大窗口。
 4. **`p_adj` 在存活候选上校正**（BH 只覆盖通过闸①②的候选，编排契约所致）——若评审认为应对
-   全批次（含被闸①②拒收者）校正，属编排行为变更。
+   全批次（含被闸①②拒收者）校正，属编排行为变更。评审修正后多重性已按候选**位置**计
+   （逐字重复不塌缩），但覆盖范围仍是闸①②存活集。
 5. 人工终审签字（自动化 runner 未代签）。
+
+## 5. 评审修正（2026-10-13，review fixes）
+
+评审对 T3–T7 实装提出 9 项修正，全部落地（TDD 红→绿；逐项有测试钉子；`tests/factors` 240 → **252 例**）：
+
+| # | 项 | 严重度 | 修正内容 | 测试钉子 |
+|---|---|---|---|---|
+| 1 | BH-FDR 分辨率缺陷 | 重要 | `PERMUTATION_N` 200 → **999**（覆盖 `K ≤ q·(N+1) = 100`）；`check_significance` 加 fail-loud 守卫（`1/(N+1) > q/K` → `ValueError`，消息含不等式两侧数值与 N/K/q） | K=50 单强通过 / K=50 全噪声全拒 / 守卫边界 N=50·K=5↔6 / 默认 K=100↔101 |
+| 2 | 闸④判据须样本外 | 重要 | 池增量改在**验证段**（与闸⑤同一 `TRAIN_FRACTION` 切分）计算，判定 `increment > 0`；`detail` 记 `increment_train`（审计）+ 两段 IR 与切分边界；验证段有效日 < `MIN_OOS_IR_SAMPLES=10` → `NO_POOL_INCREMENT` + `reason="insufficient_oos_dates"`；冗余口径（全样本 \|ρ\| > 0.7）不变 | 样本内强样本外平坦 → 拒收（旧实现放行）/ 验证段强 → 通过 / 验证段过短 fail closed / 边界与闸⑤同源 |
+| 3 | 置换口径替代（ratification） | 重要（批准） | 逐日符号随机化 = H0 下 IC 关于 0 对称的**精确条件检验**，对 H1 保守——控制器批准；口径写入 `validate.py` 模块 docstring「置换口径」段 + 计划文件「评审修正记录」 | 既有置换用例（同种子逐位可复现、强信号/噪声）继续全绿 |
+| 4 | 闸⑤边界泄漏 | 次要 | 训练段末端 `DEFAULT_IC_HORIZON` 日剔除后再算训练统计量（其远期收益跨入验证段）；`detail["purged_train_days"]` 记录 | 秩平移构造：剔除前训练均值被边界日翻转（旧实现错误拒收）、剔除后同号通过；训练段剔空 → fail closed |
+| 5 | delta spec 查重措辞 | 次要 | 「与库内全部因子」→「与库内 candidate/active/degraded 因子（retired 允许重提）」（与 E7/实现一致）；`openspec validate add-factor-library-and-monitor --strict` 通过 | `openspec validate --strict` |
+| 6 | `_MIN_REDUNDANCY_SAMPLES` 单一来源 | 次要 | 移至 `constraints.py` 为 `MIN_REDUNDANCY_SAMPLES=5`（validate 改为导入） | 4 点跳过 / 5 点比对 |
+| 7 | 陈旧 docstring | 次要 | `test_validate.py` 中「闸③④⑤ 为占位桩」表述更新为真实闸（占位桩 T4/T5 已删除） | —（纯文字） |
+| 8 | K>20 批量（闸③集成级） | 次要 | K=25 批量 = 闸②存活者（逐条先验 `check_single_factor` 通过）：24 条超额数 = N 的尖峰序列 + 1 条零超额强信号 → 仅强候选过闸③。**级别披露**：单一面板无法可控地造出 20+ 条过闸②且 IC 超额数受控的表达式（ICIR ≥ 0.3 与高超额数在σ面上互斥），故本用例在闸③集成级建模（输入 = 闸②存活集）；全管线视角另由既有 50 随机表达式 `admit_candidates` 用例（全部止步闸②）+ 修正 9 的重复表达式编排用例覆盖 | K=25 用例（修正 1 同节） |
+| 9 | BH 多重性按位置 | 次要 | 编排闸③改以**零填充候选位置**为键（`_significance_key`），逐字重复表达式各计一条假设；`detail["n_hypotheses"]` 暴露 K | 同批两个逐字重复 volume：`n_hypotheses = 2`、仅 1 条入库 |
+| 10 | 文档与验收刷新 | 次要 | 本报告 + 计划文件「评审修正记录」+ `tasks.md`；重跑验收脚本，artifact 已刷新（数字变化见下） | 本报告 §0/§1 |
+
+**验收刷新（fix 10）**：重跑 `tests/validation/2026-10-13-add-factor-library-and-monitor-acceptance.py`，
+verdict 不变（`classic_active=5/5, noise_rejected=5/5, passed=True`），artifact 数字变化：
+① 闸③ `p_value = p_adj = 0.001`（N=999，原 0.004975 = 1/201）且 `n_hypotheses=5`；
+② 闸④ `pool_increment` 由全样本增量改为**验证段**增量（0.5498 / 0.9181 / 0.8621 / 0.9885 /
+1.0869，原 0.5423 / 0.9578 / 0.4329 / 0.3078 / 0.1563）；③ 闸⑤ `purged_train_days=1`
+（训练段 ICIR 略变：动量 0.5352 → 0.5280 等）。两次运行 stdout/artifact 逐位相同（固定种子）。
+另更正报告 §1.4 表一处转录笔误（波动闸④最大 |ρ|：0.053 → **0.067**，与 §1.2 两两相关 -0.0667 一致）。
+
+**验收循环性告诫（已记录，沿用 §3.1/§3.3）**：本验收的合成世界是**为验收构造**的
+（生成过程显式依赖五经典因子；§3.3 记录了调参取舍）——「5 经典入库 + 5 噪声拒收」证明的是
+**管线判定正确性**（真预测成分 → 过五闸；无预测 → 被拦），**不是**这些因子在真实 A 股上有效，
+也**不能**用于论证闸口阈值「太松/太紧」；真实数据验收（open item 1）仍是唯一有效性证据。

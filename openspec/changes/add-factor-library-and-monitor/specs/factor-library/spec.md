@@ -21,7 +21,7 @@
 
 ### Requirement: 双层查重
 
-入库前 SHALL 执行结构层查重（与库内全部因子做 AST 子树同构检测）与数值层查重（IC 相关性）；结构同构者直接拒收，原因码 `STRUCTURAL_DUPLICATE`。
+入库前 SHALL 执行结构层查重（与库内 candidate/active/degraded 因子做 AST 子树同构检测（retired 允许重提））与数值层查重（IC 相关性）；结构同构者直接拒收，原因码 `STRUCTURAL_DUPLICATE`。
 
 #### Scenario: 换皮因子拒收
 
