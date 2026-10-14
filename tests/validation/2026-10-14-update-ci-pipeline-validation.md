@@ -64,9 +64,15 @@
   - **`thinking-timeline-pipeline.spec.ts`（timeline）有效 n=1 / flaky 次数 1 / 抖动率 100.0%**；其余 43 个 spec 零抖动零失败；
   - 套件总计与 §3.1 记录逐项一致（default 31/0/0/22 等）。
 
-### 3.3 收尾 run（探针移除后最终树）
+### 3.3 收尾 run（探针移除后的最终树，head `cbd0fc25`）
 
-**待填**（push 后填 run 链接 + 缓存命中日志 + 全绿结论）。
+| 作业 | run | 结论 |
+|---|---|---|
+| `ci.yml` lint-and-test | [38532671186](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38532671186) | **pass** |
+| `e2e-playwright.yml` stub | [38532671389](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38532671389) | **pass（16m35s）**；`e2e-flaky` artifact 正常产出；live/flaky-report skipping（PR 事件，符合预期） |
+
+- **R3（缓存命中，同 PR ref）**：`Cache hit for: playwright-Linux-b0392083…` → `Cache restored from key: playwright-Linux-b0392083…`；作业末尾 `Cache hit occurred on the primary key …, not saving cache`（命中即不重存）。stub 作业墙钟 17m28s（首跑）→ **16m35s**（命中后），浏览器不再重下。
+- 探针步骤已从 live 作业移除，最终树无任何临时探针残留（`git diff main...head` 净差异见 PR #332）。
 
 ### 3.4 main 分支保护核对（tasks 3.2 人工项）
 
@@ -84,4 +90,11 @@
 
 ## 五、结论
 
-**待 CI 实跑后填**。
+- **五条需求全部在真实 CI 上验证**：R1 并发取消（行为学：后发 dispatch 取消前发 run，被取消 run 无半截 artifact）；R2 fail-fast 排序（ci.yml 前端步骤先于 pytest、E2E 套件耗时升序，均以步骤终态序列取证）；R3 浏览器缓存（miss → saved → 同 ref 命中 restored，时长下降）；R4 抖动统计（artifact 记录与实跑逐项吻合 + nightly 聚合出各 spec 抖动率报告，捕获 #328 族首例 flaky 记录）；R5 失败上报（created/commented/noop 三路径在真实 GitHub API 上全部走通，标签自动补建）。
+- **既有测试零修改**；新增 21 例测试（17 pytest 先红后绿 + 4 node 桩件）全部纳入 CI 门禁（`node --test` 步骤）。
+- **本地唯一失败项已归因**（宿主 .env `LLM_MAX_CONTEXT=256000` 泄漏，非本 delta；CI 无 .env 为绿；并发会话已在修复）。
+- **遗留与后续**：
+  1. 探针 issue #333 验证后已关闭（注明为实施期探针用途）——后续真实 nightly 失败会重新建单；
+  2. **nightly 首次自然运行**（今晚 UTC 18:00）将自然覆盖：schedule 豁免取消语义、@live 真实链路（失败则真建单）、聚合窗口随记录累积（当前窗口 2 条记录）；
+  3. 缓存按 ref 作用域为平台语义：PR run 之间命中、nightly 命中上一晚，跨 ref 不共享（§四.7）；
+  4. main 未配置分支保护（§3.4）；若后续启用，建议将 `lint-and-test` / `stub` 设为 required checks（本 delta 未改动作业名，无重命名风险）。

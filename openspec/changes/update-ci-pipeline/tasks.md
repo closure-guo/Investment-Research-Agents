@@ -16,7 +16,8 @@
       —— 逻辑独立成 `scripts/ci/report_live_failure.cjs` + node 桩件测试 4/4；CI 探针实证见验证报告 §三
 
 ## 3. 验证
-- [ ] 3.1 全量测试通过（后端 + 前端）
-- [ ] 3.2 在 PR 上跑通全部 workflow（证据：CI 链接）；`git fetch` 核对 main 分支保护的 required checks（人工）
+- [x] 3.1 全量测试通过（后端 + 前端）—— 后端 CI 绿（本地 1 例失败已归因宿主 .env 泄漏，见验证报告 §二）；前端 vitest 760/760 本地 + CI 双绿
+- [x] 3.2 在 PR 上跑通全部 workflow（证据：CI 链接）；`git fetch` 核对 main 分支保护的 required checks（人工）
+      —— PR #332 run 38527451554/38527451582/38532671186/38532671389 + dispatch 探针 38529898682/38529954252 全数取证；分支保护核对：main 未配置保护（404），required checks 为空（见验证报告 §3.4）
 - [x] 3.3 既有测试零修改（红线）—— diff 不含任何既有测试文件；新增测试：`tests/test_collect_flaky.py`、`tests/test_aggregate_flaky.py`、`scripts/ci/report_live_failure.test.cjs`
-- [ ] 3.4 验证报告落 `tests/validation/2026-10-14-update-ci-pipeline-validation.md`
+- [x] 3.4 验证报告落 `tests/validation/2026-10-14-update-ci-pipeline-validation.md`（含机制实证/本地验证/CI 证据/口径说明/结论）
