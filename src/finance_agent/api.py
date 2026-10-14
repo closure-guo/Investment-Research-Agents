@@ -45,6 +45,12 @@ from finance_agent.graph import build_5layer_graph  # noqa: E402
 from finance_agent.langfuse_tracing import get_langfuse  # noqa: E402
 from finance_agent.llm import LLMConfig  # noqa: E402
 from finance_agent.llm.probe_cache import get_probe_cache  # noqa: E402
+from finance_agent.memory.semantic import (  # noqa: E402
+    CLAUSE_STATUSES,
+    confirm_clause,
+    list_clauses,
+    reject_clause,
+)
 from finance_agent.pipeline_runner import PipelineRunner, build_layer_tree  # noqa: E402
 from finance_agent.screening.pipeline import (  # noqa: E402
     check_signal_freshness,
@@ -746,9 +752,14 @@ if TESTING:
         screening 五表**并丢弃进程内队列单例**）造选股页确定性状态
         （add-screening-pipeline S6）；库路径于调用期读 SCREENING_DB_PATH（导入期
         冻结会让 E2E 注入失效）。
+        顶层可选 memory（dict：``clauses`` 造条款，逐条经既有落库 + 状态机置
+        pending/confirmed/rejected；可带 source 与 evidence（JSON 文本，结算样本）
+        造记忆确认页确定性状态）与 memory_reset（bool：清条款表）造记忆确认页
+        确定性状态（delta add-memory-confirmation T1/2.3）；库路径于调用期读
+        SESSIONS_DB_PATH（semantic 模块 env 口径，E2E 指向独立测试库）。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
-        # track_record / snapshot / screening 造数块不受 chat_history 前置约束
+        # track_record / snapshot / screening / memory 造数块不受 chat_history 前置约束
         if (
             "chat_history" not in req
             and not isinstance(req.get("track_record"), dict)
@@ -757,6 +768,8 @@ if TESTING:
             and not isinstance(req.get("screening"), dict)
             and not req.get("screening_reset")
             and not req.get("track_record_reset")
+            and not isinstance(req.get("memory"), dict)
+            and not req.get("memory_reset")
         ):
             return {"status": "ok", "mode": "testing"}
         # add-paper-broker：战绩造数复位（清 equity_curve + paper_equity 两表）。双曲线
@@ -927,6 +940,39 @@ if TESTING:
             queue_seed = screening_seed.get("queue")
             if isinstance(queue_seed, list):
                 _get_analyze_queue().seed(queue_seed)
+        # 语义记忆造数（delta add-memory-confirmation T1）：可选先 reset（清条款表）再写
+        # 条款——逐条经既有落库（去重口径同生产：同文本已存在则跳过）后再按 status 走
+        # 既有状态机置态，与真实确认/驳回路径同源。库路径调用期读 SESSIONS_DB_PATH。
+        if req.get("memory_reset"):
+            from finance_agent.memory.semantic import reset_clauses
+
+            reset_clauses()
+        memory_seed = req.get("memory")
+        if isinstance(memory_seed, dict):
+            from finance_agent.memory.semantic import (
+                confirm_clause as _seed_confirm_clause,
+            )
+            from finance_agent.memory.semantic import (
+                reject_clause as _seed_reject_clause,
+            )
+            from finance_agent.memory.semantic import (
+                store_candidate_clauses as _seed_store_clauses,
+            )
+
+            for clause_row in memory_seed.get("clauses") or []:
+                new_ids = _seed_store_clauses(
+                    [str(clause_row["text"])],
+                    source=clause_row.get("source", "monthly_batch"),
+                    # evidence 原样落库（生产为 JSON 文本）：供记忆页结算样本展示造数
+                    evidence=clause_row.get("evidence"),
+                )
+                # 同文本已存在（去重口径）→ 不重复入库，seed 保持幂等
+                if not new_ids:
+                    continue
+                if clause_row.get("status") == "confirmed":
+                    _seed_confirm_clause(new_ids[0])
+                elif clause_row.get("status") == "rejected":
+                    _seed_reject_clause(new_ids[0])
         # track_record-only（含 {} 空 dict）造数后即返回占位响应，不落会话
         if "chat_history" not in req:
             return {"status": "ok", "mode": "testing"}
@@ -3231,6 +3277,61 @@ async def screening_analyze() -> Any:
         "queued": [item for item in snapshot if item["state"] == "queued"],
         "removed": removals,
     }
+
+
+# ── 语义记忆确认（delta add-memory-confirmation：审批队列暴露 + 人工确认门禁） ──
+
+# 条款载荷字段：id / 正文 / 来源 / 提炼时间 / 状态 / 结算样本（evidence，可空）。
+# 状态机与注入门禁（仅 confirmed 注入）全部沿用 memory.semantic——本层零业务复制。
+
+
+def _memory_clause_payload(row: dict[str, Any]) -> dict[str, Any]:
+    """条款行（库列名）→ API 载荷（前端契约字段名）。"""
+    return {
+        "id": str(row.get("clause_id")),
+        "text": row.get("text"),
+        "status": row.get("status"),
+        "source": row.get("source"),
+        "created_at": row.get("created_at"),
+        "evidence": row.get("evidence"),
+    }
+
+
+@app.get("/api/memory/clauses")
+async def memory_clause_list(status: str | None = None) -> dict[str, Any]:
+    """语义记忆条款列表（只读）：``?status=`` 三态过滤，默认 pending（审批队列默认视图）。
+
+    未知 status → 400 显式拒绝（不静默回落默认或全量：静默回落会让调用方把结果
+    误读成所请求的状态）。缺库/无表 → 空列表（读路径既有 fail-open 语义）。
+
+    函数名刻意避开条款库表名的连写：门禁测试要求该表名只出现在
+    memory/semantic.py（无第二读入口），命名撞串会让门禁对 api.py 误报。
+    """
+    effective = status if status is not None else "pending"
+    if effective not in CLAUSE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"未知条款状态: {effective}")
+    rows = await asyncio.to_thread(list_clauses, effective)
+    return {"status": effective, "clauses": [_memory_clause_payload(row) for row in rows]}
+
+
+@app.post("/api/memory/clauses/{clause_id}/confirm")
+async def memory_clause_confirm(clause_id: str) -> dict[str, Any]:
+    """人工确认：pending → confirmed（此后即刻参与风控辩论注入）。
+
+    幂等：对已确认条款重复确认仍 200 并返回当前状态（既有状态机 UPDATE 命中即 True）；
+    未知 id → 404（写语义 MUST NOT 静默成功）。
+    """
+    if not await asyncio.to_thread(confirm_clause, clause_id):
+        raise HTTPException(status_code=404, detail=f"未知条款: {clause_id}")
+    return {"id": clause_id, "status": "confirmed"}
+
+
+@app.post("/api/memory/clauses/{clause_id}/reject")
+async def memory_clause_reject(clause_id: str) -> dict[str, Any]:
+    """人工驳回：pending → rejected（永不注入）。幂等与 404 语义同确认端点。"""
+    if not await asyncio.to_thread(reject_clause, clause_id):
+        raise HTTPException(status_code=404, detail=f"未知条款: {clause_id}")
+    return {"id": clause_id, "status": "rejected"}
 
 
 # ── AG-UI 协议通道（add-assistant-ui-thread PoC，双轨隔离：仅挂载，不接入 registry）──

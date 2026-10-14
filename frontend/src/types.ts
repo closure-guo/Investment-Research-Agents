@@ -828,3 +828,24 @@ export interface ScreeningAnalyzeResponse {
   queued: ScreeningQueueEntry[]
   removed: ScreeningRemoval[]
 }
+
+// 语义记忆条款（add-memory-confirmation：GET /api/memory/clauses 载荷）
+export type MemoryClauseStatus = 'pending' | 'confirmed' | 'rejected'
+
+export interface MemoryClause {
+  id: string
+  text: string
+  /** 条款状态三态；仅 confirmed 参与风控辩论注入（后端门禁） */
+  status: MemoryClauseStatus
+  /** 来源（monthly_batch / llm 等，后端原值） */
+  source: string
+  /** 提炼时间（落库时刻 ISO） */
+  created_at: string
+  /** 结算样本（JSON 文本或空，后端原值） */
+  evidence: string | null
+}
+
+export interface MemoryClauseListResponse {
+  status: MemoryClauseStatus
+  clauses: MemoryClause[]
+}

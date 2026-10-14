@@ -18,6 +18,7 @@ import { useClickOutside } from './useClickOutside'
 import { usePathname, navigate } from './route'
 import { DownloadCenter } from './pages/downloads/DownloadCenter'
 import { ScreeningPage } from './pages/screening/ScreeningPage'
+import { MemoryPage } from './pages/memory/MemoryPage'
 import { TrackRecordPage } from './pages/trackRecord/TrackRecordPage'
 import { CalibrationPage } from './pages/trackRecord/CalibrationPage'
 import { PredictionDetailPage } from './pages/trackRecord/PredictionDetailPage'
@@ -891,6 +892,7 @@ export default function App() {
         onOpenDownloads={() => navigate('/downloads')}
         onOpenDecisions={() => navigate('/track-record')}
         onOpenScreening={() => navigate('/screening')}
+        onOpenMemory={() => navigate('/memory')}
         onOpenSettings={() => { setSettingsFocus(undefined); navigate('/settings') }}
         themeChoice={themeChoice}
         onCycleTheme={cycleTheme}
@@ -916,6 +918,9 @@ export default function App() {
         ) : pathname === '/screening' ? (
           // 选股页（add-screening-pipeline T4）：最近成功批次池 + 批量深度分析
           <ScreeningPage onBack={() => navigate('/')} />
+        ) : pathname === '/memory' ? (
+          // 记忆确认页（add-memory-confirmation T2）：语义记忆条款审批队列
+          <MemoryPage onBack={() => navigate('/')} />
         ) : pathname === '/settings' ? (
           // 设置中心页（add-agent-settings-center Task 7）：左导航六分区 + 右内容区
           <SettingsCenterPage
@@ -1116,6 +1121,7 @@ export default function App() {
         onSelectSession={selectSession}
         onNewSession={newAnalysis}
         onOpenDownloads={() => navigate('/downloads')}
+        onOpenMemory={() => navigate('/memory')}
         onCycleTheme={cycleTheme}
         themeChoice={themeChoice}
       />
@@ -1132,7 +1138,7 @@ export default function App() {
 }
 
 // ── Sidebar（add-collapsible-sidebar：shadcn Sidebar 原语重构）──
-function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
+function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenMemory, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
   sessions: SessionMeta[]
   currentSessionId: string | null
   onSelect: (id: string) => void
@@ -1142,6 +1148,7 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
   onOpenDownloads: () => void
   onOpenDecisions: () => void
   onOpenScreening: () => void
+  onOpenMemory: () => void
   onOpenSettings: () => void
   runningSessionIds: Set<string>
   loading?: boolean
@@ -1194,6 +1201,11 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
           <SidebarIcon label="选股池">
             <Button variant="ghost" size="icon" onClick={onOpenScreening} aria-label="选股池" data-testid="sidebar-screening-collapsed">
               <i className="fas fa-filter text-xs"></i>
+            </Button>
+          </SidebarIcon>
+          <SidebarIcon label="记忆">
+            <Button variant="ghost" size="icon" onClick={onOpenMemory} aria-label="记忆" data-testid="sidebar-memory-collapsed">
+              <i className="fas fa-brain text-xs"></i>
             </Button>
           </SidebarIcon>
           <SidebarIcon label="决策战绩">

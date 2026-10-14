@@ -14,12 +14,13 @@ export interface CommandPaletteProps {
   onSelectSession: (id: string) => void
   onNewSession: () => void
   onOpenDownloads: () => void
+  onOpenMemory: () => void
   onCycleTheme: () => void
   /** 当前主题（面板内展示动作副作用说明） */
   themeChoice: ThemeChoice
 }
 
-export function CommandPalette({ open, onClose, sessions, onSelectSession, onNewSession, onOpenDownloads, onCycleTheme, themeChoice }: CommandPaletteProps) {
+export function CommandPalette({ open, onClose, sessions, onSelectSession, onNewSession, onOpenDownloads, onOpenMemory, onCycleTheme, themeChoice }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -41,8 +42,10 @@ export function CommandPalette({ open, onClose, sessions, onSelectSession, onNew
   const actions = useMemo(() => ([
     { id: 'action-new', icon: 'fa-plus', label: '新建会话', hint: 'Ctrl/⌘+⇧+N', run: onNewSession },
     { id: 'action-downloads', icon: 'fa-download', label: '打开下载管理', hint: '', run: onOpenDownloads },
+    // add-memory-confirmation：记忆确认页入口（与侧边栏折叠图标同源 navigate）
+    { id: 'action-memory', icon: 'fa-brain', label: '打开记忆确认', hint: '', run: onOpenMemory },
     { id: 'action-theme', icon: 'fa-moon', label: `切换主题（当前：${themeChoice === 'system' ? '跟随系统' : themeChoice === 'dark' ? '深色' : '浅色'}）`, hint: '', run: onCycleTheme },
-  ]), [onNewSession, onOpenDownloads, onCycleTheme, themeChoice])
+  ]), [onNewSession, onOpenDownloads, onOpenMemory, onCycleTheme, themeChoice])
 
   const q = query.trim().toLowerCase()
   const matchedSessions = q

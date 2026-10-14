@@ -301,6 +301,24 @@ def _set_status(clause_id: str, status: str, *, db_path: str | Path | None) -> b
         conn.close()
 
 
+def reset_clauses(db_path: str | Path | None = None) -> None:
+    """清空条款表（TESTING 造数复位专用，非业务路径）。
+
+    仅 delta add-memory-confirmation 的 `/api/test/seed` ``memory_reset`` 调用：
+    E2E 每例前后复位条款面。业务确认/注入只经既有读路径与状态机，无生产调用方。
+
+    为何放在本模块：表名 ``memory_clauses`` 只允许出现在 semantic.py
+    （门禁测试「无第二读入口」逐文件扫描 src）；api.py 若自行拼 SQL 会让门禁变红。
+    """
+    init_clauses(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute("DELETE FROM memory_clauses")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def confirm_clause(clause_id: str, db_path: str | Path | None = None) -> bool:
     """人工确认：pending → confirmed（此后才允许注入 prompt）。"""
     return _set_status(clause_id, "confirmed", db_path=db_path)
