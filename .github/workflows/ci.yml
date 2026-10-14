@@ -56,3 +56,21 @@ jobs:
       # prompt/模型/校验器变更后守卫被削弱即红
       - name: Fault injection regression gate
         run: uv run pytest tests/regression/fault_injection -m fault_regression -q
+
+      # 前端单测门禁（vitest，2026-10-13 补）：此前 CI 仅由 E2E 覆盖前端，
+      # 761 例单测从未在 CI 运行（本地 `npm test` 全绿但无门禁）——UI 改动
+      # 可能带病进 main。步骤零后端依赖（fetch 全 mock），约 1-2 分钟。
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Frontend unit tests (vitest)
+        run: npm test
+        working-directory: frontend
