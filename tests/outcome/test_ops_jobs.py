@@ -33,8 +33,59 @@ from finance_agent.outcome.ops.model import (
 class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 8  # 6 → 8：+factor_decay_monitor(1) +paper_settle_daily(12)
+        assert (
+            len(JOB_IDS) == 9
+        )  # 6 → 8：+factor_decay_monitor(1) +paper_settle_daily(12)；8 → 9：+screening_daily
         assert all(JOB_LABELS[jid] for jid in JOB_IDS)
+
+
+class TestScreeningDailyRegistration:
+    """add-screening-batch-scheduling：选股日批接线（15:40，晚于快照 15:30）。"""
+
+    def test_registered_aligned_and_ordered(self):
+        assert "screening_daily" in JOB_IDS
+        assert JOB_LABELS["screening_daily"] == "选股"
+        assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
+        assert len(JOB_IDS) == 9  # 8 → 9：+screening_daily（选股日批接线）
+        assert (
+            JOB_IDS.index("market_snapshot_daily")
+            < JOB_IDS.index("screening_daily")
+            < JOB_IDS.index("factor_decay_monitor")
+        ), "展示顺序 = 时刻顺序（快照 15:30 → 选股 15:40 → 因子衰减 15:45）"
+
+    def test_schedule_spec_is_1540_monfri(self):
+        assert SCHEDULES["screening_daily"] == {
+            "day_of_week": "mon-fri",
+            "hour": 15,
+            "minute": 40,
+            "timezone": "Asia/Shanghai",
+        }
+
+    def test_daily_wrapper_raises_on_failed_batch(self, monkeypatch):
+        """批次 failed（快照过期等）→ 任务上抛：run_job 记 failed，运维界面可见。"""
+        import finance_agent.screening.pipeline as pipeline_mod
+
+        monkeypatch.setattr(
+            pipeline_mod,
+            "run_screening_batch",
+            lambda: {"trade_date": "2026-10-13", "status": "failed", "error": "快照过期"},
+        )
+        with pytest.raises(RuntimeError, match="快照过期"):
+            pipeline_mod.run_screening_daily()
+
+    def test_daily_wrapper_passes_through_ok_summary(self, monkeypatch):
+        import finance_agent.screening.pipeline as pipeline_mod
+
+        payload = {
+            "trade_date": "2026-10-13",
+            "status": "ok",
+            "l1_passed": 10,
+            "l2_top": 5,
+            "l3_keep": 3,
+            "pool_size": 3,
+        }
+        monkeypatch.setattr(pipeline_mod, "run_screening_batch", lambda: payload)
+        assert pipeline_mod.run_screening_daily() == payload
 
     def test_paper_settle_schedule_spec_is_1620_monfri(self):
         """add-paper-broker T2：paper 结算日批 16:20（mon-fri，Asia/Shanghai）逐字钉死。"""

@@ -53,6 +53,7 @@ from finance_agent.outcome.ops.model import finish_job_run, get_cohort_settings
 from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
+from finance_agent.screening.pipeline import run_screening_daily
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,15 @@ def _mark_retries(outcome: dict[str, Any] | None) -> None:
 def _snapshot_job() -> None:
     """add-market-snapshot：全市场行情快照日批（15:30，收盘后；次日开盘前可读）。"""
     _with_retry("market_snapshot_daily", "market snapshot", run_market_snapshot_batch)
+
+
+def _screening_job() -> None:
+    """add-screening-batch-scheduling：选股日批（15:40，快照之后、因子监控之前）。
+
+    快照 15:30 先落库，选股据此跑 L1→L2→L3 产出精选池；批次 failed 时任务上抛
+    （run_job 记 failed），运维界面可见。快照缺失时快照守卫 fail loud，不产残缺池。
+    """
+    _with_retry("screening_daily", "screening batch", run_screening_daily)
 
 
 def _factor_monitor_job() -> None:
@@ -215,6 +225,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         _snapshot_job,
         _cron_for("market_snapshot_daily"),
         id="market_snapshot_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-screening-batch-scheduling：选股日批（15:40）——快照（15:30）之后、
+    # 因子监控（15:45）与结算链（16:00 起）之前；读快照库，L3 走 quick LLM。
+    scheduler.add_job(
+        _screening_job,
+        _cron_for("screening_daily"),
+        id="screening_daily",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
