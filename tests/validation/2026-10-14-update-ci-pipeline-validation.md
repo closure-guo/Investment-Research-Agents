@@ -36,7 +36,41 @@
 
 ## 三、CI 实跑证据
 
-**待 CI 实跑后填**（PR 链接、stub 作业套件顺序与缓存命中日志、e2e-flaky artifact、dispatch 探针的 issue 创建/rerun 幂等、flaky-report 报告、concurrency 组字段）。
+**PR**: https://github.com/closure-guo/finance_analysis_agent/pull/332（head `feat/ci-pipeline-delta`）
+
+### 3.1 PR run #1（`pull_request` 事件，实施提交 9a207a18 对应 run）
+
+| 作业 | run | 结论 |
+|---|---|---|
+| `ci.yml` lint-and-test | [38527451554](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38527451554) | **pass（13m37s）** |
+| `e2e-playwright.yml` stub | [38527451582](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38527451582) | **pass（17m28s）**；live/flaky-report 按 PR 事件规则 skipping（符合预期） |
+
+- **R2（ci.yml 排序）**：步骤终态序列实测——`CI helper script tests (node --test)` → `Install frontend dependencies` → `Frontend unit tests (vitest)` 全部 success，且 `Unit tests`（pytest）在其后执行；三道评估门禁随后全绿。**node --test 在真实 runner（node 20）通过；vitest 门禁在 CI 通过**。
+- **R2（E2E 套件排序）**：stub 作业步骤 12→15 实测为 `eval-ops → track-record → (stub) default → timeline`，全部 success；`Collect flaky stats` 与 `e2e-flaky` 上传 success；`playwright-report` 上传 skipped（无失败，符合 `if: failure()`）。
+- **R4（记录落盘）**：下载 artifact `e2e-flaky` → `38527451582-1.json`，内容与实跑逐项吻合：
+  `default: passed=31/flaky=0/skipped=22（18 specs）`、`eval-ops: 5/0/0（1）`、`track-record: 16/0/0（8）`、`timeline: passed=33/flaky=1/skipped=1（17 specs）`；`missing=[]`（四套件全跑，排序未遮挡）；`source=github-actions`，`run_url/branch/event/sha` 元数据齐全。**timeline 的 1 例 flaky 即 #328 时延族首例被机器记录**。
+- **R3（缓存）**：首跑 `Cache not found for input keys: playwright-Linux-b0392083…` → 作业末尾 `Cache saved with key: playwright-Linux-b0392083…`（缓存按 PR ref 作用域建立，同 PR 后续 run 命中——见 §3.3）。
+
+### 3.2 dispatch 探针（`workflow_dispatch`，head 81336572）——R1/R4/R5
+
+- **R1（并发取消，行为学实证）**：连续两次 dispatch 同一分支（同一 `github.ref` → 同一并发组）——run [38529898682](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38529898682) 被后发的 run [38529954252](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38529954252) **取消**（终态 `cancelled`；后发 run 先短暂 pending 等待接管，符合 GitHub 并发语义）；被取消 run 的 stub 步骤 14-18（后两个套件/收数/上传）**全部 skipped**——`!cancelled()` 生效，**半截数据未上传**（该 run artifacts 仅剩其先完成的 flaky-report 产物，无 e2e-flaky 记录）。
+- **R5（失败上报，三路径真实 API 验证）**：
+  1. **created**：run #1 的 live 作业失败（探针步骤）→ 自动建 **issue [#333](https://github.com/closure-guo/finance_analysis_agent/issues/333)**「[ci-failure] @live nightly E2E 失败」，标签 `ci-failure` **由 ensure 逻辑自动补建**（此前仓库无此标签），body 含失败 run 链接/事件/提交/尝试次数；
+  2. **commented**：run #2 的 live 作业失败（新 run 链接）→ 日志 `已在 issue #333 追加失败记录`，**未重复建单**（open 单仍为 1 条，评论 +1）；
+  3. **noop**：`gh run rerun 38529954252 --failed`（attempt 2，同 run 链接）→ 日志 `issue #333 已有本 run 记录，跳过（幂等）`，评论数保持 1。
+  （探针 issue #333 验证完成后已关闭并注明用途。）
+- **R4（nightly 聚合，真实数据）**：run #2 的 flaky-report 作业（dispatch 亦触发）`gh run download` 拉到 PR run #1 的 artifact → 产出汇总报告（artifact `e2e-flaky-summary`，内容摘录）：
+  - 窗口 2026-09-30 → 2026-10-14（UTC，近 14 天）；有效记录 1 条；同 run rerun 去重 0；无效文件 0；
+  - **`thinking-timeline-pipeline.spec.ts`（timeline）有效 n=1 / flaky 次数 1 / 抖动率 100.0%**；其余 43 个 spec 零抖动零失败；
+  - 套件总计与 §3.1 记录逐项一致（default 31/0/0/22 等）。
+
+### 3.3 收尾 run（探针移除后最终树）
+
+**待填**（push 后填 run 链接 + 缓存命中日志 + 全绿结论）。
+
+### 3.4 main 分支保护核对（tasks 3.2 人工项）
+
+`gh api repos/{owner}/{repo}/branches/main/protection` → **404 Branch not protected**：本仓库 main **未配置分支保护，required checks 为空**。即当前合并门禁靠约定（PR + CI 观察）而非平台强制；本 delta 的五个 workflow 作业名与既有命名不冲突，后续如需启用分支保护可直接把 `lint-and-test` / `stub` 加为 required checks（无重命名风险）。
 
 ## 四、实施口径说明（与 tasks 字面差异及理由）
 
@@ -45,6 +79,8 @@
 3. **浏览器缓存同时加进 live 作业**（键绑 `uv.lock`）：tasks 1.3 只点名 e2e 主作业；live 作业的 Python 侧 playwright 版本由 `uv.lock` 锁定，同键同原理，省 nightly 下载。
 4. **新增 `node --test` 桩件测试步骤进 ci.yml**：R5 上报逻辑属本 delta 新增代码，按「先写失败测试」纪律补桩件测试并纳入门禁（零依赖、秒级；亦属 fail-fast 排序的受益项）。
 5. **`if: ${{ !cancelled() }}`（而非 `always()`）用于收数与 artifact 上传**：被并发取消的 run 不收半截数据（半截记录无归因价值，且 `always()` 会在取消时照跑）。
+6. **artifact 上传加 `overwrite: true`**（新增的 `e2e-flaky` 与既有 `playwright-report`）：upload-artifact v4 制品不可变且按 run 作用域——rerun（attempt≥2）时同名上传会冲突，不加则 rerun 在无过错情况下假红；覆盖后 artifact 恒为最新 attempt 的记录（汇总侧仍按 run_id 取最高 attempt 去重，双保险）。
+7. **GitHub 缓存按 ref 作用域**（R3 的命中前提）：PR run 的缓存在 `refs/pull/N/merge` 作用域，nightly/main push 在 `refs/heads/main` 作用域——同 PR 的后续 run 命中、nightly 命中上一晚，跨 ref 不共享（平台语义，非实现选择；§3.3 的命中实证即同 PR ref）。
 
 ## 五、结论
 

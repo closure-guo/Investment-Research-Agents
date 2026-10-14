@@ -192,15 +192,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ===== 临时探针（update-ci-pipeline 实施期验证用，验证后删除本步骤）=====
-      # 目的：真实 GitHub API 上验证 R5 上报链路（require 路径 / issues: write 权限 /
-      # ci-failure 标签建单 + rerun 幂等）。删掉后本作业恢复原样。
-      - name: PROBE forced failure (temporary)
-        run: |
-          echo "temporary probe: forcing live job failure to verify issue reporting"
-          exit 1
-      # ===== 临时探针结束 =====
-
       - uses: astral-sh/setup-uv@v5
 
       - name: Set up Python
