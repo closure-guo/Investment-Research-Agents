@@ -98,3 +98,9 @@
   2. **nightly 首次自然运行**（今晚 UTC 18:00）将自然覆盖：schedule 豁免取消语义、@live 真实链路（失败则真建单）、聚合窗口随记录累积（当前窗口 2 条记录）；
   3. 缓存按 ref 作用域为平台语义：PR run 之间命中、nightly 命中上一晚，跨 ref 不共享（§四.7）；
   4. main 未配置分支保护（§3.4）；若后续启用，建议将 `lint-and-test` / `stub` 设为 required checks（本 delta 未改动作业名，无重命名风险）。
+
+## 六、实施期 CI flake 观察（非本 delta，已立案 #334）
+
+run #4（head `97c0a5a1`）的 `ci.yml` `Unit tests` 步失败：`tests/test_ops_api.py::test_stale_running_swept_on_read`（悬挂行清扫断言 `'running' == 'failed'`）。**同 tree 的 run #1（`9a207a18`）与 run #3（`cbd0fc25`）同测试通过，三次 head 间 `src/` 与 `tests/` 逐字节相同 → flake 实证、非回归**；`gh run rerun --failed` 重跑（10m40s）即绿。
+
+诊断摘要（详见 issue #334）：清扫为**静默跳过**（成功/异常两条路径均会打 WARNING 日志，实测无任何日志）；本地单测/模块/收集序对（`tests/outcome/test_ops_jobs.py` + `tests/test_ops_api.py`）复现均绿且 `active_run_ids()` 零泄漏；模块 reload、sweep 节流、跨文件 active 泄漏均已排除；剩余假设（active 集合时机依赖 / 时间字符串边缘）未证实，建议按 issue 的「失败现场保留」方案先钉机制。本 delta 的抖动统计当前只覆盖 Playwright 套件——本 flake 即后端 pytest 抖动暂无度量的首个样本。
