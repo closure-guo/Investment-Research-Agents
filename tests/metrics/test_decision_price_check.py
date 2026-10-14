@@ -251,6 +251,24 @@ class TestScenarioNonPriceDimensions:
         assert len(anomalies) == 1
         assert anomalies[0]["deviation_pct"] == pytest.approx(4.06, abs=0.01)
 
+    def test_dash_range_not_extracted(self):
+        """破折号区间「2—3.5%」的 2 不得当价位提取（宝信软件 10-13 生产实证：
+        「止损距离仅约 2—3.5%（估算值）」的 2 与止损参考带下沿 16.3771
+        偏差 87.79% → 打回重试）。"""
+        decision = _decision(reasoning="止损距离仅约 2—3.5%（估算值），在 38.61% 年化波动下。")
+        anomalies = check_decision_prices(decision, TI_600845, PL_600845, CLOSE_600845)
+        assert anomalies == []
+
+    def test_real_price_after_dash_range_still_checked(self):
+        """护栏：破折号区间后的真实价位仍须校验（排除区不得过宽）。
+
+        13.0 与最近已验证指标偏差远超 2% 且落在全部参考带外 → SHALL 登记 deviation。
+        """
+        decision = _decision(reasoning="止损距离约 2—3.5%；若跌破 13.0 支撑则离场观望。")
+        anomalies = check_decision_prices(decision, TI_600845, PL_600845, CLOSE_600845)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+
 
 class TestCjkEmbeddedAliasesAndTrailingEnumerators:
     """10-07 生产误拦回归（issue #254）：中文行文嵌入的 MA 别名 + 「1) 2)」后括号序号。
@@ -745,6 +763,25 @@ class TestEnumeratorFalsePositives:
         anomalies = check_decision_prices(decision, TI_600026, PL_600026, CLOSE_600026)
         assert anomalies == []
 
+    def test_institution_count_measure_word_not_treated_as_price(self):
+        """「减少超 10 家」的 10 不得当价位提取（赛轮轮胎 10-13 生产实证：
+        「机构二季度持股减少超 10 家」的 10 与止损参考带下沿 11.9029
+        偏差 15.99% → 报告阻断）。"""
+        decision = _decision(reasoning="机构二季度持股减少超 10 家、零正向催化。")
+        anomalies = check_decision_prices(decision, TI_600026, PL_600026, CLOSE_600026)
+        assert anomalies == []
+
+    def test_real_price_after_measure_word_still_checked(self):
+        """护栏：量词数字后的真实价位仍须校验（排除区不得过宽）。
+
+        13.0 与近期低点 14.06 偏差 7.5% 且落在全部参考带外 → SHALL 登记 deviation。
+        """
+        decision = _decision(reasoning="机构减持超 10 家；若跌破 13.0 支撑则离场观望。")
+        anomalies = check_decision_prices(decision, TI_600026, PL_600026, CLOSE_600026)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert anomalies[0]["indicator"] == "近期低点"
+
     def test_price_in_parens_with_context_still_checked(self):
         """护栏：括号内带小数点/上下文的真实价位仍须校验（排除区不得过宽）。
 
@@ -866,6 +903,90 @@ class TestIndexNameFalsePositives:
         """护栏：指数名后隔开的真实价位仍须校验（排除区不得过宽）。"""
         decision = _decision(reasoning="相对沪深300 超额考核；若跌破（1130.0）支撑则离场观望。")
         anomalies = check_decision_prices(decision, TI_600519, PL_600519, CLOSE_600519)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert anomalies[0]["indicator"] == "近期低点"
+
+    def test_index_name_with_multi_space_not_treated_as_price(self):
+        """多空格排版变体「沪深  300」不得穿透指数名豁免（同花顺 10-13 生产实证：
+        阻断消息「文本价位 300 与 近期高点 245.48 偏差 22.21%」同形——指数名
+        与数字间多一个空格即从豁免区漏出）。"""
+        decision = _decision(reasoning="按 T+20 相对沪深  300 超额收益考核，财报已披露。")
+        anomalies = check_decision_prices(decision, TI_600519, PL_600519, CLOSE_600519)
+        assert anomalies == []
+
+    def test_real_price_after_multi_space_index_mention_still_checked(self):
+        """护栏：多空格指数名后隔开的真实价位仍须校验（排除区不得过宽）。"""
+        decision = _decision(reasoning="相对沪深  300 超额考核；若跌破（1130.0）支撑则离场观望。")
+        anomalies = check_decision_prices(decision, TI_600519, PL_600519, CLOSE_600519)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert anomalies[0]["indicator"] == "近期低点"
+
+
+# ── 300033 形态夹具（2026-10-14 cohort 实跑实证）：MA20 204.157 / MA60 218.87 /
+# 近期低点 185.01 / 近期高点 245.48 / 现价与入场参考 190——「T+20」的 20 被提为
+# 价位归属近期低点（偏差 89.19%，打回反馈原文），打回重试仍写周期契约标记 →
+# 恶化判定 → 报告阻断（cohort no_report_ready 根因）──
+TI_300033 = _indicators(
+    ma5=197.0,
+    ma10=199.0,
+    ma20=204.157,
+    ma60=218.87,
+    boll_upper=212.0,
+    boll_middle=199.0,
+    boll_lower=186.0,
+)
+PL_300033 = {
+    "available": True,
+    "entry_ref": 190.0,
+    "recent_high": 245.48,
+    "recent_low": 185.01,
+    "atr": 6.0,
+    "stop_band_long": {"low": 186.0, "high": 188.0},
+    "target_band_long": {"low": 210.0, "high": 220.0},
+    "full_band": [180.5, 246.0],
+}
+CLOSE_300033 = 190.0
+
+
+class TestTPlusTokenFalsePositives:
+    """周期/结算记号（T+N）不得按个股价位校验（2026-10-13/14 cohort 实证）。
+
+    agent-prompt-contracts 周期契约要求决策层 reasoning 写「T+20 个交易日」考核
+    语义；规范形态被量词后缀（个/日）豁免，但模型自由文本缩写形态（「T+20内」
+    「T+20考核」「T+20低概率尾部」「T+2（结算惯例）」）无豁免 → 20/2 被提为
+    价位（同花顺 10-14 三处 89.19% 阻断；华夏银行/南方航空/海南机场 10-13
+    同族）→ 打回重试仍然写 T+N（契约要求，换不掉）→ 恶化判定 → 报告阻断
+    （cohort no_report_ready 根因）。
+    """
+
+    def test_production_reasoning_horizon_tokens_zero_anomalies(self):
+        """生产打回反馈原文三条触发（T+20考核/T+20内/T+20低概率）SHALL 零 anomaly。"""
+        decision = _decision(
+            reasoning=(
+                "①周期契约层面：T+20考核要求可兑现催化剂。放量收复并站稳MA20 204.16"
+                "这一T+20内唯一可兑现的反弹前提未出现；46.23%年化波动下约合1.1个"
+                "标准差，属T+20低概率尾部。"
+            )
+        )
+        anomalies = check_decision_prices(decision, TI_300033, PL_300033, CLOSE_300033)
+        assert anomalies == []
+
+    def test_settlement_cycle_token_not_extracted(self):
+        """「T+2（把执行交给日历而非结构）」的 2 不得当价位提取（海南机场 10-13 实证）。"""
+        decision = _decision(reasoning="不接受保守方T+2（把执行交给日历而非结构）。")
+        anomalies = check_decision_prices(decision, TI_600845, PL_600845, CLOSE_600845)
+        assert anomalies == []
+
+    def test_real_price_after_horizon_token_still_checked(self):
+        """护栏：T+N 后的真实价位仍须校验（排除区不得过宽）。
+
+        「T+20内跌破 179.0」的 179.0 与近期低点 185.01 偏差 3.25% 且落在
+        参考带外 → SHALL 登记 deviation。
+        """
+        decision = _decision(reasoning="T+20内跌破 179.0 则重新评估。")
+        anomalies = check_decision_prices(decision, TI_300033, PL_300033, CLOSE_300033)
         assert len(anomalies) == 1
         assert anomalies[0]["kind"] == "deviation"
         assert anomalies[0]["indicator"] == "近期低点"
