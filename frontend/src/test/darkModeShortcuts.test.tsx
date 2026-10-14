@@ -88,6 +88,7 @@ describe('命令面板（polish-dark-mode-shortcuts）', () => {
     const onNewSession = vi.fn()
     const onOpenDownloads = vi.fn()
     const onOpenMemory = vi.fn()
+    const onOpenFactors = vi.fn()
     const onCycleTheme = vi.fn()
     render(
       <CommandPalette
@@ -98,11 +99,12 @@ describe('命令面板（polish-dark-mode-shortcuts）', () => {
         onNewSession={onNewSession}
         onOpenDownloads={onOpenDownloads}
         onOpenMemory={onOpenMemory}
+        onOpenFactors={onOpenFactors}
         onCycleTheme={onCycleTheme}
         themeChoice={(over.themeChoice as never) ?? 'light'}
       />,
     )
-    return { onClose, onSelectSession, onNewSession, onOpenDownloads, onOpenMemory, onCycleTheme }
+    return { onClose, onSelectSession, onNewSession, onOpenDownloads, onOpenMemory, onOpenFactors, onCycleTheme }
   }
 
   it('快捷动作：新建会话/下载管理/切换主题', () => {

@@ -6,6 +6,10 @@ import { defineConfig } from '@playwright/test'
  *
  * SESSIONS_DB_PATH 必须指向独立文件：与 docker 生产后端共用 data/sessions.db
  * 会因两进程并发写导致 SQLite 主库被 WAL 帧覆盖而彻底损坏（不可恢复）。
+ *
+ * FACTOR_LIBRARY_DB_PATH（delta add-factor-library-page T2.3）：本 config 下跑
+ * factor-library.spec.ts 时 seed/factors_reset 会清表——不指向独立库会落到开发库
+ * data/factor_library.db（seed 造数/复位污染）。
  */
 export default defineConfig({
   testDir: './tests',
@@ -28,6 +32,8 @@ export default defineConfig({
         TESTING: '1',
         // 独立测试库，与生产 data/sessions.db 物理隔离
         SESSIONS_DB_PATH: 'data/test-e2e-sessions.db',
+        // 因子库 E2E 造数库（同默认 config 口径）
+        FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db',
         // 隔离报告落盘目录，避免 E2E 副作用污染 reports/
         REPORTS_DIR: 'tmp/e2e-reports-8001',
       },

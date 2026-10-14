@@ -414,6 +414,30 @@ def list_active_factors(
     return list_factors(status="active", category=category, db_path=db_path)
 
 
+def reset_factor_library(db_path: str | Path | None = None) -> dict[str, int]:
+    """清空因子库三表（TESTING 造数复位专用，非业务路径）；返回各表删除行数。
+
+    仅 delta add-factor-library-page 的 `/api/test/seed` ``factors_reset`` 调用：
+    E2E 每例前后复位因子面（库路径随 ``FACTOR_LIBRARY_DB_PATH`` 指向独立测试库）。
+    业务写路径只经五道闸与衰减监控，无生产调用方。
+
+    为何放在本模块：表名只允许出现在 library.py（api.py 自行拼 SQL 会复制 schema
+    知识；与 screening.store / memory.semantic 的 reset 函数同款纪律）。
+    """
+    init_library(db_path)
+    conn = _connect(db_path)
+    removed: dict[str, int] = {}
+    try:
+        # 先子表后主表（无外键，仅语义顺序：事件/IC 属于因子）
+        for table in ("factor_events", "factor_ic", "factors"):
+            cursor = conn.execute(f"DELETE FROM {table}")  # noqa: S608 -- 表名来自模块常量
+            removed[table] = int(cursor.rowcount)
+        conn.commit()
+        return removed
+    finally:
+        conn.close()
+
+
 def list_events(
     factor_id: int | None = None, db_path: str | Path | None = None
 ) -> list[dict[str, Any]]:

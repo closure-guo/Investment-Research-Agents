@@ -1,0 +1,358 @@
+"""因子库只读 API 单测（delta add-factor-library-page T1.1/T1.2）。
+
+spec factor-library「因子库只读查询」：
+
+- ``GET /api/factors``：列表含 名称 / 表达式 / 状态（active|retired）/ 来源
+  （builtin|llm）/ ICIR / 最近闸门结论 / 衰减标记；按 ICIR 降序固定排序；
+  空库 → 200 + 空数组（MUST NOT 500 或以伪数据冒充）；
+- ``GET /api/factors/{factor_id}``：详情含完整 DSL 表达式（含规范 ``ast_json``）、
+  IC 序列（近 60 点升序）与事件历史（准入/降级/退役及时间）；未知 id → 404；
+- **只读面**：接口只包装 ``factors.library`` 的 ``list_factors`` / ``list_events`` /
+  ``list_ic_series``（零业务复制），不暴露任何写操作；
+- TESTING seed（T1.2）：``factors`` 造数（逐条经既有落库 + 状态机走到目标态，
+  与生产准入/退役路径同源）+ ``factors_reset`` 清三表，供 E2E 造数/复位。
+
+零网络：TestClient + tmp 库（FACTOR_LIBRARY_DB_PATH 逐例注入；library 模块
+调用期读 env，不落开发库 data/factor_library.db）。
+"""
+
+from __future__ import annotations
+
+import importlib
+import math
+
+import pytest
+from fastapi.testclient import TestClient
+
+from finance_agent.api import app
+from finance_agent.factors.library import (
+    add_factor,
+    list_events,
+    list_factors,
+    record_ic,
+    set_status,
+)
+
+_FACTORS = "/api/factors"
+# builtin 注册词表逐字（builtin.BUILTIN_FACTORS：momentum_20 的表达式）
+_BUILTIN_EXPRESSION = "delta(close,20)"
+_BUILTIN_NAME = "momentum_20"
+_LLM_EXPRESSION = "ts_rank(close,20)"
+
+
+@pytest.fixture(autouse=True)
+def _factors_db(tmp_path, monkeypatch):
+    """因子库路径指向 tmp（library._default_db_path 调用期读 env）。"""
+    path = tmp_path / "factor_library.db"
+    monkeypatch.setenv("FACTOR_LIBRARY_DB_PATH", str(path))
+    return path
+
+
+def _seed_library() -> tuple[int, int]:
+    """造 spec 场景两因子：active+llm（有 IC）/ retired+builtin（衰减后退役）。
+
+    状态迁移全部经 ``set_status``（唯一状态写入口），事件形态与生产一致：
+    candidate（created）→ active（ADMITTED）→ degraded（DECAY）→ retired（BUCKET_QUOTA）。
+    """
+    llm_id = add_factor(
+        expression=_LLM_EXPRESSION,
+        hypothesis="近 20 日截面排名刻画价格相对强弱，排名抬升的标的短期收益分布偏正。",
+        category="动量",
+        status="candidate",
+        source="llm",
+    )
+    set_status(llm_id, "active", detail={"reason": "ADMITTED"})
+    record_ic(llm_id, "2026-10-08", 0.10)
+    record_ic(llm_id, "2026-10-09", 0.12)
+
+    builtin_id = add_factor(
+        expression=_BUILTIN_EXPRESSION,
+        hypothesis="过去 20 个交易日涨幅高的标的短期内倾向继续跑赢（Jegadeesh-Titman）。",
+        category="builtin",
+        status="candidate",
+        source="builtin",
+    )
+    set_status(builtin_id, "active", detail={"reason": "ADMITTED"})
+    set_status(builtin_id, "degraded", detail={"reason": "DECAY", "as_of": "2026-10-13"})
+    set_status(builtin_id, "retired", detail={"reason": "BUCKET_QUOTA"})
+    return llm_id, builtin_id
+
+
+# ── 列表端点：字段齐备 + 排序 + 空库 ──────────────────────────────────────
+
+
+def test_list_fields_complete(_factors_db) -> None:
+    """spec 场景：两因子列表含 名称/表达式/状态/来源/ICIR/最近闸门结论/衰减标记。"""
+    llm_id, builtin_id = _seed_library()
+
+    resp = TestClient(app).get(_FACTORS)
+
+    assert resp.status_code == 200
+    rows = resp.json()["factors"]
+    assert [row["id"] for row in rows] == [llm_id, builtin_id]  # ICIR 降序（有 IC 者在前）
+
+    llm = rows[0]
+    assert {
+        "id",
+        "name",
+        "expression",
+        "hypothesis",
+        "category",
+        "status",
+        "source",
+        "created_at",
+        "updated_at",
+        "ic_mean_60d",
+        "icir_60d",
+        "ic_points",
+        "decayed",
+        "last_event",
+    } <= set(llm)
+    assert llm["name"] is None  # LLM 提案无注册名：不臆造
+    assert llm["expression"] == _LLM_EXPRESSION
+    assert llm["status"] == "active"
+    assert llm["source"] == "llm"
+    assert llm["ic_points"] == 2
+    assert llm["ic_mean_60d"] == pytest.approx(0.11)
+    expected_icir = 0.11 / math.sqrt(((0.10 - 0.11) ** 2 + (0.12 - 0.11) ** 2) / 1)
+    assert llm["icir_60d"] == pytest.approx(expected_icir)
+    assert llm["decayed"] is False
+    assert llm["last_event"] == {
+        "event": "status_change",
+        "from_status": "candidate",
+        "to_status": "active",
+        "reason": "ADMITTED",
+        "created_at": llm["last_event"]["created_at"],
+    }
+
+    builtin = rows[1]
+    assert builtin["name"] == _BUILTIN_NAME  # builtin 注册词表作品名（逐字）
+    assert builtin["status"] == "retired"
+    assert builtin["source"] == "builtin"
+    assert builtin["ic_points"] == 0
+    assert (
+        builtin["icir_60d"] == 0.0
+    )  # 无 IC 记录：recent_ic_stats 口径记 0（ic_points 供界面区分）
+    assert builtin["decayed"] is True  # 衰减降级史（retired 后标记仍在）
+    assert builtin["last_event"]["to_status"] == "retired"
+    assert builtin["last_event"]["reason"] == "BUCKET_QUOTA"
+
+
+def test_list_empty_db_returns_empty_array(_factors_db) -> None:
+    """spec 场景：空库 → 200 + 空列表（MUST NOT 500 或伪数据冒充）。"""
+    resp = TestClient(app).get(_FACTORS)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"factors": []}
+
+
+# ── 详情端点：完整表达式 / IC 序列 / 事件历史 / 未知 id 404 ────────────────
+
+
+def test_detail_returns_expression_ic_series_and_events(_factors_db) -> None:
+    """详情含完整 DSL 表达式、IC 序列（升序）与事件历史（含时间与事件类型）。"""
+    llm_id, _ = _seed_library()
+
+    resp = TestClient(app).get(f"{_FACTORS}/{llm_id}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["expression"] == _LLM_EXPRESSION
+    assert body["status"] == "active"
+    assert body["source"] == "llm"
+    assert body["ic_series"] == [
+        {"trade_date": "2026-10-08", "rank_ic": 0.10},
+        {"trade_date": "2026-10-09", "rank_ic": 0.12},
+    ]
+
+    events = body["events"]
+    assert [event["event"] for event in events] == ["created", "status_change"]
+    assert events[0]["to_status"] == "candidate"
+    assert events[0]["created_at"]  # 准入事件时间
+    assert events[-1]["from_status"] == "candidate"
+    assert events[-1]["to_status"] == "active"
+    assert events[-1]["detail"]["reason"] == "ADMITTED"
+    assert events[-1]["created_at"]  # 闸门结论事件时间
+
+
+def test_detail_series_empty_for_factor_without_ic(_factors_db) -> None:
+    """无 IC 记录 → 空序列（不编造占位点）。"""
+    _, builtin_id = _seed_library()
+
+    body = TestClient(app).get(f"{_FACTORS}/{builtin_id}").json()
+
+    assert body["ic_series"] == []
+    assert [event["to_status"] for event in body["events"]] == [
+        "candidate",
+        "active",
+        "degraded",
+        "retired",
+    ]
+
+
+def test_detail_unknown_id_returns_404(_factors_db) -> None:
+    """未知 id → 404（不静默返回空详情）。"""
+    _seed_library()
+
+    resp = TestClient(app).get(f"{_FACTORS}/99999")
+
+    assert resp.status_code == 404
+    assert "99999" in resp.json()["detail"]
+
+
+def test_detail_unknown_id_404_on_empty_db(_factors_db) -> None:
+    """空库同样 404（无行可返回，不臆造）。"""
+    resp = TestClient(app).get(f"{_FACTORS}/1")
+
+    assert resp.status_code == 404
+
+
+# ── TESTING seed 扩展（factors 造数 + factors_reset） ──────────────────────
+
+
+@pytest.fixture
+def testing_client(monkeypatch):
+    """TESTING=1 下 reload 出带 /api/test/seed 的客户端（仓库既有模式）。"""
+    monkeypatch.setenv("TESTING", "1")
+    import finance_agent.api as api_module
+
+    importlib.reload(api_module)
+    try:
+        yield TestClient(api_module.app)
+    finally:
+        monkeypatch.delenv("TESTING", raising=False)
+        importlib.reload(api_module)
+
+
+def test_seed_placeholder_untouched_for_factor_free_payload(testing_client) -> None:
+    """既有 {symbol} 早退路径不受 factors 扩展影响（占位响应逐字不变）。"""
+    resp = testing_client.post("/api/test/seed", json={"symbol": "300308"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "mode": "testing"}
+
+
+def test_seed_factors_roundtrip(testing_client, _factors_db) -> None:
+    """seed `factors.factors`（active+llm / retired+builtin + 事件 + IC）→ 端点可见。"""
+    resp = testing_client.post(
+        "/api/test/seed",
+        json={
+            "factors": {
+                "factors": [
+                    {
+                        "expression": _LLM_EXPRESSION,
+                        "hypothesis": "截面排名动量：排名抬升的标的短期收益分布偏正。",
+                        "category": "动量",
+                        "status": "active",
+                        "source": "llm",
+                        "alignment_score": 0.7,
+                        "ast_json": _LLM_EXPRESSION,
+                        "ic": [["2026-10-09", 0.12], ["2026-10-08", 0.10]],
+                    },
+                    {
+                        "expression": _BUILTIN_EXPRESSION,
+                        "hypothesis": "20 日动量（Jegadeesh-Titman）。",
+                        "category": "builtin",
+                        "status": "retired",
+                        "source": "builtin",
+                        "pool_increment": 0.05,
+                        "detail": {"reason": "BUCKET_QUOTA"},
+                    },
+                ]
+            }
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "mode": "testing"}
+
+    rows = TestClient(app).get(_FACTORS).json()["factors"]
+    assert [(row["status"], row["source"]) for row in rows] == [
+        ("active", "llm"),
+        ("retired", "builtin"),
+    ]
+    llm_id = rows[0]["id"]
+    builtin_id = rows[1]["id"]
+    assert rows[0]["ic_points"] == 2
+    assert rows[0]["last_event"]["reason"] == "ADMITTED"  # 状态机走到位（active 记 ADMITTED）
+    assert rows[1]["last_event"]["reason"] == "BUCKET_QUOTA"
+
+    detail = TestClient(app).get(f"{_FACTORS}/{builtin_id}").json()
+    assert detail["pool_increment"] == pytest.approx(0.05)
+    assert [event["to_status"] for event in detail["events"]] == ["candidate", "active", "retired"]
+    assert TestClient(app).get(f"{_FACTORS}/{llm_id}").json()["ast_json"] == _LLM_EXPRESSION
+
+
+def test_seed_factors_via_degraded_records_decay_history(testing_client, _factors_db) -> None:
+    """seed ``via_degraded``：retired 先经 degraded(DECAY) → 衰减标记为真（E2E 造态）。"""
+    resp = testing_client.post(
+        "/api/test/seed",
+        json={
+            "factors": {
+                "factors": [
+                    {
+                        "expression": _BUILTIN_EXPRESSION,
+                        "status": "retired",
+                        "source": "builtin",
+                        "via_degraded": True,
+                        "detail": {"reason": "BUCKET_QUOTA"},
+                    }
+                ]
+            }
+        },
+    )
+
+    assert resp.status_code == 200
+    row = TestClient(app).get(_FACTORS).json()["factors"][0]
+    assert row["status"] == "retired"
+    assert row["decayed"] is True
+    assert row["last_event"]["reason"] == "BUCKET_QUOTA"
+
+    events = TestClient(app).get(f"{_FACTORS}/{row['id']}").json()["events"]
+    assert [event["to_status"] for event in events] == [
+        "candidate",
+        "active",
+        "degraded",
+        "retired",
+    ]
+    assert events[2]["detail"] == {
+        "reason": "DECAY"
+    }  # 降级事件 detail 缺省 DECAY（可经 degraded_detail 覆盖）
+
+
+def test_seed_factors_unknown_status_fails_loud(testing_client, _factors_db) -> None:
+    """种子状态非法 → 显式失败（不静默落一条状态不符预期的行）。"""
+    with pytest.raises(ValueError, match="非法种子状态"):
+        testing_client.post(
+            "/api/test/seed",
+            json={"factors": {"factors": [{"expression": "delta(close,5)", "status": "bogus"}]}},
+        )
+
+    assert list_factors() == []
+
+
+def test_seed_factors_reset_clears_library(testing_client, _factors_db) -> None:
+    """factors_reset 清三表（E2E 每例前后复位；不影响其它库）。"""
+    _seed_library()
+
+    resp = testing_client.post("/api/test/seed", json={"factors_reset": True})
+
+    assert resp.status_code == 200
+    assert list_factors() == []
+    assert list_events() == []
+    assert TestClient(app).get(_FACTORS).json() == {"factors": []}
+
+
+def test_seed_factors_reset_then_seed_is_deterministic(testing_client, _factors_db) -> None:
+    """reset 后重 seed 同表达式不被结构规则吞（E2E 串行套件的复位前提）。"""
+    payload = {
+        "factors": {
+            "factors": [{"expression": _LLM_EXPRESSION, "status": "active", "source": "llm"}]
+        }
+    }
+    testing_client.post("/api/test/seed", json=payload)
+    testing_client.post("/api/test/seed", json={"factors_reset": True})
+    testing_client.post("/api/test/seed", json=payload)
+
+    rows = TestClient(app).get(_FACTORS).json()["factors"]
+    assert [row["expression"] for row in rows] == [_LLM_EXPRESSION]

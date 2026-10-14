@@ -849,3 +849,67 @@ export interface MemoryClauseListResponse {
   status: MemoryClauseStatus
   clauses: MemoryClause[]
 }
+
+// 因子库（delta add-factor-library-page：GET /api/factors 载荷）。
+// 状态为库内原值（candidate/active/degraded/retired）；来源为库内原值（builtin/
+// llm/proposal）；name 为 builtin 注册词表作品名，非 builtin → null（界面回退显示因子 id）。
+export interface FactorLastEvent {
+  /** 事件类型（created / status_change） */
+  event: string
+  from_status: string | null
+  to_status: string | null
+  /** 闸门/状态变更结论（detail.reason 提升；无 → null） */
+  reason: string | null
+  created_at: string
+}
+
+export interface FactorRow {
+  id: number
+  name: string | null
+  expression: string
+  hypothesis: string
+  category: string
+  status: string
+  /** 规范表达式（dsl.serialize 产出；库内行未存 → null） */
+  ast_json: string | null
+  source: string
+  alignment_score: number | null
+  pool_increment: number | null
+  created_at: string
+  updated_at: string
+  /** 近 60 个交易日 IC 均值（recent_ic_stats 口径；无记录 → 0.0） */
+  ic_mean_60d: number
+  /** 近 60 个交易日 ICIR（mean/std，ddof=1；无记录 → 0.0，界面按 ic_points 区分） */
+  icir_60d: number
+  /** 窗口内 IC 记录数：0 → 界面显示「—」而非 0.000 */
+  ic_points: number
+  /** 衰减降级史（事件历史出现过 degraded；退役后标记仍在） */
+  decayed: boolean
+  last_event: FactorLastEvent | null
+}
+
+export interface FactorListResponse {
+  factors: FactorRow[]
+}
+
+// GET /api/factors/{id}：摘要字段 + IC 序列（近 60 点升序）+ 事件历史（完整 detail）
+export interface FactorIcPoint {
+  trade_date: string
+  rank_ic: number
+}
+
+export interface FactorEvent {
+  id: number
+  factor_id: number
+  event: string
+  from_status: string | null
+  to_status: string | null
+  reason: string | null
+  detail: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface FactorDetail extends FactorRow {
+  ic_series: FactorIcPoint[]
+  events: FactorEvent[]
+}

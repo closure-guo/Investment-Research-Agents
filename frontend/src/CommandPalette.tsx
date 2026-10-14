@@ -15,12 +15,14 @@ export interface CommandPaletteProps {
   onNewSession: () => void
   onOpenDownloads: () => void
   onOpenMemory: () => void
+  /** 因子库页入口（delta add-factor-library-page：与侧边栏折叠图标同源 navigate） */
+  onOpenFactors: () => void
   onCycleTheme: () => void
   /** 当前主题（面板内展示动作副作用说明） */
   themeChoice: ThemeChoice
 }
 
-export function CommandPalette({ open, onClose, sessions, onSelectSession, onNewSession, onOpenDownloads, onOpenMemory, onCycleTheme, themeChoice }: CommandPaletteProps) {
+export function CommandPalette({ open, onClose, sessions, onSelectSession, onNewSession, onOpenDownloads, onOpenMemory, onOpenFactors, onCycleTheme, themeChoice }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -44,8 +46,10 @@ export function CommandPalette({ open, onClose, sessions, onSelectSession, onNew
     { id: 'action-downloads', icon: 'fa-download', label: '打开下载管理', hint: '', run: onOpenDownloads },
     // add-memory-confirmation：记忆确认页入口（与侧边栏折叠图标同源 navigate）
     { id: 'action-memory', icon: 'fa-brain', label: '打开记忆确认', hint: '', run: onOpenMemory },
+    // add-factor-library-page：因子库页入口（与侧边栏折叠图标同源 navigate）
+    { id: 'action-factors', icon: 'fa-flask', label: '打开因子库', hint: '', run: onOpenFactors },
     { id: 'action-theme', icon: 'fa-moon', label: `切换主题（当前：${themeChoice === 'system' ? '跟随系统' : themeChoice === 'dark' ? '深色' : '浅色'}）`, hint: '', run: onCycleTheme },
-  ]), [onNewSession, onOpenDownloads, onOpenMemory, onCycleTheme, themeChoice])
+  ]), [onNewSession, onOpenDownloads, onOpenMemory, onOpenFactors, onCycleTheme, themeChoice])
 
   const q = query.trim().toLowerCase()
   const matchedSessions = q

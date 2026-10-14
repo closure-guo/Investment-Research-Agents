@@ -41,6 +41,14 @@ from finance_agent.data.snapshot import (  # noqa: E402
     read_universe,
 )
 from finance_agent.events.pipeline import fetch_key_events  # noqa: E402
+from finance_agent.factors.builtin import BUILTIN_FACTORS  # noqa: E402
+from finance_agent.factors.library import (  # noqa: E402
+    FACTOR_STATES,
+    list_events,
+    list_factors,
+    list_ic_series,
+)
+from finance_agent.factors.tools import IC_WINDOW as FACTOR_IC_WINDOW  # noqa: E402
 from finance_agent.graph import build_5layer_graph  # noqa: E402
 from finance_agent.langfuse_tracing import get_langfuse  # noqa: E402
 from finance_agent.llm import LLMConfig  # noqa: E402
@@ -58,6 +66,7 @@ from finance_agent.screening.pipeline import (  # noqa: E402
     read_snapshot_calendar,
 )
 from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
+from finance_agent.screening.ranker import recent_ic_stats  # noqa: E402
 from finance_agent.screening.store import (  # noqa: E402
     latest_screening_batch,
     latest_successful_batch,
@@ -757,9 +766,19 @@ if TESTING:
         造记忆确认页确定性状态）与 memory_reset（bool：清条款表）造记忆确认页
         确定性状态（delta add-memory-confirmation T1/2.3）；库路径于调用期读
         SESSIONS_DB_PATH（semantic 模块 env 口径，E2E 指向独立测试库）。
+        顶层可选 factors（dict：``factors`` 造因子，逐条经既有落库 +
+        状态机走到目标态（active 记 ADMITTED，与准入路径同源；degraded/retired 的
+        detail 由行内 ``detail`` 给出；``via_degraded`` 为真时 retired 先经
+        degraded(DECAY) 落衰减史，供「衰减标记」列造态）；行内可带 ic
+        （[[trade_date, rank_ic]...] 经 record_ic 幂等写入）与
+        pool_increment/alignment_score/ast_json）与 factors_reset（bool：清因子库
+        三表）造因子库页确定性状态（delta add-factor-library-page T1.2）；库路径
+        于调用期读 FACTOR_LIBRARY_DB_PATH（library 模块 env 口径，E2E 指向独立
+        测试库，绝不落到开发库 data/factor_library.db）。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
-        # track_record / snapshot / screening / memory 造数块不受 chat_history 前置约束
+        # track_record / snapshot / screening / memory / factors 造数块不受
+        # chat_history 前置约束
         if (
             "chat_history" not in req
             and not isinstance(req.get("track_record"), dict)
@@ -770,6 +789,8 @@ if TESTING:
             and not req.get("track_record_reset")
             and not isinstance(req.get("memory"), dict)
             and not req.get("memory_reset")
+            and not isinstance(req.get("factors"), dict)
+            and not req.get("factors_reset")
         ):
             return {"status": "ok", "mode": "testing"}
         # add-paper-broker：战绩造数复位（清 equity_curve + paper_equity 两表）。双曲线
@@ -973,6 +994,55 @@ if TESTING:
                     _seed_confirm_clause(new_ids[0])
                 elif clause_row.get("status") == "rejected":
                     _seed_reject_clause(new_ids[0])
+        # 因子库造数（delta add-factor-library-page T1.2）：可选先 reset（清三表）再
+        # 写因子——逐条经既有落库 + 状态机走到目标态（candidate→active→degraded/
+        # retired，与生产准入/退役路径同源），IC 经 record_ic 幂等写入。库路径调用期
+        # 读 FACTOR_LIBRARY_DB_PATH（library 模块 env 口径）。
+        if req.get("factors_reset"):
+            from finance_agent.factors.library import reset_factor_library
+
+            reset_factor_library()
+        factors_seed = req.get("factors")
+        if isinstance(factors_seed, dict):
+            from finance_agent.factors.library import add_factor as _seed_add_factor
+            from finance_agent.factors.library import record_ic as _seed_record_ic
+            from finance_agent.factors.library import (
+                set_pool_increment as _seed_set_pool_increment,
+            )
+            from finance_agent.factors.library import set_status as _seed_set_status
+
+            for factor_row in factors_seed.get("factors") or []:
+                target = str(factor_row.get("status", "candidate"))
+                if target not in FACTOR_STATES:
+                    # fail loud：静默回落会让 E2E 断言对着一条状态不符预期的行变红难归因
+                    raise ValueError(f"非法种子状态 {target!r}；允许: {list(FACTOR_STATES)}")
+                factor_id = _seed_add_factor(
+                    expression=str(factor_row["expression"]),
+                    hypothesis=str(factor_row.get("hypothesis", "")),
+                    category=str(factor_row.get("category", "seed")),
+                    status="candidate",
+                    ast_json=factor_row.get("ast_json"),
+                    source=str(factor_row.get("source", "proposal")),
+                    alignment_score=factor_row.get("alignment_score"),
+                )
+                if factor_row.get("pool_increment") is not None:
+                    _seed_set_pool_increment(factor_id, float(factor_row["pool_increment"]))
+                if target != "candidate":
+                    # active 的闸门结论与 validate.admit_candidates 逐字同源（ADMITTED）
+                    _seed_set_status(factor_id, "active", detail={"reason": "ADMITTED"})
+                if target == "retired" and factor_row.get("via_degraded"):
+                    # 衰减后退役（真实路径 degraded → retired）：先落 DECAY 降级事件
+                    # （detail 缺省 {"reason": "DECAY"}）再退役——供「衰减标记」列造态
+                    _seed_set_status(
+                        factor_id,
+                        "degraded",
+                        detail=factor_row.get("degraded_detail") or {"reason": "DECAY"},
+                    )
+                if target in ("degraded", "retired"):
+                    # detail 由 seed 行给出（缺省 None——不臆造原因）
+                    _seed_set_status(factor_id, target, detail=factor_row.get("detail"))
+                for trade_date, rank_ic in factor_row.get("ic") or []:
+                    _seed_record_ic(factor_id, str(trade_date), float(rank_ic))
         # track_record-only（含 {} 空 dict）造数后即返回占位响应，不落会话
         if "chat_history" not in req:
             return {"status": "ok", "mode": "testing"}
@@ -3332,6 +3402,166 @@ async def memory_clause_reject(clause_id: str) -> dict[str, Any]:
     if not await asyncio.to_thread(reject_clause, clause_id):
         raise HTTPException(status_code=404, detail=f"未知条款: {clause_id}")
     return {"id": clause_id, "status": "rejected"}
+
+
+# ── 因子库只读查询（delta add-factor-library-page：暴露 + 呈现，零业务复制） ──
+#
+# 写路径铁律：本层只包装 factors.library 既有只读面（list_factors / list_events /
+# list_ic_series），不暴露任何写操作——因子入库、状态变更、参数调整仍只经五道闸与
+# 衰减监控路径。派生字段口径：
+#   - icir_60d / ic_mean_60d：复用 screening.ranker.recent_ic_stats（近
+#     FACTOR_IC_WINDOW=60 个交易日，与 tools.IC_WINDOW / DECAY_WINDOW 同口径）；
+#     ic_points 为窗口内 IC 记录数——无记录时 icir 按既有口径记 0.0，界面据此显示「—」
+#     而非把 0.0 冒充为真实读数；
+#   - name：builtin 注册词表（builtin.BUILTIN_FACTORS）作品名；非 builtin 或表达式
+#     不在词表 → None（库内无名称列，不臆造；界面回退显示因子 id）；
+#   - last_event：最近一条事件（准入/降级/退役及时间）——闸门结论落库的唯一形态
+#     （准入经 set_status(active, detail={"reason": "ADMITTED"})，见 validate.py）；
+#   - decayed：事件历史中出现过 to_status='degraded'（衰减监控降级史；退役后标记仍在）。
+
+
+def _factor_name(row: dict[str, Any]) -> str | None:
+    """builtin 因子的注册名（词表逐字）；非 builtin 来源 / 未命中 → None（不臆造）。"""
+    if str(row.get("source") or "") != "builtin":
+        return None
+    expression = str(row.get("expression") or "")
+    return next((item.name for item in BUILTIN_FACTORS if item.expression == expression), None)
+
+
+def _factor_event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    """事件行 → API 载荷（detail 为 JSON 解析后的 dict，reason 提升为平铺字段）。"""
+    detail = event.get("detail")
+    reason = detail.get("reason") if isinstance(detail, dict) else None
+    return {
+        "id": event.get("id"),
+        "factor_id": event.get("factor_id"),
+        "event": event.get("event"),
+        "from_status": event.get("from_status"),
+        "to_status": event.get("to_status"),
+        "reason": reason,
+        "detail": detail,
+        "created_at": event.get("created_at"),
+    }
+
+
+def _factor_summary_payload(
+    row: dict[str, Any],
+    *,
+    events: list[dict[str, Any]],
+    ic_stats: dict[int, tuple[float, float]],
+    ic_points: int,
+) -> dict[str, Any]:
+    """因子行 + 事件 + IC 统计 → 列表/详情共用的摘要载荷。"""
+    factor_id = int(row["id"])
+    ic_mean, icir = ic_stats.get(factor_id, (0.0, 0.0))
+    return {
+        # 行原值（库内列逐字透传；前端只消费其需要的子集）
+        "id": factor_id,
+        "expression": row.get("expression"),
+        "hypothesis": row.get("hypothesis"),
+        "category": row.get("category"),
+        "status": row.get("status"),
+        "ast_json": row.get("ast_json"),
+        "source": row.get("source"),
+        "alignment_score": row.get("alignment_score"),
+        "pool_increment": row.get("pool_increment"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        # 派生字段（口径见本节顶部注释）
+        "name": _factor_name(row),
+        "ic_mean_60d": ic_mean,
+        "icir_60d": icir,
+        "ic_points": ic_points,
+        "decayed": any(str(event.get("to_status")) == "degraded" for event in events),
+        "last_event": _factor_last_event_summary(events),
+    }
+
+
+def _factor_events_by_factor() -> dict[int, list[dict[str, Any]]]:
+    """全库事件按因子分组（list_events 按写入序返回；组内保持时序）。"""
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for event in list_events():
+        grouped.setdefault(int(event["factor_id"]), []).append(event)
+    return grouped
+
+
+def _factor_last_event_summary(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """最近一条事件的紧凑摘要（事件/状态迁移/闸门结论/时间）。
+
+    列表载荷不带完整 ``detail``：衰减降级事件 detail 含滚动窗口数组，逐行展开会
+    让列表响应无谓膨胀——完整事件历史由详情端点给出。
+    """
+    if not events:
+        return None
+    event = _factor_event_payload(events[-1])
+    return {
+        "event": event["event"],
+        "from_status": event["from_status"],
+        "to_status": event["to_status"],
+        "reason": event["reason"],
+        "created_at": event["created_at"],
+    }
+
+
+def _factors_payload() -> list[dict[str, Any]]:
+    """列表载荷（同步体，供 to_thread）：按 ICIR 降序固定排序（并列按 id 升序）。
+
+    因子量级为十位级：逐因子各一次 IC 序列读（``ic_points`` 计数）与既有
+    ``recent_ic_stats`` 同量级，无需批量化。
+    """
+    rows = list_factors()
+    events_by_factor = _factor_events_by_factor()
+    ic_stats = recent_ic_stats(rows, window=FACTOR_IC_WINDOW)
+    payload = [
+        _factor_summary_payload(
+            row,
+            events=events_by_factor.get(int(row["id"]), []),
+            ic_stats=ic_stats,
+            ic_points=len(list_ic_series(int(row["id"]), limit=FACTOR_IC_WINDOW)),
+        )
+        for row in rows
+    ]
+    payload.sort(key=lambda item: (-item["icir_60d"], item["id"]))
+    return payload
+
+
+def _factor_detail_payload(factor_id: int) -> dict[str, Any] | None:
+    """详情载荷：摘要字段 + IC 序列（近 60 点升序）+ 事件历史；无该因子 → None。"""
+    row = next((item for item in list_factors() if int(item["id"]) == factor_id), None)
+    if row is None:
+        return None
+    events = list_events(factor_id)
+    ic_series = list_ic_series(factor_id, limit=FACTOR_IC_WINDOW)
+    detail = _factor_summary_payload(
+        row,
+        events=events,
+        ic_stats=recent_ic_stats([row], window=FACTOR_IC_WINDOW),
+        ic_points=len(ic_series),
+    )
+    detail["ic_series"] = [
+        {"trade_date": trade_date, "rank_ic": rank_ic} for trade_date, rank_ic in ic_series
+    ]
+    detail["events"] = [_factor_event_payload(event) for event in events]
+    return detail
+
+
+@app.get("/api/factors")
+async def factor_library_list() -> dict[str, Any]:
+    """因子库列表（只读）：名称/表达式/状态/来源/ICIR/最近闸门结论/衰减标记。
+
+    空库 → 200 + 空数组（不 500、不用伪数据冒充）；库路径调用期读
+    ``FACTOR_LIBRARY_DB_PATH``（library 模块 env 口径）。
+    """
+    return {"factors": await asyncio.to_thread(_factors_payload)}
+
+
+@app.get("/api/factors/{factor_id}")
+async def factor_library_detail(factor_id: int) -> dict[str, Any]:
+    """因子详情（只读）：完整 DSL 表达式 + IC 序列 + 事件历史；未知 id → 404。"""
+    payload = await asyncio.to_thread(_factor_detail_payload, factor_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"未知因子: {factor_id}")
+    return payload
 
 
 # ── AG-UI 协议通道（add-assistant-ui-thread PoC，双轨隔离：仅挂载，不接入 registry）──
