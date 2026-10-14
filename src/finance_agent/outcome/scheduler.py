@@ -25,6 +25,11 @@ paper 仿真结算(add-paper-broker):工作日 16:20 触发 ``run_paper_settle_d
 (读快照最新收盘价 mark 持仓 → ``paper_equity`` 曲线),经同一 ``_with_retry``
 入口(单飞锁 + 运行历史 + 3 次退避重试);与虚拟结算链互不依赖。
 
+paper 仿真执行(add-execution-chain-driver):工作日 16:10 触发 ``run_execution_daily``
+(决策 → 信号 → 组合目标 → 风控门禁 → paper 下单,决策日次一交易日开盘口径),
+排在 paper 结算(16:20)之前保证当日成交当日入账;快照不可用时返回跳过摘要
+(job 记 ok),经同一 ``_with_retry`` 入口。
+
 注:定时任务框架选型建议人工落 ADR(design 决策 6 注),agent 不自建 ADR。
 """
 
@@ -41,6 +46,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from finance_agent.data.snapshot_job import run_market_snapshot_batch
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
+from finance_agent.execution.driver import run_execution_daily
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.ops.jobs import (
@@ -155,6 +161,15 @@ def _settle_job() -> None:
     _with_retry("decision_settle_daily", "prediction settle", settle_open_predictions)
 
 
+def _paper_execute_job() -> None:
+    """add-execution-chain-driver：执行链日批（16:10，settle 之后、paper 结算之前）。
+
+    决策 → 信号 → 组合目标 → 门禁 → paper 下单（决策日次一交易日开盘口径）；
+    快照库为空时返回跳过摘要（job 记 ok），信号顺延至下一交易日。
+    """
+    _with_retry("paper_execute_daily", "paper execute", run_execution_daily)
+
+
 def _paper_settle_job() -> None:
     """add-paper-broker：paper 仿真账户日结算（16:20，settle 之后、marking 之前）。
 
@@ -253,6 +268,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-execution-chain-driver：执行链日批（16:10）——决策 → 信号 → 目标 →
+    # 门禁 → paper 下单；排在 paper 结算（16:20）之前，当日成交当日入账。
+    scheduler.add_job(
+        _paper_execute_job,
+        _cron_for("paper_execute_daily"),
+        id="paper_execute_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     # add-paper-broker：paper 仿真账户日结算（16:20）——快照收盘价 mark 持仓；
     # 排在 decision settle（16:00）与 daily marking（16:30）之间，三条链互不依赖。
     scheduler.add_job(
@@ -300,7 +324,7 @@ def start_scheduler() -> BackgroundScheduler | None:
     _scheduler = scheduler
     logger.info(
         "decision settle scheduler 已启动(market snapshot 15:30;factor decay monitor 15:45;"
-        "decision settle 16:00;paper settle 16:20);"
+        "decision settle 16:00;paper execute 16:10;paper settle 16:20);"
         "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"
         "cohort batch %02d:%02d(开关关闭时记 skipped-disabled,零 LLM 调用)",
         cohort["hour"],

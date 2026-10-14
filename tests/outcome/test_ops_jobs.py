@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from finance_agent.execution.driver import run_execution_daily
 from finance_agent.outcome.ops.jobs import (
     JOB_FUNCS,
     JOB_IDS,
@@ -34,9 +35,39 @@ class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 9
-        )  # 6 → 8：+factor_decay_monitor(1) +paper_settle_daily(12)；8 → 9：+screening_daily
+            len(JOB_IDS) == 10
+        )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
+        # 9→10：+paper_execute_daily（执行链日批接线，add-execution-chain-driver）
         assert all(JOB_LABELS[jid] for jid in JOB_IDS)
+
+
+class TestPaperExecuteDailyRegistration:
+    """add-execution-chain-driver：执行链日批接线（16:10，settle 与 paper 结算之间）。"""
+
+    def test_registered_aligned_and_ordered(self):
+        assert "paper_execute_daily" in JOB_IDS
+        assert JOB_LABELS["paper_execute_daily"] == "仿真执行"
+        assert JOB_FUNCS["paper_execute_daily"] is run_execution_daily
+        assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
+        assert len(JOB_IDS) == 10  # 9 → 10：+paper_execute_daily（执行链日批接线）
+        assert (
+            JOB_IDS.index("decision_settle_daily")
+            < JOB_IDS.index("paper_execute_daily")
+            < JOB_IDS.index("paper_settle_daily")
+        ), "展示顺序 = 时刻顺序（判定 16:00 → 仿真执行 16:10 → paper 结算 16:20）"
+
+    def test_schedule_spec_is_1610_monfri(self):
+        """执行链日批 16:10（mon-fri，Asia/Shanghai）逐字钉死；先于 paper 结算 16:20。"""
+        assert SCHEDULES["paper_execute_daily"] == {
+            "day_of_week": "mon-fri",
+            "hour": 16,
+            "minute": 10,
+            "timezone": "Asia/Shanghai",
+        }
+        settle_spec = SCHEDULES["decision_settle_daily"]
+        paper_settle_spec = SCHEDULES["paper_settle_daily"]
+        assert (settle_spec["hour"], settle_spec["minute"]) == (16, 0)
+        assert (paper_settle_spec["hour"], paper_settle_spec["minute"]) == (16, 20)
 
 
 class TestScreeningDailyRegistration:
@@ -46,7 +77,7 @@ class TestScreeningDailyRegistration:
         assert "screening_daily" in JOB_IDS
         assert JOB_LABELS["screening_daily"] == "选股"
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 9  # 8 → 9：+screening_daily（选股日批接线）
+        assert len(JOB_IDS) == 10  # 8→9：+screening_daily；9→10：+paper_execute_daily
         assert (
             JOB_IDS.index("market_snapshot_daily")
             < JOB_IDS.index("screening_daily")
