@@ -22,6 +22,11 @@ import { defineConfig } from '@playwright/test'
  * - testMatch 只收 ui-baseline-pages.spec.ts：采集/对比必须串行单 worker，
  *   与其他套件并行会因侧栏骨架、后端缓存计数等互相污染截图。
  *
+ * 为什么不进 CI（2026-10-13 决策）：像素基线在 Windows 本地采集，Linux runner 的
+ * 字体/抗锯齿渲染差异会超 0.1% 容差产生假红；跨平台对比需按平台分基线维护
+ * （{platform} 模板 + 各平台基线），仓内暂无该机制。定位 = UI 改动时的本地门禁
+ * （改前采集 / 改后对比），不进 CI；若要 CI 化，先解决跨平台基线维护。
+ *
  * 用法：
  *   生成基线：npx playwright test -c playwright.ui-baseline.config.ts --update-snapshots
  *   对比验证：npx playwright test -c playwright.ui-baseline.config.ts
