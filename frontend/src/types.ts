@@ -829,6 +829,22 @@ export interface ScreeningAnalyzeResponse {
   removed: ScreeningRemoval[]
 }
 
+// 选股批次历史（delta add-daily-ops-page：GET /api/screening/batches 载荷行）。
+// 字段名逐字对齐 `src/finance_agent/screening/store.py::list_batches`（不猜测）。
+export interface ScreeningBatch {
+  trade_date: string
+  /** 批次状态：ok / failed（库内原值） */
+  status: string
+  /** 失败原因（失败行原样，不改写不归类）；成功行 null */
+  error: string | null
+  started_at: string
+  finished_at: string
+  l1_passed: number
+  l2_top: number
+  l3_keep: number
+  pool_size: number
+}
+
 // 语义记忆条款（add-memory-confirmation：GET /api/memory/clauses 载荷）
 export type MemoryClauseStatus = 'pending' | 'confirmed' | 'rejected'
 

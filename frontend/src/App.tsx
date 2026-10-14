@@ -21,6 +21,7 @@ import { ScreeningPage } from './pages/screening/ScreeningPage'
 import { MemoryPage } from './pages/memory/MemoryPage'
 import { FactorLibraryPage } from './pages/factors/FactorLibraryPage'
 import { BrokerConsolePage } from './pages/broker/BrokerConsolePage'
+import { DailyOpsPage } from './pages/ops/DailyOpsPage'
 import { TrackRecordPage } from './pages/trackRecord/TrackRecordPage'
 import { CalibrationPage } from './pages/trackRecord/CalibrationPage'
 import { PredictionDetailPage } from './pages/trackRecord/PredictionDetailPage'
@@ -897,6 +898,7 @@ export default function App() {
         onOpenMemory={() => navigate('/memory')}
         onOpenFactors={() => navigate('/factors')}
         onOpenBroker={() => navigate('/broker')}
+        onOpenOps={() => navigate('/ops')}
         onOpenSettings={() => { setSettingsFocus(undefined); navigate('/settings') }}
         themeChoice={themeChoice}
         onCycleTheme={cycleTheme}
@@ -931,6 +933,9 @@ export default function App() {
         ) : pathname === '/broker' ? (
           // 执行台账页（delta add-broker-console T2.1）：资金/持仓/订单四态/门禁拒绝（只读）
           <BrokerConsolePage onBack={() => navigate('/')} />
+        ) : pathname === '/ops' ? (
+          // 日批运维页（delta add-daily-ops-page T2.1）：当日各批时间线 + 一键补跑 + 选股批次历史
+          <DailyOpsPage onBack={() => navigate('/')} onOpenEvalOps={() => { setSettingsFocus('eval-ops'); navigate('/settings') }} />
         ) : pathname === '/settings' ? (
           // 设置中心页（add-agent-settings-center Task 7）：左导航六分区 + 右内容区
           <SettingsCenterPage
@@ -1134,6 +1139,7 @@ export default function App() {
         onOpenMemory={() => navigate('/memory')}
         onOpenFactors={() => navigate('/factors')}
         onOpenBroker={() => navigate('/broker')}
+        onOpenOps={() => navigate('/ops')}
         onCycleTheme={cycleTheme}
         themeChoice={themeChoice}
       />
@@ -1150,7 +1156,7 @@ export default function App() {
 }
 
 // ── Sidebar（add-collapsible-sidebar：shadcn Sidebar 原语重构）──
-function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenMemory, onOpenFactors, onOpenBroker, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
+function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenMemory, onOpenFactors, onOpenBroker, onOpenOps, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
   sessions: SessionMeta[]
   currentSessionId: string | null
   onSelect: (id: string) => void
@@ -1163,6 +1169,7 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
   onOpenMemory: () => void
   onOpenFactors: () => void
   onOpenBroker: () => void
+  onOpenOps: () => void
   onOpenSettings: () => void
   runningSessionIds: Set<string>
   loading?: boolean
@@ -1230,6 +1237,11 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
           <SidebarIcon label="执行台账">
             <Button variant="ghost" size="icon" onClick={onOpenBroker} aria-label="执行台账" data-testid="sidebar-broker-collapsed">
               <i className="fas fa-book-open text-xs"></i>
+            </Button>
+          </SidebarIcon>
+          <SidebarIcon label="日批运维">
+            <Button variant="ghost" size="icon" onClick={onOpenOps} aria-label="日批运维" data-testid="sidebar-ops-collapsed">
+              <i className="fas fa-list-check text-xs"></i>
             </Button>
           </SidebarIcon>
           <SidebarIcon label="决策战绩">

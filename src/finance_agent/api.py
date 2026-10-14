@@ -69,8 +69,11 @@ from finance_agent.screening.pipeline import (  # noqa: E402
 from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
 from finance_agent.screening.ranker import recent_ic_stats  # noqa: E402
 from finance_agent.screening.store import (  # noqa: E402
+    DEFAULT_BATCH_HISTORY_LIMIT,
+    MAX_BATCH_HISTORY_LIMIT,
     latest_screening_batch,
     latest_successful_batch,
+    list_batches,
     record_screening_removals,
 )
 from finance_agent.session_store import (  # noqa: E402
@@ -1010,6 +1013,24 @@ if TESTING:
         if isinstance(screening_seed, dict):
             from finance_agent.screening.store import record_screening_batch as _seed_batch
 
+            # add-daily-ops-page T1.2：``batches`` = 历史多批次（每行可自带 ``pool``，
+            # pool_size 随该行的池行数）；先落历史、后落单数 ``batch``——同日撞键时
+            # 单数（当前批次）胜出，既有 payload 语义零漂移。
+            batches_seed = screening_seed.get("batches")
+            if isinstance(batches_seed, list):
+                for history_row in batches_seed:
+                    trade_date = history_row["trade_date"]
+                    _seed_batch(
+                        trade_date,
+                        status=history_row.get("status", "ok"),
+                        error=history_row.get("error"),
+                        started_at=history_row.get("started_at", _now()),
+                        finished_at=history_row.get("finished_at", _now()),
+                        l1_passed=history_row.get("l1_passed", 0),
+                        l2_top=history_row.get("l2_top", 0),
+                        l3_keep=history_row.get("l3_keep", 0),
+                        pool_rows=history_row.get("pool") or [],
+                    )
             batch_seed = screening_seed.get("batch")
             if isinstance(batch_seed, dict):
                 trade_date = batch_seed["trade_date"]
@@ -3306,6 +3327,20 @@ async def screening_status() -> dict[str, Any]:
     except Exception:  # noqa: BLE001 -- 横幅通道永不 500（前端轮询不得被后端故障打断）
         _logger.exception("选股批次状态读取失败，降级返回")
         return dict(_SCREENING_STATUS_DEGRADED)
+
+
+@app.get("/api/screening/batches")
+async def screening_batches(limit: int = DEFAULT_BATCH_HISTORY_LIMIT) -> list[dict[str, Any]]:
+    """选股批次历史（delta add-daily-ops-page T1；spec「批次历史查询」）。
+
+    按交易日期倒序返回近 ``limit`` 批次（默认 20），字段 = 日期 / 状态（ok/failed）/
+    错误 / 起止时间 / 各层计数（l1_passed/l2_top/l3_keep）/ 池数（pool_size）。
+    空库 → 200 + 空列表（不以错误冒充「无历史」）；``limit`` 钳制到
+    ``[1, MAX_BATCH_HISTORY_LIMIT]``（越界不 422——越界值只影响窗口大小，
+    钳制后再交给 store 的严格校验）。只读端点：无任何写操作暴露。
+    """
+    clamped = max(1, min(limit, MAX_BATCH_HISTORY_LIMIT))
+    return await asyncio.to_thread(list_batches, clamped)
 
 
 def _screening_freshness_removals(

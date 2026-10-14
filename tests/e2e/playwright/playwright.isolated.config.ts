@@ -15,6 +15,11 @@ import { defineConfig } from '@playwright/test'
  * broker-console.spec.ts 时 seed/broker_reset 会清 orders/positions/cash 三表——
  * 同款纪律指向独立库（data/test-e2e-execution.db，与默认 config 同文件；
  * track-record config 用的是另一个文件，承载 paper_equity 造数互不影响）。
+ *
+ * SCREENING_DB_PATH（delta add-daily-ops-page T2.3）：本 config 下跑
+ * daily-ops.spec.ts 时 seed/screening_reset 会清 screening 五表——不指向独立库会
+ * 落到开发库 data/screening.db（与默认 config 同文件 data/test-e2e-screening.db，
+ * .gitignore 既有条目覆盖）。
  */
 export default defineConfig({
   testDir: './tests',
@@ -41,6 +46,8 @@ export default defineConfig({
         FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db',
         // 执行台账 E2E 造数库（同默认 config 口径；broker_reset 清账户三表）
         EXECUTION_DB_PATH: 'data/test-e2e-execution.db',
+        // 选股 E2E 造数库（同默认 config 口径；screening_reset 清五表）
+        SCREENING_DB_PATH: 'data/test-e2e-screening.db',
         // 隔离报告落盘目录，避免 E2E 副作用污染 reports/
         REPORTS_DIR: 'tmp/e2e-reports-8001',
       },
