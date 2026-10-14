@@ -6,6 +6,20 @@ import { defineConfig } from '@playwright/test'
  *
  * SESSIONS_DB_PATH 必须指向独立文件：与 docker 生产后端共用 data/sessions.db
  * 会因两进程并发写导致 SQLite 主库被 WAL 帧覆盖而彻底损坏（不可恢复）。
+ *
+ * FACTOR_LIBRARY_DB_PATH（delta add-factor-library-page T2.3）：本 config 下跑
+ * factor-library.spec.ts 时 seed/factors_reset 会清表——不指向独立库会落到开发库
+ * data/factor_library.db（seed 造数/复位污染）。
+ *
+ * EXECUTION_DB_PATH（delta add-broker-console T2.3）：本 config 下跑
+ * broker-console.spec.ts 时 seed/broker_reset 会清 orders/positions/cash 三表——
+ * 同款纪律指向独立库（data/test-e2e-execution.db，与默认 config 同文件；
+ * track-record config 用的是另一个文件，承载 paper_equity 造数互不影响）。
+ *
+ * SCREENING_DB_PATH（delta add-daily-ops-page T2.3）：本 config 下跑
+ * daily-ops.spec.ts 时 seed/screening_reset 会清 screening 五表——不指向独立库会
+ * 落到开发库 data/screening.db（与默认 config 同文件 data/test-e2e-screening.db，
+ * .gitignore 既有条目覆盖）。
  */
 export default defineConfig({
   testDir: './tests',
@@ -28,6 +42,12 @@ export default defineConfig({
         TESTING: '1',
         // 独立测试库，与生产 data/sessions.db 物理隔离
         SESSIONS_DB_PATH: 'data/test-e2e-sessions.db',
+        // 因子库 E2E 造数库（同默认 config 口径）
+        FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db',
+        // 执行台账 E2E 造数库（同默认 config 口径；broker_reset 清账户三表）
+        EXECUTION_DB_PATH: 'data/test-e2e-execution.db',
+        // 选股 E2E 造数库（同默认 config 口径；screening_reset 清五表）
+        SCREENING_DB_PATH: 'data/test-e2e-screening.db',
         // 隔离报告落盘目录，避免 E2E 副作用污染 reports/
         REPORTS_DIR: 'tmp/e2e-reports-8001',
       },

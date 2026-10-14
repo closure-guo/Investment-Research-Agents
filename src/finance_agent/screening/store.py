@@ -110,6 +110,10 @@ BATCH_STATUSES: tuple[str, ...] = ("ok", "failed")
 # 稳定性门槛默认值（Global Constraints：默认连续 3 个交易日）
 DEFAULT_MIN_DAYS = 3
 
+# 批次历史窗口（add-daily-ops-page T1）：默认近 20 批次；上限 100 防一次倾倒全表
+DEFAULT_BATCH_HISTORY_LIMIT = 20
+MAX_BATCH_HISTORY_LIMIT = 100
+
 
 # ── 连接纪律（与 data/snapshot.py 同款） ────────────────────────────────────
 
@@ -595,6 +599,32 @@ def latest_successful_batch(db_path: str | Path | None = None) -> dict[str, Any]
             "WHERE status = 'ok' ORDER BY trade_date DESC LIMIT 1"
         ).fetchone()
         return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def list_batches(
+    limit: int = DEFAULT_BATCH_HISTORY_LIMIT, db_path: str | Path | None = None
+) -> list[dict[str, Any]]:
+    """近 ``limit`` 条批次历史（``trade_date`` 倒序，含失败行）；空库 → 空列表。
+
+    字段与服务端「当日运维」页逐字对齐：状态 / 错误（失败原因原样，不改写不归类）/
+    起止时间 / 各层计数（``l1_passed``/``l2_top``/``l3_keep``）/ 池数（``pool_size``）。
+    ``limit`` 须正整数（bool 为非整数，fail loud）——**上/下界钳制在端点层**，本函数
+    只做严格校验（与 ``_non_negative_int`` 等写入口径一致，不静默改正调用方入参）。
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError(f"limit 必须是正整数: {limit!r}")
+    init_screening_db(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT trade_date, status, error, started_at, finished_at, "
+            "l1_passed, l2_top, l3_keep, pool_size FROM screening_batches "
+            "ORDER BY trade_date DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
     finally:
         conn.close()
 

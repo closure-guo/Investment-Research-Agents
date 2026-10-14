@@ -12,6 +12,9 @@ DB 路径调用期读取 env ``EXECUTION_DB_PATH``（默认 ``data/execution.db`
   幂等，不产生重复审计行。
 - ``orders``/``positions``/``cash``（add-paper-broker B1）：paper 账户落库；
   复合读写（订单+持仓+资金）经 ``execution_conn`` 同事务提交；
+  ``signal_ids_with_orders``（已下单信号集合，只读）与 ``record_order_rejection``
+  （门禁拒绝留痕）为 add-execution-chain-driver 的驱动器配套助手；
+  ``delete_all_broker_state``（add-broker-console：TESTING 造数复位清三表）。
 - ``paper_equity``（B2）：每日结算净值曲线（trade_date PK，幂等 upsert）。
 
 模块级只依赖 stdlib：``Signal``/``OrderRecord`` 类型经 TYPE_CHECKING / 函数内
@@ -30,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from finance_agent.execution.brokers.base import OrderRecord
+    from finance_agent.execution.risk_gate import OrderIntent
     from finance_agent.execution.signals import Signal
 
 # 两表 DDL 集中定义（幂等 CREATE IF NOT EXISTS）。
@@ -466,6 +470,61 @@ def list_pending_orders(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def signal_ids_with_orders(*, db_path: str | Path | None = None) -> set[str]:
+    """已有订单的 signal_id 集合（add-execution-chain-driver：待执行信号判定，只读）。
+
+    含全部状态（filled/pending/rejected/expired）：被拒订单是该信号的终态留痕，
+    驱动器重跑不得再为该信号生成订单（幂等锚点之一，另一锚点见 order_id 派生）。
+    """
+    init_execution_db(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute("SELECT DISTINCT signal_id FROM orders").fetchall()
+    finally:
+        conn.close()
+    return {str(row["signal_id"]) for row in rows}
+
+
+def record_order_rejection(
+    order_id: str,
+    intent: OrderIntent,
+    reason: str,
+    created_at: str,
+    *,
+    db_path: str | Path | None = None,
+) -> None:
+    """门禁拒绝留痕（add-execution-chain-driver）：orders 行 ``rejected`` + 原因码。
+
+    被拒订单 MUST NOT 静默丢弃（delta spec broker-execution）：以结构化原因码落库
+    供台账/门禁日志回查，``decision_id``/``signal_id`` 照填、成交价与费用留空/零。
+    ``order_id`` 由调用方经 ``PaperBroker.order_id_for(intent)`` 同源派生；本函数
+    幂等——同 order_id 已有行（成交/挂单/既有拒绝）直接返回，不覆盖不重复插入。
+    """
+    # 函数内 import：模块级只依赖 stdlib 的连接纪律（同 list_signals 引入 Signal 先例）
+    from finance_agent.execution.brokers.base import STATUS_REJECTED, OrderRecord
+
+    with execution_conn(db_path) as conn:
+        if read_order(conn, order_id) is not None:
+            return
+        insert_order(
+            conn,
+            OrderRecord(
+                order_id=str(order_id),
+                symbol=str(intent.symbol),
+                side=str(intent.side),
+                qty=int(intent.qty),
+                status=STATUS_REJECTED,
+                reason=str(reason),
+                fill_price=None,
+                fee=0.0,
+                decision_id=str(intent.decision_id),
+                signal_id=str(intent.signal_id),
+                created_at=str(created_at),
+                attempts=0,
+            ),
+        )
+
+
 _PAPER_EQUITY_SQL = (
     "INSERT INTO paper_equity (trade_date, cash, positions_value, equity)"
     " VALUES (?, ?, ?, ?)"
@@ -534,3 +593,18 @@ def delete_all_paper_equity(db_path: str | Path | None = None) -> int:
         return int(cursor.rowcount)
     finally:
         conn.close()
+
+
+def delete_all_broker_state(db_path: str | Path | None = None) -> dict[str, int]:
+    """清空 paper 账户三表（orders/positions/cash；add-broker-console 造数复位）。
+
+    仅清账户账本三表；``paper_equity`` 净值曲线（战绩页造数面）不涉——两者复位
+    边界独立（同 ``delete_all_paper_equity`` 的反向纪律）。返回各表删除行数。
+    """
+    init_execution_db(db_path)
+    with execution_conn(db_path) as conn:
+        return {
+            "orders": int(conn.execute("DELETE FROM orders").rowcount),
+            "positions": int(conn.execute("DELETE FROM positions").rowcount),
+            "cash": int(conn.execute("DELETE FROM cash").rowcount),
+        }

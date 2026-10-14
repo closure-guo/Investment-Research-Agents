@@ -33,6 +33,7 @@ from typing import Any
 
 from finance_agent.data.snapshot_job import MARKET_SNAPSHOT_SCHEDULE, run_market_snapshot_batch
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
+from finance_agent.execution.driver import run_execution_daily
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.ops.model import (
@@ -43,14 +44,17 @@ from finance_agent.outcome.ops.model import (
 from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
+from finance_agent.screening.pipeline import run_screening_daily
 
 logger = logging.getLogger(__name__)
 
 # 任务全集(顺序 = 调度注册与状态接口的展示顺序;按触发时刻升序)
 JOB_IDS: tuple[str, ...] = (
     "market_snapshot_daily",
+    "screening_daily",
     "factor_decay_monitor",
     "decision_settle_daily",
+    "paper_execute_daily",
     "paper_settle_daily",
     "daily_marking",
     "metrics_snapshot",
@@ -60,8 +64,10 @@ JOB_IDS: tuple[str, ...] = (
 
 JOB_LABELS: dict[str, str] = {
     "market_snapshot_daily": "行情快照",
+    "screening_daily": "选股",
     "factor_decay_monitor": "因子衰减监控",
     "decision_settle_daily": "判定",
+    "paper_execute_daily": "仿真执行",
     "paper_settle_daily": "paper 结算",
     "daily_marking": "盯市",
     "metrics_snapshot": "指标快照",
@@ -72,8 +78,10 @@ JOB_LABELS: dict[str, str] = {
 # 默认注册表。值都是无参调用(任务函数签名全为可选关键字参数)。
 JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "market_snapshot_daily": run_market_snapshot_batch,
+    "screening_daily": run_screening_daily,
     "factor_decay_monitor": run_factor_decay_monitor,
     "decision_settle_daily": settle_open_predictions,
+    "paper_execute_daily": run_execution_daily,
     "paper_settle_daily": run_paper_settle_daily,
     "daily_marking": run_daily_marking,
     "metrics_snapshot": persist_metrics_snapshot,
@@ -82,14 +90,22 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
 }
 
 # 每 job 的 cron 规格:结算链任务时刻固定(16:00/16:20/16:30/16:35/16:40,工作日);
-# paper 仿真结算 16:20(decision settle 之后、daily marking 之前,
+# paper 仿真执行 16:10(decision settle 之后、paper 结算之前,add-execution-chain-driver)
+# → 当日成交当日入结算;paper 仿真结算 16:20(decision settle 之后、daily marking 之前,
 # add-paper-broker);行情快照日批 15:30(收盘后,add-market-snapshot);
+# 选股日批 15:40(快照之后、因子监控之前,add-screening-batch-scheduling);
 # 因子衰减监控 15:45(快照之后、结算链之前,add-factor-library-and-monitor);
 # cohort 项的 hour/minute 由 ``scheduler.start_scheduler``(启动时)与
 # ``scheduler.reschedule_cohort``(界面保存后)按 config 覆写——本字典是调度与
 # 状态接口共用的时刻快照。
 SCHEDULES: dict[str, dict[str, Any]] = {
     "market_snapshot_daily": MARKET_SNAPSHOT_SCHEDULE,
+    "screening_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 15,
+        "minute": 40,
+        "timezone": "Asia/Shanghai",
+    },
     "factor_decay_monitor": {
         "day_of_week": "mon-fri",
         "hour": 15,
@@ -100,6 +116,12 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 0,
+        "timezone": "Asia/Shanghai",
+    },
+    "paper_execute_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 10,
         "timezone": "Asia/Shanghai",
     },
     "paper_settle_daily": {

@@ -28,12 +28,15 @@ import { test, expect, type APIRequestContext, type Page } from '@playwright/tes
 test.describe.configure({ timeout: 120_000 })
 
 // 任务 id（顺序 = 后端 JOB_IDS）。add-market-snapshot / add-factor-library-and-monitor /
-// add-paper-broker 三次注册表扩容（5→8：快照 15:30、因子衰减 15:45、paper 结算 16:20）
-// 后同步更新——断言强度不变（仍逐 id 断言存在与顺序）。
+// add-paper-broker 三次注册表扩容（5→8：快照 15:30、因子衰减 15:45、paper 结算 16:20）、
+// add-screening-batch-scheduling（8→9：选股 15:40）与 add-execution-chain-driver
+// （9→10：仿真执行 16:10）后同步更新——断言强度不变（仍逐 id 断言存在与顺序）。
 const JOB_IDS = [
   'market_snapshot_daily',
+  'screening_daily',
   'factor_decay_monitor',
   'decision_settle_daily',
+  'paper_execute_daily',
   'paper_settle_daily',
   'daily_marking',
   'metrics_snapshot',

@@ -18,6 +18,10 @@ import { useClickOutside } from './useClickOutside'
 import { usePathname, navigate } from './route'
 import { DownloadCenter } from './pages/downloads/DownloadCenter'
 import { ScreeningPage } from './pages/screening/ScreeningPage'
+import { MemoryPage } from './pages/memory/MemoryPage'
+import { FactorLibraryPage } from './pages/factors/FactorLibraryPage'
+import { BrokerConsolePage } from './pages/broker/BrokerConsolePage'
+import { DailyOpsPage } from './pages/ops/DailyOpsPage'
 import { TrackRecordPage } from './pages/trackRecord/TrackRecordPage'
 import { CalibrationPage } from './pages/trackRecord/CalibrationPage'
 import { PredictionDetailPage } from './pages/trackRecord/PredictionDetailPage'
@@ -891,6 +895,10 @@ export default function App() {
         onOpenDownloads={() => navigate('/downloads')}
         onOpenDecisions={() => navigate('/track-record')}
         onOpenScreening={() => navigate('/screening')}
+        onOpenMemory={() => navigate('/memory')}
+        onOpenFactors={() => navigate('/factors')}
+        onOpenBroker={() => navigate('/broker')}
+        onOpenOps={() => navigate('/ops')}
         onOpenSettings={() => { setSettingsFocus(undefined); navigate('/settings') }}
         themeChoice={themeChoice}
         onCycleTheme={cycleTheme}
@@ -916,6 +924,18 @@ export default function App() {
         ) : pathname === '/screening' ? (
           // 选股页（add-screening-pipeline T4）：最近成功批次池 + 批量深度分析
           <ScreeningPage onBack={() => navigate('/')} />
+        ) : pathname === '/memory' ? (
+          // 记忆确认页（add-memory-confirmation T2）：语义记忆条款审批队列
+          <MemoryPage onBack={() => navigate('/')} />
+        ) : pathname === '/factors' ? (
+          // 因子库页（delta add-factor-library-page T2）：资产目录（筛选 + 行展开，只读）
+          <FactorLibraryPage onBack={() => navigate('/')} />
+        ) : pathname === '/broker' ? (
+          // 执行台账页（delta add-broker-console T2.1）：资金/持仓/订单四态/门禁拒绝（只读）
+          <BrokerConsolePage onBack={() => navigate('/')} />
+        ) : pathname === '/ops' ? (
+          // 日批运维页（delta add-daily-ops-page T2.1）：当日各批时间线 + 一键补跑 + 选股批次历史
+          <DailyOpsPage onBack={() => navigate('/')} onOpenEvalOps={() => { setSettingsFocus('eval-ops'); navigate('/settings') }} />
         ) : pathname === '/settings' ? (
           // 设置中心页（add-agent-settings-center Task 7）：左导航六分区 + 右内容区
           <SettingsCenterPage
@@ -1116,6 +1136,10 @@ export default function App() {
         onSelectSession={selectSession}
         onNewSession={newAnalysis}
         onOpenDownloads={() => navigate('/downloads')}
+        onOpenMemory={() => navigate('/memory')}
+        onOpenFactors={() => navigate('/factors')}
+        onOpenBroker={() => navigate('/broker')}
+        onOpenOps={() => navigate('/ops')}
         onCycleTheme={cycleTheme}
         themeChoice={themeChoice}
       />
@@ -1132,7 +1156,7 @@ export default function App() {
 }
 
 // ── Sidebar（add-collapsible-sidebar：shadcn Sidebar 原语重构）──
-function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
+function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenMemory, onOpenFactors, onOpenBroker, onOpenOps, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
   sessions: SessionMeta[]
   currentSessionId: string | null
   onSelect: (id: string) => void
@@ -1142,6 +1166,10 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
   onOpenDownloads: () => void
   onOpenDecisions: () => void
   onOpenScreening: () => void
+  onOpenMemory: () => void
+  onOpenFactors: () => void
+  onOpenBroker: () => void
+  onOpenOps: () => void
   onOpenSettings: () => void
   runningSessionIds: Set<string>
   loading?: boolean
@@ -1194,6 +1222,26 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
           <SidebarIcon label="选股池">
             <Button variant="ghost" size="icon" onClick={onOpenScreening} aria-label="选股池" data-testid="sidebar-screening-collapsed">
               <i className="fas fa-filter text-xs"></i>
+            </Button>
+          </SidebarIcon>
+          <SidebarIcon label="记忆">
+            <Button variant="ghost" size="icon" onClick={onOpenMemory} aria-label="记忆" data-testid="sidebar-memory-collapsed">
+              <i className="fas fa-brain text-xs"></i>
+            </Button>
+          </SidebarIcon>
+          <SidebarIcon label="因子库">
+            <Button variant="ghost" size="icon" onClick={onOpenFactors} aria-label="因子库" data-testid="sidebar-factors-collapsed">
+              <i className="fas fa-flask text-xs"></i>
+            </Button>
+          </SidebarIcon>
+          <SidebarIcon label="执行台账">
+            <Button variant="ghost" size="icon" onClick={onOpenBroker} aria-label="执行台账" data-testid="sidebar-broker-collapsed">
+              <i className="fas fa-book-open text-xs"></i>
+            </Button>
+          </SidebarIcon>
+          <SidebarIcon label="日批运维">
+            <Button variant="ghost" size="icon" onClick={onOpenOps} aria-label="日批运维" data-testid="sidebar-ops-collapsed">
+              <i className="fas fa-list-check text-xs"></i>
             </Button>
           </SidebarIcon>
           <SidebarIcon label="决策战绩">

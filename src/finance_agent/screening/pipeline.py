@@ -398,6 +398,22 @@ def run_screening_batch(
         }
 
 
+def run_screening_daily() -> dict[str, Any]:
+    """ops 日批入口（add-screening-batch-scheduling）：封装 ``run_screening_batch``。
+
+    - 批次 ``status="failed"``（快照过期等内部失败）→ **上抛** ``RuntimeError``：
+      ``run_job`` 记 ``failed`` 运行行，运维界面（评估运维/日批运维）据此可见——
+      批次自身的 failed 行（screening_batches）与运行历史两侧一致；
+    - 快照库为空且未指定 as_of → 管线直接抛 ``SnapshotNotFreshError``（原样透传，
+      同样落 failed 运行行）；
+    - 成功 → 摘要原样透传（``trade_date/status/l1_passed/l2_top/l3_keep/pool_size``）。
+    """
+    result = run_screening_batch()
+    if isinstance(result, dict) and result.get("status") == "failed":
+        raise RuntimeError(str(result.get("error") or "选股日批失败"))
+    return result
+
+
 def latest_successful_pool(*, db_path: str | Path | None = None) -> dict[str, Any] | None:
     """最近成功批次 + 其当日精选池；无成功批次 → None（前端回退空态/旧日期标注）。
 

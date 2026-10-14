@@ -2185,3 +2185,78 @@ assistant 消息 hover SHALL 显示复制与重新生成操作；管线进度时
 - **WHEN** 本 change 完成后重新截图对比
 - **THEN** 全部页面像素级无差异（允许的抗锯齿噪声容差 ≤ 0.1% 像素）
 
+### Requirement: 记忆确认页
+
+系统 SHALL 提供 `/memory` 路由页，采用 PageShellC（左列表 + 右详情 + 确认/驳回）形态：左侧为语义记忆条款列表并支持 待确认 / 已确认 / 已驳回 三态筛选（默认待确认），右侧为条款详情（完整正文、来源、提炼时间）与「确认」「驳回」动作；条款正文 SHALL 携带 AiBadge（LLM 提炼产物）；条款状态 SHALL 使用 StatusBadge；确认动作旁 SHALL 明示「确认后即刻生效注入风控辩论」；列表为空时 SHALL 如实说明等待月批提炼（MUST NOT 以加载中或错误态冒充）。页面入口 SHALL 同源提供于侧边栏与命令面板。
+
+#### Scenario: 确认流
+
+- **GIVEN** 待确认列表含条款 C
+- **WHEN** 用户选中 C 并点击「确认」
+- **THEN** 待确认列表移除 C、已确认列表出现 C（状态徽章为已确认）
+- **AND** 无页面级报错
+
+#### Scenario: 空态如实
+
+- **GIVEN** 库中无任何 pending 条款
+- **WHEN** 打开页面
+- **THEN** 展示空态文案（等待月批提炼），MUST NOT 显示骨架屏或错误提示冒充
+
+### Requirement: 因子库页
+
+系统 SHALL 提供 `/factors` 路由页，采用 PageShellB（筛选栏 + 数据表 + 行展开详情）形态：筛选栏 SHALL 支持状态（全部 / active / retired）与来源（全部 / builtin / llm）过滤；表格列 SHALL 含 名称、表达式（截断）、状态、来源、ICIR 与衰减标记；状态 SHALL 使用 StatusBadge，`llm` 来源 SHALL 携带 AiBadge；行展开 SHALL 展示完整表达式、IC 序列与事件历史；空库时 SHALL 如实展示空态文案。页面入口 SHALL 同源提供于侧边栏与命令面板。
+
+#### Scenario: 筛选与徽章
+
+- **GIVEN** 库中含 active/llm 与 retired/builtin 两条因子
+- **WHEN** 选择来源筛选 `llm`
+- **THEN** 仅显示 active/llm 因子，其来源带 AiBadge、状态为 StatusBadge active
+- **AND** retired 因子被过滤
+
+#### Scenario: 行展开详情
+
+- **GIVEN** 列表中的一条因子
+- **WHEN** 展开该行
+- **THEN** 展示完整 DSL 表达式、IC 序列与事件历史（含时间与事件类型）
+
+### Requirement: 执行台账页
+
+系统 SHALL 提供 `/broker` 路由页，采用 PageShellA（指标条 + 主图表 + 底部 Tab 表）形态：指标条 SHALL 含 总资产 / 可用资金 / 持仓市值 / 浮动盈亏（市值不可得时显式标注而非显示 0）；主图表 SHALL 为持仓市值构成（按标的）；底部 Tab 表 SHALL 含 持仓 / 订单 / 门禁拒绝 三个页签，订单状态 SHALL 使用 StatusBadge（pending→running、filled→active、rejected→failed、expired→retired）；空账户时 SHALL 如实展示空态。页面入口 SHALL 同源提供于侧边栏与命令面板。
+
+#### Scenario: 台账齐备
+
+- **GIVEN** 账户含 2 条持仓与 4 条不同状态订单
+- **WHEN** 打开页面
+- **THEN** 指标条与持仓构成图渲染；订单 Tab 含四态徽章
+- **AND** 门禁拒绝 Tab 含被拒订单与原因码
+
+#### Scenario: 空账户空态
+
+- **GIVEN** 账户无持仓、无订单
+- **WHEN** 打开页面
+- **THEN** 指标条显示资金，图表与表格显示空态文案
+- **AND** MUST NOT 渲染伪持仓或伪订单
+
+### Requirement: 日批运维页
+
+系统 SHALL 提供 `/ops` 路由页，采用 PageShellD（批次列表 + 步骤级状态图标）形态：**当日时间线** SHALL 按排程时刻数据驱动渲染全部日批任务（不硬编码任务清单），每项含 状态徽章（成功 / 失败 / 未跑 / 运行中 / 跳过）、最近运行摘要与失败原因（逐字展示）；每项 SHALL 提供一键补跑动作（复用既有补跑通道，已在运行或关闭态按端点语义如实提示）；**选股批次历史表** SHALL 展示近 N 批次（日期 / 状态 / 各层计数 / 池数 / 错误）；页面 SHALL 提供至评估运维（全量控制台）的跳转。空数据时各区块 SHALL 如实展示空态。页面入口 SHALL 同源提供于侧边栏与命令面板。
+
+#### Scenario: 时间线齐备且数据驱动
+
+- **GIVEN** 注册表含 10 个日批任务
+- **WHEN** 打开页面
+- **THEN** 时间线按排程时刻升序展示 10 项，各含状态徽章与最近运行摘要
+- **AND** 失败项展示错误信息原文
+
+#### Scenario: 一键补跑
+
+- **GIVEN** 当日某任务失败
+- **WHEN** 点击该任务补跑
+- **THEN** 触发既有补跑通道并刷新该任务最近运行（或按 409/关闭语义如实提示）
+
+#### Scenario: 选股批次历史
+
+- **GIVEN** 含 1 成功 1 失败批次
+- **WHEN** 打开页面
+- **THEN** 历史表含两行（日期倒序），成功行含各层计数、失败行含原因
+

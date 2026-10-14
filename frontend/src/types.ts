@@ -828,3 +828,166 @@ export interface ScreeningAnalyzeResponse {
   queued: ScreeningQueueEntry[]
   removed: ScreeningRemoval[]
 }
+
+// 选股批次历史（delta add-daily-ops-page：GET /api/screening/batches 载荷行）。
+// 字段名逐字对齐 `src/finance_agent/screening/store.py::list_batches`（不猜测）。
+export interface ScreeningBatch {
+  trade_date: string
+  /** 批次状态：ok / failed（库内原值） */
+  status: string
+  /** 失败原因（失败行原样，不改写不归类）；成功行 null */
+  error: string | null
+  started_at: string
+  finished_at: string
+  l1_passed: number
+  l2_top: number
+  l3_keep: number
+  pool_size: number
+}
+
+// 语义记忆条款（add-memory-confirmation：GET /api/memory/clauses 载荷）
+export type MemoryClauseStatus = 'pending' | 'confirmed' | 'rejected'
+
+export interface MemoryClause {
+  id: string
+  text: string
+  /** 条款状态三态；仅 confirmed 参与风控辩论注入（后端门禁） */
+  status: MemoryClauseStatus
+  /** 来源（monthly_batch / llm 等，后端原值） */
+  source: string
+  /** 提炼时间（落库时刻 ISO） */
+  created_at: string
+  /** 结算样本（JSON 文本或空，后端原值） */
+  evidence: string | null
+}
+
+export interface MemoryClauseListResponse {
+  status: MemoryClauseStatus
+  clauses: MemoryClause[]
+}
+
+// 因子库（delta add-factor-library-page：GET /api/factors 载荷）。
+// 状态为库内原值（candidate/active/degraded/retired）；来源为库内原值（builtin/
+// llm/proposal）；name 为 builtin 注册词表作品名，非 builtin → null（界面回退显示因子 id）。
+export interface FactorLastEvent {
+  /** 事件类型（created / status_change） */
+  event: string
+  from_status: string | null
+  to_status: string | null
+  /** 闸门/状态变更结论（detail.reason 提升；无 → null） */
+  reason: string | null
+  created_at: string
+}
+
+export interface FactorRow {
+  id: number
+  name: string | null
+  expression: string
+  hypothesis: string
+  category: string
+  status: string
+  /** 规范表达式（dsl.serialize 产出；库内行未存 → null） */
+  ast_json: string | null
+  source: string
+  alignment_score: number | null
+  pool_increment: number | null
+  created_at: string
+  updated_at: string
+  /** 近 60 个交易日 IC 均值（recent_ic_stats 口径；无记录 → 0.0） */
+  ic_mean_60d: number
+  /** 近 60 个交易日 ICIR（mean/std，ddof=1；无记录 → 0.0，界面按 ic_points 区分） */
+  icir_60d: number
+  /** 窗口内 IC 记录数：0 → 界面显示「—」而非 0.000 */
+  ic_points: number
+  /** 衰减降级史（事件历史出现过 degraded；退役后标记仍在） */
+  decayed: boolean
+  last_event: FactorLastEvent | null
+}
+
+export interface FactorListResponse {
+  factors: FactorRow[]
+}
+
+// GET /api/factors/{id}：摘要字段 + IC 序列（近 60 点升序）+ 事件历史（完整 detail）
+export interface FactorIcPoint {
+  trade_date: string
+  rank_ic: number
+}
+
+export interface FactorEvent {
+  id: number
+  factor_id: number
+  event: string
+  from_status: string | null
+  to_status: string | null
+  reason: string | null
+  detail: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface FactorDetail extends FactorRow {
+  ic_series: FactorIcPoint[]
+  events: FactorEvent[]
+}
+
+// ── 执行台账只读契约（delta add-broker-console：GET /api/broker/*） ──
+
+export interface BrokerOverview {
+  /** 可用资金（PaperBroker 惰性开户口径：首次读取即落初始 100 万） */
+  cash: number
+  /** 持仓市值（最新快照 close_raw 口径；快照不可得 → null，MUST NOT 填 0 冒充） */
+  positions_value: number | null
+  /** 总资产 = 资金 + 持仓市值（市值不可得 → null） */
+  equity: number | null
+  /** 浮动盈亏 = 持仓市值 − 持仓成本（市值不可得 → null） */
+  unrealized_pnl: number | null
+  /** 持仓成本合计（账本口径，不依赖快照） */
+  position_cost: number
+  positions_count: number
+  /** mark 所用快照交易日（不可得 → null） */
+  snapshot_date: string | null
+  /** 缺收盘价的标的（市值不可得时的可判读明细） */
+  missing_symbols: string[]
+  /** 市值不可得原因的标注文案（可得 → null） */
+  market_value_note: string | null
+}
+
+export interface BrokerPositionRow {
+  symbol: string
+  qty: number
+  avg_cost: number
+  updated_at: string | null
+  /** 现价（快照 close_raw；不可得 → null） */
+  close: number | null
+  market_value: number | null
+  unrealized_pnl: number | null
+}
+
+export interface BrokerPositionsResponse {
+  snapshot_date: string | null
+  positions: BrokerPositionRow[]
+}
+
+/** 订单状态枚举（spec 逐字四态） */
+export type BrokerOrderStatus = 'pending' | 'filled' | 'rejected' | 'expired'
+
+export interface BrokerOrderRow {
+  order_id: string
+  symbol: string
+  side: string
+  qty: number
+  status: BrokerOrderStatus | string
+  /** 未成交/拒单原因码（成交 → null） */
+  reason: string | null
+  fill_price: number | null
+  fee: number
+  /** 证据链（spec：订单记录含 decision_id 与 signal_id） */
+  decision_id: string
+  signal_id: string
+  created_at: string
+  attempts: number
+}
+
+export interface BrokerOrdersResponse {
+  orders: BrokerOrderRow[]
+}

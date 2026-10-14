@@ -41,10 +41,25 @@ from finance_agent.data.snapshot import (  # noqa: E402
     read_universe,
 )
 from finance_agent.events.pipeline import fetch_key_events  # noqa: E402
+from finance_agent.execution.brokers.base import ORDER_STATUSES, STATUS_REJECTED  # noqa: E402
+from finance_agent.factors.builtin import BUILTIN_FACTORS  # noqa: E402
+from finance_agent.factors.library import (  # noqa: E402
+    FACTOR_STATES,
+    list_events,
+    list_factors,
+    list_ic_series,
+)
+from finance_agent.factors.tools import IC_WINDOW as FACTOR_IC_WINDOW  # noqa: E402
 from finance_agent.graph import build_5layer_graph  # noqa: E402
 from finance_agent.langfuse_tracing import get_langfuse  # noqa: E402
 from finance_agent.llm import LLMConfig  # noqa: E402
 from finance_agent.llm.probe_cache import get_probe_cache  # noqa: E402
+from finance_agent.memory.semantic import (  # noqa: E402
+    CLAUSE_STATUSES,
+    confirm_clause,
+    list_clauses,
+    reject_clause,
+)
 from finance_agent.pipeline_runner import PipelineRunner, build_layer_tree  # noqa: E402
 from finance_agent.screening.pipeline import (  # noqa: E402
     check_signal_freshness,
@@ -52,9 +67,13 @@ from finance_agent.screening.pipeline import (  # noqa: E402
     read_snapshot_calendar,
 )
 from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
+from finance_agent.screening.ranker import recent_ic_stats  # noqa: E402
 from finance_agent.screening.store import (  # noqa: E402
+    DEFAULT_BATCH_HISTORY_LIMIT,
+    MAX_BATCH_HISTORY_LIMIT,
     latest_screening_batch,
     latest_successful_batch,
+    list_batches,
     record_screening_removals,
 )
 from finance_agent.session_store import (  # noqa: E402
@@ -722,6 +741,64 @@ async def health():
 
 
 # ── 测试专用端点（仅 TESTING=1 下可用）──
+
+
+def _seed_broker_account(seed: dict[str, Any]) -> None:
+    """broker 造数（delta add-broker-console T1.2）：cash/positions/orders 经既有落库入口写入。
+
+    ``order_id`` 缺省按 ``PaperBroker.order_id_for`` 同源派生
+    （``signal_id:symbol:side``）——与生产订单 id 口径一致，避免造数与真实重跑口径
+    分叉；缺 ``cash`` 时按 PaperBroker 初始资金惰性开户（``ensure_account``，不覆盖
+    已有余额）。状态/原因码/证据链照 seed 行给定（不臆造）。库路径于调用期读
+    EXECUTION_DB_PATH（store 各入口 env 口径；E2E 指向独立测试库）。
+    """
+    from finance_agent.execution.brokers.base import OrderRecord
+    from finance_agent.execution.store import (
+        ensure_account,
+        execution_conn,
+        insert_order,
+        write_cash,
+        write_position,
+    )
+
+    now = _now()
+    with execution_conn() as conn:
+        cash = seed.get("cash")
+        if cash is None:
+            ensure_account(conn, 1_000_000.0, now)
+        else:
+            write_cash(conn, float(cash), now)
+        for row in seed.get("positions") or []:
+            write_position(
+                conn,
+                str(row["symbol"]),
+                int(row["qty"]),
+                float(row["avg_cost"]),
+                str(row.get("updated_at") or now),
+            )
+        for order_row in seed.get("orders") or []:
+            symbol = str(order_row["symbol"])
+            side = str(order_row["side"])
+            signal_id = str(order_row["signal_id"])
+            insert_order(
+                conn,
+                OrderRecord(
+                    order_id=str(order_row.get("order_id") or f"{signal_id}:{symbol}:{side}"),
+                    symbol=symbol,
+                    side=side,
+                    qty=int(order_row["qty"]),
+                    status=str(order_row["status"]),
+                    reason=order_row.get("reason"),
+                    fill_price=order_row.get("fill_price"),
+                    fee=float(order_row.get("fee", 0.0)),
+                    decision_id=str(order_row["decision_id"]),
+                    signal_id=signal_id,
+                    created_at=str(order_row.get("created_at") or now),
+                    attempts=int(order_row.get("attempts", 0)),
+                ),
+            )
+
+
 if TESTING:
 
     @app.post("/api/test/seed")
@@ -746,9 +823,29 @@ if TESTING:
         screening 五表**并丢弃进程内队列单例**）造选股页确定性状态
         （add-screening-pipeline S6）；库路径于调用期读 SCREENING_DB_PATH（导入期
         冻结会让 E2E 注入失效）。
+        顶层可选 memory（dict：``clauses`` 造条款，逐条经既有落库 + 状态机置
+        pending/confirmed/rejected；可带 source 与 evidence（JSON 文本，结算样本）
+        造记忆确认页确定性状态）与 memory_reset（bool：清条款表）造记忆确认页
+        确定性状态（delta add-memory-confirmation T1/2.3）；库路径于调用期读
+        SESSIONS_DB_PATH（semantic 模块 env 口径，E2E 指向独立测试库）。
+        顶层可选 factors（dict：``factors`` 造因子，逐条经既有落库 +
+        状态机走到目标态（active 记 ADMITTED，与准入路径同源；degraded/retired 的
+        detail 由行内 ``detail`` 给出；``via_degraded`` 为真时 retired 先经
+        degraded(DECAY) 落衰减史，供「衰减标记」列造态）；行内可带 ic
+        （[[trade_date, rank_ic]...] 经 record_ic 幂等写入）与
+        pool_increment/alignment_score/ast_json）与 factors_reset（bool：清因子库
+        三表）造因子库页确定性状态（delta add-factor-library-page T1.2）；库路径
+        于调用期读 FACTOR_LIBRARY_DB_PATH（library 模块 env 口径，E2E 指向独立
+        测试库，绝不落到开发库 data/factor_library.db）。
+        顶层可选 broker（dict：``cash`` 写账户余额、``positions`` 造持仓、
+        ``orders`` 造订单（四态/原因码/证据链照填，``order_id`` 缺省按
+        PaperBroker.order_id_for 同源派生））与 broker_reset（bool：清账户三表
+        orders/positions/cash）造执行台账页确定性状态（delta add-broker-console
+        T1.2）；库路径于调用期读 EXECUTION_DB_PATH（E2E 指向独立测试库）。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
-        # track_record / snapshot / screening 造数块不受 chat_history 前置约束
+        # track_record / snapshot / screening / memory / factors / broker 造数块不受
+        # chat_history 前置约束
         if (
             "chat_history" not in req
             and not isinstance(req.get("track_record"), dict)
@@ -757,6 +854,12 @@ if TESTING:
             and not isinstance(req.get("screening"), dict)
             and not req.get("screening_reset")
             and not req.get("track_record_reset")
+            and not isinstance(req.get("memory"), dict)
+            and not req.get("memory_reset")
+            and not isinstance(req.get("factors"), dict)
+            and not req.get("factors_reset")
+            and not isinstance(req.get("broker"), dict)
+            and not req.get("broker_reset")
         ):
             return {"status": "ok", "mode": "testing"}
         # add-paper-broker：战绩造数复位（清 equity_curve + paper_equity 两表）。双曲线
@@ -910,6 +1013,24 @@ if TESTING:
         if isinstance(screening_seed, dict):
             from finance_agent.screening.store import record_screening_batch as _seed_batch
 
+            # add-daily-ops-page T1.2：``batches`` = 历史多批次（每行可自带 ``pool``，
+            # pool_size 随该行的池行数）；先落历史、后落单数 ``batch``——同日撞键时
+            # 单数（当前批次）胜出，既有 payload 语义零漂移。
+            batches_seed = screening_seed.get("batches")
+            if isinstance(batches_seed, list):
+                for history_row in batches_seed:
+                    trade_date = history_row["trade_date"]
+                    _seed_batch(
+                        trade_date,
+                        status=history_row.get("status", "ok"),
+                        error=history_row.get("error"),
+                        started_at=history_row.get("started_at", _now()),
+                        finished_at=history_row.get("finished_at", _now()),
+                        l1_passed=history_row.get("l1_passed", 0),
+                        l2_top=history_row.get("l2_top", 0),
+                        l3_keep=history_row.get("l3_keep", 0),
+                        pool_rows=history_row.get("pool") or [],
+                    )
             batch_seed = screening_seed.get("batch")
             if isinstance(batch_seed, dict):
                 trade_date = batch_seed["trade_date"]
@@ -927,6 +1048,100 @@ if TESTING:
             queue_seed = screening_seed.get("queue")
             if isinstance(queue_seed, list):
                 _get_analyze_queue().seed(queue_seed)
+        # 语义记忆造数（delta add-memory-confirmation T1）：可选先 reset（清条款表）再写
+        # 条款——逐条经既有落库（去重口径同生产：同文本已存在则跳过）后再按 status 走
+        # 既有状态机置态，与真实确认/驳回路径同源。库路径调用期读 SESSIONS_DB_PATH。
+        if req.get("memory_reset"):
+            from finance_agent.memory.semantic import reset_clauses
+
+            reset_clauses()
+        memory_seed = req.get("memory")
+        if isinstance(memory_seed, dict):
+            from finance_agent.memory.semantic import (
+                confirm_clause as _seed_confirm_clause,
+            )
+            from finance_agent.memory.semantic import (
+                reject_clause as _seed_reject_clause,
+            )
+            from finance_agent.memory.semantic import (
+                store_candidate_clauses as _seed_store_clauses,
+            )
+
+            for clause_row in memory_seed.get("clauses") or []:
+                new_ids = _seed_store_clauses(
+                    [str(clause_row["text"])],
+                    source=clause_row.get("source", "monthly_batch"),
+                    # evidence 原样落库（生产为 JSON 文本）：供记忆页结算样本展示造数
+                    evidence=clause_row.get("evidence"),
+                )
+                # 同文本已存在（去重口径）→ 不重复入库，seed 保持幂等
+                if not new_ids:
+                    continue
+                if clause_row.get("status") == "confirmed":
+                    _seed_confirm_clause(new_ids[0])
+                elif clause_row.get("status") == "rejected":
+                    _seed_reject_clause(new_ids[0])
+        # 因子库造数（delta add-factor-library-page T1.2）：可选先 reset（清三表）再
+        # 写因子——逐条经既有落库 + 状态机走到目标态（candidate→active→degraded/
+        # retired，与生产准入/退役路径同源），IC 经 record_ic 幂等写入。库路径调用期
+        # 读 FACTOR_LIBRARY_DB_PATH（library 模块 env 口径）。
+        if req.get("factors_reset"):
+            from finance_agent.factors.library import reset_factor_library
+
+            reset_factor_library()
+        factors_seed = req.get("factors")
+        if isinstance(factors_seed, dict):
+            from finance_agent.factors.library import add_factor as _seed_add_factor
+            from finance_agent.factors.library import record_ic as _seed_record_ic
+            from finance_agent.factors.library import (
+                set_pool_increment as _seed_set_pool_increment,
+            )
+            from finance_agent.factors.library import set_status as _seed_set_status
+
+            for factor_row in factors_seed.get("factors") or []:
+                target = str(factor_row.get("status", "candidate"))
+                if target not in FACTOR_STATES:
+                    # fail loud：静默回落会让 E2E 断言对着一条状态不符预期的行变红难归因
+                    raise ValueError(f"非法种子状态 {target!r}；允许: {list(FACTOR_STATES)}")
+                factor_id = _seed_add_factor(
+                    expression=str(factor_row["expression"]),
+                    hypothesis=str(factor_row.get("hypothesis", "")),
+                    category=str(factor_row.get("category", "seed")),
+                    status="candidate",
+                    ast_json=factor_row.get("ast_json"),
+                    source=str(factor_row.get("source", "proposal")),
+                    alignment_score=factor_row.get("alignment_score"),
+                )
+                if factor_row.get("pool_increment") is not None:
+                    _seed_set_pool_increment(factor_id, float(factor_row["pool_increment"]))
+                if target != "candidate":
+                    # active 的闸门结论与 validate.admit_candidates 逐字同源（ADMITTED）
+                    _seed_set_status(factor_id, "active", detail={"reason": "ADMITTED"})
+                if target == "retired" and factor_row.get("via_degraded"):
+                    # 衰减后退役（真实路径 degraded → retired）：先落 DECAY 降级事件
+                    # （detail 缺省 {"reason": "DECAY"}）再退役——供「衰减标记」列造态
+                    _seed_set_status(
+                        factor_id,
+                        "degraded",
+                        detail=factor_row.get("degraded_detail") or {"reason": "DECAY"},
+                    )
+                if target in ("degraded", "retired"):
+                    # detail 由 seed 行给出（缺省 None——不臆造原因）
+                    _seed_set_status(factor_id, target, detail=factor_row.get("detail"))
+                for trade_date, rank_ic in factor_row.get("ic") or []:
+                    _seed_record_ic(factor_id, str(trade_date), float(rank_ic))
+        # 执行台账造数（delta add-broker-console T1.2）：可选先 reset（清 orders/
+        # positions/cash 三表）再写 cash/positions/orders——逐条经既有落库入口
+        # （ensure_account/write_cash/write_position/insert_order），与 paper 生产写
+        # 路径同源；库路径调用期读 EXECUTION_DB_PATH（E2E 指向独立测试库
+        # data/test-e2e-execution.db，绝不落到开发库 data/execution.db）。
+        if req.get("broker_reset"):
+            from finance_agent.execution.store import delete_all_broker_state
+
+            delete_all_broker_state()
+        broker_seed = req.get("broker")
+        if isinstance(broker_seed, dict):
+            _seed_broker_account(broker_seed)
         # track_record-only（含 {} 空 dict）造数后即返回占位响应，不落会话
         if "chat_history" not in req:
             return {"status": "ok", "mode": "testing"}
@@ -3114,6 +3329,20 @@ async def screening_status() -> dict[str, Any]:
         return dict(_SCREENING_STATUS_DEGRADED)
 
 
+@app.get("/api/screening/batches")
+async def screening_batches(limit: int = DEFAULT_BATCH_HISTORY_LIMIT) -> list[dict[str, Any]]:
+    """选股批次历史（delta add-daily-ops-page T1；spec「批次历史查询」）。
+
+    按交易日期倒序返回近 ``limit`` 批次（默认 20），字段 = 日期 / 状态（ok/failed）/
+    错误 / 起止时间 / 各层计数（l1_passed/l2_top/l3_keep）/ 池数（pool_size）。
+    空库 → 200 + 空列表（不以错误冒充「无历史」）；``limit`` 钳制到
+    ``[1, MAX_BATCH_HISTORY_LIMIT]``（越界不 422——越界值只影响窗口大小，
+    钳制后再交给 store 的严格校验）。只读端点：无任何写操作暴露。
+    """
+    clamped = max(1, min(limit, MAX_BATCH_HISTORY_LIMIT))
+    return await asyncio.to_thread(list_batches, clamped)
+
+
 def _screening_freshness_removals(
     pool_rows: list[dict[str, Any]], batch_date: str | None
 ) -> list[dict[str, Any]]:
@@ -3231,6 +3460,407 @@ async def screening_analyze() -> Any:
         "queued": [item for item in snapshot if item["state"] == "queued"],
         "removed": removals,
     }
+
+
+# ── 语义记忆确认（delta add-memory-confirmation：审批队列暴露 + 人工确认门禁） ──
+
+# 条款载荷字段：id / 正文 / 来源 / 提炼时间 / 状态 / 结算样本（evidence，可空）。
+# 状态机与注入门禁（仅 confirmed 注入）全部沿用 memory.semantic——本层零业务复制。
+
+
+def _memory_clause_payload(row: dict[str, Any]) -> dict[str, Any]:
+    """条款行（库列名）→ API 载荷（前端契约字段名）。"""
+    return {
+        "id": str(row.get("clause_id")),
+        "text": row.get("text"),
+        "status": row.get("status"),
+        "source": row.get("source"),
+        "created_at": row.get("created_at"),
+        "evidence": row.get("evidence"),
+    }
+
+
+@app.get("/api/memory/clauses")
+async def memory_clause_list(status: str | None = None) -> dict[str, Any]:
+    """语义记忆条款列表（只读）：``?status=`` 三态过滤，默认 pending（审批队列默认视图）。
+
+    未知 status → 400 显式拒绝（不静默回落默认或全量：静默回落会让调用方把结果
+    误读成所请求的状态）。缺库/无表 → 空列表（读路径既有 fail-open 语义）。
+
+    函数名刻意避开条款库表名的连写：门禁测试要求该表名只出现在
+    memory/semantic.py（无第二读入口），命名撞串会让门禁对 api.py 误报。
+    """
+    effective = status if status is not None else "pending"
+    if effective not in CLAUSE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"未知条款状态: {effective}")
+    rows = await asyncio.to_thread(list_clauses, effective)
+    return {"status": effective, "clauses": [_memory_clause_payload(row) for row in rows]}
+
+
+@app.post("/api/memory/clauses/{clause_id}/confirm")
+async def memory_clause_confirm(clause_id: str) -> dict[str, Any]:
+    """人工确认：pending → confirmed（此后即刻参与风控辩论注入）。
+
+    幂等：对已确认条款重复确认仍 200 并返回当前状态（既有状态机 UPDATE 命中即 True）；
+    未知 id → 404（写语义 MUST NOT 静默成功）。
+    """
+    if not await asyncio.to_thread(confirm_clause, clause_id):
+        raise HTTPException(status_code=404, detail=f"未知条款: {clause_id}")
+    return {"id": clause_id, "status": "confirmed"}
+
+
+@app.post("/api/memory/clauses/{clause_id}/reject")
+async def memory_clause_reject(clause_id: str) -> dict[str, Any]:
+    """人工驳回：pending → rejected（永不注入）。幂等与 404 语义同确认端点。"""
+    if not await asyncio.to_thread(reject_clause, clause_id):
+        raise HTTPException(status_code=404, detail=f"未知条款: {clause_id}")
+    return {"id": clause_id, "status": "rejected"}
+
+
+# ── 因子库只读查询（delta add-factor-library-page：暴露 + 呈现，零业务复制） ──
+#
+# 写路径铁律：本层只包装 factors.library 既有只读面（list_factors / list_events /
+# list_ic_series），不暴露任何写操作——因子入库、状态变更、参数调整仍只经五道闸与
+# 衰减监控路径。派生字段口径：
+#   - icir_60d / ic_mean_60d：复用 screening.ranker.recent_ic_stats（近
+#     FACTOR_IC_WINDOW=60 个交易日，与 tools.IC_WINDOW / DECAY_WINDOW 同口径）；
+#     ic_points 为窗口内 IC 记录数——无记录时 icir 按既有口径记 0.0，界面据此显示「—」
+#     而非把 0.0 冒充为真实读数；
+#   - name：builtin 注册词表（builtin.BUILTIN_FACTORS）作品名；非 builtin 或表达式
+#     不在词表 → None（库内无名称列，不臆造；界面回退显示因子 id）；
+#   - last_event：最近一条事件（准入/降级/退役及时间）——闸门结论落库的唯一形态
+#     （准入经 set_status(active, detail={"reason": "ADMITTED"})，见 validate.py）；
+#   - decayed：事件历史中出现过 to_status='degraded'（衰减监控降级史；退役后标记仍在）。
+
+
+def _factor_name(row: dict[str, Any]) -> str | None:
+    """builtin 因子的注册名（词表逐字）；非 builtin 来源 / 未命中 → None（不臆造）。"""
+    if str(row.get("source") or "") != "builtin":
+        return None
+    expression = str(row.get("expression") or "")
+    return next((item.name for item in BUILTIN_FACTORS if item.expression == expression), None)
+
+
+def _factor_event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    """事件行 → API 载荷（detail 为 JSON 解析后的 dict，reason 提升为平铺字段）。"""
+    detail = event.get("detail")
+    reason = detail.get("reason") if isinstance(detail, dict) else None
+    return {
+        "id": event.get("id"),
+        "factor_id": event.get("factor_id"),
+        "event": event.get("event"),
+        "from_status": event.get("from_status"),
+        "to_status": event.get("to_status"),
+        "reason": reason,
+        "detail": detail,
+        "created_at": event.get("created_at"),
+    }
+
+
+def _factor_summary_payload(
+    row: dict[str, Any],
+    *,
+    events: list[dict[str, Any]],
+    ic_stats: dict[int, tuple[float, float]],
+    ic_points: int,
+) -> dict[str, Any]:
+    """因子行 + 事件 + IC 统计 → 列表/详情共用的摘要载荷。"""
+    factor_id = int(row["id"])
+    ic_mean, icir = ic_stats.get(factor_id, (0.0, 0.0))
+    return {
+        # 行原值（库内列逐字透传；前端只消费其需要的子集）
+        "id": factor_id,
+        "expression": row.get("expression"),
+        "hypothesis": row.get("hypothesis"),
+        "category": row.get("category"),
+        "status": row.get("status"),
+        "ast_json": row.get("ast_json"),
+        "source": row.get("source"),
+        "alignment_score": row.get("alignment_score"),
+        "pool_increment": row.get("pool_increment"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        # 派生字段（口径见本节顶部注释）
+        "name": _factor_name(row),
+        "ic_mean_60d": ic_mean,
+        "icir_60d": icir,
+        "ic_points": ic_points,
+        "decayed": any(str(event.get("to_status")) == "degraded" for event in events),
+        "last_event": _factor_last_event_summary(events),
+    }
+
+
+def _factor_events_by_factor() -> dict[int, list[dict[str, Any]]]:
+    """全库事件按因子分组（list_events 按写入序返回；组内保持时序）。"""
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for event in list_events():
+        grouped.setdefault(int(event["factor_id"]), []).append(event)
+    return grouped
+
+
+def _factor_last_event_summary(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """最近一条事件的紧凑摘要（事件/状态迁移/闸门结论/时间）。
+
+    列表载荷不带完整 ``detail``：衰减降级事件 detail 含滚动窗口数组，逐行展开会
+    让列表响应无谓膨胀——完整事件历史由详情端点给出。
+    """
+    if not events:
+        return None
+    event = _factor_event_payload(events[-1])
+    return {
+        "event": event["event"],
+        "from_status": event["from_status"],
+        "to_status": event["to_status"],
+        "reason": event["reason"],
+        "created_at": event["created_at"],
+    }
+
+
+def _factors_payload() -> list[dict[str, Any]]:
+    """列表载荷（同步体，供 to_thread）：按 ICIR 降序固定排序（并列按 id 升序）。
+
+    因子量级为十位级：逐因子各一次 IC 序列读（``ic_points`` 计数）与既有
+    ``recent_ic_stats`` 同量级，无需批量化。
+    """
+    rows = list_factors()
+    events_by_factor = _factor_events_by_factor()
+    ic_stats = recent_ic_stats(rows, window=FACTOR_IC_WINDOW)
+    payload = [
+        _factor_summary_payload(
+            row,
+            events=events_by_factor.get(int(row["id"]), []),
+            ic_stats=ic_stats,
+            ic_points=len(list_ic_series(int(row["id"]), limit=FACTOR_IC_WINDOW)),
+        )
+        for row in rows
+    ]
+    payload.sort(key=lambda item: (-item["icir_60d"], item["id"]))
+    return payload
+
+
+def _factor_detail_payload(factor_id: int) -> dict[str, Any] | None:
+    """详情载荷：摘要字段 + IC 序列（近 60 点升序）+ 事件历史；无该因子 → None。"""
+    row = next((item for item in list_factors() if int(item["id"]) == factor_id), None)
+    if row is None:
+        return None
+    events = list_events(factor_id)
+    ic_series = list_ic_series(factor_id, limit=FACTOR_IC_WINDOW)
+    detail = _factor_summary_payload(
+        row,
+        events=events,
+        ic_stats=recent_ic_stats([row], window=FACTOR_IC_WINDOW),
+        ic_points=len(ic_series),
+    )
+    detail["ic_series"] = [
+        {"trade_date": trade_date, "rank_ic": rank_ic} for trade_date, rank_ic in ic_series
+    ]
+    detail["events"] = [_factor_event_payload(event) for event in events]
+    return detail
+
+
+@app.get("/api/factors")
+async def factor_library_list() -> dict[str, Any]:
+    """因子库列表（只读）：名称/表达式/状态/来源/ICIR/最近闸门结论/衰减标记。
+
+    空库 → 200 + 空数组（不 500、不用伪数据冒充）；库路径调用期读
+    ``FACTOR_LIBRARY_DB_PATH``（library 模块 env 口径）。
+    """
+    return {"factors": await asyncio.to_thread(_factors_payload)}
+
+
+@app.get("/api/factors/{factor_id}")
+async def factor_library_detail(factor_id: int) -> dict[str, Any]:
+    """因子详情（只读）：完整 DSL 表达式 + IC 序列 + 事件历史；未知 id → 404。"""
+    payload = await asyncio.to_thread(_factor_detail_payload, factor_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"未知因子: {factor_id}")
+    return payload
+
+
+# ── 执行台账只读查询（delta add-broker-console：暴露 + 呈现，零业务复制） ──
+#
+# 写路径铁律：本层只包装执行侧既有只读面（``store.list_orders`` /
+# ``PaperBroker.query_cash`` / ``query_positions``），不暴露任何写操作——下单/撤单
+# 仍只经日批驱动器（可审计、可重放），手工入口会绕过信号/门禁契约。派生字段口径：
+#   - 持仓市值：最新快照日 ``close_raw``（与 ``paper.run_paper_settle_daily`` 同源
+#     口径：``_snapshot_code`` 去后缀 + ``_valid_close`` 有效性判定）；
+#   - 快照缺失 / 标的缺价：持仓市值、总资产、浮盈记 ``null`` 并附可判读标注
+#     （``market_value_note`` + ``missing_symbols``）——MUST NOT 以 0 冒充。
+#     0 只在「无持仓」时为真实读数（空集求和不需要价格）；
+#   - 门禁日志 = orders 中 status=rejected（add-execution-chain-driver 落库形态，
+#     零 schema 变更）；
+#   - 空账户如实：资金 = 初始 100 万（PaperBroker 惰性开户口径）、列表为空。
+
+_BROKER_NOTE_NO_SNAPSHOT = "快照缺失（无行情数据），持仓市值不可得，未以 0 冒充"
+
+
+def _broker_snapshot_marks(symbols: list[str]) -> tuple[str | None, dict[str, float], list[str]]:
+    """持仓标的最新快照 ``close_raw`` 映射 → ``(快照交易日, {symbol: 价}, 缺价标的)``。
+
+    快照库为空 / 该日无行 / 标的缺价 → 逐项如实返回（不抛错、不编造价格）：API 是
+    只读面，缺价由调用方以 ``null`` + 标注表达（``settle_daily`` 的 fail loud 是
+    日批落库语义，两者口径不同）。
+    """
+    from finance_agent.data.snapshot import SnapshotError, latest_snapshot_date, read_bars
+    from finance_agent.execution.brokers.paper import _snapshot_code, _valid_close
+
+    as_of = latest_snapshot_date()
+    if as_of is None:
+        return None, {}, sorted(symbols)
+    codes = sorted({_snapshot_code(symbol) for symbol in symbols})
+    try:
+        frame = read_bars(codes, as_of, as_of, as_of=as_of)
+    except SnapshotError:
+        # 该日无快照行（含空库）：全部标的按缺价处理（E2E 快照库常态）
+        return as_of, {}, sorted(symbols)
+    by_code = {
+        str(row["code"]): price
+        for row in frame[["code", "close_raw"]].to_dict("records")
+        if (price := _valid_close(row["close_raw"])) is not None
+    }
+    closes = {
+        symbol: by_code[code] for symbol in symbols if (code := _snapshot_code(symbol)) in by_code
+    }
+    missing = sorted(symbol for symbol in symbols if symbol not in closes)
+    return as_of, closes, missing
+
+
+def _broker_overview_payload() -> dict[str, Any]:
+    """总览载荷（同步体，供 to_thread）：资金 + 持仓市值/总资产/浮盈（快照 mark 口径）。
+
+    无持仓 → 市值/浮盈为 0.0（空集求和的真实读数）；有持仓但快照不可得 → 三者记
+    ``null`` + 标注（``position_cost`` 仍来自账本，不依赖快照）。
+    """
+    from finance_agent.execution.brokers.paper import PaperBroker
+
+    broker = PaperBroker()
+    cash = broker.query_cash()
+    positions = broker.query_positions()
+    if not positions:
+        return {
+            "cash": cash,
+            "positions_value": 0.0,
+            "equity": cash,
+            "unrealized_pnl": 0.0,
+            "position_cost": 0.0,
+            "positions_count": 0,
+            "snapshot_date": None,
+            "missing_symbols": [],
+            "market_value_note": None,
+        }
+    cost_total = round(sum(int(row["qty"]) * float(row["avg_cost"]) for row in positions), 2)
+    as_of, closes, missing = _broker_snapshot_marks([str(row["symbol"]) for row in positions])
+    if missing:
+        note = (
+            _BROKER_NOTE_NO_SNAPSHOT
+            if as_of is None
+            else f"快照 {as_of} 缺收盘价：{', '.join(missing)}；持仓市值不可得，未以 0 冒充"
+        )
+        return {
+            "cash": cash,
+            "positions_value": None,
+            "equity": None,
+            "unrealized_pnl": None,
+            "position_cost": cost_total,
+            "positions_count": len(positions),
+            "snapshot_date": as_of,
+            "missing_symbols": missing,
+            "market_value_note": note,
+        }
+    positions_value = round(
+        sum(int(row["qty"]) * closes[str(row["symbol"])] for row in positions), 2
+    )
+    return {
+        "cash": cash,
+        "positions_value": positions_value,
+        "equity": round(cash + positions_value, 2),
+        "unrealized_pnl": round(positions_value - cost_total, 2),
+        "position_cost": cost_total,
+        "positions_count": len(positions),
+        "snapshot_date": as_of,
+        "missing_symbols": [],
+        "market_value_note": None,
+    }
+
+
+def _broker_positions_payload() -> dict[str, Any]:
+    """持仓载荷（同步体，供 to_thread）：标的/数量/成本/现价（close_raw）/市值/浮盈。
+
+    现价不可得 → 该行 ``close``/``market_value``/``unrealized_pnl`` 为 ``null``（界面
+    显示占位符并标注快照口径），MUST NOT 填 0。
+    """
+    from finance_agent.execution.brokers.paper import PaperBroker
+
+    positions = PaperBroker().query_positions()
+    if positions:
+        as_of, closes, _missing = _broker_snapshot_marks([str(row["symbol"]) for row in positions])
+    else:
+        as_of, closes = None, {}
+    rows: list[dict[str, Any]] = []
+    for row in positions:
+        symbol = str(row["symbol"])
+        qty = int(row["qty"])
+        avg_cost = float(row["avg_cost"])
+        close = closes.get(symbol)
+        rows.append(
+            {
+                "symbol": symbol,
+                "qty": qty,
+                "avg_cost": avg_cost,
+                "updated_at": row.get("updated_at"),
+                "close": close,
+                "market_value": round(qty * close, 2) if close is not None else None,
+                "unrealized_pnl": (
+                    round(qty * (close - avg_cost), 2) if close is not None else None
+                ),
+            }
+        )
+    return {"snapshot_date": as_of, "positions": rows}
+
+
+def _broker_orders_payload(status: str | None) -> list[dict[str, Any]]:
+    """订单行（store 只读；含状态/原因码/decision_id/signal_id 证据链，零业务复制）。"""
+    from finance_agent.execution.store import list_orders
+
+    return list_orders(status=status)
+
+
+@app.get("/api/broker/overview")
+async def broker_overview() -> dict[str, Any]:
+    """执行台账总览（只读）：可用资金 / 持仓市值 / 总资产 / 浮动盈亏。
+
+    持仓市值按最新快照 ``close_raw`` mark；快照缺失 → 市值/总资产/浮盈 ``null`` +
+    标注（MUST NOT 以 0 冒充）。空账户如实：资金 = 初始 100 万、市值/浮盈为 0。
+    库路径调用期读 ``EXECUTION_DB_PATH`` / ``SNAPSHOT_DB_PATH``（E2E env 注入即生效）。
+    """
+    return await asyncio.to_thread(_broker_overview_payload)
+
+
+@app.get("/api/broker/positions")
+async def broker_positions() -> dict[str, Any]:
+    """持仓列表（只读）：标的/数量/成本/现价/市值/浮盈；现价不可得逐行为 ``null``。"""
+    return await asyncio.to_thread(_broker_positions_payload)
+
+
+@app.get("/api/broker/orders")
+async def broker_orders(status: str | None = None) -> dict[str, Any]:
+    """订单列表（只读）：四态（pending/filled/rejected/expired）+ 原因码 + 证据链。
+
+    ``?status=`` 过滤；非法状态 → 400（fail loud，不静默返回空列表误导归因）。
+    """
+    if status is not None and status not in ORDER_STATUSES:
+        raise HTTPException(status_code=400, detail=f"非法订单状态: {status}")
+    return {"orders": await asyncio.to_thread(_broker_orders_payload, status)}
+
+
+@app.get("/api/broker/gate-log")
+async def broker_gate_log() -> dict[str, Any]:
+    """门禁拒绝视图（只读）：= orders 中 status=rejected 的记录（含原因码）。
+
+    风控门禁拒绝经 ``store.record_order_rejection`` 落库后即在此回查（含 ST_FLAG
+    等结构化原因码与关联 ``decision_id``/``signal_id``）——零 schema 变更。
+    """
+    return {"orders": await asyncio.to_thread(_broker_orders_payload, STATUS_REJECTED)}
 
 
 # ── AG-UI 协议通道（add-assistant-ui-thread PoC，双轨隔离：仅挂载，不接入 registry）──

@@ -22,6 +22,12 @@ export interface ShellBatch {
   title: ReactNode
   subtitle?: ReactNode
   status: StatusKey
+  /**
+   * 批次级徽章文案（可选契约扩容，add-daily-ops-page T2.1）：省略 → StatusBadge
+   * 五态默认文案（既有调用面零变化）；日批运维页用「成功/失败/未跑」等业务态文案
+   * 覆盖（「已停用」等生命周期文案对运行记录语义不符）。
+   */
+  statusLabel?: ReactNode
   steps: readonly ShellStepStatus[]
 }
 
@@ -62,7 +68,7 @@ export function PageShellD({
                   <div className="truncate text-sm font-medium text-foreground">{batch.title}</div>
                   {batch.subtitle && <div className="text-xs text-muted-foreground">{batch.subtitle}</div>}
                 </div>
-                <StatusBadge status={batch.status} />
+                <StatusBadge status={batch.status} label={batch.statusLabel} />
               </div>
               <div data-testid={SHELL_TEST_IDS.steps(batch.id)} className="mt-2.5 flex flex-wrap items-center gap-3">
                 {batch.steps.map(step => (
