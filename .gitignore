@@ -277,6 +277,8 @@ Kimi_Agent_简化 Agent Harness/
 tests/e2e/playwright/node_modules/
 tests/e2e/playwright/playwright-report/
 tests/e2e/playwright/test-results/
+# 各套件 JSON 报告（update-ci-pipeline R4，收数步骤输入）
+tests/e2e/playwright/flaky-reports/
 /test-results/
 
 # Superpowers SDD 工作流临时产物

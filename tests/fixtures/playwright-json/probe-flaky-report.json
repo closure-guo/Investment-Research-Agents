@@ -1,0 +1,183 @@
+{
+  "config": {
+    "version": "1.62.0",
+    "retries": 1,
+    "workers": 1
+  },
+  "suites": [
+    {
+      "title": "probe-flaky.spec.ts",
+      "file": "probe-flaky.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "probe pass",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 9,
+                  "retry": 0,
+                  "startTime": "2026-10-14T06:42:17.308Z",
+                  "annotations": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "6b756b329e859c368135-45fc3933907a2210b82a",
+          "file": "probe-flaky.spec.ts",
+          "line": 4,
+          "column": 1
+        },
+        {
+          "title": "probe skip",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [
+                {
+                  "type": "skip",
+                  "description": "probe skip",
+                  "location": {
+                    "file": "D:/WorkSpace/finance_analysis_agent/.worktrees/merge-pr/tests/e2e/playwright/tmp-probe/probe-flaky.spec.ts",
+                    "line": 9,
+                    "column": 8
+                  }
+                }
+              ],
+              "expectedStatus": "skipped",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "skipped",
+                  "duration": 1,
+                  "retry": 0,
+                  "startTime": "2026-10-14T06:42:17.354Z",
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "description": "probe skip",
+                      "location": {
+                        "file": "D:/WorkSpace/finance_analysis_agent/.worktrees/merge-pr/tests/e2e/playwright/tmp-probe/probe-flaky.spec.ts",
+                        "line": 9,
+                        "column": 8
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": "skipped"
+            }
+          ],
+          "id": "6b756b329e859c368135-333a9db86aaa7c2554c3",
+          "file": "probe-flaky.spec.ts",
+          "line": 8,
+          "column": 1
+        },
+        {
+          "title": "probe flaky",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 2,
+                  "retry": 0,
+                  "startTime": "2026-10-14T06:42:17.364Z",
+                  "annotations": []
+                },
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 6,
+                  "retry": 1,
+                  "startTime": "2026-10-14T06:42:17.898Z",
+                  "annotations": []
+                }
+              ],
+              "status": "flaky"
+            }
+          ],
+          "id": "6b756b329e859c368135-1ced49ef772a7122e53a",
+          "file": "probe-flaky.spec.ts",
+          "line": 12,
+          "column": 1
+        },
+        {
+          "title": "probe fail",
+          "ok": false,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 2,
+                  "retry": 0,
+                  "startTime": "2026-10-14T06:42:17.932Z",
+                  "annotations": []
+                },
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 10,
+                  "retry": 1,
+                  "startTime": "2026-10-14T06:42:18.540Z",
+                  "annotations": []
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "6b756b329e859c368135-6dc7b9f3838ad977a30c",
+          "file": "probe-flaky.spec.ts",
+          "line": 17,
+          "column": 1
+        }
+      ]
+    }
+  ],
+  "stats": {
+    "startTime": "2026-10-14T06:42:16.722Z",
+    "duration": 1902.4900000000002,
+    "expected": 1,
+    "skipped": 1,
+    "unexpected": 1,
+    "flaky": 1
+  }
+}

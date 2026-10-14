@@ -10,6 +10,13 @@ on:
     - cron: '0 18 * * *'
   workflow_dispatch:
 
+# 同分支并发取消（update-ci-pipeline R1）：PR/push 连推取消旧 run；schedule 豁免
+# ——nightly 是唯一 @live 真链路信号，不得被普通 push 的 run 取消（design 风险节同旨：
+# 豁免按事件类型，后续如需可扩到 workflow_dispatch）。
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
 jobs:
   # stub 套件：PR/push 触发，确定性，秒级-分钟级
   stub:
@@ -53,41 +60,76 @@ jobs:
         run: npm ci
         working-directory: frontend
 
+      # Playwright 浏览器缓存（update-ci-pipeline R3）：键绑 package-lock（内含
+      # @playwright/test 精确版本）——同版本命中即不再下载 chromium；换版本键变化
+      # 自然失效重下，不会命中错库。
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('tests/e2e/playwright/package-lock.json') }}
+
       - name: Install Playwright dependencies
         run: |
           npm ci
           npx playwright install chromium --with-deps
         working-directory: tests/e2e/playwright
 
+      # 套件顺序 = 耗时升序（update-ci-pipeline R2）：eval-ops → 战绩页 → 默认 →
+      # 时间轴，最快失败最快反馈；~12 分钟的时间轴殿后，不遮挡快套件失败。
+      # 每套件同时落 JSON 报告（R4）：PLAYWRIGHT_JSON_OUTPUT_NAME 相对 configDir
+      # 解析（playwright 1.62 实跑实证），reporter 自动建父目录。
       # Playwright webServer 自动拉起前后端（TESTING=1）
-      - name: Run Playwright E2E (stub suite)
-        run: npx playwright test
-        working-directory: tests/e2e/playwright
-        env:
-          CI: "true"
-
-      # 战绩页·跑赢指数对比（专属 config + 独立测试库，避免造数污染共享库空态前提）
-      - name: Run Playwright E2E (track-record suite)
-        run: npx playwright test --config=playwright.track-record.config.ts
-        working-directory: tests/e2e/playwright
-        env:
-          CI: "true"
-
       # 评估运维分区（专属 config + 独立端口对 8005/5178 + 独立测试库）：
       # 手动补跑用例服务端同步执行 20-60s，在默认套件并行会独占单进程后端致
       # 流式用例随机红（issue #252）——物理隔离后默认套件恢复并行门禁
       - name: Run Playwright E2E (eval-ops suite)
-        run: npx playwright test --config=playwright.eval-ops.config.ts
+        run: npx playwright test --config=playwright.eval-ops.config.ts --reporter=list --reporter=json
         working-directory: tests/e2e/playwright
         env:
           CI: "true"
+          PLAYWRIGHT_JSON_OUTPUT_NAME: flaky-reports/eval-ops.json
+
+      # 战绩页·跑赢指数对比（专属 config + 独立测试库，避免造数污染共享库空态前提）
+      - name: Run Playwright E2E (track-record suite)
+        run: npx playwright test --config=playwright.track-record.config.ts --reporter=list --reporter=json
+        working-directory: tests/e2e/playwright
+        env:
+          CI: "true"
+          PLAYWRIGHT_JSON_OUTPUT_NAME: flaky-reports/track-record.json
+
+      - name: Run Playwright E2E (stub suite)
+        run: npx playwright test --reporter=list --reporter=html --reporter=json
+        working-directory: tests/e2e/playwright
+        env:
+          CI: "true"
+          PLAYWRIGHT_JSON_OUTPUT_NAME: flaky-reports/default.json
 
       # 时间序列 E2E（专属 config，STUB_SCENARIO=tool_call/pipeline，独立端口对）
       - name: Run Playwright E2E (timeline suite)
-        run: npx playwright test --config=playwright.timeline.config.ts
+        run: npx playwright test --config=playwright.timeline.config.ts --reporter=list --reporter=html --reporter=json
         working-directory: tests/e2e/playwright
         env:
           CI: "true"
+          PLAYWRIGHT_JSON_OUTPUT_NAME: flaky-reports/timeline.json
+
+      # 抖动统计收数（update-ci-pipeline R4）：!cancelled() —— 前序套件失败时后续
+      # 套件被跳过，本步仍要把已产出的报告收成一条 run 记录（缺失/损坏记名单不抛）；
+      # 被并发取消的 run 不收（半截数据无归因价值）
+      - name: Collect flaky stats
+        if: ${{ !cancelled() }}
+        run: uv run python scripts/ci/collect_flaky.py --reports-dir tests/e2e/playwright/flaky-reports --out-dir reports/e2e-flaky --expect eval-ops,track-record,default,timeline
+
+      # overwrite: rerun（attempt≥2）时同名 artifact 已存在——v4 制品不可变，
+      # 不加 overwrite 会让上传步骤在 rerun 上假红；覆盖后 artifact 恒为最新
+      # attempt 的记录（汇总侧仍按 run_id 取最高 attempt 去重，双保险）
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: e2e-flaky
+          path: reports/e2e-flaky/
+          retention-days: 30
+          overwrite: true
 
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -95,14 +137,69 @@ jobs:
           name: playwright-report
           path: tests/e2e/playwright/playwright-report/
           retention-days: 7
+          overwrite: true
+
+  # nightly 抖动汇总（update-ci-pipeline R4）：拉最近 30 次 E2E run 的 e2e-flaky
+  # artifact → 近 14 天各 spec 抖动率报告（stdout + artifact）。workflow_dispatch
+  # 亦触发（手动出报告 / 联调取证）。
+  flaky-report:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download recent e2e-flaky records
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports/e2e-flaky/records
+          fetched=0
+          # 最近 30 次运行覆盖约两周的 PR/push 记录；无 artifact 的 run（nightly 自身）
+          # 下载失败即跳过——属预期，不是错误
+          for rid in $(gh run list --workflow=e2e-playwright.yml --limit 30 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$rid" --name e2e-flaky --dir "reports/e2e-flaky/records/$rid" >/dev/null 2>&1; then
+              fetched=$((fetched+1))
+            fi
+          done
+          echo "downloaded records from $fetched runs"
+
+      - name: Aggregate flaky report
+        run: |
+          python3 scripts/ci/aggregate_flaky.py \
+            --records-dir reports/e2e-flaky/records \
+            --out "reports/e2e-flaky/summary-$(date -u +%F).md" \
+            --days 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-flaky-summary
+          path: reports/e2e-flaky/summary-*.md
+          retention-days: 30
 
   # @live 套件：nightly 触发，真 LLM，防 stub 漂移
   live:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
+
+      # ===== 临时探针（update-ci-pipeline 实施期验证用，验证后删除本步骤）=====
+      # 目的：真实 GitHub API 上验证 R5 上报链路（require 路径 / issues: write 权限 /
+      # ci-failure 标签建单 + rerun 幂等）。删掉后本作业恢复原样。
+      - name: PROBE forced failure (temporary)
+        run: |
+          echo "temporary probe: forcing live job failure to verify issue reporting"
+          exit 1
+      # ===== 临时探针结束 =====
 
       - uses: astral-sh/setup-uv@v5
 
@@ -122,6 +219,13 @@ jobs:
         run: npm ci
         working-directory: frontend
 
+      # Playwright 浏览器缓存（R3 同理；Python 侧 playwright 版本由 uv.lock 锁定）
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-py-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+
       - name: Install Playwright browsers
         run: uv run playwright install chromium --with-deps
 
@@ -140,3 +244,13 @@ jobs:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST || 'http://localhost:3000' }}
+
+      # 失败不静默（update-ci-pipeline R5）：建/更新 ci-failure issue（同源去重，
+      # rerun 幂等）；逻辑与桩件测试在 scripts/ci/report_live_failure.cjs
+      - name: Report @live failure to issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const report = require(`${process.env.GITHUB_WORKSPACE}/scripts/ci/report_live_failure.cjs`)
+            await report({github, context, core})
