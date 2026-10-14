@@ -7,6 +7,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 同分支并发取消（update-ci-pipeline R1）：连推同一分支时取消在跑的旧 run，分钟不叠加。
+# 手动 workflow_dispatch 同受组约束（design 已声明为预期行为）。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
@@ -38,6 +44,33 @@ jobs:
       - name: MyPy
         run: uv run mypy src/ || true  # third-party stub issues (docx, pptx, langgraph)
 
+      # fail-fast 排序（update-ci-pipeline R2）：前端单测与 CI 脚本桩件测试先于后端
+      # pytest 执行——最快的失败最先反馈；两者零后端依赖。
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # @live 失败上报逻辑的桩件测试（update-ci-pipeline R5 配套）：node 内置
+      # test runner，零依赖秒级（node --test 需 ≥18；runner 为 20）
+      - name: CI helper script tests (node --test)
+        run: node --test scripts/ci/report_live_failure.test.cjs
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      # 隔离说明（issue #331）：followup-resume-after-switch 在 CI（2 vCPU Linux）上
+      # **确定性失败**（--retry=1 两次尝试均败；本地 Windows 3/3 通过）——固定
+      # setTimeout + stub 409 session_busy 竞态，属测试时序假设问题而非断言缺陷。
+      # 修复后移除本 exclude；其余 90 文件 / 760 例纳入门禁。
+      # --retry=1 与 Playwright 套件 retries=1 同口径：只吸收抖动，确定性回归两次都失败。
+      - name: Frontend unit tests (vitest)
+        run: npm test -- --retry=1 --exclude 'src/test/followup-resume-after-switch.test.tsx'
+        working-directory: frontend
+
       - name: Unit tests
         run: uv run pytest tests/ --ignore=tests/scripts -m "not live" -x -q
 
@@ -56,26 +89,3 @@ jobs:
       # prompt/模型/校验器变更后守卫被削弱即红
       - name: Fault injection regression gate
         run: uv run pytest tests/regression/fault_injection -m fault_regression -q
-
-      # 前端单测门禁（vitest，2026-10-13 补）：此前 CI 仅由 E2E 覆盖前端，
-      # 761 例单测从未在 CI 运行（本地 `npm test` 全绿但无门禁）——UI 改动
-      # 可能带病进 main。步骤零后端依赖（fetch 全 mock），约 1-2 分钟。
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-
-      # 隔离说明（issue #331）：followup-resume-after-switch 在 CI（2 vCPU Linux）上
-      # **确定性失败**（--retry=1 两次尝试均败；本地 Windows 3/3 通过）——固定
-      # setTimeout + stub 409 session_busy 竞态，属测试时序假设问题而非断言缺陷。
-      # 修复后移除本 exclude；其余 90 文件 / 760 例纳入门禁。
-      # --retry=1 与 Playwright 套件 retries=1 同口径：只吸收抖动，确定性回归两次都失败。
-      - name: Frontend unit tests (vitest)
-        run: npm test -- --retry=1 --exclude 'src/test/followup-resume-after-switch.test.tsx'
-        working-directory: frontend

@@ -1,0 +1,100 @@
+# update-ci-pipeline 实施验证报告
+
+**日期**: 2026-10-14
+**范围**: `update-ci-pipeline` delta 五条需求——R1 同分支并发取消 / R2 门禁 fail-fast 排序 / R3 Playwright 浏览器缓存 / R4 抖动统计落盘与汇总 / R5 @live nightly 失败不静默
+**交付物**: `.github/workflows/ci.yml`、`.github/workflows/e2e-playwright.yml`、`scripts/ci/collect_flaky.py`、`scripts/ci/aggregate_flaky.py`、`scripts/ci/report_live_failure.cjs`（+ 桩件测试）、`tests/test_collect_flaky.py`、`tests/test_aggregate_flaky.py`、`tests/fixtures/playwright-json/probe-flaky-report.json`、`.gitignore`
+
+## 一、机制实证（先实证机制，再写实现）
+
+1. **Playwright JSON reporter 落盘机制**（playwright 1.62.0，一次性探针实跑，探针文件已删）：
+   - `PLAYWRIGHT_JSON_OUTPUT_NAME` 相对 **configDir**（config 文件所在目录）解析——源码 `playwright/lib/runner/index.js::resolveOutputFile`（无 OUTPUT_DIR 时 outputDir 回落 configDir）+ 实跑落点双重验证（探针 config 位于 `tmp-probe/` 时，报告落在 `tmp-probe/flaky-reports/probe.json`）；
+   - reporter 自动创建父目录，workflow 无需 mkdir；
+   - test 级 `status` ∈ {expected, flaky, unexpected, skipped}，与 list reporter 输出（1 passed / 1 flaky / 1 skipped / 1 failed）逐项一致 → 解析器主判据（attempts 反推为防御性回退）；
+   - 探针报告脱敏（去堆栈/绝对路径/附件，结构保真）固化为夹具 `tests/fixtures/playwright-json/probe-flaky-report.json`；**夹具保真自证** = 逐 test 分类与报告内 stats 块逐项相等（测试首例钉死此断言）。
+2. **gh CLI 下载循环**（flaky-report 作业下载段）本地实证（gh 2.92.0，与 runner 同 CLI）：`gh run list --workflow --limit --json databaseId --jq` 正常；无 `e2e-flaky` artifact 的历史 run 下载失败被 if 守卫静默跳过（candidates=5 → downloaded=0，符合预期，非错误路径）。
+3. **CI runner 版本前提**：`node --test` 需 ≥18（runner 为 20/22）；`python3`（aggregate 用）为 stdlib-only，ubuntu-latest 3.12 满足（`datetime.UTC` 需 ≥3.11）。
+
+## 二、本地验证
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| collect 解析器/收数 | `uv run pytest tests/test_collect_flaky.py -q` | 10 passed（先红：`ModuleNotFoundError: scripts.ci` → 实现后绿） |
+| aggregate 汇总 | `uv run pytest tests/test_aggregate_flaky.py -q` | 7 passed（同先红后绿） |
+| R5 上报逻辑桩件 | `node --test scripts/ci/report_live_failure.test.cjs` | 4 passed（建单含标签补建 / 追加评论 / 同 run 幂等 / 同名 PR 过滤） |
+| 本地 CLI 联调 | `collect_flaky.py`（local 与 GITHUB_* env 双路径）→ `aggregate_flaky.py` | 记录落盘 + 汇总报告（窗口 2026-09-30→2026-10-14、有效 n=2、抖动率 100.0% 披露）逐项符合夹具预期 |
+| YAML 解析 | pyyaml 解析两 workflow + 作业/步骤结构清单 | 通过；套件顺序 eval-ops→track-record→default→timeline 与前端步骤先于 pytest 均经结构打印核对 |
+| 后端全量回归 | `uv run pytest tests/ --ignore=tests/scripts -m "not live" -q`（CI 同命令，无 -x） | **5519 passed / 6 skipped / 1 failed**（19:51）——失败项 `tests/llm/test_resolver.py::TestContextLengthOverride::test_empty_follows_registry_default`，**已归因为宿主环境泄漏，非本 delta 引入**（见下「失败项归因」） |
+| 前端全量回归 | `npm test -- --retry=1 --exclude 'src/test/followup-resume-after-switch.test.tsx'`（CI 同命令） | **90 文件 / 760 例全绿**（EXIT=0；与 CI 门禁同口径：总 761 例扣除 #331 隔离文件） |
+
+### 失败项归因（后端 1 failed，非本 delta 引入）
+
+- **失败项**：`test_empty_follows_registry_default`（断言 registry 静态默认 max_context==128000）。
+- **机制实证（三连）**：宿主 `D:\WorkSpace\finance_analysis_agent\.env:50` 设 `LLM_MAX_CONTEXT=256000`（2026-10-11 起启用，见记忆档案）；`LLM_MAX_CONTEXT=256000 uv run pytest <单测>` → 复现失败（max_context=256000）；不带该变量 → 通过；模块级复跑 `tests/llm/test_resolver.py` → 29/29 全绿 → 全量套件中某前置测试把 .env 加载进 `os.environ` 后本测试被污染（顺序依赖）。
+- **非本 delta**：diff 不触碰 `src/` 与 `tests/llm/`；CI 环境无宿主 .env → 不受影响（CI 侧该测试为绿）。
+- **处置**：并发会话已在主检出以 `resolve_profile(..., _env={})` 显式隔离修复（未提交 WIP，本 worktree 未触碰该文件，避免互相覆盖）。
+- **旁证**：main 上 838c04ae 的 push run（38507058743）为红，但失败项是另一族——`test_pipeline_watchdog_graph_done.py::test_scenario_e` 时序 flake（5001 passed 后 `-x` 中止；属 #312/incident 042 已立案的 CI 时序族，重跑即绿），与本 delta 无交集。
+
+## 三、CI 实跑证据
+
+**PR**: https://github.com/closure-guo/finance_analysis_agent/pull/332（head `feat/ci-pipeline-delta`）
+
+### 3.1 PR run #1（`pull_request` 事件，实施提交 9a207a18 对应 run）
+
+| 作业 | run | 结论 |
+|---|---|---|
+| `ci.yml` lint-and-test | [38527451554](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38527451554) | **pass（13m37s）** |
+| `e2e-playwright.yml` stub | [38527451582](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38527451582) | **pass（17m28s）**；live/flaky-report 按 PR 事件规则 skipping（符合预期） |
+
+- **R2（ci.yml 排序）**：步骤终态序列实测——`CI helper script tests (node --test)` → `Install frontend dependencies` → `Frontend unit tests (vitest)` 全部 success，且 `Unit tests`（pytest）在其后执行；三道评估门禁随后全绿。**node --test 在真实 runner（node 20）通过；vitest 门禁在 CI 通过**。
+- **R2（E2E 套件排序）**：stub 作业步骤 12→15 实测为 `eval-ops → track-record → (stub) default → timeline`，全部 success；`Collect flaky stats` 与 `e2e-flaky` 上传 success；`playwright-report` 上传 skipped（无失败，符合 `if: failure()`）。
+- **R4（记录落盘）**：下载 artifact `e2e-flaky` → `38527451582-1.json`，内容与实跑逐项吻合：
+  `default: passed=31/flaky=0/skipped=22（18 specs）`、`eval-ops: 5/0/0（1）`、`track-record: 16/0/0（8）`、`timeline: passed=33/flaky=1/skipped=1（17 specs）`；`missing=[]`（四套件全跑，排序未遮挡）；`source=github-actions`，`run_url/branch/event/sha` 元数据齐全。**timeline 的 1 例 flaky 即 #328 时延族首例被机器记录**。
+- **R3（缓存）**：首跑 `Cache not found for input keys: playwright-Linux-b0392083…` → 作业末尾 `Cache saved with key: playwright-Linux-b0392083…`（缓存按 PR ref 作用域建立，同 PR 后续 run 命中——见 §3.3）。
+
+### 3.2 dispatch 探针（`workflow_dispatch`，head 81336572）——R1/R4/R5
+
+- **R1（并发取消，行为学实证）**：连续两次 dispatch 同一分支（同一 `github.ref` → 同一并发组）——run [38529898682](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38529898682) 被后发的 run [38529954252](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38529954252) **取消**（终态 `cancelled`；后发 run 先短暂 pending 等待接管，符合 GitHub 并发语义）；被取消 run 的 stub 步骤 14-18（后两个套件/收数/上传）**全部 skipped**——`!cancelled()` 生效，**半截数据未上传**（该 run artifacts 仅剩其先完成的 flaky-report 产物，无 e2e-flaky 记录）。
+- **R5（失败上报，三路径真实 API 验证）**：
+  1. **created**：run #1 的 live 作业失败（探针步骤）→ 自动建 **issue [#333](https://github.com/closure-guo/finance_analysis_agent/issues/333)**「[ci-failure] @live nightly E2E 失败」，标签 `ci-failure` **由 ensure 逻辑自动补建**（此前仓库无此标签），body 含失败 run 链接/事件/提交/尝试次数；
+  2. **commented**：run #2 的 live 作业失败（新 run 链接）→ 日志 `已在 issue #333 追加失败记录`，**未重复建单**（open 单仍为 1 条，评论 +1）；
+  3. **noop**：`gh run rerun 38529954252 --failed`（attempt 2，同 run 链接）→ 日志 `issue #333 已有本 run 记录，跳过（幂等）`，评论数保持 1。
+  （探针 issue #333 验证完成后已关闭并注明用途。）
+- **R4（nightly 聚合，真实数据）**：run #2 的 flaky-report 作业（dispatch 亦触发）`gh run download` 拉到 PR run #1 的 artifact → 产出汇总报告（artifact `e2e-flaky-summary`，内容摘录）：
+  - 窗口 2026-09-30 → 2026-10-14（UTC，近 14 天）；有效记录 1 条；同 run rerun 去重 0；无效文件 0；
+  - **`thinking-timeline-pipeline.spec.ts`（timeline）有效 n=1 / flaky 次数 1 / 抖动率 100.0%**；其余 43 个 spec 零抖动零失败；
+  - 套件总计与 §3.1 记录逐项一致（default 31/0/0/22 等）。
+
+### 3.3 收尾 run（探针移除后的最终树，head `cbd0fc25`）
+
+| 作业 | run | 结论 |
+|---|---|---|
+| `ci.yml` lint-and-test | [38532671186](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38532671186) | **pass** |
+| `e2e-playwright.yml` stub | [38532671389](https://github.com/closure-guo/finance_analysis_agent/actions/runs/38532671389) | **pass（16m35s）**；`e2e-flaky` artifact 正常产出；live/flaky-report skipping（PR 事件，符合预期） |
+
+- **R3（缓存命中，同 PR ref）**：`Cache hit for: playwright-Linux-b0392083…` → `Cache restored from key: playwright-Linux-b0392083…`；作业末尾 `Cache hit occurred on the primary key …, not saving cache`（命中即不重存）。stub 作业墙钟 17m28s（首跑）→ **16m35s**（命中后），浏览器不再重下。
+- 探针步骤已从 live 作业移除，最终树无任何临时探针残留（`git diff main...head` 净差异见 PR #332）。
+
+### 3.4 main 分支保护核对（tasks 3.2 人工项）
+
+`gh api repos/{owner}/{repo}/branches/main/protection` → **404 Branch not protected**：本仓库 main **未配置分支保护，required checks 为空**。即当前合并门禁靠约定（PR + CI 观察）而非平台强制；本 delta 的五个 workflow 作业名与既有命名不冲突，后续如需启用分支保护可直接把 `lint-and-test` / `stub` 加为 required checks（无重命名风险）。
+
+## 四、实施口径说明（与 tasks 字面差异及理由）
+
+1. **concurrency 组前缀按 workflow 区分**（`ci-${{ github.ref }}` / `e2e-${{ github.ref }}`）：tasks 1.1 字面写同一组名，但两个 workflow 共用组名会互相取消（同一 push 同时触发两 workflow → 后启动者取消先启动者），显然非意图；spec 只要求「按 github.ref 分组 + 取消在跑的上一次」。
+2. **`e2e-playwright.yml` 的 `cancel-in-progress` 对 schedule 豁免**（`${{ github.event_name != 'schedule' }}`）：nightly 是唯一 @live 真链路信号，main 上的普通 push 若取消 nightly 即失去该信号（design 风险节已声明「按事件类型豁免」方向）。
+3. **浏览器缓存同时加进 live 作业**（键绑 `uv.lock`）：tasks 1.3 只点名 e2e 主作业；live 作业的 Python 侧 playwright 版本由 `uv.lock` 锁定，同键同原理，省 nightly 下载。
+4. **新增 `node --test` 桩件测试步骤进 ci.yml**：R5 上报逻辑属本 delta 新增代码，按「先写失败测试」纪律补桩件测试并纳入门禁（零依赖、秒级；亦属 fail-fast 排序的受益项）。
+5. **`if: ${{ !cancelled() }}`（而非 `always()`）用于收数与 artifact 上传**：被并发取消的 run 不收半截数据（半截记录无归因价值，且 `always()` 会在取消时照跑）。
+6. **artifact 上传加 `overwrite: true`**（新增的 `e2e-flaky` 与既有 `playwright-report`）：upload-artifact v4 制品不可变且按 run 作用域——rerun（attempt≥2）时同名上传会冲突，不加则 rerun 在无过错情况下假红；覆盖后 artifact 恒为最新 attempt 的记录（汇总侧仍按 run_id 取最高 attempt 去重，双保险）。
+7. **GitHub 缓存按 ref 作用域**（R3 的命中前提）：PR run 的缓存在 `refs/pull/N/merge` 作用域，nightly/main push 在 `refs/heads/main` 作用域——同 PR 的后续 run 命中、nightly 命中上一晚，跨 ref 不共享（平台语义，非实现选择；§3.3 的命中实证即同 PR ref）。
+
+## 五、结论
+
+- **五条需求全部在真实 CI 上验证**：R1 并发取消（行为学：后发 dispatch 取消前发 run，被取消 run 无半截 artifact）；R2 fail-fast 排序（ci.yml 前端步骤先于 pytest、E2E 套件耗时升序，均以步骤终态序列取证）；R3 浏览器缓存（miss → saved → 同 ref 命中 restored，时长下降）；R4 抖动统计（artifact 记录与实跑逐项吻合 + nightly 聚合出各 spec 抖动率报告，捕获 #328 族首例 flaky 记录）；R5 失败上报（created/commented/noop 三路径在真实 GitHub API 上全部走通，标签自动补建）。
+- **既有测试零修改**；新增 21 例测试（17 pytest 先红后绿 + 4 node 桩件）全部纳入 CI 门禁（`node --test` 步骤）。
+- **本地唯一失败项已归因**（宿主 .env `LLM_MAX_CONTEXT=256000` 泄漏，非本 delta；CI 无 .env 为绿；并发会话已在修复）。
+- **遗留与后续**：
+  1. 探针 issue #333 验证后已关闭（注明为实施期探针用途）——后续真实 nightly 失败会重新建单；
+  2. **nightly 首次自然运行**（今晚 UTC 18:00）将自然覆盖：schedule 豁免取消语义、@live 真实链路（失败则真建单）、聚合窗口随记录累积（当前窗口 2 条记录）；
+  3. 缓存按 ref 作用域为平台语义：PR run 之间命中、nightly 命中上一晚，跨 ref 不共享（§四.7）；
+  4. main 未配置分支保护（§3.4）；若后续启用，建议将 `lint-and-test` / `stub` 设为 required checks（本 delta 未改动作业名，无重命名风险）。
