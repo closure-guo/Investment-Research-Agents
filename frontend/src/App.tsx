@@ -20,6 +20,7 @@ import { DownloadCenter } from './pages/downloads/DownloadCenter'
 import { ScreeningPage } from './pages/screening/ScreeningPage'
 import { MemoryPage } from './pages/memory/MemoryPage'
 import { FactorLibraryPage } from './pages/factors/FactorLibraryPage'
+import { BrokerConsolePage } from './pages/broker/BrokerConsolePage'
 import { TrackRecordPage } from './pages/trackRecord/TrackRecordPage'
 import { CalibrationPage } from './pages/trackRecord/CalibrationPage'
 import { PredictionDetailPage } from './pages/trackRecord/PredictionDetailPage'
@@ -895,6 +896,7 @@ export default function App() {
         onOpenScreening={() => navigate('/screening')}
         onOpenMemory={() => navigate('/memory')}
         onOpenFactors={() => navigate('/factors')}
+        onOpenBroker={() => navigate('/broker')}
         onOpenSettings={() => { setSettingsFocus(undefined); navigate('/settings') }}
         themeChoice={themeChoice}
         onCycleTheme={cycleTheme}
@@ -926,6 +928,9 @@ export default function App() {
         ) : pathname === '/factors' ? (
           // 因子库页（delta add-factor-library-page T2）：资产目录（筛选 + 行展开，只读）
           <FactorLibraryPage onBack={() => navigate('/')} />
+        ) : pathname === '/broker' ? (
+          // 执行台账页（delta add-broker-console T2.1）：资金/持仓/订单四态/门禁拒绝（只读）
+          <BrokerConsolePage onBack={() => navigate('/')} />
         ) : pathname === '/settings' ? (
           // 设置中心页（add-agent-settings-center Task 7）：左导航六分区 + 右内容区
           <SettingsCenterPage
@@ -1128,6 +1133,7 @@ export default function App() {
         onOpenDownloads={() => navigate('/downloads')}
         onOpenMemory={() => navigate('/memory')}
         onOpenFactors={() => navigate('/factors')}
+        onOpenBroker={() => navigate('/broker')}
         onCycleTheme={cycleTheme}
         themeChoice={themeChoice}
       />
@@ -1144,7 +1150,7 @@ export default function App() {
 }
 
 // ── Sidebar（add-collapsible-sidebar：shadcn Sidebar 原语重构）──
-function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenMemory, onOpenFactors, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
+function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenMemory, onOpenFactors, onOpenBroker, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
   sessions: SessionMeta[]
   currentSessionId: string | null
   onSelect: (id: string) => void
@@ -1156,6 +1162,7 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
   onOpenScreening: () => void
   onOpenMemory: () => void
   onOpenFactors: () => void
+  onOpenBroker: () => void
   onOpenSettings: () => void
   runningSessionIds: Set<string>
   loading?: boolean
@@ -1218,6 +1225,11 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
           <SidebarIcon label="因子库">
             <Button variant="ghost" size="icon" onClick={onOpenFactors} aria-label="因子库" data-testid="sidebar-factors-collapsed">
               <i className="fas fa-flask text-xs"></i>
+            </Button>
+          </SidebarIcon>
+          <SidebarIcon label="执行台账">
+            <Button variant="ghost" size="icon" onClick={onOpenBroker} aria-label="执行台账" data-testid="sidebar-broker-collapsed">
+              <i className="fas fa-book-open text-xs"></i>
             </Button>
           </SidebarIcon>
           <SidebarIcon label="决策战绩">

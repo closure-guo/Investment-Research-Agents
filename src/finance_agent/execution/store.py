@@ -14,6 +14,7 @@ DB 路径调用期读取 env ``EXECUTION_DB_PATH``（默认 ``data/execution.db`
   复合读写（订单+持仓+资金）经 ``execution_conn`` 同事务提交；
   ``signal_ids_with_orders``（已下单信号集合，只读）与 ``record_order_rejection``
   （门禁拒绝留痕）为 add-execution-chain-driver 的驱动器配套助手；
+  ``delete_all_broker_state``（add-broker-console：TESTING 造数复位清三表）。
 - ``paper_equity``（B2）：每日结算净值曲线（trade_date PK，幂等 upsert）。
 
 模块级只依赖 stdlib：``Signal``/``OrderRecord`` 类型经 TYPE_CHECKING / 函数内
@@ -592,3 +593,18 @@ def delete_all_paper_equity(db_path: str | Path | None = None) -> int:
         return int(cursor.rowcount)
     finally:
         conn.close()
+
+
+def delete_all_broker_state(db_path: str | Path | None = None) -> dict[str, int]:
+    """清空 paper 账户三表（orders/positions/cash；add-broker-console 造数复位）。
+
+    仅清账户账本三表；``paper_equity`` 净值曲线（战绩页造数面）不涉——两者复位
+    边界独立（同 ``delete_all_paper_equity`` 的反向纪律）。返回各表删除行数。
+    """
+    init_execution_db(db_path)
+    with execution_conn(db_path) as conn:
+        return {
+            "orders": int(conn.execute("DELETE FROM orders").rowcount),
+            "positions": int(conn.execute("DELETE FROM positions").rowcount),
+            "cash": int(conn.execute("DELETE FROM cash").rowcount),
+        }

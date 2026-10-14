@@ -93,8 +93,12 @@ export default defineConfig({
       // 的 seed/screening_reset 会清表，绝不能落到开发库 data/screening.db
       // FACTOR_LIBRARY_DB_PATH 同理（delta add-factor-library-page T2.3）：因子库 E2E 的
       // seed/factors_reset 会清表，绝不能落到开发库 data/factor_library.db
+      // EXECUTION_DB_PATH 同理（delta add-broker-console T2.3）：执行台账 E2E 的
+      // seed/broker_reset 会清 orders/positions/cash 三表，绝不能落到开发库
+      // data/execution.db（与 track-record config 的 EXECUTION_DB_PATH 是不同文件：
+      // 那边承载 paper_equity 双曲线造数，互不影响）
       command: 'uv run uvicorn finance_agent.api:app --port 8000',
-      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', REPORTS_DIR: 'tmp/e2e-reports-8000' },
+      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', REPORTS_DIR: 'tmp/e2e-reports-8000' },
       url: 'http://localhost:8000/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,

@@ -913,3 +913,65 @@ export interface FactorDetail extends FactorRow {
   ic_series: FactorIcPoint[]
   events: FactorEvent[]
 }
+
+// ── 执行台账只读契约（delta add-broker-console：GET /api/broker/*） ──
+
+export interface BrokerOverview {
+  /** 可用资金（PaperBroker 惰性开户口径：首次读取即落初始 100 万） */
+  cash: number
+  /** 持仓市值（最新快照 close_raw 口径；快照不可得 → null，MUST NOT 填 0 冒充） */
+  positions_value: number | null
+  /** 总资产 = 资金 + 持仓市值（市值不可得 → null） */
+  equity: number | null
+  /** 浮动盈亏 = 持仓市值 − 持仓成本（市值不可得 → null） */
+  unrealized_pnl: number | null
+  /** 持仓成本合计（账本口径，不依赖快照） */
+  position_cost: number
+  positions_count: number
+  /** mark 所用快照交易日（不可得 → null） */
+  snapshot_date: string | null
+  /** 缺收盘价的标的（市值不可得时的可判读明细） */
+  missing_symbols: string[]
+  /** 市值不可得原因的标注文案（可得 → null） */
+  market_value_note: string | null
+}
+
+export interface BrokerPositionRow {
+  symbol: string
+  qty: number
+  avg_cost: number
+  updated_at: string | null
+  /** 现价（快照 close_raw；不可得 → null） */
+  close: number | null
+  market_value: number | null
+  unrealized_pnl: number | null
+}
+
+export interface BrokerPositionsResponse {
+  snapshot_date: string | null
+  positions: BrokerPositionRow[]
+}
+
+/** 订单状态枚举（spec 逐字四态） */
+export type BrokerOrderStatus = 'pending' | 'filled' | 'rejected' | 'expired'
+
+export interface BrokerOrderRow {
+  order_id: string
+  symbol: string
+  side: string
+  qty: number
+  status: BrokerOrderStatus | string
+  /** 未成交/拒单原因码（成交 → null） */
+  reason: string | null
+  fill_price: number | null
+  fee: number
+  /** 证据链（spec：订单记录含 decision_id 与 signal_id） */
+  decision_id: string
+  signal_id: string
+  created_at: string
+  attempts: number
+}
+
+export interface BrokerOrdersResponse {
+  orders: BrokerOrderRow[]
+}

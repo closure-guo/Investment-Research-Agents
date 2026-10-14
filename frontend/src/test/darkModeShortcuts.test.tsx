@@ -89,6 +89,7 @@ describe('命令面板（polish-dark-mode-shortcuts）', () => {
     const onOpenDownloads = vi.fn()
     const onOpenMemory = vi.fn()
     const onOpenFactors = vi.fn()
+    const onOpenBroker = vi.fn()
     const onCycleTheme = vi.fn()
     render(
       <CommandPalette
@@ -100,6 +101,7 @@ describe('命令面板（polish-dark-mode-shortcuts）', () => {
         onOpenDownloads={onOpenDownloads}
         onOpenMemory={onOpenMemory}
         onOpenFactors={onOpenFactors}
+        onOpenBroker={onOpenBroker}
         onCycleTheme={onCycleTheme}
         themeChoice={(over.themeChoice as never) ?? 'light'}
       />,
