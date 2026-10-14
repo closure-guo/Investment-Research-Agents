@@ -71,6 +71,10 @@ jobs:
         run: npm ci
         working-directory: frontend
 
+      # --retry=1：CI（2 vCPU）上 followup-resume-after-switch 因固定 sleep + stub
+      # session_busy 竞态偶发超时（本地 3/3 通过；首跑 CI 即复现，非断言缺陷）——
+      # 与 Playwright 套件 retries=1 同口径「只吸收抖动，确定性回归两次都失败」；
+      # 该测试的时序硬化挂 follow-up issue。
       - name: Frontend unit tests (vitest)
-        run: npm test
+        run: npm test -- --retry=1
         working-directory: frontend
