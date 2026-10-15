@@ -86,9 +86,11 @@ def _parse_symbols_file(path: Path) -> list[str]:
 def _history_rows(frame: pd.DataFrame, code: str, name: str) -> list[dict[str, Any]]:
     """T5 双口径帧 → market_snapshot 行（无 IO 的纯映射，字段逐字对齐表列）。
 
-    状态位显式置 0、``prev_close``/``high``/``low``/``amount``/``pct_chg``/
-    ``list_date``/``listed_days`` 置 NULL：回填不编造日批才有的信息（见模块
-    docstring 警示）。日期不可解析的行丢弃（无法作主键）。
+    状态位显式置 0、``prev_close``/``high``/``low``/``pct_chg``/``list_date``/
+    ``listed_days`` 置 NULL：回填不编造日批才有的信息（见模块 docstring 警示）。
+    ``amount`` 由六列契约的「成交额」映射（unify-quant-research-architecture；
+    源缺 amount 的票在取数层即判失败，不产半口径帧）。日期不可解析的行丢弃
+    （无法作主键）。
     """
     rows: list[dict[str, Any]] = []
     for _, raw in frame.iterrows():
@@ -106,7 +108,7 @@ def _history_rows(frame: pd.DataFrame, code: str, name: str) -> list[dict[str, A
                 "close_raw": _num(raw.get("收盘_raw")),
                 "close_qfq": _num(raw.get("收盘_qfq")),
                 "volume": _num(raw.get("成交量")),
-                "amount": None,
+                "amount": _num(raw.get("成交额")),
                 "pct_chg": None,
                 "prev_close": None,
                 "is_st": 0,
@@ -121,9 +123,11 @@ def _history_rows(frame: pd.DataFrame, code: str, name: str) -> list[dict[str, A
 
 
 def _has_rows_in_window(db_path: str | Path, code: str, start: str, end: str) -> bool:
-    """该票在 ``[start, end]`` 内是否已有行（断点续跑判据）。
+    """该票在 ``[start, end]`` 内是否已有**字段齐备**的行（断点续跑判据）。
 
-    库/表不存在 → False（按未回填处理，取数方向安全）；查询异常同样按 False。
+    齐备 = 有行且全部行 ``amount`` 非空（unify-quant-research-architecture：缺
+    amount 的既有行不构成覆盖 → 重取 upsert 补齐）。库/表不存在 → False（按未回填
+    处理，取数方向安全）；查询异常同样按 False。
     """
     path = Path(db_path)
     if not path.exists():
@@ -134,7 +138,7 @@ def _has_rows_in_window(db_path: str | Path, code: str, start: str, end: str) ->
         return False
     try:
         row = conn.execute(
-            "SELECT COUNT(*) FROM market_snapshot "
+            "SELECT COUNT(*), COUNT(amount) FROM market_snapshot "
             "WHERE code = ? AND trade_date >= ? AND trade_date <= ?",
             (code, start, end),
         ).fetchone()
@@ -142,7 +146,9 @@ def _has_rows_in_window(db_path: str | Path, code: str, start: str, end: str) ->
         return False
     finally:
         conn.close()
-    return bool(row and row[0])
+    total = int(row[0]) if row else 0
+    with_amount = int(row[1]) if row else 0
+    return total > 0 and with_amount == total
 
 
 def run_backfill(
