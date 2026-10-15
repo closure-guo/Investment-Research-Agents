@@ -109,6 +109,31 @@ $ uv run python tests/validation/2026-10-15-add-market-data-fallback-live-check.
 ## 结论
 
 - [x] 全部 live 读数与契约一致，单测/回归/lint/类型通过 → **可提交审查**
-- [ ] archive（**本次不 archive**：按任务约束禁止 commit/archive；archive 另需 tasks.md 全勾 + 人工终审签字）
+- [x] archive（tasks.md 全勾 + 生产实跑补录后归档，2026-10-15；人工终审签字待补）
 
 **未达成/受限项声明（不得视为通过）**：① Scenario 1（主源可用直接返回）本次**无 live 证据**（东财 IP 封禁），仅单测覆盖；② 东财失败模式波动的归因（异常 2）未定性，留观察；③ 全市场 5500 票级别的回填端到端未跑（仅 600519 单票 live 验证 + 既有回填脚本单测），且回填在东财封禁下每票仍先付 ≈5.5s 东财失败成本（见 delta design.md Risks，建议后续加源健康冷却或 `--source` 参数）。
+
+---
+
+## 部署后生产实跑补录（2026-10-15 晚，浏览器自动化驱动 /ops 补跑；人工终审签署待补）
+
+**部署路径**：c28b111c（#342 合并）经 `scripts/deploy.py` 真实拉取（首次实战）→ `docker compose restart backend` → 容器内确认新码（`_map_sina_spot_to_em` 存在）。
+
+**① 快照日批（market_snapshot_daily，run 79，20:12:30）**：
+
+```
+成功 · {"trade_date": "2026-10-15", "written": 5569, "rebased": 0, "suspended": 0,
+"master": "refreshed", "calendar": "ok", "spot_source": "sina"}
+```
+
+东财封禁下主源失败 → 新浪回退生效（`spot_source=sina` 如实落摘要）→ 全市场 5569 行落库；`/ops` 卡片成功，下游时效性校验从「快照库为空」推进（选股批错误随之从 SnapshotNotFresh 前移到 L2 因子阶段）。
+
+**② 全市场历史回填端到端（未达成项 ③ 补验）**：
+
+- 脚本：`scripts/backfill_market_snapshot.py --start 2026-07-10 --end 2026-10-14`，16 进程按标的分片并行（`write_snapshot_rows` 为 (日期,代码) upsert，分片安全）；宿主侧总耗时 ≈55 分钟。
+- 读数：16 分片汇总 `symbols_ok≈5046 / symbols_failed≈347 / rows_written≈31.5 万`；窗口内覆盖 **5270/5617 票**（5270 + 347 = 5617，精确吻合）。
+- 失败分布：**345 票为北交所 920xxx**——新浪 `stock_zh_a_daily` 不覆盖北交所（备用源历史口径的覆盖缺口，如实暴露）；另 2 票（301569、689009）两源皆无数据，重试仍 None。
+- 交叉核对：回填后快照库 64 个交易日（07-10..10-15）；日批当日行（5569）与回填区间（以 10-14 收尾）互不覆盖；选股 60 交易日面板前置由此满足。
+- 披露：回填期间宿主机 16 进程写 WAL 与容器读同库互斥（`disk I/O error`，另立 issue #344）；北交所历史缺席使 BJ 票无法进入选股面板（源能力边界，非回退逻辑缺陷）。
+
+**③ 结论更新**：未达成项 ③ 已补验（全市场回填端到端真实跑通）；新增覆盖缺口一项（北交所历史源缺席）。

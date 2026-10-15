@@ -8,4 +8,4 @@
 - [x] `tests/execution/` + `tests/outcome/test_ops_jobs.py` + `tests/outcome/test_scheduler.py` 全绿（296 passed）；ruff / mypy 干净
 - [x] 真实数据核验：生产库 `predictions` 54 行 open 全量映射核验（52 行 approve 可转换 / 2 行 reject 过滤；`rationale_snapshot` 172/172 可解析）与隔离库实跑（见验证报告）
 - [x] `openspec validate fix-execution-signal-source --strict` 通过
-- [ ] 部署后实跑核验：`paper_execute_daily` 手动补跑 → 信号落库 → `/broker` 页可见（验证报告补录）
+- [x] 部署后实跑核验：`paper_execute_daily` 手动补跑 → 11 信号落库（生产观点）→ `/broker` 页读数一致；中断-恢复幂等收敛实证（验证报告 §6）
