@@ -53,6 +53,7 @@ from apscheduler.triggers.cron import CronTrigger
 from finance_agent.data.snapshot_job import run_market_snapshot_batch
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.execution.driver import run_execution_daily
+from finance_agent.factors.builtin import run_factor_builtin_register
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
@@ -163,6 +164,15 @@ def _factor_monitor_job() -> None:
     job 幂等（同日重跑覆盖同一 ``(factor, date)``），重试安全。
     """
     _with_retry("factor_decay_monitor", "factor decay monitor", run_factor_decay_monitor)
+
+
+def _factor_builtin_register_job() -> None:
+    """wire-builtin-factor-registration：内置因子注册日批（15:50，快照与因子监控之后）。
+
+    存在性幂等（已注册条目跳过，含 retired 不回填）；缺失条目以快照面板过五道闸；
+    面板不可得上抛（run_job 记 failed）。注册本身零 LLM 调用。
+    """
+    _with_retry("factor_builtin_register", "factor builtin register", run_factor_builtin_register)
 
 
 def _settle_job() -> None:
@@ -297,6 +307,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         _factor_monitor_job,
         _cron_for("factor_decay_monitor"),
         id="factor_decay_monitor",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # wire-builtin-factor-registration：内置因子注册（15:50）——快照（15:30）与因子
+    # 衰减监控（15:45）之后、结算链之前；存在性幂等，库空/缺条目时次日自愈。
+    scheduler.add_job(
+        _factor_builtin_register_job,
+        _cron_for("factor_builtin_register"),
+        id="factor_builtin_register",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )

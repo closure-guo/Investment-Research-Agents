@@ -34,6 +34,7 @@ from typing import Any
 from finance_agent.data.snapshot_job import MARKET_SNAPSHOT_SCHEDULE, run_market_snapshot_batch
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.execution.driver import run_execution_daily
+from finance_agent.factors.builtin import run_factor_builtin_register
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
@@ -57,6 +58,7 @@ JOB_IDS: tuple[str, ...] = (
     "market_snapshot_daily",
     "screening_daily",
     "factor_decay_monitor",
+    "factor_builtin_register",
     "decision_settle_daily",
     "paper_execute_daily",
     "paper_settle_daily",
@@ -72,6 +74,7 @@ JOB_LABELS: dict[str, str] = {
     "market_snapshot_daily": "行情快照",
     "screening_daily": "选股",
     "factor_decay_monitor": "因子衰减监控",
+    "factor_builtin_register": "内置因子注册",
     "decision_settle_daily": "判定",
     "paper_execute_daily": "仿真执行",
     "paper_settle_daily": "paper 结算",
@@ -88,6 +91,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "market_snapshot_daily": run_market_snapshot_batch,
     "screening_daily": run_screening_daily,
     "factor_decay_monitor": run_factor_decay_monitor,
+    "factor_builtin_register": run_factor_builtin_register,
     "decision_settle_daily": settle_open_predictions,
     "paper_execute_daily": run_execution_daily,
     "paper_settle_daily": run_paper_settle_daily,
@@ -123,6 +127,12 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 15,
         "minute": 45,
+        "timezone": "Asia/Shanghai",
+    },
+    "factor_builtin_register": {
+        "day_of_week": "mon-fri",
+        "hour": 15,
+        "minute": 50,
         "timezone": "Asia/Shanghai",
     },
     "decision_settle_daily": {
