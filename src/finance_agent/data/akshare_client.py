@@ -20,6 +20,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import date, datetime, timedelta
+from typing import TypeGuard
 
 import akshare as ak
 import pandas as pd
@@ -337,6 +338,90 @@ def _listing_rows(df: pd.DataFrame) -> list[dict]:
     return rows
 
 
+# ── add-market-data-fallback：新浪全市场 spot → 东财列形映射（纯函数） ─────────
+# 日批（snapshot.build_snapshot_rows / _spot_row / compute_rebase_factors）实际消费
+# 的 spot 列清单——逐列核对 src/finance_agent/data/snapshot.py 行构造得出，
+# 映射输出恰为此 10 列（列形保真；消费端只见统一列形）。
+_EM_SPOT_COLUMNS: tuple[str, ...] = (
+    "代码",
+    "名称",
+    "最新价",
+    "涨跌幅",
+    "今开",
+    "最高",
+    "最低",
+    "昨收",
+    "成交量",
+    "成交额",
+)
+# 日批「代码」为 6 位数字（证券主表/复权基准同）；新浪为交易所前缀 + 6 位
+_SINA_CODE_PREFIX_RE = re.compile(r"^(?:sh|sz|bj)", re.IGNORECASE)
+# 成交量单位口径：新浪为股、东财（spot 与历史日线同）为手 → 归一需 ÷100
+_SINA_SHARES_PER_LOT = 100
+
+
+def _strip_exchange_prefix(value: object) -> str | None:
+    """新浪代码去交易所前缀（sh/sz/bj）→ 6 位数字；空/缺失/NaN → None。"""
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if value != value:  # NaN
+            return None
+        if value.is_integer():
+            value = int(value)
+    text = _SINA_CODE_PREFIX_RE.sub("", str(value).strip())
+    return text or None
+
+
+def _has_usable_codes(df: object) -> TypeGuard[pd.DataFrame]:
+    """spot 表可用性：非空 + 含「代码」列 + 至少一个非空代码。
+
+    空壳表（代码列全空）按源失败处理——宁可告警，不静默写空快照。
+    TypeGuard 供 mypy 收窄（`_call_ak` 返回 Any）。
+    """
+    return (
+        isinstance(df, pd.DataFrame)
+        and not df.empty
+        and "代码" in df.columns
+        and bool(df["代码"].notna().any())
+    )
+
+
+def _map_sina_spot_to_em(df: pd.DataFrame) -> pd.DataFrame:
+    """新浪全市场 spot → 东财 ``stock_zh_a_spot_em`` 列形（纯函数，不改写入参）。
+
+    输出列恒为 ``_EM_SPOT_COLUMNS``（日批实际消费的 10 列）；新浪缺失的列补
+    NaN 保持列存在（列形保真），多出的列（涨跌额/买入/卖出/时间戳）丢弃。
+
+    源差异归一（缺口清单，2026-10-15 真实响应实测钉死）：
+
+    - 代码：新浪带交易所前缀（``sh600519``/``sz000001``/``bj920000``）→ 去前缀
+      回 6 位数字（日批、证券主表、复权基准全按 6 位匹配，带前缀会静默丢行）。
+    - 成交量：新浪单位为**股**、东财为**手** → ÷100（快照 volume 与东财日线/日批
+      同口径，回填区与日批区混表可比；`div(volume, ts_mean(volume,20))` 类因子
+      在跨源面板上不被 100× 跳变污染）。
+    - 最新价：新浪停牌行为 ``0.0``（东财为 NaN）→ 归一为 NaN，交日批 D2 停牌
+      合成路径（0 值直通会把 ``close_raw=0`` 写进快照并污染 qfq 序列）。
+    - 数值列统一 ``to_numeric(errors="coerce")``：上游 "-"/空串等占位归一为 NaN。
+    - 新浪 spot 无 振幅/量比/换手率/市盈率*/市净率/总市值/流通市值（日批不消费）
+      → 不产出、不编造；单标的行情/估值路径（``_quote_via_chain``）以腾讯为主源，
+      不经本函数。
+    """
+    out = pd.DataFrame(
+        {
+            col: (df[col] if col in df.columns else pd.Series(float("nan"), index=df.index))
+            for col in _EM_SPOT_COLUMNS
+        }
+    )
+    for col in ("最新价", "涨跌幅", "今开", "最高", "最低", "昨收", "成交量", "成交额"):
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    out["代码"] = out["代码"].map(_strip_exchange_prefix)
+    price = out["最新价"]
+    out["最新价"] = price.where(price != 0)  # 停牌 0.0 → NaN（触发 D2 合成）
+    out["成交量"] = out["成交量"] / _SINA_SHARES_PER_LOT
+    return out
+
+
 class AKShareClient:
     def __init__(self) -> None:
         # 实际生效的数据源留痕（供 cohort universe 登记文件落 `sources` 审计）：
@@ -345,7 +430,11 @@ class AKShareClient:
             "constituents": set(),
             "industry": set(),
             "market_cap": set(),
+            # add-market-data-fallback：全市场 spot 实际生效源（eastmoney|sina|none）
+            "market_spot": set(),
         }
+        # 全市场 spot 最近一次实际生效源（日批成功摘要 spot_source 消费；未尝试/双源失败 → None）
+        self.last_spot_source: str | None = None
 
     def _filter_annual(self, df: pd.DataFrame) -> pd.DataFrame:
         """只保留年报（报告日以 1231 结尾），并按报告日降序（最新在前）对齐契约。"""
@@ -1523,17 +1612,35 @@ class AKShareClient:
         )
 
     # ── add-market-snapshot T5：全市场快照取数包装（日批/回填共用） ──────────
+    # ── add-market-data-fallback：全市场 spot 双源回退（东财 → 新浪） ─────────
 
     def fetch_market_spot(self) -> pd.DataFrame | None:
-        """全市场 spot 表（``stock_zh_a_spot_em`` 原样透传；列映射由日批负责）。
+        """全市场 spot 表：东财主源 → 新浪回退 → None（列映射由日批负责）。
 
-        缺「代码」列（维护窗口变体）或空表 → None（调用方按拉取失败走重试/告警）。
+        add-market-data-fallback：东财行情域 IP 封禁（#325）下主源恒空，备用源
+        新浪 ``stock_zh_a_spot`` 经 ``_map_sina_spot_to_em`` 归一为东财列形
+        （缺口清单见该函数 docstring）。主源失败/空表/缺「代码」列/空壳表
+        （代码列全空）均按源失败处理，继续下一源；两源皆失败 → None 并留 ERROR
+        （调用方按既有失败语义告警/重试，MUST NOT 静默写空快照）。实际生效源
+        记入 ``sources_seen["market_spot"]`` 与 ``last_spot_source``（日批摘要）。
         """
         df = _call_ak(ak.stock_zh_a_spot_em)
-        if not isinstance(df, pd.DataFrame) or df.empty or "代码" not in df.columns:
-            logger.warning("全市场 spot 拉取失败/空/缺「代码」列（返回 None）")
-            return None
-        return df
+        if _has_usable_codes(df):
+            self.sources_seen["market_spot"].add("eastmoney")
+            self.last_spot_source = "eastmoney"
+            return df
+        logger.warning("东财全市场 spot 不可用（失败/空表/缺「代码」列），回退新浪源")
+        sina = _call_ak(ak.stock_zh_a_spot)
+        if isinstance(sina, pd.DataFrame) and not sina.empty:
+            mapped = _map_sina_spot_to_em(sina)
+            if _has_usable_codes(mapped):
+                self.sources_seen["market_spot"].add("sina")
+                self.last_spot_source = "sina"
+                return mapped
+        logger.error("全市场 spot 双源均失败（东财 + 新浪），返回 None")
+        self.sources_seen["market_spot"].add("none")
+        self.last_spot_source = None
+        return None
 
     def fetch_trade_calendar(self) -> list[str] | None:
         """全历史交易日历（``tool_trade_date_hist_sina``）→ 升序去重的 ``YYYY-MM-DD``。
@@ -1596,9 +1703,23 @@ class AKShareClient:
     def fetch_symbol_history_raw_qfq(self, code: str, start: str, end: str) -> pd.DataFrame | None:
         """逐票历史日线双口径（回填用）：raw（``adjust=""``）+ qfq 两次调用按「日期」内连接。
 
-        输出列 ``[日期, 开盘, 收盘_raw, 收盘_qfq, 成交量]``（成交量取 raw 口径），
-        按日期升序。任一腿失败/空/缺列或按日期无交集 → None（不产出半口径数据）。
+        输出列 ``[日期, 开盘, 收盘_raw, 收盘_qfq, 成交量]``（成交量取 raw 口径、单位为手），
+        按日期升序。主源东财 ``stock_zh_a_hist``；任一腿失败/空/缺列或按日期无
+        交集 → 回退新浪 ``stock_zh_a_daily`` 双口径（add-market-data-fallback：
+        东财行情域 IP 封禁 #325 后回填同为东财单源，与日批 spot 同款回退）。
+        两源皆失败 → None（不产出半口径数据）。
         """
+        merged = self._fetch_symbol_history_em(code, start, end)
+        if merged is not None:
+            return merged
+        logger.info("东财历史日线双口径不可用，回退新浪源: %s", code)
+        merged = self._fetch_symbol_history_sina(code, start, end)
+        if merged is None:
+            logger.error("历史日线双口径两源均失败: %s", code)
+        return merged
+
+    def _fetch_symbol_history_em(self, code: str, start: str, end: str) -> pd.DataFrame | None:
+        """东财双口径腿（raw + qfq）；任一腿失败/空/缺列或按日期无交集 → None。"""
         raw = _call_ak(
             ak.stock_zh_a_hist,
             symbol=code,
@@ -1636,6 +1757,55 @@ class AKShareClient:
         if merged.empty:
             logger.warning("历史日线 raw/qfq 按日期无交集: %s", code)
             return None
+        return (
+            merged[["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量"]]
+            .sort_values("日期")
+            .reset_index(drop=True)
+        )
+
+    def _fetch_symbol_history_sina(self, code: str, start: str, end: str) -> pd.DataFrame | None:
+        """新浪双口径腿（回退）：``stock_zh_a_daily`` raw/qfq + 列名/单位归一。
+
+        新浪返回英文小写列（``date``/``open``/``close``/``volume``）→ 归一为
+        东财中文列后走同款「日期」内连接；成交量单位为股、东财为手 → ÷100
+        保持 ``volume`` 口径一致（回填区与日批区混表可比）。
+        任一腿失败/空/缺列 → None（不产出半口径数据）。
+        """
+        symbol = self._to_sina_symbol(code)
+        required = {
+            "": ("date", "open", "close", "volume"),
+            "qfq": ("date", "close"),
+        }
+        frames: dict[str, pd.DataFrame] = {}
+        for adjust, cols in required.items():
+            df = _call_ak(
+                ak.stock_zh_a_daily,
+                symbol=symbol,
+                start_date=start,
+                end_date=end,
+                adjust=adjust,
+            )
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                logger.warning("新浪历史日线腿失败/空 (adjust=%r): %s", adjust, code)
+                return None
+            if not set(cols) <= set(df.columns):
+                logger.warning("新浪历史日线腿缺列 (adjust=%r): %s", adjust, code)
+                return None
+            frames[adjust] = df
+        raw = frames[""].rename(columns={"date": "日期", "open": "开盘", "close": "收盘"})
+        qfq = frames["qfq"].rename(columns={"date": "日期", "close": "收盘"})
+        merged = pd.merge(
+            raw[["日期", "开盘", "收盘", "volume"]].rename(
+                columns={"收盘": "收盘_raw", "volume": "成交量"}
+            ),
+            qfq[["日期", "收盘"]].rename(columns={"收盘": "收盘_qfq"}),
+            on="日期",
+            how="inner",
+        )
+        if merged.empty:
+            logger.warning("新浪历史日线 raw/qfq 按日期无交集: %s", code)
+            return None
+        merged["成交量"] = pd.to_numeric(merged["成交量"], errors="coerce") / _SINA_SHARES_PER_LOT
         return (
             merged[["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量"]]
             .sort_values("日期")
