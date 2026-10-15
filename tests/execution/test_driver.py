@@ -1,25 +1,31 @@
-"""执行链日批驱动器单测（add-execution-chain-driver Task 1：五段编排）。
+"""执行链日批驱动器单测（add-execution-chain-driver Task 1；fix-execution-signal-source 重写取源）。
 
-覆盖计划 §1.1（合成决策 + 合成快照，手算期望，不复用被测实现的计算）：
+覆盖计划 §1.1（合成观点 + 合成快照，手算期望，不复用被测实现的计算）：
 
-1. 闭环：1 条 open 买入决策（含 confidence）→ 信号落库（含 ``decision_id``）→
+1. 闭环：1 条 open 买入观点（含 confidence）→ 信号落库（含 ``decision_id``）→
    买入订单成交 → 持仓/资金/订单三处断言；
-2. 幂等重跑：同决策同快照再跑 → ``signals_created == 0``、订单零新增、资金持仓不变；
-3. flat 平仓：持仓 500 股 + 卖出决策 → 清仓（卖出成交、资金入账）；
-4. 快照缺失：``skipped_reason == "no_snapshot_data"``、零订单零持仓变动、信号不生成；
-5. 门禁拒绝留痕：ST 与一字涨停标的目标订单 → ``orders`` 行 ``status='rejected'`` +
+2. 幂等重跑：同观点同快照再跑 → ``signals_created == 0``、订单零新增、资金持仓不变；
+3. flat 平仓：持仓 500 股 + 卖出观点 → 清仓（卖出成交、资金入账）；
+4. 快照缺失：信号转换不依赖行情——照常落库；订单/持仓零变动，``no_snapshot_data``；
+5. 无 as_of 且快照为空：信号窗口以当日为基准（当日观点仍顺延）；
+6. 门禁拒绝留痕：ST 与一字涨停标的目标订单 → ``orders`` 行 ``status='rejected'`` +
    原因码（``ST_FLAG`` / ``LIMIT_UP_UNFILLABLE``），其余订单不受阻（照常成交）；
-6. 同日决策顺延（决策日次一交易日开盘口径：``timestamp[:10] >= as_of`` 不处理）；
-7. 空库零摘要：无决策无持仓（快照可用）→ 安全返回零摘要，不抛错。
+7. 同日观点顺延（决策日次一交易日开盘口径：``created_at[:10] >= as_of`` 不处理）；
+8. 空库零摘要：无观点无持仓（快照可用）→ 安全返回零摘要，不抛错；
+9. 未审批观点不执行：``fund_manager_decision != approve`` → 零信号，``skipped_unapproved`` 留痕；
+10. 存量窗口：窗口外旧观点不回填执行（``skipped_backlog`` 留痕）；``window_days`` 可放宽；
+11. 快照不可解析：单条脏数据跳过不阻断整批（``skipped_symbols`` 留痕）。
 
-造数口径：decision_log 走 ``insert_decision``（与生产写入方同表同列）；快照走
-``write_snapshot_rows``（列名与 market_snapshot 逐字一致）。滑点档位由快照行的
+造数口径：观点走 ``init_predictions`` + ``insert_prediction``（与生产写入方
+``track_record.ingest`` 同表同列——``rationale_snapshot`` 承载 action 与基金审批结论）；
+快照走 ``write_snapshot_rows``（列名与 market_snapshot 逐字一致）。滑点档位由快照行的
 ``amount`` 在全市场样本中的分位决定（撮合 M4 口径）——各用例把目标标的的 amount
 设为全市场最小值（分位 1/5 = 0.2 → 最保守档 0.002），手算式见各用例注释。
 """
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -35,7 +41,7 @@ from finance_agent.execution.store import (
     list_signals,
     write_position,
 )
-from finance_agent.outcome.store import init_decision_log, insert_decision
+from finance_agent.outcome.track_record.model import init_predictions, insert_prediction
 
 _AS_OF = "2026-10-14"
 _DECISION_DATE = "2026-10-13"
@@ -80,26 +86,36 @@ def _spot_row(
     }
 
 
-def _decision(**overrides: object) -> dict:
-    """decision_log 造数基座（api._persist_decision_log 生产写入列的同形记录）。"""
+def _prediction(**overrides: object) -> dict:
+    """predictions 造数基座（track_record.ingest 生产写入列的同形记录）。
+
+    ``rationale_snapshot`` 与 ingest 一致承载 ``action`` 与
+    ``fund_manager_decision``（审批结论）——驱动器据此做信号转换与审批过滤。
+    """
     base: dict = {
-        "session_id": "sess-1",
-        "timestamp": f"{_DECISION_DATE}T15:00:00",
-        "ticker": "600519",
-        "name": "贵州茅台",
-        "action": "buy",
+        "source_type": "live",
+        "symbol": "600519.SH",
+        "symbol_name": "贵州茅台",
+        "direction": "long",
         "entry_price": 10.0,
-        "stop_loss": 9.0,
         "target_price": 12.0,
+        "horizon_days": 20,
         "confidence": 0.8,
-        "position_size": 0.2,
+        "created_at": f"{_DECISION_DATE}T15:00:00",
+        "session_id": "sess-1",
+        "rationale_snapshot": {
+            "action": "buy",
+            "fund_manager_decision": "approve",
+            "fund_manager_decision_reasoning": "测试审批",
+            "declared_prices": {"entry_price": 10.0, "stop_loss": 9.0, "target_price": 12.0},
+        },
     }
     base.update(overrides)
     return base
 
 
 def _dbs(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """(决策库, 执行库, 快照库) 三库路径。"""
+    """(观点库, 执行库, 快照库) 三库路径。"""
     return tmp_path / "sessions.db", tmp_path / "execution.db", tmp_path / "snapshot.db"
 
 
@@ -124,7 +140,7 @@ def _fillers() -> list[dict]:
 
 
 def test_decision_to_position_closed_loop(tmp_path):
-    """闭环：1 条买入决策（confidence 0.8）→ 信号 + 20,000 股买入成交。
+    """闭环：1 条买入观点（confidence 0.8）→ 信号 + 20,000 股买入成交。
 
     手算：equity = 现金 1,000,000（无持仓）；1 条 long 等权 → 1/1 → 单票 clip
     20% → 目标市值 200,000；目标股数 = floor(200,000 / 10.00 / 100) × 100 = 20,000；
@@ -135,8 +151,8 @@ def test_decision_to_position_closed_loop(tmp_path):
     成本价 = 200,450.10 / 20,000 = 10.022505。
     """
     dec_db, exe_db, snap_db = _dbs(tmp_path)
-    init_decision_log(dec_db)
-    decision_id = insert_decision(_decision(), db_path=dec_db)
+    init_predictions(dec_db)
+    prediction_id = insert_prediction(_prediction(), db_path=dec_db)
     write_snapshot_rows(
         _AS_OF,
         [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
@@ -155,13 +171,15 @@ def test_decision_to_position_closed_loop(tmp_path):
         "pending": 0,
         "skipped_reason": None,
         "skipped_symbols": [],
+        "skipped_backlog": 0,
+        "skipped_unapproved": 0,
     }
     signals = list_signals(db_path=exe_db)
     assert len(signals) == 1
     signal = signals[0]
-    assert signal.decision_id == decision_id
+    assert signal.decision_id == prediction_id
     assert signal.symbol == "600519.SH" and signal.direction == "long"
-    assert signal.strength == 0.8 and signal.source == "decision_log"
+    assert signal.strength == 0.8 and signal.source == "predictions"
     assert signal.created_at == _DECISION_DATE  # 决策日（执行日次一交易日口径）
 
     orders = list_orders(db_path=exe_db)
@@ -169,7 +187,7 @@ def test_decision_to_position_closed_loop(tmp_path):
     order = orders[0]
     assert (order["side"], order["qty"], order["status"]) == ("buy", 20000, "filled")
     assert order["fill_price"] == 10.02 and order["fee"] == 50.10
-    assert order["decision_id"] == decision_id and order["signal_id"] == signal.signal_id
+    assert order["decision_id"] == prediction_id and order["signal_id"] == signal.signal_id
 
     positions = list_positions(db_path=exe_db)
     assert len(positions) == 1
@@ -182,10 +200,10 @@ def test_decision_to_position_closed_loop(tmp_path):
 
 
 def test_rerun_is_idempotent(tmp_path):
-    """幂等重跑：同决策/同快照再跑 → 信号零新增、订单零新增、持仓与资金不变。"""
+    """幂等重跑：同观点/同快照再跑 → 信号零新增、订单零新增、持仓与资金不变。"""
     dec_db, exe_db, snap_db = _dbs(tmp_path)
-    init_decision_log(dec_db)
-    insert_decision(_decision(), db_path=dec_db)
+    init_predictions(dec_db)
+    insert_prediction(_prediction(), db_path=dec_db)
     write_snapshot_rows(
         _AS_OF,
         [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
@@ -212,7 +230,7 @@ def test_rerun_is_idempotent(tmp_path):
 
 
 def test_flat_signal_liquidates_position(tmp_path):
-    """flat 平仓：持仓 500 股 + 卖出决策 → 全部卖出、清仓、资金入账。
+    """flat 平仓：持仓 500 股 + 卖出观点 → 全部卖出、清仓、资金入账。
 
     手算：equity = 1,000,000 + 500 × 20.50 = 1,010,250（仅用于权重口径，不参与本单）；
     卖出 500 股；滑点 0.002（amount 最小档）→ 成交价 = round(20.00 × 0.998, 2) = 19.96；
@@ -221,8 +239,15 @@ def test_flat_signal_liquidates_position(tmp_path):
     → 余额 = 1,000,000 + 9,970.01 = 1,009,970.01；持仓清空。
     """
     dec_db, exe_db, snap_db = _dbs(tmp_path)
-    init_decision_log(dec_db)
-    insert_decision(_decision(action="sell", confidence=0.6), db_path=dec_db)
+    init_predictions(dec_db)
+    insert_prediction(
+        _prediction(
+            direction="short",  # 生产口径：sell → direction=short（track_record.judgment）
+            confidence=0.6,
+            rationale_snapshot={"action": "sell", "fund_manager_decision": "approve"},
+        ),
+        db_path=dec_db,
+    )
     _seed_position(exe_db, "600519.SH", 500, 10.0, "2026-10-10")
     write_snapshot_rows(
         _AS_OF,
@@ -250,34 +275,66 @@ def test_flat_signal_liquidates_position(tmp_path):
     assert PaperBroker(exe_db).query_cash() == 1_009_970.01
 
 
-# ── 4. 快照缺失跳过 ─────────────────────────────────────────────────────────
+# ── 4. 快照缺失：信号照常、订单跳过 ─────────────────────────────────────────
 
 
-def test_missing_snapshot_skips_without_side_effects(tmp_path):
-    """快照库为空 → 跳过摘要（no_snapshot_data）：不生成信号、零订单、持仓不变。"""
+def test_missing_snapshot_still_converts_decisions_to_signals(tmp_path):
+    """快照库为空（显式 as_of）→ 信号转换不依赖行情照常落库；订单/持仓零变动。
+
+    信号顺延的语义在订单侧：无快照不撮合，持仓/资金零变动，原因 ``no_snapshot_data``。
+    """
     dec_db, exe_db, snap_db = _dbs(tmp_path)
-    init_decision_log(dec_db)
-    insert_decision(_decision(), db_path=dec_db)
+    init_predictions(dec_db)
+    prediction_id = insert_prediction(_prediction(), db_path=dec_db)
     _seed_position(exe_db, "600519.SH", 500, 10.0, "2026-10-10")
     positions_before = list_positions(db_path=exe_db)
     cash_before = PaperBroker(exe_db).query_cash()
 
     summary = run_execution_daily(
-        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+        as_of=_AS_OF, db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
     )
 
     assert summary == {
-        "trade_date": None,
+        "trade_date": _AS_OF,
         "skipped_reason": "no_snapshot_data",
-        "signals_created": 0,
+        "signals_created": 1,
         "orders_placed": 0,
         "rejected": 0,
         "pending": 0,
+        "skipped_symbols": [],
+        "skipped_backlog": 0,
+        "skipped_unapproved": 0,
     }
-    assert list_signals(db_path=exe_db) == []  # 信号顺延至下一交易日，不提前生成
+    signals = list_signals(db_path=exe_db)
+    assert len(signals) == 1 and signals[0].decision_id == prediction_id
     assert list_orders(db_path=exe_db) == []
     assert list_positions(db_path=exe_db) == positions_before
     assert PaperBroker(exe_db).query_cash() == cash_before
+
+
+def test_missing_snapshot_without_as_of_uses_today_for_signal_window(tmp_path):
+    """快照库为空且未给 as_of → 信号窗口以当日为基准；同日观点仍顺延（次一交易日口径）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    today = date.today()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    insert_prediction(_prediction(created_at=f"{yesterday}T18:00:00"), db_path=dec_db)
+    insert_prediction(
+        _prediction(created_at=f"{today.isoformat()}T09:00:00", symbol="600000.SH"),
+        db_path=dec_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["trade_date"] is None
+    assert summary["skipped_reason"] == "no_snapshot_data"
+    assert summary["signals_created"] == 1  # 昨日观点转换；当日观点顺延
+    assert summary["orders_placed"] == 0
+    signals = list_signals(db_path=exe_db)
+    assert [s.symbol for s in signals] == ["600519.SH"]
+    assert list_orders(db_path=exe_db) == []
 
 
 # ── 5. 门禁拒绝留痕且不阻断其余订单 ─────────────────────────────────────────
@@ -293,10 +350,10 @@ def test_gate_rejections_recorded_and_others_fill(tmp_path):
     → 余额 799,549.90；被拒两单资金/持仓零变动（只留 orders 行）。
     """
     dec_db, exe_db, snap_db = _dbs(tmp_path)
-    init_decision_log(dec_db)
-    st_id = insert_decision(_decision(ticker="600519"), db_path=dec_db)
-    limit_up_id = insert_decision(_decision(ticker="000001"), db_path=dec_db)
-    ok_id = insert_decision(_decision(ticker="600000"), db_path=dec_db)
+    init_predictions(dec_db)
+    st_id = insert_prediction(_prediction(symbol="600519.SH"), db_path=dec_db)
+    limit_up_id = insert_prediction(_prediction(symbol="000001.SZ"), db_path=dec_db)
+    ok_id = insert_prediction(_prediction(symbol="600000.SH"), db_path=dec_db)
     write_snapshot_rows(
         _AS_OF,
         [
@@ -359,10 +416,10 @@ def test_gate_rejections_recorded_and_others_fill(tmp_path):
 
 
 def test_same_day_decision_defers_to_next_day(tmp_path):
-    """同日决策不执行（决策日次一交易日开盘口径）：timestamp[:10] >= as_of → 跳过。"""
+    """同日观点不执行（决策日次一交易日开盘口径）：created_at[:10] >= as_of → 跳过。"""
     dec_db, exe_db, snap_db = _dbs(tmp_path)
-    init_decision_log(dec_db)
-    insert_decision(_decision(timestamp=f"{_AS_OF}T09:30:00"), db_path=dec_db)
+    init_predictions(dec_db)
+    insert_prediction(_prediction(created_at=f"{_AS_OF}T09:30:00"), db_path=dec_db)
     write_snapshot_rows(
         _AS_OF,
         [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
@@ -382,9 +439,9 @@ def test_same_day_decision_defers_to_next_day(tmp_path):
 
 
 def test_empty_library_returns_zero_summary(tmp_path):
-    """空库（无决策、无持仓，快照可用）→ 零摘要安全返回，不抛错。"""
+    """空库（无观点、无持仓，快照可用）→ 零摘要安全返回，不抛错。"""
     dec_db, exe_db, snap_db = _dbs(tmp_path)
-    init_decision_log(dec_db)
+    init_predictions(dec_db)
     write_snapshot_rows(_AS_OF, _fillers(), db_path=snap_db)
 
     summary = run_execution_daily(
@@ -399,4 +456,100 @@ def test_empty_library_returns_zero_summary(tmp_path):
         "pending": 0,
         "skipped_reason": None,
         "skipped_symbols": [],
+        "skipped_backlog": 0,
+        "skipped_unapproved": 0,
     }
+
+
+# ── 8. 未审批观点不执行 ─────────────────────────────────────────────────────
+
+
+def test_fm_rejected_prediction_never_generates_signal(tmp_path):
+    """open 但基金审批为 reject 的观点 → 不生成信号、不产生订单，``skipped_unapproved`` 留痕。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(
+        _prediction(
+            direction="neutral",
+            rationale_snapshot={"action": "watch", "fund_manager_decision": "reject"},
+        ),
+        db_path=dec_db,
+    )
+    write_snapshot_rows(_AS_OF, _fillers(), db_path=snap_db)
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["signals_created"] == 0
+    assert summary["skipped_unapproved"] == 1 and summary["skipped_backlog"] == 0
+    assert list_signals(db_path=exe_db) == [] and list_orders(db_path=exe_db) == []
+
+
+# ── 9. 存量窗口 ─────────────────────────────────────────────────────────────
+
+
+def test_backlog_window_excludes_stale_decisions(tmp_path):
+    """窗口外旧观点不回填执行（``skipped_backlog``）；``window_days`` 放宽后可执行。
+
+    基准日 2026-10-14、默认窗口 5 天 → 截点 2026-10-09：10-05 观点在窗口外、
+    10-13 观点在窗口内。放宽 window_days=10 → 截点 2026-10-04，10-05 观点进入。
+    """
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(
+        _prediction(created_at="2026-10-05T15:00:00", symbol="600000.SH"), db_path=dec_db
+    )
+    in_window_id = insert_prediction(_prediction(), db_path=dec_db)
+    write_snapshot_rows(
+        _AS_OF,
+        [
+            _spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0),
+            _spot_row("600000", open_=8.0, close_raw=8.2, amount=200.0),
+            *_fillers(),
+        ],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["signals_created"] == 1
+    assert summary["skipped_backlog"] == 1
+    assert [s.decision_id for s in list_signals(db_path=exe_db)] == [in_window_id]
+
+    widened = run_execution_daily(
+        db_path=dec_db,
+        execution_db_path=exe_db,
+        snapshot_db_path=snap_db,
+        window_days=10,
+    )
+
+    assert widened["signals_created"] == 1 and widened["skipped_backlog"] == 0
+    assert len(list_signals(db_path=exe_db)) == 2
+
+
+# ── 10. 脏数据不阻断整批 ────────────────────────────────────────────────────
+
+
+def test_malformed_rationale_skipped_without_blocking_batch(tmp_path):
+    """单条 rationale_snapshot 缺 action → 跳过并记 ``skipped_symbols``；同批其余照常。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_prediction(symbol="600000.SH", rationale_snapshot={}), db_path=dec_db)
+    good_id = insert_prediction(_prediction(), db_path=dec_db)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["signals_created"] == 1
+    assert summary["skipped_symbols"] == ["600000.SH"]
+    signals = list_signals(db_path=exe_db)
+    assert [s.decision_id for s in signals] == [good_id]

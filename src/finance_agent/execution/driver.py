@@ -4,20 +4,22 @@
 
 - **驱动器 = ops 日批 job**（``paper_execute_daily``，16:10，先于 paper 结算 16:20）：
   复用统一通道（调度/历史/手动补跑/单飞锁），当日成交当日入账；
-- **入场口径 = 决策日次一交易日开盘**：本驱动器只处理 ``timestamp[:10] < as_of`` 的
-  决策；job 在执行日 16:10 用当日快照 bar 撮合（fill = 开盘价 × (1 ± 滑点)，M1）
+- **入场口径 = 决策日次一交易日开盘**：本驱动器只处理决策日早于执行日的观点；
+  job 在执行日 16:10 用当日快照 bar 撮合（fill = 开盘价 × (1 ± 滑点)，M1）
   ——「昨日及更早的未执行信号，在今日开盘成交」，不引入同日盘中决策的回溯偏误；
-- **幂等锚点**：信号以 ``decision_id`` 唯一（重复执行不重复生成）；订单 ``order_id``
-  由 ``signal_id`` 派生（``PaperBroker.order_id_for``）——日批重试 / 手动补跑 /
-  重复执行三态下均不产生重复订单、不重复动账。
+- **幂等锚点**：信号以 ``decision_id``（观点主键）唯一（重复执行不重复生成）；
+  订单 ``order_id`` 由 ``signal_id`` 派生（``PaperBroker.order_id_for``）——日批重试 /
+  手动补跑 / 重复执行三态下均不产生重复订单、不重复动账。
 
 五段编排（全程纯代码、无 LLM）：
 
-① **决策 → 信号**：``decision_log`` 中 ``status='open'`` 且决策日早于执行日的决策
-   → ``signal_from_decision(approved=True, source="decision_log")`` → ``record_signal``。
-   审批语义：decision_log 的唯一生产写入方（``api._persist_decision_log``）只在
-   ``fund_manager_decision == "approve"`` 时落行——库内行即审批通过决策，故
-   ``approved=True``（库表无 verdict 列，不存在未审批行需过滤）。
+① **决策 → 信号**（不依赖行情，先于快照守卫执行）：``predictions``（观点记录，
+   决策唯一真源，``track_record.ingest`` 落库）中 ``status='open'`` 且决策日早于
+   执行日的行 → ``signal_from_decision(source="predictions")`` → ``record_signal``。
+   审批语义：仅 ``rationale_snapshot.fund_manager_decision == "approve"`` 的观点可
+   转换（未审批/被拒观点 SHALL NOT 生成信号，spec decision-outcome）；存量窗口
+   （``window_days``，默认近 5 个自然日）外的旧观点不回填执行（摘要
+   ``skipped_backlog`` 留痕，防历史存量一次性砸入）。
    幂等：已存在信号的 ``decision_id`` 集合（全量 ``list_signals``）去重。
 ② **信号 → 目标**：尚无订单的 signal（``signal_ids_with_orders`` 判定）为待执行集；
    ``long`` 集合经 ``aggregate_targets(method="equal")`` 得目标权重（单票 20% /
@@ -38,21 +40,25 @@
    → ``pending``（沿用挂单与次日重试）；下单侧拒单（``INSUFFICIENT_CASH`` 等）
    落库由 broker 完成，计入 ``rejected``。
 
-**快照守卫**：``as_of`` 缺省取快照库最新交易日；库为空（或显式 as_of 但库内无
-任何数据）→ 跳过并返回 ``skipped_reason="no_snapshot_data"`` 摘要（不生成信号、
-零订单、不伪造成交；信号自然顺延至下一交易日——同 ``run_paper_settle_daily`` 先例）。
+**快照守卫**（只守订单侧）：``as_of`` 缺省取快照库最新交易日；快照不可用（库为空
+或当日无行）→ 跳过②-⑤并返回 ``skipped_reason="no_snapshot_data"`` 摘要（不撮合、
+零订单、持仓零变动、不伪造成交）；① 已照常落库（信号转换不依赖行情），订单待快照
+恢复后的执行日撮合（同 ``run_paper_settle_daily`` 先例：不抛错）。as_of 与最新
+快照均不可得时，① 的窗口基准取当日（``signal_id`` 仅作幂等命名，撮合仍待快照）。
 
-已知边界：决策扫描经 ``outcome.store.list_decisions``（单次上限 1000 行，倒序取
-最新）；open 决策超过该行数时更早的行本轮不处理，后续轮次处理（信号生成本身幂等，
-不丢不重）。
+已知边界：观点扫描经 ``track_record.model.list_predictions``（单次上限 1000 行，
+``created_at`` 倒序取最新）；open 观点超过该行数时更早的行本轮不处理，后续轮次
+处理（信号生成本身幂等，不丢不重）。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -74,16 +80,19 @@ from finance_agent.execution.store import (
     record_signal,
     signal_ids_with_orders,
 )
-from finance_agent.outcome.store import list_decisions
+from finance_agent.outcome.track_record.model import list_predictions
 from finance_agent.screening.constraints import LOT_SIZE
 
 logger = logging.getLogger(__name__)
 
-# 信号来源标记（decision_log 为唯一决策真源；spec 信号契约的 source 字段）
-_SIGNAL_SOURCE = "decision_log"
+# 信号来源标记（predictions 为决策唯一真源；spec 信号契约的 source 字段）
+_SIGNAL_SOURCE = "predictions"
 
-# 决策扫描上限（list_decisions 的 limit 上限；见模块 docstring「已知边界」）
-_DECISION_SCAN_LIMIT = 1000
+# 存量窗口默认天数（自然日；防历史存量一次性回填执行——决策日次一交易日口径的护栏）
+_DEFAULT_BACKLOG_WINDOW_DAYS = 5
+
+# 观点扫描上限（list_predictions 单次上限；见模块 docstring「已知边界」）
+_PREDICTION_SCAN_LIMIT = 1000
 
 
 @dataclass(frozen=True)
@@ -220,52 +229,95 @@ def _load_bar_contexts(
     return contexts
 
 
+def _decision_payload(row: Mapping[Any, Any]) -> dict[str, Any]:
+    """predictions 行 → ``signal_from_decision`` 输入映射（rationale_snapshot 解析）。
+
+    生产写入方 ``track_record.ingest`` 把 ``action`` 与基金审批结论冻结在
+    ``rationale_snapshot``（JSON 文本）——此处解出 action 供信号契约的方向映射
+    （buy→long、hold/watch→flat、sell→flat），并透传 ``fund_manager_decision``
+    作审批申报。缺 action / 快照不可解析/非对象 → ``ValueError``（调用方按脏数据
+    跳过留痕，不阻断整批）。
+    """
+    raw = row.get("rationale_snapshot")
+    try:
+        snapshot = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError as exc:
+        raise ValueError(f"rationale_snapshot 不可解析: {exc}") from exc
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("rationale_snapshot 非对象")
+    action = str(snapshot.get("action") or "").strip()
+    if not action:
+        raise ValueError("rationale_snapshot 缺 action")
+    return {
+        "symbol": str(row.get("symbol") or "").strip(),
+        "confidence": row.get("confidence"),
+        "action": action,
+        "fund_manager_verdict": snapshot.get("fund_manager_decision"),
+    }
+
+
 def _create_signals_from_decisions(
-    trade_date: str,
+    effective_date: str,
     *,
+    window_days: int,
     db_path: str | Path | None,
     execution_db_path: str | Path | None,
     skipped_symbols: set[str],
-) -> int:
-    """① 决策 → 信号（幂等）：返回本次新落库的信号数。"""
+) -> tuple[int, int, int]:
+    """① 决策 → 信号（幂等）：返回 ``(新落库信号数, 窗口外存量数, 未审批数)``。"""
     known_decision_ids = {signal.decision_id for signal in list_signals(db_path=execution_db_path)}
-    decisions = list_decisions(status="open", limit=_DECISION_SCAN_LIMIT, db_path=db_path)
+    predictions = list_predictions(status="open", limit=_PREDICTION_SCAN_LIMIT, db_path=db_path)
+    cutoff = (date.fromisoformat(effective_date) - timedelta(days=window_days)).isoformat()
     created = 0
-    for decision in sorted(
-        decisions,
-        key=lambda item: (str(item.get("timestamp") or ""), str(item.get("decision_id") or "")),
+    skipped_backlog = 0
+    skipped_unapproved = 0
+    for row in sorted(
+        predictions,
+        key=lambda item: (str(item.get("created_at") or ""), str(item.get("prediction_id") or "")),
     ):
-        decision_id = str(decision.get("decision_id") or "").strip()
+        decision_id = str(row.get("prediction_id") or "").strip()
         if not decision_id or decision_id in known_decision_ids:
             continue
-        timestamp = str(decision.get("timestamp") or "").strip()
-        if len(timestamp) < 10:
-            logger.warning("决策 %s 缺有效 timestamp，跳过", decision_id)
+        created_at = str(row.get("created_at") or "").strip()
+        if len(created_at) < 10:
+            logger.warning("观点 %s 缺有效 created_at，跳过", decision_id)
             continue
-        if timestamp[:10] >= trade_date:
-            continue  # 决策日次一交易日口径：当日及更晚的决策不在本执行日
-        symbol = _symbol_for_ticker(decision.get("ticker"))
+        if created_at[:10] >= effective_date:
+            continue  # 决策日次一交易日口径：当日及更晚的观点不在本执行日
+        if created_at[:10] < cutoff:
+            skipped_backlog += 1
+            continue  # 存量窗口外：不回填执行（留痕）
+        try:
+            payload = _decision_payload(row)
+        except ValueError as exc:
+            logger.warning("观点 %s 快照不可解析，跳过: %s", decision_id, exc)
+            skipped_symbols.add(str(row.get("symbol") or decision_id))
+            continue
+        if str(payload.get("fund_manager_verdict") or "").strip() != "approve":
+            skipped_unapproved += 1
+            continue  # 未审批/被拒观点 SHALL NOT 生成信号（spec decision-outcome）
+        symbol = _symbol_for_ticker(payload.get("symbol"))
         if not symbol:
-            logger.warning("决策 %s 缺有效 ticker，跳过", decision_id)
+            logger.warning("观点 %s 缺有效 symbol，跳过", decision_id)
             continue
         try:
             signal = signal_from_decision(
-                {**decision, "symbol": symbol},
+                {**payload, "symbol": symbol},
                 decision_id=decision_id,
                 source=_SIGNAL_SOURCE,
-                trade_date=trade_date,
-                created_at=timestamp[:10],
-                approved=True,  # decision_log 仅存审批通过决策（见模块 docstring ①）
+                trade_date=effective_date,
+                created_at=created_at[:10],
+                approved=True,  # 扫描已过滤 fund_manager_decision=="approve"（显式申报）
             )
         except SignalContractError as exc:
             # 单条历史脏数据不得阻断整条日批：记 warning + skipped 留痕，不落库不伪造
-            logger.warning("决策 %s 转换失败，跳过: %s", decision_id, exc)
+            logger.warning("观点 %s 转换失败，跳过: %s", decision_id, exc)
             skipped_symbols.add(symbol)
             continue
         record_signal(signal, db_path=execution_db_path)
         known_decision_ids.add(decision_id)
         created += 1
-    return created
+    return created, skipped_backlog, skipped_unapproved
 
 
 def _plan_flat_exits(
@@ -361,16 +413,11 @@ def _plan_long_entries(
     return planned, projected_value
 
 
-def _skip_summary() -> dict[str, Any]:
-    """快照不可用跳过摘要（逐字；同 run_paper_settle_daily 先例：不抛错、零订单）。"""
-    return {
-        "trade_date": None,
-        "skipped_reason": "no_snapshot_data",
-        "signals_created": 0,
-        "orders_placed": 0,
-        "rejected": 0,
-        "pending": 0,
-    }
+def _skipped(summary: dict[str, Any], skipped_symbols: set[str]) -> dict[str, Any]:
+    """快照不可用返回：标记原因 + 填充跳过标的（信号段已落库计数保持真实）。"""
+    summary["skipped_reason"] = "no_snapshot_data"
+    summary["skipped_symbols"] = sorted(skipped_symbols)
+    return summary
 
 
 def run_execution_daily(
@@ -379,38 +426,53 @@ def run_execution_daily(
     db_path: str | Path | None = None,
     execution_db_path: str | Path | None = None,
     snapshot_db_path: str | Path | None = None,
+    window_days: int = _DEFAULT_BACKLOG_WINDOW_DAYS,
 ) -> dict[str, Any]:
     """执行链日批入口：五段编排（见模块 docstring），返回摘要字典。
 
     参数：``as_of`` 执行日（缺省取快照库最新交易日；决策日次一交易日口径由
-    ``timestamp[:10] < as_of`` 保证）；``db_path`` 决策库（缺省 env
+    ``created_at[:10] < as_of`` 保证）；``db_path`` 观点库（缺省 env
     ``SESSIONS_DB_PATH``）；``execution_db_path`` 执行库（缺省 env
     ``EXECUTION_DB_PATH``）；``snapshot_db_path`` 快照库（缺省 env
-    ``SNAPSHOT_DB_PATH``）。返回 ``{trade_date, signals_created, orders_placed,
-    rejected, pending, skipped_reason, skipped_symbols}``；快照不可用时返回
-    ``skipped_reason="no_snapshot_data"`` 的零摘要（键集略窄，见 ``_skip_summary``）。
+    ``SNAPSHOT_DB_PATH``）；``window_days`` 存量窗口（自然日，默认 5——窗口外
+    旧观点不回填执行，摘要 ``skipped_backlog`` 留痕）。返回 ``{trade_date,
+    signals_created, orders_placed, rejected, pending, skipped_reason,
+    skipped_symbols, skipped_backlog, skipped_unapproved}``；快照不可用时
+    ``skipped_reason="no_snapshot_data"``（信号已照常落库，仅跳过撮合与持仓变动）。
     """
     latest = latest_snapshot_date(snapshot_db_path)
     trade_date = (str(as_of).strip() if as_of is not None else "") or latest
-    if not trade_date or latest is None:
-        # 快照库为空（含显式 as_of 但库内无任何数据）：跳过，不生成信号不下单
-        return _skip_summary()
-    try:
-        # 全市场样本：① 该日行情存在性（无行 → 快照不可用）；② 滑点档位分位样本（M4）
-        universe = read_universe(trade_date, db_path=snapshot_db_path)
-    except SnapshotEmptyError:
-        return _skip_summary()
-    market_amounts = [
-        value for row in universe if (value := _finite(row.get("amount"))) is not None
-    ]
 
     skipped_symbols: set[str] = set()
-    signals_created = _create_signals_from_decisions(
-        trade_date,
+    signals_created, skipped_backlog, skipped_unapproved = _create_signals_from_decisions(
+        trade_date or date.today().isoformat(),
+        window_days=window_days,
         db_path=db_path,
         execution_db_path=execution_db_path,
         skipped_symbols=skipped_symbols,
     )
+    summary: dict[str, Any] = {
+        "trade_date": trade_date,
+        "signals_created": signals_created,
+        "orders_placed": 0,
+        "rejected": 0,
+        "pending": 0,
+        "skipped_reason": None,
+        "skipped_symbols": [],  # 收尾统一填充（含信号段留痕）
+        "skipped_backlog": skipped_backlog,
+        "skipped_unapproved": skipped_unapproved,
+    }
+    if not trade_date or latest is None:
+        # 快照库为空（含显式 as_of 但库内无任何数据）：仅跳过撮合（信号已落库）
+        return _skipped(summary, skipped_symbols)
+    try:
+        # 全市场样本：① 该日行情存在性（无行 → 快照不可用）；② 滑点档位分位样本（M4）
+        universe = read_universe(trade_date, db_path=snapshot_db_path)
+    except SnapshotEmptyError:
+        return _skipped(summary, skipped_symbols)
+    market_amounts = [
+        value for row in universe if (value := _finite(row.get("amount"))) is not None
+    ]
 
     broker = PaperBroker(db_path=execution_db_path)
     cash = broker.query_cash()
@@ -510,12 +572,8 @@ def run_execution_daily(
             # 下单侧拒单（INSUFFICIENT_CASH 等）：broker 已落 rejected 行，照计数
             rejected += 1
 
-    return {
-        "trade_date": trade_date,
-        "signals_created": signals_created,
-        "orders_placed": orders_placed,
-        "rejected": rejected,
-        "pending": pending_count,
-        "skipped_reason": None,
-        "skipped_symbols": sorted(skipped_symbols),
-    }
+    summary["orders_placed"] = orders_placed
+    summary["rejected"] = rejected
+    summary["pending"] = pending_count
+    summary["skipped_symbols"] = sorted(skipped_symbols)
+    return summary
