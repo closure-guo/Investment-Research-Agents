@@ -7,10 +7,12 @@
 
 - 缺省标的池 = 证券主表（``security_master``）全量；主表为空且未显式指定
   ``--symbols``/``--symbols-file`` → 报错并退 2（禁止静默空跑）。
-- 逐票 ``fetch_symbol_history_raw_qfq``（raw+qfq 双口径），按 ``--sleep`` 限速；
-  断点续跑：该票在 ``[start, end]`` 内已有行则跳过（不重取）。
-- 落库经 ``write_snapshot_rows``——其契约为「单交易日整批」，故按 (票, 交易日)
-  分组调用（一票的日期升序写完后才进入下一票，进程中断在票间）。
+- 逐票 ``fetch_symbol_history_raw_qfq``（raw+qfq 双口径 + 成交额），按 ``--sleep``
+  限速；断点续跑：该票在 ``[start, end]`` 内已有**字段齐备**（amount 非空）的行则
+  跳过（缺 amount 的既有行重取 upsert 补齐）。
+- 落库经 ``write_snapshot_rows_bulk``——一票一次事务整批 upsert（~190 日/票；
+  逐日提交在 16 进程并行下提交放大严重，unify-quant-research-architecture P0-1
+  运维修复）；进程中断在票间。
 - ⚠ 回填行不含停牌合成/前收盘/状态位（``is_suspended`` 等显式为 0，
   ``prev_close``/涨跌幅为 NULL）：**不得**把回填区间接入
   ``compute_rebase_factors`` 链（停牌合成依赖状态链，会把缺行误判）；正式日频
@@ -41,7 +43,7 @@ from finance_agent.data.snapshot import (
     _parse_date_param,
     get_security_master,
     init_snapshot_db,
-    write_snapshot_rows,
+    write_snapshot_rows_bulk,
 )
 
 logger = logging.getLogger(__name__)
@@ -222,15 +224,8 @@ def run_backfill(
             print(f"[{index}/{total}] {code}: 失败（无可用行）")
             continue
 
-        by_date: dict[str, list[dict[str, Any]]] = {}
-        for row in rows:
-            by_date.setdefault(row["trade_date"], []).append(row)
-        written = 0
-        for trade_date in sorted(by_date):  # 单交易日整批（write_snapshot_rows 契约）
-            if not dry_run:
-                written += write_snapshot_rows(trade_date, by_date[trade_date], db_path=resolved_db)
-            else:
-                written += len(by_date[trade_date])
+        # 每票单事务整批 upsert（提交放大治理；行内 trade_date 逐行取用）
+        written = len(rows) if dry_run else write_snapshot_rows_bulk(rows, db_path=resolved_db)
         summary["rows_written"] += written
         summary["symbols_ok"] += 1
         flag = "[dry-run] 可取" if dry_run else "写入"

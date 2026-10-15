@@ -41,6 +41,7 @@ from finance_agent.data.snapshot import (
     set_meta_many,
     upsert_security_master,
     write_snapshot_rows,
+    write_snapshot_rows_bulk,
 )
 
 # Global Constraints 钉死的 market_snapshot 列集合（逐字，不得改名）。
@@ -516,6 +517,30 @@ def test_write_idempotent_same_day(tmp_path):
     assert _count(db, "market_snapshot") == 2  # INSERT OR REPLACE 覆盖
     universe = read_universe("2026-10-10", db_path=db)
     assert [r["close_raw"] for r in universe if r["code"] == "600519"] == [11.0]
+
+
+def test_write_snapshot_rows_bulk_multi_day_single_txn(tmp_path):
+    """write_snapshot_rows_bulk：多交易日一次写入（行内 trade_date 逐行取用）+ upsert 语义。"""
+    db = tmp_path / "market_snapshot.db"
+    rows = [
+        _snapshot_row("2026-10-09", "600519"),
+        _snapshot_row("2026-10-10", "600519"),
+        _snapshot_row("2026-10-10", "000001"),
+    ]
+
+    assert write_snapshot_rows_bulk(rows, db_path=db) == 3
+    assert _count(db, "market_snapshot") == 3
+    assert latest_snapshot_date(db_path=db) == "2026-10-10"
+
+    # 重跑幂等 + 覆盖（同票同日 upsert 不产生新行）
+    changed = [_snapshot_row("2026-10-10", "600519", close_raw=11.0, close_qfq=11.0)]
+    assert write_snapshot_rows_bulk(changed, db_path=db) == 1
+    assert _count(db, "market_snapshot") == 3
+    universe = read_universe("2026-10-10", db_path=db)
+    assert [r["close_raw"] for r in universe if r["code"] == "600519"] == [11.0]
+
+    # 空批 → 0（不建行）
+    assert write_snapshot_rows_bulk([], db_path=db) == 0
 
 
 def test_read_universe_rejects_future_as_of(tmp_path):
