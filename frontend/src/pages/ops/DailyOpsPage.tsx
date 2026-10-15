@@ -12,7 +12,8 @@ import type { OpsJobStatus, OpsJobsResponse, OpsRun, ScreeningBatch } from '../.
  * 映射为批次卡（每卡一个日批任务）：
  * - **当日时间线**：GET /api/v1/ops/jobs 的排程时刻升序渲染（数据驱动，不硬编码
  *   任务清单——注册表扩容自动跟随）；每卡 = 任务名/排程时刻 + 状态徽章 + 最近运行
- *   摘要 + 失败原因逐字 + 一键补跑；
+ *   摘要 + 失败原因逐字 + 一键补跑；排程文案两粒度（add-monthly-batch-scheduling）：
+ *   日/周 →「HH:MM」、月 →「每月 N 日 HH:MM」（非排程日如实「未到本期排程日」）；
  * - **五态映射**：ok→active（成功）、failed→failed（失败）、今日无运行行→retired
  *   （未跑）、running→running（运行中）、skipped-disabled→degraded（跳过）；
  * - **一键补跑**：POST /api/v1/ops/jobs/{id}/run（复用既有补跑通道）；202 → 刷新
@@ -62,6 +63,16 @@ function scheduleMinutes(job: OpsJobStatus): number {
   return job.schedule.hour * 60 + job.schedule.minute
 }
 
+/**
+ * 排程文案（add-monthly-batch-scheduling 粒度通用化）：
+ * - 月粒度（含 day_of_month）→「每月 N 日 HH:MM」；
+ * - 日/周粒度（既有）→「HH:MM」逐字不变。
+ */
+function scheduleText(schedule: OpsJobStatus['schedule']): string {
+  const time = `${pad2(schedule.hour)}:${pad2(schedule.minute)}`
+  return schedule.day_of_month !== undefined ? `每月 ${schedule.day_of_month} 日 ${time}` : time
+}
+
 /** 摘要单值渲染（长对象截断；口径同「评估运维」面板，避免 summary 全量铺开） */
 function shortValue(value: unknown): string {
   if (value === null || value === undefined) return '—'
@@ -104,9 +115,17 @@ function describeJob(job: OpsJobStatus, now: Date): TaskState {
       run.status === 'failed' ? `${badge.label} · ${when}` : `${badge.label} · ${when} · ${fmtSummary(run.summary)}`
     return { badge, summary, error: run.status === 'failed' ? run.error : null }
   }
-  // 今日无运行行：已过排程时刻 → 未跑；未到 → 尚未到排程时刻（design 口径）
-  const due = now.getHours() * 60 + now.getMinutes() >= scheduleMinutes(job)
-  const head = due ? '今日未跑' : `尚未到排程时刻（${pad2(job.schedule.hour)}:${pad2(job.schedule.minute)}）`
+  // 今日无运行行：已过排程时刻 → 未跑；未到 → 尚未到排程时刻（design 口径）。
+  // 月批（含 day_of_month）：仅排程日谈「今日未跑」；非排程日如实报「未到本期排程日」，
+  // 不得把「还没轮到」谎称成「该跑没跑」。
+  const isScheduledDay =
+    job.schedule.day_of_month === undefined || now.getDate() === job.schedule.day_of_month
+  const due = isScheduledDay && now.getHours() * 60 + now.getMinutes() >= scheduleMinutes(job)
+  const head = !isScheduledDay
+    ? `未到本期排程日（${scheduleText(job.schedule)}）`
+    : due
+      ? '今日未跑'
+      : `尚未到排程时刻（${scheduleText(job.schedule)}）`
   const tail =
     run === null
       ? '（尚无运行历史）'
@@ -270,7 +289,7 @@ export function DailyOpsPage({ onBack, onOpenEvalOps }: { onBack: () => void; on
     id: job.job_id,
     title: (
       <span data-testid={`ops-job-title-${job.job_id}`}>
-        {pad2(job.schedule.hour)}:{pad2(job.schedule.minute)} · {job.label}
+        {scheduleText(job.schedule)} · {job.label}
       </span>
     ),
     subtitle: (

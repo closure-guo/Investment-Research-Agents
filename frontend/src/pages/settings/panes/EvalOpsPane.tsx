@@ -116,9 +116,16 @@ function auditRunOf(job: OpsJobStatus): OpsRun | null {
   return job.last_run !== null && job.last_run.kind === 'config-change' ? job.last_run : null
 }
 
+/**
+ * 排程文案（add-monthly-batch-scheduling 粒度通用化）：
+ * - 月粒度（含 day_of_month）→「每月 N 日 HH:MM（时区）」；
+ * - 日/周粒度（既有）→「day_of_week HH:MM（时区）」逐字不变。
+ */
 function scheduleText(job: OpsJobStatus): string {
-  const { day_of_week, hour, minute, timezone } = job.schedule
-  return `${day_of_week} ${pad2(hour)}:${pad2(minute)}（${timezone}）`
+  const { day_of_week, day_of_month, hour, minute, timezone } = job.schedule
+  const time = `${pad2(hour)}:${pad2(minute)}（${timezone}）`
+  if (day_of_month !== undefined) return `每月 ${day_of_month} 日 ${time}`
+  return `${day_of_week} ${time}`
 }
 
 function lastRunText(run: OpsRun | null): string {

@@ -221,6 +221,66 @@ describe('日批运维页（delta add-daily-ops-page T2.2）', () => {
     expect(screen.getByTestId('ops-job-summary-f_future').textContent).toContain('尚未到排程时刻')
   })
 
+  it('月粒度排程文案：标题「每月 N 日 HH:MM」；非排程日如实「未到本期排程日」', async () => {
+    mockFetch({
+      jobs: [
+        jobsBody([
+          opsJob('memory_extract_monthly', 9, 0, {
+            label: '记忆提炼',
+            schedule: { day_of_month: 1, hour: 9, minute: 0, timezone: 'Asia/Shanghai' },
+          }),
+          opsJob('screening_daily', 15, 40, { label: '选股' }),
+        ]),
+      ],
+    })
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+
+    const title = await screen.findByTestId('ops-job-title-memory_extract_monthly')
+    expect(title.textContent).toContain('每月 1 日 09:00')
+    expect(title.textContent).toContain('记忆提炼')
+    // 今日 = 2026-10-14（非 1 日）：月批尚未轮到 → 不得谎称「今日未跑」
+    expect(screen.getByTestId('ops-job-summary-memory_extract_monthly').textContent)
+      .toContain('未到本期排程日（每月 1 日 09:00）')
+    // 时刻升序：月批 09:00 在日批 15:40 之前；既有日批文案逐字不变
+    expect(timelineOrder()).toEqual(['memory_extract_monthly', 'screening_daily'])
+    expect(screen.getByTestId('ops-job-title-screening_daily').textContent).toContain('15:40 · 选股')
+  })
+
+  it('月批排程日语义：1 日 09:00 前「尚未到排程时刻」、09:00 后「今日未跑」', async () => {
+    // 钉死为排程日（2026-10-01）当天的 08:00：未到时刻
+    vi.setSystemTime(new Date(2026, 9, 1, 8, 0, 0))
+    mockFetch({
+      jobs: [
+        jobsBody([
+          opsJob('memory_extract_monthly', 9, 0, {
+            label: '记忆提炼',
+            schedule: { day_of_month: 1, hour: 9, minute: 0, timezone: 'Asia/Shanghai' },
+          }),
+        ]),
+      ],
+    })
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+    expect((await screen.findByTestId('ops-job-summary-memory_extract_monthly')).textContent)
+      .toContain('尚未到排程时刻（每月 1 日 09:00）')
+  })
+
+  it('月批排程日已过时刻且无运行行 → 「今日未跑」（不因月粒度豁免）', async () => {
+    vi.setSystemTime(new Date(2026, 9, 1, 10, 0, 0))
+    mockFetch({
+      jobs: [
+        jobsBody([
+          opsJob('memory_extract_monthly', 9, 0, {
+            label: '记忆提炼',
+            schedule: { day_of_month: 1, hour: 9, minute: 0, timezone: 'Asia/Shanghai' },
+          }),
+        ]),
+      ],
+    })
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+    expect((await screen.findByTestId('ops-job-summary-memory_extract_monthly')).textContent)
+      .toContain('今日未跑')
+  })
+
   it('一键补跑：POST 补跑端点 → 成功后刷新该任务最近运行', async () => {
     const fetchMock = mockFetch({
       jobs: [

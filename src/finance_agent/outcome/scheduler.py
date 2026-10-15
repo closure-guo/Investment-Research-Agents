@@ -30,6 +30,12 @@ paper 仿真执行(add-execution-chain-driver):工作日 16:10 触发 ``run_exec
 排在 paper 结算(16:20)之前保证当日成交当日入账;快照不可用时返回跳过摘要
 (job 记 ok),经同一 ``_with_retry`` 入口。
 
+月批(add-monthly-batch-scheduling):每月 1 日 09:00 触发 ``run_memory_extract_monthly``
+(已结算决策近窗口 → 候选条款落 pending),10:00 触发 ``run_factor_proposal_monthly``
+(快照面板 → LLM 提案批 → 五道闸准入);粒度经 ``SCHEDULES`` 的 ``day_of_month`` 键
+表达(``_cron_from_spec`` 二分支),经同一 ``_with_retry`` 入口(单飞锁 + 运行历史 +
+3 次退避重试),注册位置在 cohort 之前(cohort 保持末位)。
+
 注:定时任务框架选型建议人工落 ADR(design 决策 6 注),agent 不自建 ADR。
 """
 
@@ -48,6 +54,8 @@ from finance_agent.data.snapshot_job import run_market_snapshot_batch
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.execution.driver import run_execution_daily
 from finance_agent.factors.monitor import run_factor_decay_monitor
+from finance_agent.factors.monthly import run_factor_proposal_monthly
+from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.ops.jobs import (
     SCHEDULES,
@@ -204,8 +212,39 @@ def _cohort_job() -> None:
     _with_retry("cohort_batch", "cohort batch", run_cohort_batch)
 
 
+def _memory_extract_job() -> None:
+    """add-monthly-batch-scheduling：语义记忆月批提炼（每月 1 日 09:00 Asia/Shanghai）。
+
+    已结算决策近窗口 → 提炼（LLM 优先/规则兜底）→ 候选态落库（未确认不注入）；
+    提炼入口自身容错（缺库/LLM 失败均有既有降级语义），真实故障经 run_job
+    记 failed 并退避重试。
+    """
+    _with_retry("memory_extract_monthly", "memory extract monthly", run_memory_extract_monthly)
+
+
+def _factor_proposal_job() -> None:
+    """add-monthly-batch-scheduling：因子提案月批（每月 1 日 10:00 Asia/Shanghai）。
+
+    快照面板 → LLM 跨桶提案批 → 逐条五道闸准入（过闸入库/未过留事件史）；网关
+    不可用或面板不可得 → 上抛，run_job 记 failed 如实（月批可重试，不静默）。
+    """
+    _with_retry("factor_proposal_monthly", "factor proposal monthly", run_factor_proposal_monthly)
+
+
 def _cron_from_spec(spec: dict[str, Any]) -> CronTrigger:
-    """按 SCHEDULES 规格建 cron(注册与运行时重排共用一种形态)。"""
+    """按 SCHEDULES 规格建 cron(注册与运行时重排共用一种形态)。
+
+    粒度二分支(add-monthly-batch-scheduling):规格含 ``day_of_month`` → 月批
+    ``CronTrigger(day=…, hour, minute, timezone)``;否则维持 ``day_of_week`` 分支
+    (日批,逐字不变)——同一形态两分支,不引入第二调度器/第二注册表。
+    """
+    if "day_of_month" in spec:
+        return CronTrigger(
+            day=spec["day_of_month"],
+            hour=spec["hour"],
+            minute=spec["minute"],
+            timezone=spec["timezone"],
+        )
     return CronTrigger(
         day_of_week=spec["day_of_week"],
         hour=spec["hour"],
@@ -310,6 +349,23 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-monthly-batch-scheduling：两月批任务（每月 1 日 09:00 记忆提炼 / 10:00
+    # 因子提案）——盘前错峰，互不竞争 LLM 网关；排期与日批链（15:30 起）也错开。
+    # 注册位置在 cohort 之前（cohort 仍是末位注册，既有断言不变）。
+    scheduler.add_job(
+        _memory_extract_job,
+        _cron_for("memory_extract_monthly"),
+        id="memory_extract_monthly",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    scheduler.add_job(
+        _factor_proposal_job,
+        _cron_for("factor_proposal_monthly"),
+        id="factor_proposal_monthly",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     # Δ3：cohort 盘后跑批（默认 18:00，晚于结算链路，避免与日批争资源）。
     # 注意：本 job 的**时刻**来自 ops_config（界面可改，改后 reschedule_cohort 即时
     # 生效），**跑不跑**由 run_job 在调用前按同一份配置判定。
@@ -326,6 +382,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         "decision settle scheduler 已启动(market snapshot 15:30;factor decay monitor 15:45;"
         "decision settle 16:00;paper execute 16:10;paper settle 16:20);"
         "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"
+        "monthly: memory extract day-1 09:00 / factor proposal day-1 10:00;"
         "cohort batch %02d:%02d(开关关闭时记 skipped-disabled,零 LLM 调用)",
         cohort["hour"],
         cohort["minute"],

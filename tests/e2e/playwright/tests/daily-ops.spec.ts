@@ -104,22 +104,28 @@ test('当日时间线：注册表全部任务按排程时刻升序渲染，每�
   // 首屏取数在共享测试库/并发套件下偶见 >5s：显式放宽首屏断言超时（同 screening spec 处置）
   await expect(page.getByTestId('daily-ops-page')).toBeVisible({ timeout: 15_000 })
 
-  // 批次卡 = 当日各批（任务载荷数据驱动）；数量 = 当前注册表规模（spec 场景 GIVEN 10 个日批任务）
+  // 批次卡 = 当日各批（任务载荷数据驱动）；数量 = 当前注册表规模
+  // （spec 场景 GIVEN 10 个日批任务 + add-monthly-batch-scheduling 的 2 个月批任务 = 12）
   const items = page.locator('[data-testid^="page-shell-batch-"]')
-  await expect(items).toHaveCount(10)
+  await expect(items).toHaveCount(12)
 
-  // 排程升序：15:30 行情快照 → 15:40 选股 → 15:45 因子衰减监控 → … → 18:00 cohort
-  await expect(items.nth(0)).toContainText('15:30')
-  await expect(items.nth(0)).toContainText('行情快照')
-  await expect(items.nth(1)).toContainText('15:40')
-  await expect(items.nth(1)).toContainText('选股')
-  await expect(items.nth(2)).toContainText('15:45')
-  await expect(items.nth(2)).toContainText('因子衰减监控')
-  await expect(items.nth(9)).toContainText('18:00')
-  await expect(items.nth(9)).toContainText('cohort 跑批')
+  // 排程升序（数据驱动）：09:00/10:00 月批 → 15:30 行情快照 → 15:40 选股 →
+  // 15:45 因子衰减监控 → … → 18:00 cohort
+  await expect(items.nth(0)).toContainText('每月 1 日 09:00')
+  await expect(items.nth(0)).toContainText('记忆提炼')
+  await expect(items.nth(1)).toContainText('每月 1 日 10:00')
+  await expect(items.nth(1)).toContainText('因子提案')
+  await expect(items.nth(2)).toContainText('15:30')
+  await expect(items.nth(2)).toContainText('行情快照')
+  await expect(items.nth(3)).toContainText('15:40')
+  await expect(items.nth(3)).toContainText('选股')
+  await expect(items.nth(4)).toContainText('15:45')
+  await expect(items.nth(4)).toContainText('因子衰减监控')
+  await expect(items.nth(11)).toContainText('18:00')
+  await expect(items.nth(11)).toContainText('cohort 跑批')
 
   // 每项状态徽章 ∈ 五态（成功/失败/未跑/运行中/跳过；运行历史不由本 spec 控制，只断言枚举不变量）
-  for (let index = 0; index < 10; index += 1) {
+  for (let index = 0; index < 12; index += 1) {
     const badge = items.nth(index).getByTestId('status-badge')
     await expect(badge).toHaveAttribute('data-status', /^(active|failed|retired|running|degraded)$/)
     await expect(badge).toHaveText(/^(成功|失败|未跑|运行中|跳过)$/)

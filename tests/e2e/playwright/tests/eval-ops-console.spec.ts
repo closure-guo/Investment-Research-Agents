@@ -29,8 +29,9 @@ test.describe.configure({ timeout: 120_000 })
 
 // 任务 id（顺序 = 后端 JOB_IDS）。add-market-snapshot / add-factor-library-and-monitor /
 // add-paper-broker 三次注册表扩容（5→8：快照 15:30、因子衰减 15:45、paper 结算 16:20）、
-// add-screening-batch-scheduling（8→9：选股 15:40）与 add-execution-chain-driver
-// （9→10：仿真执行 16:10）后同步更新——断言强度不变（仍逐 id 断言存在与顺序）。
+// add-screening-batch-scheduling（8→9：选股 15:40）、add-execution-chain-driver
+// （9→10：仿真执行 16:10）与 add-monthly-batch-scheduling（10→12：记忆提炼/因子提案，
+// 月批附于注册表末尾）后同步更新——断言强度不变（仍逐 id 断言存在与顺序）。
 const JOB_IDS = [
   'market_snapshot_daily',
   'screening_daily',
@@ -42,6 +43,8 @@ const JOB_IDS = [
   'metrics_snapshot',
   'integrity_check',
   'cohort_batch',
+  'memory_extract_monthly',
+  'factor_proposal_monthly',
 ] as const
 
 const JOBS_URL = '/api/v1/ops/jobs'
@@ -109,7 +112,7 @@ async function cohortAuditCount(request: APIRequestContext): Promise<number> {
 }
 
 test.describe('评估运维分区（设置中心）', () => {
-  test('分区渲染任务卡片（当前 8 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
+  test('分区渲染任务卡片（当前 12 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
     await openEvalOps(page)
 
     // TESTING=1 → 调度器未启动：显式提示，不得空白、不得以空列表冒充「一切正常」
@@ -130,6 +133,14 @@ test.describe('评估运维分区（设置中心）', () => {
       // 调度器未运行 → 下次触发为显式占位，不冒充时间
       await expect(page.getByTestId(`eval-ops-next-${jobId}`)).toContainText('调度器未运行')
     }
+
+    // 月粒度排程可读形态（spec 场景）：两月批任务以「每月 1 日 HH:MM」呈现
+    await expect(page.getByTestId('eval-ops-job-memory_extract_monthly'))
+      .toContainText('每月 1 日 09:00')
+    await expect(page.getByTestId('eval-ops-job-factor_proposal_monthly'))
+      .toContainText('每月 1 日 10:00')
+    // 既有日批卡片仍是周粒度形态（mon-fri）——粒度分支互不串味
+    await expect(page.getByTestId('eval-ops-job-decision_settle_daily')).toContainText('mon-fri')
 
     // cohort 开关 / 跑批时刻 / 今日花费与预算同屏（默认未开启 = env 无引导值时的内置默认）
     const summary = page.getByTestId('eval-ops-cohort-summary')
