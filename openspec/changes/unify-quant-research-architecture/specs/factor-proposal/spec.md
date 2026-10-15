@@ -65,3 +65,23 @@
 - **GIVEN** 因子库与运行历史中无任何拒收记录
 - **WHEN** 组装深度改进提案上下文
 - **THEN** prompt 如实标注「暂无拒收记录」，不虚构分布
+
+## MODIFIED Requirements
+
+### Requirement: 提案月批排程
+
+系统 SHALL 将因子提案注册为统一日批通道的**月批任务**（每月 1 日 10:00 Asia/Shanghai）：依序运行两类提案批——① 广度变异批（按跨桶采样）② 深度改进批（上下文 SHALL 含拒收原因分布与衰减复盘，经 `deep` 档位路由）；两类批的候选 SHALL 逐条经五道闸准入（各自成批次族、各自一次闸③调用）——过闸者入因子库（active）、未过者留事件史（原因码），逐条裁决（单条失败不阻断整批）；运行历史 SHALL 含 `{proposed, admitted, rejected, errors}` 计数（两批合计）、`deep` 分桶计数与手动补跑通道；LLM 网关不可用时任务 SHALL fail loud（不静默、不伪造候选）。
+
+#### Scenario: 提案过闸入库
+
+- **GIVEN** 广度批产出 3 条候选（其中 1 条通过五道闸）且深度批产出 0 条
+- **WHEN** 月批任务运行
+- **THEN** 1 条入因子库（active）、2 条留事件史（含未过闸原因）
+- **AND** 摘要 `{proposed: 3, admitted: 1, rejected: 2}`，`deep` 分桶计数全 0
+
+#### Scenario: 网关不可用 fail loud
+
+- **GIVEN** LLM 网关整体不可用
+- **WHEN** 月批任务运行
+- **THEN** 运行历史记 failed 且错误可判读
+- **AND** 因子库零新增（MUST NOT 以 builtin 顶替或静默跳过）

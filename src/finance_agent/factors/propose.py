@@ -506,7 +506,7 @@ def _render_operator_ic(operator_ic: dict[str, float]) -> str:
 def _render_feedback(feedback: list[dict]) -> str:
     """因子库反馈渲染：逐条 `1. 键=值，键=值`（保持条目顺序）；无反馈 → 明示。"""
     if not feedback:
-        return "（暂无因子库反馈）"
+        return "（暂无拒收/衰减记录）"
     return "\n".join(
         f"{index}. " + "，".join(f"{key}={value}" for key, value in item.items())
         for index, item in enumerate(feedback, 1)

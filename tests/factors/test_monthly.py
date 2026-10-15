@@ -38,6 +38,8 @@ _RETURN_NOISE = 0.02
 HYPOTHESIS_OK = "合成提案的经济学假设文本：成交量水平代理规模与流动性，预期与下一期收益相关。"
 # 本批三条候选：① 有真实预测成分 → 过闸入库；②③ 纯噪声 → 闸② WEAK_ICIR
 ADMITTED_EXPRESSION = "ts_mean(volume,20)"
+# 深度批专用候选（同源预测成分、不同窗口——与 ADMITTED_EXPRESSION 不同构）
+DEEP_EXPRESSION = "ts_mean(volume,10)"
 FAIL_EXPRESSIONS = ("ts_std(amount,20)", "ts_mean(amount,5)")
 
 
@@ -162,6 +164,21 @@ class _StubClient:
         return self._payload if len(self.prompts) == 1 else {"proposals": []}
 
 
+class _RoutingStubClient:
+    """按 prompt 内容分流返回（广度批 vs 深度批），对修复/补轮循环鲁棒。"""
+
+    def __init__(self, *, broad_payload: dict[str, Any], deep_payload: dict[str, Any]) -> None:
+        self._broad = broad_payload
+        self._deep = deep_payload
+        self.prompts: list[str] = []
+
+    def complete_json(
+        self, prompt: str, *, purpose: Any, metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.prompts.append(prompt)
+        return self._deep if "深度改进" in prompt else self._broad
+
+
 class _BoomClient:
     """网关整体不可用：任何调用直接抛（fail loud，不得静默跳过）。"""
 
@@ -185,6 +202,72 @@ def _local_prompts_only(monkeypatch):
 @pytest.fixture
 def db(tmp_path: Path) -> str:
     return str(tmp_path / "factor_library.db")
+
+
+class TestDeepImprovementBatch:
+    """unify-quant-research-architecture：深度改进批接线（拒收分布回喂 + 同五道闸）。
+
+    spec factor-proposal「提案月批排程」MODIFIED（深度批依序运行）与「拒收原因回喂」。
+    """
+
+    def test_deep_prompt_carries_rejection_distribution_and_admits(self, db: str):
+        client = _RoutingStubClient(
+            broad_payload=_proposals(FAIL_EXPRESSIONS[0]),  # 广度批 1 条 → 闸②拒收
+            deep_payload=_proposals(ADMITTED_EXPRESSION),  # 深度批 1 条 → 过闸入库
+        )
+
+        summary = run_factor_proposal_monthly(client=client, panel=_signal_panel(), db_path=db)
+
+        deep_prompts = [prompt for prompt in client.prompts if "深度改进" in prompt]
+        assert len(deep_prompts) == 1  # 深度批恰发起一次（deep 档位路由）
+        assert "WEAK_ICIR" in deep_prompts[0]  # 本批拒收分布回喂
+        assert summary["deep"] == {"proposed": 1, "admitted": 1, "rejected": 0, "errors": 0}
+        assert summary["admitted"] == 1  # 仅深度批候选过闸
+        assert summary["rejected"] >= 1  # 广度批候选闸②拒收（n=20 目标下含补轮重复，不钉计数）
+        assert [row["expression"] for row in list_factors(db_path=db)] == [ADMITTED_EXPRESSION]
+
+    def test_recent_rejection_feedback_reads_job_runs_and_degraded(self, db: str):
+        """聚合来源：运行历史 rejections（gate/reason 计数）+ 因子库 degraded 复盘。"""
+        from finance_agent.factors.library import set_status
+        from finance_agent.outcome.ops.model import finish_job_run, insert_job_run
+
+        run_id = insert_job_run("factor_proposal_monthly", "manual", "running", source="manual")
+        finish_job_run(
+            run_id,
+            status="ok",
+            summary={
+                "rejections": [
+                    {"expression": "delta(close,20)", "gate": 2, "reason": "WEAK_ICIR"},
+                    {
+                        "expression": "div(volume,ts_mean(volume,20))",
+                        "gate": 2,
+                        "reason": "WEAK_ICIR",
+                    },
+                    {"expression": "foo(close,3)", "gate": None, "reason": "DSLParseError: ..."},
+                ]
+            },
+        )
+        degraded_id = add_factor(
+            expression="ts_std(delta(close,1),20)",
+            hypothesis="测试用：衰减复盘样本（长度达标）。",
+            category="波动率",
+            status="active",
+            db_path=db,
+        )
+        set_status(degraded_id, "degraded", db_path=db)
+
+        feedback = monthly._recent_rejection_feedback(db_path=db)
+
+        aggregated = next(
+            item for item in feedback if item.get("拒收原因", "").startswith("WEAK_ICIR")
+        )
+        assert aggregated["次数"] == 2
+        assert aggregated["典型表达式"] in {"delta(close,20)", "div(volume,ts_mean(volume,20))"}
+        assert any(item.get("衰减因子") == "ts_std(delta(close,1),20)" for item in feedback)
+
+    def test_recent_rejection_feedback_empty_is_empty(self, db: str):
+        """两类来源均空 → []（渲染侧如实标注「暂无」，不虚构分布）。"""
+        assert monthly._recent_rejection_feedback(db_path=db) == []
 
 
 class TestBatchAdmission:
@@ -255,6 +338,11 @@ class TestBatchAdmission:
             trace_metadata={},
         )
         monkeypatch.setattr(monthly, "propose_broad_batch", lambda **_kwargs: batch)
+        monkeypatch.setattr(
+            monthly,
+            "propose_deep_improvement",
+            lambda **_kwargs: ProposalBatchResult(proposals=(), rejected=(), trace_metadata={}),
+        )
         client = _StubClient(_proposals(ADMITTED_EXPRESSION))
 
         summary = run_factor_proposal_monthly(client=client, panel=_signal_panel(), db_path=db)
