@@ -3,7 +3,9 @@
 对外唯一入口（节点与消融图只经此 facade 消费；双实现文件不重复导出）：
 - 情景：``retrieve_episodic`` / ``build_memory_block`` / ``render_memory_state`` /
   ``memory_recall_entry``（生产图 analysts_entry）/ ``memory_block_for_state``；
-- 语义：``semantic`` 模块（提炼 / 确认 / 只读 confirmed）。
+- 语义：``semantic`` 模块（提炼 / 确认 / 只读 confirmed）；
+- 月批：``monthly.run_memory_extract_monthly``（ops 通道入口，
+  delta add-monthly-batch-scheduling）。
 """
 
 from finance_agent.memory.episodic import (
@@ -25,6 +27,11 @@ from finance_agent.memory.episodic import (
     settled_records,
     symbol_for,
 )
+from finance_agent.memory.monthly import (
+    DEFAULT_WINDOW_DAYS,
+    GatewayExtractionClient,
+    run_memory_extract_monthly,
+)
 from finance_agent.memory.semantic import (
     CLAUSE_STATUSES,
     confirm_clause,
@@ -41,6 +48,8 @@ from finance_agent.memory.semantic import (
 __all__ = [
     "CLAUSE_STATUSES",
     "DEFAULT_TOP_K",
+    "DEFAULT_WINDOW_DAYS",
+    "GatewayExtractionClient",
     "MEMORY_BLOCK_BUDGET_CHARS",
     "PURPOSE_TAG_DECISION_MEMORY",
     "RATIONALE_MAX_CHARS",
@@ -61,6 +70,7 @@ __all__ = [
     "reject_clause",
     "render_memory_state",
     "retrieve_episodic",
+    "run_memory_extract_monthly",
     "run_monthly_extraction",
     "semantic_block_for_state",
     "settled_records",

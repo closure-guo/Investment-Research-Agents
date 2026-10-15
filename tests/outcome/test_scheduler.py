@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from finance_agent.outcome.ops.jobs import JobAlreadyRunning
+from finance_agent.outcome.ops.jobs import SCHEDULES, JobAlreadyRunning
 from finance_agent.outcome.ops.model import (
     COHORT_ENABLED_KEY,
     COHORT_HOUR_KEY,
@@ -21,6 +21,7 @@ from finance_agent.outcome.ops.model import (
     set_config,
 )
 from finance_agent.outcome.scheduler import (
+    _cron_from_spec,
     get_scheduler,
     reschedule_cohort,
     start_scheduler,
@@ -172,10 +173,11 @@ class TestCohortJobRegistration:
         mock_sched_cls.return_value = sched
         assert start_scheduler() is sched
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 10, (
+        assert len(ids) == 12, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
-        # 9→10：+paper_execute_daily（执行链日批接线）
+        # 9→10：+paper_execute_daily（执行链日批接线）；
+        # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）
         assert ids[-1] == "cohort_batch"
         assert set(ids) == {
             "decision_settle_daily",
@@ -188,6 +190,8 @@ class TestCohortJobRegistration:
             "market_snapshot_daily",
             "screening_daily",
             "factor_decay_monitor",
+            "memory_extract_monthly",
+            "factor_proposal_monthly",
         }
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
@@ -492,10 +496,11 @@ class TestMisfireHardening:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 10, (
+        assert len(ids) == 12, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
-        # 9→10：+paper_execute_daily（执行链日批接线）
+        # 9→10：+paper_execute_daily（执行链日批接线）；
+        # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）
         for call in sched.add_job.call_args_list:
             job_id = call.kwargs.get("id")
             assert call.kwargs.get("misfire_grace_time") == 3600, job_id
@@ -644,3 +649,103 @@ class TestSnapshotJobRegistration:
         assert row["status"] == "failed" and row["kind"] == "scheduled"
         assert "akshare down" in row["error"]
         assert row["summary"] == {"attempts": 3, "retries": 2}
+
+
+class TestMonthlyCronGranularity:
+    """add-monthly-batch-scheduling：``_cron_from_spec`` 可选 ``day_of_month`` 分支。
+
+    月度 spec（含 ``day_of_month``）→ ``CronTrigger(day=…)``；日度 spec（既有形态，
+    含 ``day_of_week``）→ 维持原分支——**既有日批 cron 逐字不变**。
+    """
+
+    def test_monthly_spec_uses_day_of_month_branch(self):
+        trigger = _cron_from_spec(
+            {"day_of_month": 1, "hour": 9, "minute": 0, "timezone": "Asia/Shanghai"}
+        )
+        fields = {field.name: [str(expr) for expr in field.expressions] for field in trigger.fields}
+        assert fields["day"] == ["1"]
+        assert fields["hour"] == ["9"]
+        assert fields["minute"] == ["0"]
+        # 月批不叠加周约束（* = 每日均可，由 day=1 收窄到每月 1 日）
+        assert fields["day_of_week"] == ["*"]
+        assert str(trigger.timezone) == "Asia/Shanghai"
+
+    def test_daily_spec_keeps_day_of_week_branch_verbatim(self):
+        trigger = _cron_from_spec(SCHEDULES["decision_settle_daily"])
+        fields = {field.name: [str(expr) for expr in field.expressions] for field in trigger.fields}
+        assert fields["day"] == ["*"]
+        assert fields["day_of_week"] == ["mon-fri"]
+        assert fields["hour"] == ["16"]
+        assert fields["minute"] == ["0"]
+        assert str(trigger.timezone) == "Asia/Shanghai"
+
+
+class TestMonthlyBatchJobsRegistration:
+    """add-monthly-batch-scheduling：两月批任务（每月 1 日 09:00/10:00）注册与重试包装。"""
+
+    @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
+    @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
+    def test_registers_monthly_day1_crons_before_cohort(self, mock_sched_cls):
+        sched = MagicMock()
+        mock_sched_cls.return_value = sched
+        start_scheduler()
+        assert _job_field(sched, "memory_extract_monthly", "day") == ["1"]
+        assert _job_field(sched, "memory_extract_monthly", "hour") == ["9"]
+        assert _job_field(sched, "memory_extract_monthly", "minute") == ["0"]
+        assert _job_field(sched, "memory_extract_monthly", "day_of_week") == ["*"]
+        assert _job_field(sched, "factor_proposal_monthly", "day") == ["1"]
+        assert _job_field(sched, "factor_proposal_monthly", "hour") == ["10"]
+        assert _job_field(sched, "factor_proposal_monthly", "minute") == ["0"]
+        assert _job_field(sched, "factor_proposal_monthly", "day_of_week") == ["*"]
+        # 注册序：记忆提炼 → 因子提案 → …,cohort 仍是末位（既有断言逐一不变）
+        ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
+        assert (
+            ids.index("memory_extract_monthly")
+            < ids.index("factor_proposal_monthly")
+            < ids.index("cohort_batch")
+        )
+
+    @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
+    @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
+    @patch("finance_agent.outcome.scheduler.time.sleep")
+    def test_memory_job_uses_retry(self, mock_sleep, mock_sched_cls, tmp_path, monkeypatch):
+        """镜像 TestSnapshotJobRegistration：异常重试 3 次（2 次退避）且不上抛。"""
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "s.db"))
+        sched = MagicMock()
+        mock_sched_cls.return_value = sched
+        start_scheduler()
+        job_fn = _job_fn(sched, "memory_extract_monthly")
+        with patch(
+            "finance_agent.outcome.scheduler.run_memory_extract_monthly",
+            side_effect=RuntimeError("sessions db down"),
+        ) as mock_extract:
+            job_fn()  # 不抛异常
+        assert mock_extract.call_count == 3
+        assert mock_sleep.call_count == 2
+        row = last_job_run("memory_extract_monthly", tmp_path / "s.db")
+        assert row["status"] == "failed" and row["kind"] == "scheduled"
+        assert "sessions db down" in row["error"]
+        assert row["summary"] == {"attempts": 3, "retries": 2}
+
+    @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
+    @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
+    @patch("finance_agent.outcome.scheduler.time.sleep")
+    def test_factor_proposal_job_uses_retry(
+        self, mock_sleep, mock_sched_cls, tmp_path, monkeypatch
+    ):
+        """网关不可用 → 异常经统一入口重试后记 failed（fail loud，不静默）。"""
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "s.db"))
+        sched = MagicMock()
+        mock_sched_cls.return_value = sched
+        start_scheduler()
+        job_fn = _job_fn(sched, "factor_proposal_monthly")
+        with patch(
+            "finance_agent.outcome.scheduler.run_factor_proposal_monthly",
+            side_effect=RuntimeError("LLM 网关不可用"),
+        ) as mock_propose:
+            job_fn()  # 不抛异常
+        assert mock_propose.call_count == 3
+        assert mock_sleep.call_count == 2
+        row = last_job_run("factor_proposal_monthly", tmp_path / "s.db")
+        assert row["status"] == "failed" and row["kind"] == "scheduled"
+        assert "LLM 网关不可用" in row["error"]

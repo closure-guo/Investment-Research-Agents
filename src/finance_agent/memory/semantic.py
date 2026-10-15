@@ -227,6 +227,11 @@ def extract_candidate_clauses(
     - client 缺省/失败/空产出 → 规则式降级（零 LLM 可测）；
     - min_samples：单样本组不入候选（避免 n=1 噪声条款）。
     """
+    if not settled:
+        # 空素材一律零候选且**不调 LLM**：空输入下模型产出属编造
+        # （add-monthly-batch-scheduling 实跑暴露——空列表 + 真实网关曾产出 1 条候选，
+        # 违反该 delta 规范场景「无素材 MUST NOT 以编造条款冒充提炼产物」）。
+        return []
     if client is not None:
         texts = _llm_extract(settled, client)
         if texts:

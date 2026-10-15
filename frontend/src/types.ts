@@ -704,8 +704,13 @@ export interface CurrentStanceResponse {
 // ── 评估运维（delta add-eval-ops-console Task 6）──
 // 字段名逐字对齐 `src/finance_agent/ops_api.py` 的 /api/v1/ops/* 契约（不猜测）。
 
+// 排程粒度两形态（add-monthly-batch-scheduling）：
+// - 日/周粒度（既有）：day_of_week（如 'mon-fri'）；
+// - 月粒度：day_of_month（如 1 → 「每月 1 日」）。
+// 二者互斥（后端 SCHEDULES 二分支 `_cron_from_spec`），时刻与时区恒有。
 export interface OpsSchedule {
-  day_of_week: string
+  day_of_week?: string
+  day_of_month?: number
   hour: number
   minute: number
   timezone: string

@@ -13,6 +13,8 @@ import time
 import pytest
 
 from finance_agent.execution.driver import run_execution_daily
+from finance_agent.factors.monthly import run_factor_proposal_monthly
+from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.ops.jobs import (
     JOB_FUNCS,
     JOB_IDS,
@@ -35,9 +37,10 @@ class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 10
+            len(JOB_IDS) == 12
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
-        # 9→10：+paper_execute_daily（执行链日批接线，add-execution-chain-driver）
+        # 9→10：+paper_execute_daily（执行链日批接线，add-execution-chain-driver）；
+        # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）
         assert all(JOB_LABELS[jid] for jid in JOB_IDS)
 
 
@@ -49,7 +52,7 @@ class TestPaperExecuteDailyRegistration:
         assert JOB_LABELS["paper_execute_daily"] == "仿真执行"
         assert JOB_FUNCS["paper_execute_daily"] is run_execution_daily
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 10  # 9 → 10：+paper_execute_daily（执行链日批接线）
+        assert len(JOB_IDS) == 12  # 9→10：+paper_execute_daily；10→12：+月批两任务
         assert (
             JOB_IDS.index("decision_settle_daily")
             < JOB_IDS.index("paper_execute_daily")
@@ -77,7 +80,9 @@ class TestScreeningDailyRegistration:
         assert "screening_daily" in JOB_IDS
         assert JOB_LABELS["screening_daily"] == "选股"
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 10  # 8→9：+screening_daily；9→10：+paper_execute_daily
+        assert (
+            len(JOB_IDS) == 12
+        )  # 8→9：+screening_daily；9→10：+paper_execute_daily；10→12：+月批两任务
         assert (
             JOB_IDS.index("market_snapshot_daily")
             < JOB_IDS.index("screening_daily")
@@ -158,6 +163,63 @@ class TestScreeningDailyRegistration:
         spec = SCHEDULES["cohort_batch"]
         assert spec["day_of_week"] == "mon-fri" and spec["timezone"] == "Asia/Shanghai"
         assert 0 <= spec["hour"] <= 23 and 0 <= spec["minute"] <= 59
+
+
+class TestMonthlyBatchRegistration:
+    """add-monthly-batch-scheduling：两月批任务（每月 1 日 09:00/10:00）注册与补跑。"""
+
+    def test_registered_aligned_and_appended(self):
+        assert JOB_LABELS["memory_extract_monthly"] == "记忆提炼"
+        assert JOB_LABELS["factor_proposal_monthly"] == "因子提案"
+        assert JOB_FUNCS["memory_extract_monthly"] is run_memory_extract_monthly
+        assert JOB_FUNCS["factor_proposal_monthly"] is run_factor_proposal_monthly
+        assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
+        assert len(JOB_IDS) == 12
+        # 月批附于末尾：既有任务下标不动（展示顺序 = 日批链逐字不变）
+        assert JOB_IDS[-2:] == ("memory_extract_monthly", "factor_proposal_monthly")
+        assert JOB_IDS.index("cohort_batch") == 9  # 既有十任务下标逐字不动
+
+    def test_monthly_schedule_specs_verbatim(self):
+        """月粒度以 ``day_of_month=1`` 表达（09:00 / 10:00，Asia/Shanghai）。"""
+        assert SCHEDULES["memory_extract_monthly"] == {
+            "day_of_month": 1,
+            "hour": 9,
+            "minute": 0,
+            "timezone": "Asia/Shanghai",
+        }
+        assert SCHEDULES["factor_proposal_monthly"] == {
+            "day_of_month": 1,
+            "hour": 10,
+            "minute": 0,
+            "timezone": "Asia/Shanghai",
+        }
+        # 月/日粒度互斥：月批规格不含 day_of_week（二分支判据，见 scheduler._cron_from_spec）
+        assert "day_of_week" not in SCHEDULES["memory_extract_monthly"]
+        assert "day_of_week" not in SCHEDULES["factor_proposal_monthly"]
+
+    def test_manual_rerun_lands_new_manual_run(self, tmp_path, monkeypatch):
+        """spec 场景「手动补跑」：以 source=manual 落新运行行并执行同一编排。"""
+        calls: list[str] = []
+
+        def _fake_extract() -> dict:
+            calls.append("memory_extract_monthly")
+            return {"window_days": 90, "settled_count": 5, "candidates": 2, "path": "rule"}
+
+        monkeypatch.setitem(JOB_FUNCS, "memory_extract_monthly", _fake_extract)
+        out = run_job("memory_extract_monthly", source="manual", db_path=tmp_path / "o.db")
+
+        assert calls == ["memory_extract_monthly"]
+        assert out["status"] == "ok"
+        assert out["summary"] == {
+            "window_days": 90,
+            "settled_count": 5,
+            "candidates": 2,
+            "path": "rule",
+        }
+        row = last_job_run("memory_extract_monthly", tmp_path / "o.db")
+        assert row["run_id"] == out["run_id"]
+        assert row["kind"] == "manual" and row["source"] == "manual"
+        assert row["status"] == "ok" and row["finished_at"] is not None
 
 
 class TestRunJobLifecycle:

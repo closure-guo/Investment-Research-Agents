@@ -155,6 +155,29 @@ describe('EvalOpsPane 评估运维分区（add-eval-ops-console Task 6）', () =
     expect(within(card).getByTestId('eval-ops-last-run-integrity_check')).toHaveTextContent('尚无运行记录')
   })
 
+  it('月粒度排程文案：「每月 N 日 HH:MM」；既有日批文案逐字不变', async () => {
+    const monthly = [
+      jobCard('memory_extract_monthly', '记忆提炼', {
+        schedule: { day_of_month: 1, hour: 9, minute: 0, timezone: 'Asia/Shanghai' },
+      }),
+      jobCard('factor_proposal_monthly', '因子提案', {
+        schedule: { day_of_month: 1, hour: 10, minute: 0, timezone: 'Asia/Shanghai' },
+      }),
+    ]
+    mockFetch({
+      'GET /api/v1/ops/jobs': { body: { ...JOBS_NOT_RUNNING, jobs: [...fiveJobs(), ...monthly] } },
+    })
+    renderPane()
+
+    const memoryCard = await screen.findByTestId('eval-ops-job-memory_extract_monthly')
+    expect(memoryCard).toHaveTextContent('每月 1 日 09:00（Asia/Shanghai）')
+    expect(screen.getByTestId('eval-ops-job-factor_proposal_monthly'))
+      .toHaveTextContent('每月 1 日 10:00（Asia/Shanghai）')
+    // 既有日批卡片文案逐字不变（周粒度分支）
+    expect(screen.getByTestId('eval-ops-job-integrity_check'))
+      .toHaveTextContent('mon-fri 16:00（Asia/Shanghai）')
+  })
+
   it('调度器运行中时不展示未运行横幅，且展示下次触发时间', async () => {
     mockFetch({
       'GET /api/v1/ops/jobs': {

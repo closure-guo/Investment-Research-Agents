@@ -294,7 +294,12 @@ class TestJobsEndpoint:
         assert all(j["next_fire_time"] is None for j in body["jobs"])
         assert all(j["label"] for j in body["jobs"])
         for job in body["jobs"]:
-            assert set(job["schedule"]) == {"day_of_week", "hour", "minute", "timezone"}
+            # 排程粒度两形态（add-monthly-batch-scheduling）：日/周粒度 = day_of_week，
+            # 月粒度 = day_of_month（互斥；时刻与时区恒有）
+            assert set(job["schedule"]) in (
+                {"day_of_week", "hour", "minute", "timezone"},
+                {"day_of_month", "hour", "minute", "timezone"},
+            ), job["job_id"]
             assert job["last_run"] is None and job["history"] == []
         # error 只在降级载荷出现（正常载荷不得带它）
         assert "error" not in body
