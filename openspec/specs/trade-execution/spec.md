@@ -41,7 +41,7 @@ TBD - created by archiving change add-signal-portfolio-risk-gate. Update Purpose
 
 ### Requirement: 信号到订单的日批执行
 
-系统 SHALL 提供日批执行通道，按以下顺序编排且全程纯代码（无 LLM）：① 将审批通过且尚未生成信号的决策转换为 Signal 落库（复用信号契约转换；同一 `decision_id` 重复执行 SHALL NOT 重复生成）；② 将尚未产生订单的 Signal 按其交易日聚合为目标持仓；③ 与当前持仓差分生成订单（100 股整手；`flat` 信号 SHALL 产生平仓目标）；④ 逐单经确定性风控门禁；⑤ 通过者由 paper broker 以**执行日开盘**口径撮合（决策日次一交易日开盘，`fill=开盘价×(1±滑点)`），不可成交者沿用 pending 与次日重试。快照不可用时该次执行 SHALL 跳过并记录原因，MUST NOT 伪造成交。同一决策/信号的重复执行 SHALL NOT 产生重复订单。
+系统 SHALL 提供日批执行通道，按以下顺序编排且全程纯代码（无 LLM）：① 将审批通过且尚未生成信号的决策转换为 Signal 落库（复用信号契约转换；同一 `decision_id` 重复执行 SHALL NOT 重复生成）——决策取源 SHALL 为观点记录（`predictions`）中 `status='open'`、基金审批通过（`rationale_snapshot.fund_manager_decision == 'approve'`）且决策日早于执行日的行，存量窗口默认近 5 个自然日、窗口外旧观点 SHALL NOT 回填执行（摘要 `skipped_backlog` 留痕）；信号转换 SHALL NOT 依赖行情数据，快照不可用时 SHALL 照常落库；② 将尚未产生订单的 Signal 按其交易日聚合为目标持仓；③ 与当前持仓差分生成订单（100 股整手；`flat` 信号 SHALL 产生平仓目标）；④ 逐单经确定性风控门禁；⑤ 通过者由 paper broker 以**执行日开盘**口径撮合（决策日次一交易日开盘，`fill=开盘价×(1±滑点)`），不可成交者沿用 pending 与次日重试。快照不可用时 SHALL 跳过订单撮合与持仓变动并记录原因（`no_snapshot_data`），MUST NOT 伪造成交。同一决策/信号的重复执行 SHALL NOT 产生重复订单。
 
 #### Scenario: 决策到持仓闭环
 
@@ -68,6 +68,20 @@ TBD - created by archiving change add-signal-portfolio-risk-gate. Update Purpose
 
 - **GIVEN** 快照库为空或当日快照缺失
 - **WHEN** 执行日批运行
-- **THEN** 跳过本次执行并记录原因（`no_snapshot_data`）
-- **AND** 不产生任何订单与持仓变动，信号顺延至下一交易日
+- **THEN** 跳过本次订单撮合并记录原因（`no_snapshot_data`）
+- **AND** 不产生任何订单与持仓变动；决策→信号转换不依赖行情、SHALL 照常落库（不重复生成），订单待快照恢复后的执行日撮合
+
+#### Scenario: 未审批决策不执行
+
+- **GIVEN** 一条 `status='open'` 但基金审批结论为 reject 的观点记录
+- **WHEN** 执行日批运行
+- **THEN** 不生成 Signal、不产生订单
+- **AND** 摘要 `skipped_unapproved` 计数留痕
+
+#### Scenario: 存量窗口限制回填范围
+
+- **GIVEN** 观点库存在一条窗口外（默认近 5 个自然日之外）的 open 且审批通过的决策
+- **WHEN** 执行日批运行
+- **THEN** 该决策不生成 Signal、不产生订单
+- **AND** 摘要 `skipped_backlog` 计数留痕；显式放宽窗口参数后可执行
 
