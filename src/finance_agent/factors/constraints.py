@@ -27,7 +27,12 @@
 - ``MIN_IC_SAMPLES``：``rank_ic_series`` 逐日有效样本下限（不足 → 该日 NaN，
   样本太少不可信；E2 逐字 30）；
 - ``MIN_REDUNDANCY_SAMPLES``：闸④冗余比对的最少共同有效交易日（2 点相关恒 ±1 →
-  会假阳性；5 点起才有意义）。
+  会假阳性；5 点起才有意义）；
+- ``ADMISSION_PANEL_LOOKBACK_DAYS``：准入面板深度下限（交易日）——五道闸准入
+  评估（提案月批/基线注册/外部导入三入口共用）所用面板的取数深度；**独立于
+  衰减监控口径**（``DECAY_WINDOW+30``）：闸①缺失率含热身期 NaN，浅面板使
+  20 日窗因子结构性拒收（19/90≈21%+覆盖缺口 > 20%），150 日下 ≈13%+缺口
+  < 20% 可评估（unify-quant-research-architecture D1；改闸①口径需与该值联动）。
 
 消费方：``eval_engine``（``DEFAULT_IC_HORIZON``/``MIN_IC_SAMPLES``）、
 ``validate``（闸①–⑤）、``library``（``BUCKET_TOP_K``）、``monitor``（衰减三常量）。
@@ -64,3 +69,5 @@ DEFAULT_IC_HORIZON: int = 1
 MIN_IC_SAMPLES: int = 30
 # 闸④：冗余比对的最少共同有效交易日（2 点相关恒 ±1）
 MIN_REDUNDANCY_SAMPLES: int = 5
+# 准入面板深度下限（交易日；三准入入口共用；独立于衰减监控口径——见模块 docstring）
+ADMISSION_PANEL_LOOKBACK_DAYS: int = 150

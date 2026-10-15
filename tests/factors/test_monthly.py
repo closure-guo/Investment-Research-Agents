@@ -41,6 +41,60 @@ ADMITTED_EXPRESSION = "ts_mean(volume,20)"
 FAIL_EXPRESSIONS = ("ts_std(amount,20)", "ts_mean(amount,5)")
 
 
+def _seed_snapshot_dates(db_path: Path, n: int) -> None:
+    """向快照库写 ``n`` 个交易日的单票行（面板构造所需列齐备；深度测试用）。"""
+    from finance_agent.data.snapshot import write_snapshot_rows
+
+    for offset in range(n):
+        trade_date = (date(2026, 1, 1) + timedelta(days=offset)).isoformat()
+        write_snapshot_rows(
+            trade_date,
+            [
+                {
+                    "trade_date": trade_date,
+                    "code": "600519",
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close_raw": 10.2,
+                    "close_qfq": 10.0,
+                    "volume": 1000.0,
+                    "amount": 1_000_000.0,
+                }
+            ],
+            db_path=db_path,
+        )
+
+
+def test_admission_lookback_independent_of_monitor():
+    """准入面板深度常量独立（unify-quant-research-architecture D1）：150；监控口径不动。"""
+    from finance_agent.factors import constraints, monitor
+
+    assert constraints.ADMISSION_PANEL_LOOKBACK_DAYS == 150
+    assert monitor._PANEL_LOOKBACK_DAYS == constraints.DECAY_WINDOW + 30  # 衰减监控口径逐字不变
+
+
+def test_panel_from_snapshot_takes_admission_lookback(tmp_path):
+    """160 日可用 → 准入面板取最近 150 日（独立于监控面板的 90 日口径）。"""
+    from finance_agent.factors.constraints import ADMISSION_PANEL_LOOKBACK_DAYS
+
+    snap = tmp_path / "snap.db"
+    _seed_snapshot_dates(snap, n=160)
+
+    panel = monthly._panel_from_snapshot(snap)
+
+    assert len(panel.fields["close"].index) == ADMISSION_PANEL_LOOKBACK_DAYS
+
+
+def test_panel_from_snapshot_shallow_fails_loud(tmp_path):
+    """可用深度 < 下限 → ValueError（MUST NOT 以浅面板放行评估）。"""
+    snap = tmp_path / "snap.db"
+    _seed_snapshot_dates(snap, n=149)
+
+    with pytest.raises(ValueError, match="深度不足"):
+        monthly._panel_from_snapshot(snap)
+
+
 def _labels(dates: int, codes: int) -> tuple[list[str], list[str]]:
     days = [(date(2026, 5, 1) + timedelta(days=offset)).isoformat() for offset in range(dates)]
     return days, [f"c{index:03d}" for index in range(codes)]

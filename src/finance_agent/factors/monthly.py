@@ -4,10 +4,10 @@
 Asia/Shanghai）的编排入口，走统一日批通道（``ops.jobs.run_job``：调度 / 运行历史 /
 手动补跑 / 单飞锁）：
 
-1. **面板**：快照库最近 ``_PANEL_LOOKBACK_DAYS`` 个交易日 → ``MarketPanel``
-   （取数口径与 ``monitor.run_factor_decay_monitor`` 单一来源）；快照库为空 /
-   ``as_of`` 前无数据 → ``ValueError``（fail loud，先建面板后提案——网关调用
-   不发生）；
+1. **面板**：快照库最近 ``ADMISSION_PANEL_LOOKBACK_DAYS``（≥150 交易日，独立于
+   衰减监控口径）个交易日 → ``MarketPanel``（取数辅助与 ``monitor`` 单一来源）；
+   快照库为空 / 深度不足 / ``as_of`` 前无数据 → ``ValueError``（fail loud，先建
+   面板后提案——网关调用不发生）；
 2. **提案**：``propose_broad_batch``（跨桶采样：分桶存量 + 算子历史入库 IC 均值）；
    ``client`` 缺省 = ``GatewayProposalClient``（双档路由快档）；**网关不可用 →
    异常照实上抛**（job 记 failed，月批可重试，不静默、不伪造候选）；
@@ -42,6 +42,7 @@ from finance_agent.data.snapshot import (
     init_snapshot_db,
     latest_snapshot_date,
 )
+from finance_agent.factors.constraints import ADMISSION_PANEL_LOOKBACK_DAYS
 from finance_agent.factors.dsl import (
     AstNode,
     Call,
@@ -51,8 +52,7 @@ from finance_agent.factors.dsl import (
 )
 from finance_agent.factors.eval_engine import MarketPanel
 from finance_agent.factors.library import list_factors, list_ic_series
-from finance_agent.factors.monitor import (  # noqa: PLC2701 - 面板取数口径单一来源（同包先例）
-    _PANEL_LOOKBACK_DAYS,
+from finance_agent.factors.monitor import (  # noqa: PLC2701 - 面板取数辅助单一来源（同包先例）
     _load_panel,
     _recent_trade_dates,
 )
@@ -122,7 +122,13 @@ def _operator_ic(*, db_path: str | Path | None = None, window: int = IC_WINDOW) 
 def _panel_from_snapshot(
     snapshot_db_path: str | Path | None, *, as_of: str | None = None
 ) -> MarketPanel:
-    """快照库 → 准入面板（fail loud：空库/窗口内无数据 → ``ValueError``）。"""
+    """快照库 → 准入面板（fail loud：空库/深度不足/窗口内无数据 → ``ValueError``）。
+
+    准入面板深度 = ``ADMISSION_PANEL_LOOKBACK_DAYS``（≥150 交易日，**独立于**衰减
+    监控的 ``DECAY_WINDOW+30`` 口径）——闸①缺失率含热身期 NaN，浅面板使长窗因子
+    结构性拒收；可用深度不足下限 → fail loud（MUST NOT 以浅面板放行评估，
+    unify-quant-research-architecture D1）。
+    """
     init_snapshot_db(snapshot_db_path)  # 幂等建表：空库读也确定（不抛 no such table）
     resolved = as_of
     if resolved is None:
@@ -131,9 +137,17 @@ def _panel_from_snapshot(
             raise ValueError("快照库为空：无法构造因子准入面板（先跑 market_snapshot_daily）")
     else:
         resolved = _parse_date_param(resolved, param="as_of").isoformat()
-    dates = _recent_trade_dates(snapshot_db_path, as_of=resolved, limit=_PANEL_LOOKBACK_DAYS)
+    dates = _recent_trade_dates(
+        snapshot_db_path, as_of=resolved, limit=ADMISSION_PANEL_LOOKBACK_DAYS
+    )
     if not dates:
         raise ValueError(f"快照库在 {resolved} 前无数据：无法构造因子准入面板")
+    if len(dates) < ADMISSION_PANEL_LOOKBACK_DAYS:
+        raise ValueError(
+            f"准入面板深度不足：可用 {len(dates)} 个交易日 < 下限 "
+            f"{ADMISSION_PANEL_LOOKBACK_DAYS}（先补历史回填："
+            "scripts/backfill_market_snapshot.py）"
+        )
     return _load_panel(snapshot_db_path, dates=dates)
 
 
