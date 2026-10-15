@@ -76,7 +76,8 @@ def run_market_snapshot_batch(
 
     摘要键：``trade_date`` / ``written`` / ``rebased``（发生复权的票数）/
     ``suspended``（合成停牌行数）/ ``master``（``refreshed``|``skipped``）/
-    ``calendar``（``ok``|``unavailable``）；非交易日返回
+    ``calendar``（``ok``|``unavailable``）/ ``spot_source``（实际生效 spot 源
+    ``eastmoney``|``sina``；客户端未上报 → None）；非交易日返回
     ``{"trade_date", "skipped": "non_trading_day", "written": 0, "rebased": 0,
     "suspended": 0}``。
     """
@@ -108,6 +109,8 @@ def run_market_snapshot_batch(
         spot = client.fetch_market_spot()
         if spot is None:
             raise SnapshotError("全市场行情拉取失败")
+        # add-market-data-fallback：实际生效源如实入摘要（eastmoney|sina；客户端未上报 → None）
+        spot_source = getattr(client, "last_spot_source", None)
 
         last_date = latest_snapshot_date(db_path, before=trade_date)
         prev_rows = (
@@ -155,6 +158,7 @@ def run_market_snapshot_batch(
             "suspended": sum(1 for row in rows if row.get("is_suspended") == 1),
             "master": master_state,
             "calendar": calendar_state,
+            "spot_source": spot_source,
         }
     except Exception as exc:  # noqa: BLE001 - 失败标记后重抛，交 ops/scheduler 处置
         try:
