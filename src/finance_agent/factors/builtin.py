@@ -31,15 +31,25 @@ R5（实施者不得自行改口径）：
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from finance_agent.factors.eval_engine import MarketPanel
+from finance_agent.factors.library import list_factors
+from finance_agent.factors.monthly import (  # noqa: PLC2701 - 面板取数/原因码口径单一来源（同 monitor 先例）
+    _panel_from_snapshot,
+    _rejection_reason,
+)
 from finance_agent.factors.validate import AdmissionResult, admit_candidates
 
 # 注册词表（逐字；库内 category/source 列值）
 BUILTIN_CATEGORY = "builtin"
 BUILTIN_SOURCE = "builtin"
+
+# 注册任务闸③置换检验的固定种子（与提案月批同款 42；同面板同候选逐位可复现）
+DEFAULT_REGISTRATION_SEED = 42
 
 
 @dataclass(frozen=True)
@@ -96,15 +106,23 @@ BUILTIN_FACTORS: tuple[BuiltinFactor, ...] = (
 
 
 def register_builtins(
-    *, panel: MarketPanel, seed: int, db_path: str | Path | None = None
+    *,
+    panel: MarketPanel,
+    seed: int,
+    factors: Sequence[BuiltinFactor] | None = None,
+    db_path: str | Path | None = None,
 ) -> list[AdmissionResult]:
-    """R5：五条 builtin 逐条走 ``admit_candidates``（免提案、同五道闸），返回同序结论。
+    """R5：builtin 逐条走 ``admit_candidates``（免提案、同五道闸），返回同序结论。
 
     ``category="builtin"``、``source="builtin"``、``hypothesis`` 为经济学描述文本
     （≥30 字，与提案合同同长度纪律）；``seed`` 透传闸③置换检验（同种子可复现）。
     已存在结构同构者 → 该条在闸 0 被拒（``STRUCTURAL_DUPLICATE``，``status="rejected"``，
     ``factor_id=None``）——幂等重跑不重复入库。
+
+    ``factors`` 缺省 = 全量 ``BUILTIN_FACTORS``；注册日批（见
+    ``run_factor_builtin_register``）传入**缺失子集**，避免对已注册条目重复走闸。
     """
+    items = BUILTIN_FACTORS if factors is None else tuple(factors)
     candidates = [
         {
             "expression": item.expression,
@@ -112,6 +130,57 @@ def register_builtins(
             "category": BUILTIN_CATEGORY,
             "source": BUILTIN_SOURCE,
         }
-        for item in BUILTIN_FACTORS
+        for item in items
     ]
     return admit_candidates(candidates, panel, seed=seed, db_path=db_path)
+
+
+def missing_builtins(*, db_path: str | Path | None = None) -> list[BuiltinFactor]:
+    """库内缺失的 builtin 条目（存在性判据 = 同表达式，**任意状态**含 retired/degraded）。
+
+    retired 视为已注册（MUST NOT 复活——「retired 可重提」属提案路径语义，基线包
+    固定表达式不参与）；结构等价但字符串不同的条目由闸 0 兜底（提交后被
+    ``STRUCTURAL_DUPLICATE`` 拒收，不重复入库）。
+    """
+    known = {str(row["expression"]).strip() for row in list_factors(db_path=db_path)}
+    return [item for item in BUILTIN_FACTORS if item.expression.strip() not in known]
+
+
+def run_factor_builtin_register(
+    *,
+    panel: MarketPanel | None = None,
+    seed: int = DEFAULT_REGISTRATION_SEED,
+    db_path: str | Path | None = None,
+    snapshot_db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """注册日批入口（job 零参数调用）：存在性幂等 → 缺失子集过五道闸 → 摘要。
+
+    摘要 ``{registered, rejected, skipped, reasons}``：``skipped`` = 已存在条目
+    （任意状态，含 retired——不回填）；``reasons`` = 未过闸者逐条
+    ``{expression, gate, reason}``（原因码口径同提案月批）。全量已注册 → **不构造
+    面板**（快照库不可达亦不失败）；缺失条目存在而面板不可得 → ``ValueError``
+    上抛（job 记 failed，MUST NOT 以空面板放行注册）。
+    """
+    missing = missing_builtins(db_path=db_path)
+    skipped = len(BUILTIN_FACTORS) - len(missing)
+    if not missing:
+        return {"registered": 0, "rejected": 0, "skipped": skipped, "reasons": []}
+    if panel is None:
+        panel = _panel_from_snapshot(snapshot_db_path)
+    results = register_builtins(panel=panel, seed=seed, factors=missing, db_path=db_path)
+    registered = sum(1 for result in results if result.factor_id is not None)
+    reasons = [
+        {
+            "expression": missing[index].expression,
+            "gate": result.rejected_gate,
+            "reason": _rejection_reason(result),
+        }
+        for index, result in enumerate(results)
+        if result.factor_id is None
+    ]
+    return {
+        "registered": registered,
+        "rejected": len(results) - registered,
+        "skipped": skipped,
+        "reasons": reasons,
+    }

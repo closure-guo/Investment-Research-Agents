@@ -173,11 +173,12 @@ class TestCohortJobRegistration:
         mock_sched_cls.return_value = sched
         assert start_scheduler() is sched
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 12, (
+        assert len(ids) == 13, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
-        # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）
+        # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
+        # 12→13：+factor_builtin_register（内置因子注册接线）
         assert ids[-1] == "cohort_batch"
         assert set(ids) == {
             "decision_settle_daily",
@@ -190,6 +191,7 @@ class TestCohortJobRegistration:
             "market_snapshot_daily",
             "screening_daily",
             "factor_decay_monitor",
+            "factor_builtin_register",
             "memory_extract_monthly",
             "factor_proposal_monthly",
         }
@@ -496,11 +498,12 @@ class TestMisfireHardening:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 12, (
+        assert len(ids) == 13, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
-        # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）
+        # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
+        # 12→13：+factor_builtin_register（内置因子注册接线）
         for call in sched.add_job.call_args_list:
             job_id = call.kwargs.get("id")
             assert call.kwargs.get("misfire_grace_time") == 3600, job_id
