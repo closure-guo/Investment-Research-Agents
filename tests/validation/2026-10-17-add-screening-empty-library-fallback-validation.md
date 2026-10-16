@@ -42,15 +42,23 @@ TDD 节奏留痕：各层先红后绿（T1 5 红→26 绿；T2+T3 7 红→68 绿
 - 披露文案单源在后端 `_SCREENING_FALLBACK_NOTICE`（前端原样渲染）。
 - 迁移幂等：`init_screening_db` PRAGMA 检查 + ALTER 补列（旧行默认 `factor`）。
 
-## §4 生产实跑（部署后补记）
+## §4 生产实跑（2026-10-17 凌晨，部署后实测）
 
-- [ ] 部署：前端镜像重建（`docker compose up -d --build frontend`）+ 后端容器重启（src 挂载 reload 不跨 WSL 传播）
-- [ ] 手动补跑选股日批（ops 通道）→ 批次 ok + `selection_mode=fallback`
-- [ ] 页面人工核验（真实浏览器）：降级横幅 + 成交额列 + 池行渲染
-- [ ] 读数补记于本节
+- [x] 部署：前端镜像重建（`docker compose up -d --build frontend`）+ 后端容器重启；新代码生效判据 =
+      `/api/screening/pool` 载荷出现 `selection_mode`/`notice` 键（部署前无）
+- [x] 手动补跑选股日批（ops 通道 `POST /api/v1/ops/jobs/screening_daily/run`，run 108，source=manual）：
+      **status=ok / `selection_mode=fallback`**，`l1_passed=3990 → l2_top=100 → l3_keep=100 → pool_size=0`，
+      耗时 01:24:31→01:57:01（≈32.5 分钟，瓶颈 = L3 逐候选事件抓取 + 快筛，~百次真实调用）
+- [x] 池 0 为**在榜门槛按设计**（今日为降级榜第 1 日；连续 3 日在榜后自动出池，预期 10-20）
+- [x] 页面人工核验（真实浏览器截图 `D:/tmp/screening-fallback-verify.png`）：降级披露横幅逐字显示
+      「因子库无可打分因子：本次为降级模式，按近 20 日日均成交额排序（非因子信号）」；批次日期
+      2026-10-16；**无失败横幅**（批次 ok）；空态文案 = 通用「等待下一批」——轻微文案不精确
+      （空因=在榜门槛第 1 日而非缺批次），记 Minor 待后续微调
+- 失败横幅回归：部署前旧失败批次行为不变（`stale` 逻辑未动）
 
 ## §5 备注
 
 - 生产库 `data/screening.db` 的旧批次行经迁移自动补 `selection_mode='factor'`（语义：历史批次为
   因子路径尝试/未判定）。
 - 降级为过渡通道：因子库出现可打分因子后同批日自动回到 `factor` 路径，无需人工切换。
+- Minor（后续微调）：降级首日的空态文案可细化（「在榜门槛累计中」而非「等待下一批」）。
