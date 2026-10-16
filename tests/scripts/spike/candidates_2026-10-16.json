@@ -1,0 +1,72 @@
+[
+ {
+  "name": "MOM20",
+  "qlib_expression": "$close / Ref($close, 20) - 1",
+  "formulation": "MOM20_t = Close_t / Close_{t-20} - 1",
+  "workspace": "558a3a0f28a84090a491094b7aaa5daa",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "VolumeRatio_20",
+  "qlib_expression": "$volume / Mean($volume, 20)",
+  "formulation": "VolumeRatio_20 = Volume_t / (1/20 * sum_{i=0..19} Volume_{t-i})",
+  "workspace": "55c394d64d7b4d9aae8a140af919de80",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "Momentum_20",
+  "qlib_expression": "$close / Ref($close, 20) - 1",
+  "formulation": "Momentum_20 = Close_t / Close_{t-20} - 1",
+  "workspace": "6e28f97656f4452aaae1de8a002b1b5f",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "Reversal_5",
+  "qlib_expression": "$close / Ref($close, 5) - 1",
+  "formulation": "Reversal_5 = Close_t / Close_{t-5} - 1",
+  "workspace": "8af455921cd34ffe92cc076bd400fcca",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "BIAS20",
+  "qlib_expression": "$close / Mean($close, 20) - 1",
+  "formulation": "BIAS20_t = Close_t / Mean(Close, 20) - 1",
+  "workspace": "acccd2fb0a594a698b5f38182a3961c2",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "ClosePosition",
+  "qlib_expression": "($close - $low) / ($high - $low)",
+  "formulation": "ClosePosition = (Close_t - Low_t) / (High_t - Low_t)",
+  "workspace": "cffee2aac52c46d7b4165d109ef06a7d",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "VOL20",
+  "qlib_expression": "Std($close / Ref($close, 1) - 1, 20)",
+  "formulation": "VOL20 = Std(Close_t / Close_{t-1} - 1, 20)",
+  "workspace": "c138fd1191bd484785d88fdbcd9e32ac",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "REV5",
+  "qlib_expression": "$close / Ref($close, 5) - 1",
+  "formulation": "REV5_t = Close_t / Close_{t-5} - 1",
+  "workspace": "ef340fdba7464dbcb6ddf07aed7cdc55",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "Volatility_20",
+  "qlib_expression": "Std($close / Ref($close, 1) - 1, 20)",
+  "formulation": "Volatility_20 = Std(r_t, 20), r_t = Close_t / Close_{t-1} - 1",
+  "workspace": "efe950dcbacb449ab2c717a6d19e325d",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "VRATIO20",
+  "qlib_expression": "$volume / Mean($volume, 20)",
+  "formulation": "VRATIO20_t = Volume_t / Mean(Volume, 20)",
+  "workspace": "fce15779bc08468e9bbad2f6203aa72b",
+  "category": "RD-Agent"
+ }
+]
