@@ -53,7 +53,13 @@ from finance_agent.screening.candidate_llm import (
     run_triage,
 )
 from finance_agent.screening.filters import build_candidate_record, filter_universe
-from finance_agent.screening.ranker import Candidate, rank_universe, recent_ic_stats
+from finance_agent.screening.ranker import (
+    Candidate,
+    has_scorable_factors,
+    liquidity_fallback_rank,
+    rank_universe,
+    recent_ic_stats,
+)
 from finance_agent.screening.store import (
     DEFAULT_MIN_DAYS,
     consecutive_days_in_top,
@@ -252,6 +258,7 @@ def run_screening_batch(
             error=error,
             started_at=started_at,
             finished_at=_now_iso(),
+            selection_mode="factor",  # 快照新鲜度未过：选择路径未判定，按默认标注
             db_path=db_path,
         )
         return {
@@ -262,11 +269,13 @@ def run_screening_batch(
             "l2_top": 0,
             "l3_keep": 0,
             "pool_size": 0,
+            "selection_mode": "factor",
         }
 
     l1_passed = 0
     l2_top = 0
     l3_keep = 0
+    selection_mode = "factor"
     try:
         calendar = _read_trade_calendar(snapshot_db_path)
         active_panel = (
@@ -291,17 +300,36 @@ def run_screening_batch(
         passed = [decision.code for decision in filter_universe(records) if decision.passed]
         l1_passed = len(passed)
         # ③ L2：active 因子 × 近 60 日 IC → Top-N（全量落库；当日榜原子替换——
-        # 同日重跑换小集合时旧行不得残留，否则虚增 consecutive_days_in_top）
+        # 同日重跑换小集合时旧行不得残留，否则虚增 consecutive_days_in_top）。
+        # 无可打分因子（无 active 因子或全无 IC 记录，镜像打分器拒绝条件）→ 显式
+        # 降级：L2 跳过，按近 N 日日均成交额降序过渡排序（spec「无可打分因子降级
+        # 通道」；MUST NOT 静默等权/伪造权重）
         factors = list_active_factors(db_path=library_db_path)
         ic_stats = recent_ic_stats(factors, db_path=library_db_path)
-        candidates = rank_universe(
-            panel=active_panel,
-            as_of=trade_date,
-            passed_codes=passed,
-            factors=factors,
-            ic_stats=ic_stats,
-            top_n=L2_TOP_N,
-        )
+        if has_scorable_factors(factors, ic_stats):
+            candidates = rank_universe(
+                panel=active_panel,
+                as_of=trade_date,
+                passed_codes=passed,
+                factors=factors,
+                ic_stats=ic_stats,
+                top_n=L2_TOP_N,
+            )
+        else:
+            selection_mode = "fallback"
+            _logger.warning(
+                "选股日批降级（%s）：因子库无可打分因子（active=%d），L2 显式跳过，"
+                "按近 %d 日日均成交额降级排序（selection_mode=fallback）",
+                trade_date,
+                len(factors),
+                constraints.MIN_LIQUIDITY_HISTORY_DAYS,
+            )
+            candidates = liquidity_fallback_rank(
+                amounts_by_code=amounts,
+                passed_codes=passed,
+                as_of=trade_date,
+                top_n=L2_TOP_N,
+            )
         rewrite_day_l2_board(trade_date, candidates, db_path=db_path)
         l2_top = len(candidates)
         # ④ L3：quick profile 粗筛（事件注入；单只失败降级不阻断）
@@ -362,6 +390,7 @@ def run_screening_batch(
             l2_top=l2_top,
             l3_keep=l3_keep,
             pool_rows=pool_rows,
+            selection_mode=selection_mode,
             db_path=db_path,
         )
         return {
@@ -372,6 +401,7 @@ def run_screening_batch(
             "l2_top": l2_top,
             "l3_keep": l3_keep,
             "pool_size": pool_size,
+            "selection_mode": selection_mode,
         }
     except Exception as exc:  # noqa: BLE001 -- fail-closed：任一步失败 → 批次 failed + 零池
         error = f"{type(exc).__name__}: {exc}"
@@ -385,6 +415,7 @@ def run_screening_batch(
             l1_passed=l1_passed,
             l2_top=l2_top,
             l3_keep=l3_keep,
+            selection_mode=selection_mode,
             db_path=db_path,
         )
         return {
@@ -395,6 +426,7 @@ def run_screening_batch(
             "l2_top": l2_top,
             "l3_keep": l3_keep,
             "pool_size": 0,
+            "selection_mode": selection_mode,
         }
 
 

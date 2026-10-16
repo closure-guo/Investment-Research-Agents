@@ -161,6 +161,47 @@ test('批次失败 → 横幅可见且标注最近成功批次日期（池仍展
   await expect(page.getByTestId('screening-pool-table')).toBeVisible({ timeout: 15_000 })
 })
 
+test('降级批次 → 披露横幅可见 + 成交额列语义（add-screening-empty-library-fallback）', async ({ page, request }) => {
+  const seeded = await request.post(`${API_BASE}/api/test/seed`, {
+    data: {
+      screening: {
+        batch: {
+          trade_date: BATCH_DATE,
+          status: 'ok',
+          started_at: `${BATCH_DATE}T15:30:00`,
+          finished_at: `${BATCH_DATE}T15:33:00`,
+          l1_passed: 20,
+          l2_top: 9,
+          l3_keep: 1,
+          selection_mode: 'fallback',
+        },
+        pool: [
+          {
+            symbol: '600519',
+            composite_score: 102000000, // 降级模式：score = 近 20 日日均成交额（元）
+            rank: 1,
+            consecutive_days: 5,
+            l3_verdict: 'keep',
+            l3_reason: '无重大风险事件',
+            factor_contribs: [],
+          },
+        ],
+      },
+    },
+  })
+  expect(seeded.ok()).toBeTruthy()
+
+  await page.goto('/screening')
+  const banner = page.getByTestId('screening-fallback-banner')
+  await expect(banner).toBeVisible({ timeout: 15_000 })
+  await expect(banner).toContainText('非因子信号')
+
+  // 列标题与数值口径同步切换（综合分 → 近 20 日日均成交额（亿元））
+  await expect(page.getByTestId('screening-pool-table')).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByTestId('screening-pool-table')).toContainText('近 20 日日均成交额（亿元）')
+  await expect(page.getByTestId('screening-row-600519')).toContainText('1.02')
+})
+
 test('无成功批次 → 空态 + 分析按钮禁用', async ({ page }) => {
   await page.goto('/screening')
 

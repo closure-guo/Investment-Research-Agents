@@ -151,6 +151,12 @@ export function ScreeningPage({
   )
   const removedGroups = useMemo(() => groupRemovals(removed), [removed])
   const poolEmpty = pool !== null && pool.length === 0
+  // 降级模式（add-screening-empty-library-fallback）：L2 跳过、按成交额排序——
+  // 横幅披露 + 综合分列切换为成交额语义（标题与数值口径同步切换）
+  const fallback = data?.selection_mode === 'fallback'
+  const scoreHeader = fallback ? '近 20 日日均成交额（亿元）' : '综合分'
+  const formatScore = (score: number) =>
+    fallback ? (score / 1e8).toFixed(2) : score.toFixed(3)
 
   return (
     <div className="flex flex-col h-screen" data-testid="screening-page">
@@ -216,6 +222,18 @@ export function ScreeningPage({
           </div>
         )}
 
+        {fallback && (
+          // spec「无可打分因子降级通道」：降级披露横幅（文案单源在后端 notice）
+          <div
+            data-testid="screening-fallback-banner"
+            className="rounded-lg border px-3 py-2 text-xs flex items-center gap-2"
+            style={{ borderColor: 'var(--status-warning-default)', color: 'var(--status-warning-default)' }}
+          >
+            <i className="fas fa-triangle-exclamation text-xs"></i>
+            {data?.notice ?? '因子库无可打分因子：本次为降级模式，按近 20 日日均成交额排序（非因子信号）'}
+          </div>
+        )}
+
         {removedGroups.length > 0 && (
           <div
             data-testid="screening-removed-list"
@@ -255,7 +273,7 @@ export function ScreeningPage({
             <thead>
               <tr className="text-left" style={{ color: 'var(--text-tertiary)' }}>
                 <th className="py-2 pr-3 font-medium">标的</th>
-                <th className="py-2 pr-3 font-medium">综合分</th>
+                <th className="py-2 pr-3 font-medium">{scoreHeader}</th>
                 <th className="py-2 pr-3 font-medium">连续在榜天数</th>
                 <th className="py-2 pr-3 font-medium">L3 判定</th>
                 <th className="py-2 font-medium">批次日期</th>
@@ -291,7 +309,7 @@ export function ScreeningPage({
                       onMouseLeave={() => setHoverSymbol(null)}
                     >
                       <span className="cursor-help underline decoration-dotted tabular-nums">
-                        {row.composite_score.toFixed(3)}
+                        {formatScore(row.composite_score)}
                       </span>
                       {hoverSymbol === row.symbol && (
                         <div

@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS screening_batches (
   l1_passed   INTEGER NOT NULL DEFAULT 0,
   l2_top      INTEGER NOT NULL DEFAULT 0,
   l3_keep     INTEGER NOT NULL DEFAULT 0,
-  pool_size   INTEGER NOT NULL DEFAULT 0
+  pool_size   INTEGER NOT NULL DEFAULT 0,
+  selection_mode TEXT NOT NULL DEFAULT 'factor'
 );
 CREATE TABLE IF NOT EXISTS selection_pool (
   trade_date           TEXT NOT NULL,
@@ -106,6 +107,8 @@ CREATE TABLE IF NOT EXISTS screening_removals (
 
 # 批次状态（Global Constraints 逐字）：ok / failed
 BATCH_STATUSES: tuple[str, ...] = ("ok", "failed")
+# 选择模式（add-screening-empty-library-fallback）：factor = 因子打分路径；fallback = 流动性降级
+SELECTION_MODES: tuple[str, ...] = ("factor", "fallback")
 
 # 稳定性门槛默认值（Global Constraints：默认连续 3 个交易日）
 DEFAULT_MIN_DAYS = 3
@@ -135,11 +138,21 @@ def _connect(db_path: str | Path | None) -> sqlite3.Connection:
 
 
 def init_screening_db(db_path: str | Path | None = None) -> Path:
-    """幂等建两表 + 索引，返回实际使用的库路径。"""
+    """幂等建表 + 索引 + 增量迁移，返回实际使用的库路径。
+
+    迁移：旧库 ``screening_batches`` 缺 ``selection_mode`` 列 → ALTER 补列
+    （默认 ``'factor'``——旧行语义 = 因子路径批次）。
+    """
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
     try:
         conn.executescript(SCREENING_DDL)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_batches)")}
+        if "selection_mode" not in columns:
+            conn.execute(
+                "ALTER TABLE screening_batches ADD COLUMN selection_mode TEXT NOT NULL "
+                "DEFAULT 'factor'"
+            )
         conn.commit()
     finally:
         conn.close()
@@ -482,11 +495,14 @@ def record_screening_batch(
     l2_top: int = 0,
     l3_keep: int = 0,
     pool_rows: Sequence[dict[str, Any]] = (),
+    selection_mode: str = "factor",
     db_path: str | Path | None = None,
 ) -> int:
     """批次行 + 当日精选池**单事务**写入（S1 落库口径；fail-closed 不变量）。
 
-    - ``status`` 逐字 ∈ {``"ok"``, ``"failed"``}；``pool_size`` 恒 = ``len(pool_rows)``
+    - ``status`` 逐字 ∈ {``"ok"``, ``"failed"``}；``selection_mode`` 逐字 ∈
+      {``"factor"``, ``"fallback"``}（add-screening-empty-library-fallback）；
+      ``pool_size`` 恒 = ``len(pool_rows)``
       （不独立入参，避免与池行数漂移）；同 ``trade_date`` upsert 覆盖（幂等重跑）；
     - **失败批次传 ``pool_rows=()`` → 当日池行先清空**：失败日零池行是不变量，不被
       同日旧行/部分写入破坏；批次行与池行同一事务提交（ok 与池同生共死）；
@@ -497,6 +513,8 @@ def record_screening_batch(
     normalized = _parse_trade_date(trade_date)
     if status not in BATCH_STATUSES:
         raise ValueError(f"非法批次 status {status!r}；允许: {list(BATCH_STATUSES)}")
+    if selection_mode not in SELECTION_MODES:
+        raise ValueError(f"非法 selection_mode {selection_mode!r}；允许: {list(SELECTION_MODES)}")
     if not isinstance(started_at, str) or not started_at:
         raise ValueError(f"started_at 不能为空: {started_at!r}")
     if not isinstance(finished_at, str) or not finished_at:
@@ -520,14 +538,24 @@ def record_screening_batch(
         conn.execute("DELETE FROM selection_pool WHERE trade_date = ?", (normalized,))
         conn.execute(
             "INSERT INTO screening_batches "
-            "(trade_date, status, error, started_at, finished_at, l1_passed, l2_top, l3_keep, pool_size) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "(trade_date, status, error, started_at, finished_at, l1_passed, l2_top, l3_keep, pool_size, selection_mode) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(trade_date) DO UPDATE SET "
             "status = excluded.status, error = excluded.error, "
             "started_at = excluded.started_at, finished_at = excluded.finished_at, "
             "l1_passed = excluded.l1_passed, l2_top = excluded.l2_top, "
-            "l3_keep = excluded.l3_keep, pool_size = excluded.pool_size",
-            (normalized, status, error, started_at, finished_at, *counts, len(payload)),
+            "l3_keep = excluded.l3_keep, pool_size = excluded.pool_size, "
+            "selection_mode = excluded.selection_mode",
+            (
+                normalized,
+                status,
+                error,
+                started_at,
+                finished_at,
+                *counts,
+                len(payload),
+                selection_mode,
+            ),
         )
         if payload:
             conn.executemany(
@@ -580,7 +608,7 @@ def latest_screening_batch(db_path: str | Path | None = None) -> dict[str, Any] 
     try:
         row = conn.execute(
             "SELECT trade_date, status, error, started_at, finished_at, "
-            "l1_passed, l2_top, l3_keep, pool_size FROM screening_batches "
+            "l1_passed, l2_top, l3_keep, pool_size, selection_mode FROM screening_batches "
             "ORDER BY trade_date DESC LIMIT 1"
         ).fetchone()
         return dict(row) if row is not None else None
@@ -595,7 +623,7 @@ def latest_successful_batch(db_path: str | Path | None = None) -> dict[str, Any]
     try:
         row = conn.execute(
             "SELECT trade_date, status, error, started_at, finished_at, "
-            "l1_passed, l2_top, l3_keep, pool_size FROM screening_batches "
+            "l1_passed, l2_top, l3_keep, pool_size, selection_mode FROM screening_batches "
             "WHERE status = 'ok' ORDER BY trade_date DESC LIMIT 1"
         ).fetchone()
         return dict(row) if row is not None else None
@@ -620,7 +648,7 @@ def list_batches(
     try:
         rows = conn.execute(
             "SELECT trade_date, status, error, started_at, finished_at, "
-            "l1_passed, l2_top, l3_keep, pool_size FROM screening_batches "
+            "l1_passed, l2_top, l3_keep, pool_size, selection_mode FROM screening_batches "
             "ORDER BY trade_date DESC LIMIT ?",
             (limit,),
         ).fetchall()

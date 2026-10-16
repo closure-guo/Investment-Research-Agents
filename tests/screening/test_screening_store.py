@@ -368,3 +368,87 @@ def test_reset_screening_db_clears_removals(tmp_path) -> None:
 
     assert removed["screening_removals"] == 1
     assert list_screening_removals(db_path=db) == []
+
+
+# ── 选择模式列与迁移（add-screening-empty-library-fallback T3） ─────────────
+
+
+def test_selection_mode_migration_backfills_legacy_rows(tmp_path) -> None:
+    """旧库（无 selection_mode 列）→ init 幂等补列，旧行默认 'factor'。"""
+    db = tmp_path / "legacy_screening.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            "CREATE TABLE screening_batches ("
+            "trade_date TEXT PRIMARY KEY, status TEXT NOT NULL, error TEXT, "
+            "started_at TEXT NOT NULL, finished_at TEXT NOT NULL, "
+            "l1_passed INTEGER NOT NULL DEFAULT 0, l2_top INTEGER NOT NULL DEFAULT 0, "
+            "l3_keep INTEGER NOT NULL DEFAULT 0, pool_size INTEGER NOT NULL DEFAULT 0);"
+        )
+        conn.execute(
+            "INSERT INTO screening_batches (trade_date, status, started_at, finished_at) "
+            "VALUES ('2026-10-01', 'ok', 'x', 'y')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_screening_db(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT selection_mode FROM screening_batches WHERE trade_date = '2026-10-01'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == ("factor",)
+
+
+def test_record_and_read_back_selection_mode(tmp_path) -> None:
+    """record_screening_batch 携带 selection_mode；批次行回读三处一致。"""
+    from finance_agent.screening.store import (
+        latest_screening_batch,
+        latest_successful_batch,
+        list_batches,
+        record_screening_batch,
+    )
+
+    db = tmp_path / "screening.db"
+    record_screening_batch(
+        _D1,
+        status="ok",
+        started_at="t0",
+        finished_at="t1",
+        selection_mode="fallback",
+        db_path=db,
+    )
+    record_screening_batch(
+        _D2,
+        status="ok",
+        started_at="t2",
+        finished_at="t3",
+        db_path=db,  # 缺省 factor
+    )
+
+    assert latest_screening_batch(db_path=db)["selection_mode"] == "factor"
+    assert latest_successful_batch(db_path=db)["selection_mode"] == "factor"
+    rows = list_batches(db_path=db)
+    assert {row["trade_date"]: row["selection_mode"] for row in rows} == {
+        _D2: "factor",
+        _D1: "fallback",
+    }
+
+
+def test_record_screening_batch_rejects_unknown_selection_mode(tmp_path) -> None:
+    from finance_agent.screening.store import record_screening_batch
+
+    with pytest.raises(ValueError, match="selection_mode"):
+        record_screening_batch(
+            _D1,
+            status="ok",
+            started_at="t0",
+            finished_at="t1",
+            selection_mode="degraded",
+            db_path=tmp_path / "screening.db",
+        )

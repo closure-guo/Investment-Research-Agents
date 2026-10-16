@@ -24,6 +24,8 @@ function poolBody(overrides: Partial<ScreeningPoolResponse> = {}): ScreeningPool
     batch_date: BATCH_DATE,
     batch_status: 'ok',
     stale: false,
+    selection_mode: 'factor',
+    notice: null,
     pool: [
       {
         symbol: '600519',
@@ -92,6 +94,59 @@ function mockFetch(
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }
+
+describe('降级模式披露（add-screening-empty-library-fallback）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    window.history.pushState({}, '', '/')
+  })
+
+  it('fallback 批次 → 降级横幅（含「非因子信号」）+ 列标题/数值口径切换', async () => {
+    const fallbackPool = [
+      {
+        symbol: '600519',
+        composite_score: 102000000, // 1.02 亿元（降级模式下 score = 近 20 日日均成交额）
+        rank: 1,
+        consecutive_days: 5,
+        l3_verdict: 'keep',
+        l3_reason: '无重大风险事件',
+        factor_contribs: [],
+      },
+    ]
+    mockFetch({
+      pool: [
+        poolBody({
+          selection_mode: 'fallback',
+          notice: '因子库无可打分因子：本次为降级模式，按近 20 日日均成交额排序（非因子信号）',
+          pool: fallbackPool,
+        }),
+      ],
+    })
+    render(<ScreeningPage onBack={() => {}} />)
+
+    const banner = await screen.findByTestId('screening-fallback-banner')
+    expect(banner.textContent).toContain('非因子信号')
+
+    const table = await screen.findByTestId('screening-pool-table')
+    expect(within(table).getByText('近 20 日日均成交额（亿元）')).toBeTruthy()
+    expect(within(table).queryByText('综合分')).toBeNull()
+    expect(within(screen.getByTestId('screening-row-600519')).getByText('1.02')).toBeTruthy()
+  })
+
+  it('factor 批次 → 无降级横幅（回归钉死）', async () => {
+    mockFetch()
+    render(<ScreeningPage onBack={() => {}} />)
+
+    await screen.findByTestId('screening-pool-table')
+    expect(screen.queryByTestId('screening-fallback-banner')).toBeNull()
+    expect(screen.getByText('综合分')).toBeTruthy()
+  })
+})
 
 describe('选股页（add-screening-pipeline T4）', () => {
   beforeEach(() => {
