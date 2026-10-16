@@ -25,3 +25,13 @@ CLI 修改 + 两种重启顺序均未生效；共享 socket 对非集成 distro 
 - raw.githubusercontent.com / objects.githubusercontent.com（release 资产直连）**不可达**
 - PyPI 走 TUNA 镜像 ✓；github release 资产走 ghfast.top/gh-proxy.com ✓（8MB/s）
 - Ubuntu WSL rootfs：NJU 镜像 `ubuntu-cloud-images/wsl` ✓（1.2MB/s+）
+
+## 2026-10-16 晚：fin_factor 单循环完整跑通（⑥ 前的核心验证）
+
+- `launch-fin-factor.sh`（DOCKER_HOST=bind socket + conda 激活语义）→ 单循环 5/5 步 100% 完成
+- LLM 生成因子代码 → local_qlib 容器内真实数据评估（47,378 非空因子值）→ CoSTEER 判 SUCCESS
+- 遇到的三个坑（均已绕过/修复，脚本含修复）：
+  1. 镜像构建内 `git clone github.com/microsoft/qlib` 被墙 → Dockerfile 补丁换 ghfast 镜像（.bak-spike-patch）
+  2. RD-Agent 默认 embedding=text-embedding-3-small 在 bigmodel 不存在（错误码 1211）→ `.env` 补 `EMBEDDING_MODEL=openai/embedding-3`（实测 dim 2048 ✓）
+  3. LiteLLM 对 `openai/` 前缀回落读 OPENAI_API_KEY → `.env` 补 OPENAI_API_KEY/OPENAI_API_BASE
+- 遗留：MLflow 文件存储后端弃用告警（record 步）；WSL 下 runtime info 内省补丁（见 patch-runtime-info.sh）
