@@ -7,9 +7,10 @@
 
 - 缺省标的池 = 证券主表（``security_master``）全量；主表为空且未显式指定
   ``--symbols``/``--symbols-file`` → 报错并退 2（禁止静默空跑）。
-- 逐票 ``fetch_symbol_history_raw_qfq``（raw+qfq 双口径 + 成交额），按 ``--sleep``
-  限速；断点续跑：该票在 ``[start, end]`` 内已有**字段齐备**（amount 非空）的行则
-  跳过（缺 amount 的既有行重取 upsert 补齐）。
+- 逐票 ``fetch_symbol_history_raw_qfq``（raw+qfq 双口径 + 成交额/最高/最低），按
+  ``--sleep`` 限速；断点续跑：该票在 ``[start, end]`` 内已有**字段齐备**
+  （amount/high/low 非空）的行则跳过（缺任一列的既有行重取 upsert 补齐；
+  extend-backfill-high-low 后旧六列产物自动重取）。
 - 落库经 ``write_snapshot_rows_bulk``——一票一次事务整批 upsert（~190 日/票；
   逐日提交在 16 进程并行下提交放大严重，unify-quant-research-architecture P0-1
   运维修复）；进程中断在票间。
@@ -88,11 +89,12 @@ def _parse_symbols_file(path: Path) -> list[str]:
 def _history_rows(frame: pd.DataFrame, code: str, name: str) -> list[dict[str, Any]]:
     """T5 双口径帧 → market_snapshot 行（无 IO 的纯映射，字段逐字对齐表列）。
 
-    状态位显式置 0、``prev_close``/``high``/``low``/``pct_chg``/``list_date``/
-    ``listed_days`` 置 NULL：回填不编造日批才有的信息（见模块 docstring 警示）。
-    ``amount`` 由六列契约的「成交额」映射（unify-quant-research-architecture；
-    源缺 amount 的票在取数层即判失败，不产半口径帧）。日期不可解析的行丢弃
-    （无法作主键）。
+    状态位显式置 0、``prev_close``/``pct_chg``/``list_date``/``listed_days``
+    置 NULL：回填不编造日批才有的信息（见模块 docstring 警示）。
+    ``amount`` 由八列契约的「成交额」映射（unify-quant-research-architecture）；
+    ``high``/``low`` 由「最高/最低」映射（raw 口径，extend-backfill-high-low——
+    面板 high/low 由 raw×复权因子派生，与日批快照语义一致）；源缺列在取数层即
+    判失败，不产半口径帧。日期不可解析的行丢弃（无法作主键）。
     """
     rows: list[dict[str, Any]] = []
     for _, raw in frame.iterrows():
@@ -105,8 +107,8 @@ def _history_rows(frame: pd.DataFrame, code: str, name: str) -> list[dict[str, A
                 "code": code,
                 "name": name,
                 "open": _num(raw.get("开盘")),
-                "high": None,
-                "low": None,
+                "high": _num(raw.get("最高")),
+                "low": _num(raw.get("最低")),
                 "close_raw": _num(raw.get("收盘_raw")),
                 "close_qfq": _num(raw.get("收盘_qfq")),
                 "volume": _num(raw.get("成交量")),
@@ -127,9 +129,10 @@ def _history_rows(frame: pd.DataFrame, code: str, name: str) -> list[dict[str, A
 def _has_rows_in_window(db_path: str | Path, code: str, start: str, end: str) -> bool:
     """该票在 ``[start, end]`` 内是否已有**字段齐备**的行（断点续跑判据）。
 
-    齐备 = 有行且全部行 ``amount`` 非空（unify-quant-research-architecture：缺
-    amount 的既有行不构成覆盖 → 重取 upsert 补齐）。库/表不存在 → False（按未回填
-    处理，取数方向安全）；查询异常同样按 False。
+    齐备 = 有行且全部行 ``amount``/``high``/``low`` 非空（unify-quant-research-
+    architecture + extend-backfill-high-low：缺任一列的既有行不构成覆盖 → 重取
+    upsert 补齐；旧六列契约的回填产物由此自动重取）。库/表不存在 → False（按未
+    回填处理，取数方向安全）；查询异常同样按 False。
     """
     path = Path(db_path)
     if not path.exists():
@@ -140,7 +143,7 @@ def _has_rows_in_window(db_path: str | Path, code: str, start: str, end: str) ->
         return False
     try:
         row = conn.execute(
-            "SELECT COUNT(*), COUNT(amount) FROM market_snapshot "
+            "SELECT COUNT(*), COUNT(amount), COUNT(high), COUNT(low) FROM market_snapshot "
             "WHERE code = ? AND trade_date >= ? AND trade_date <= ?",
             (code, start, end),
         ).fetchone()
@@ -150,7 +153,9 @@ def _has_rows_in_window(db_path: str | Path, code: str, start: str, end: str) ->
         conn.close()
     total = int(row[0]) if row else 0
     with_amount = int(row[1]) if row else 0
-    return total > 0 and with_amount == total
+    with_high = int(row[2]) if row else 0
+    with_low = int(row[3]) if row else 0
+    return total > 0 and with_amount == total and with_high == total and with_low == total
 
 
 def run_backfill(

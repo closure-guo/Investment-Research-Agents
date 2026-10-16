@@ -189,13 +189,14 @@ class TestFetchListingInfo:
 class TestFetchSymbolHistoryRawQfq:
     @patch("finance_agent.data.akshare_client.ak")
     def test_two_calls_joined_on_date(self, mock_ak, client):
-        """raw（adjust=""）+ qfq 两次调用按「日期」内连接；输出六列、按日期升序。"""
+        """raw（adjust=""）+ qfq 两次调用按「日期」内连接；输出八列、按日期升序。"""
         raw = pd.DataFrame(
             {
                 "日期": [date(2026, 10, 10), date(2026, 10, 9)],  # 乱序：出口必须排序
                 "开盘": [10.2, 10.0],
                 "收盘": [10.3, 10.1],
                 "最高": [10.6, 10.5],
+                "最低": [10.0, 9.8],
                 "成交量": [1200.0, 1000.0],
                 "成交额": [3_600_000.0, 3_000_000.0],
             }
@@ -213,13 +214,24 @@ class TestFetchSymbolHistoryRawQfq:
         out = client.fetch_symbol_history_raw_qfq("600519", "20261001", "20261012")
 
         assert out is not None
-        assert list(out.columns) == ["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量", "成交额"]
+        assert list(out.columns) == [
+            "日期",
+            "开盘",
+            "最高",
+            "最低",
+            "收盘_raw",
+            "收盘_qfq",
+            "成交量",
+            "成交额",
+        ]
         assert list(out["日期"]) == [
             date(2026, 10, 9),
             date(2026, 10, 10),
         ]  # 10-12 仅 qfq 有：内连接剔除
         assert list(out["收盘_raw"]) == [10.1, 10.3]
         assert list(out["收盘_qfq"]) == [9.1, 9.3]
+        assert list(out["最高"]) == [10.5, 10.6]  # raw 口径（extend-backfill-high-low）
+        assert list(out["最低"]) == [9.8, 10.0]
         assert list(out["成交量"]) == [1000.0, 1200.0]  # 成交量取 raw 口径
         assert list(out["成交额"]) == [3_000_000.0, 3_600_000.0]  # 成交额取 raw 口径（元）
 

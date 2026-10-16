@@ -284,9 +284,20 @@ class TestFetchSymbolHistoryRawQfqFallback:
         out = client.fetch_symbol_history_raw_qfq("600519", "20261001", "20261014")
 
         assert out is not None
-        assert list(out.columns) == ["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量", "成交额"]
+        assert list(out.columns) == [
+            "日期",
+            "开盘",
+            "最高",
+            "最低",
+            "收盘_raw",
+            "收盘_qfq",
+            "成交量",
+            "成交额",
+        ]
         assert list(out["日期"]) == [date(2026, 10, 10), date(2026, 10, 13)]  # 10-14 仅 qfq 有
         assert list(out["开盘"]) == [9.9, 10.0]
+        assert list(out["最高"]) == [10.0, 10.6]  # raw 口径（extend-backfill-high-low）
+        assert list(out["最低"]) == [9.7, 9.9]
         assert list(out["收盘_raw"]) == [9.8, 10.5]
         assert list(out["收盘_qfq"]) == [9.0, 9.6]
         assert list(out["成交量"]) == [1000.0, 1200.0]  # 股 → 手（÷100）
@@ -316,6 +327,8 @@ class TestFetchSymbolHistoryRawQfqFallback:
             {
                 "日期": [date(2026, 10, 10)],
                 "开盘": [9.9],
+                "最高": [10.1],
+                "最低": [9.6],
                 "收盘": [9.8],
                 "成交量": [1000.0],
                 "成交额": [2_000_000.0],
@@ -333,12 +346,14 @@ class TestFetchSymbolHistoryRawQfqFallback:
         assert mock_ak.stock_zh_a_daily.call_count == 2
 
     @patch("finance_agent.data.akshare_client.ak")
-    def test_eastmoney_success_includes_amount_six_columns(self, mock_ak, client):
-        """东财双口径成功：出口六列契约（成交额取 raw 腿，元直通）。"""
+    def test_eastmoney_success_eight_column_contract(self, mock_ak, client):
+        """东财双口径成功：出口八列契约（成交额/最高/最低取 raw 腿，元/原值直通）。"""
         em_raw = pd.DataFrame(
             {
                 "日期": [date(2026, 10, 10), date(2026, 10, 13)],
                 "开盘": [9.9, 10.0],
+                "最高": [10.1, 10.8],
+                "最低": [9.6, 9.9],
                 "收盘": [9.8, 10.5],
                 "成交量": [1000.0, 1200.0],
                 "成交额": [2_000_000.0, 2_600_000.0],
@@ -355,7 +370,18 @@ class TestFetchSymbolHistoryRawQfqFallback:
         out = client.fetch_symbol_history_raw_qfq("600519", "20261001", "20261014")
 
         assert out is not None
-        assert list(out.columns) == ["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量", "成交额"]
+        assert list(out.columns) == [
+            "日期",
+            "开盘",
+            "最高",
+            "最低",
+            "收盘_raw",
+            "收盘_qfq",
+            "成交量",
+            "成交额",
+        ]
+        assert list(out["最高"]) == [10.1, 10.8]
+        assert list(out["最低"]) == [9.6, 9.9]
         assert list(out["成交额"]) == [2_000_000.0, 2_600_000.0]
         assert mock_ak.stock_zh_a_daily.call_count == 0  # 主源成功不触回退
 
@@ -368,6 +394,38 @@ class TestFetchSymbolHistoryRawQfqFallback:
         mock_ak.stock_zh_a_daily.side_effect = [raw, qfq]
 
         assert client.fetch_symbol_history_raw_qfq("600519", "20261001", "20261014") is None
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_sina_missing_high_low_returns_none(self, mock_ak, client):
+        """新浪 raw 腿缺 high/low → None（spec 场景「源缺最高最低价按失败处理」）。"""
+        raw, qfq = self._sina_pair()
+        raw = raw.drop(columns=["high", "low"])
+        mock_ak.stock_zh_a_hist.return_value = None
+        mock_ak.stock_zh_a_daily.side_effect = [raw, qfq]
+
+        assert client.fetch_symbol_history_raw_qfq("600519", "20261001", "20261014") is None
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_eastmoney_missing_high_falls_back_to_sina(self, mock_ak, client):
+        """东财 raw 腿缺 最高 列 → 该腿判失败 → 回退新浪（不产半口径帧）。"""
+        em_raw = pd.DataFrame(
+            {
+                "日期": [date(2026, 10, 10)],
+                "开盘": [9.9],
+                "收盘": [9.8],
+                "成交量": [1000.0],
+                "成交额": [2_000_000.0],
+            }
+        )
+        raw, qfq = self._sina_pair()
+        mock_ak.stock_zh_a_hist.return_value = em_raw  # 若被消费将缺列短路
+        mock_ak.stock_zh_a_daily.side_effect = [raw, qfq]
+
+        out = client.fetch_symbol_history_raw_qfq("600519", "20261001", "20261014")
+
+        assert out is not None
+        assert list(out["最高"]) == [10.0, 10.6]  # 来自新浪腿
+        assert mock_ak.stock_zh_a_daily.call_count == 2
 
     @patch("finance_agent.data.akshare_client.ak")
     def test_both_sources_fail_returns_none(self, mock_ak, client):
