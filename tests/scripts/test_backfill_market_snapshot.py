@@ -28,8 +28,18 @@ _END = "2026-10-12"
 
 
 def _frame(rows: list[dict]) -> pd.DataFrame:
-    """按 T5 包装出口列构造历史帧（六列：日期为 date 对象，同 akshare 出口形态）。"""
-    return pd.DataFrame(rows, columns=["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量", "成交额"])
+    """按 T5 包装出口列构造历史帧（八列：日期为 date 对象，同 akshare 出口形态）。
+
+    用例行未显式给 最高/最低 时按 ``收盘_raw ± 0.1`` 派生——回填契约关心「列在不在、
+    映射对不对」，取值细节由字段映射用例单独钉死（extend-backfill-high-low）。
+    """
+    for row in rows:
+        row.setdefault("最高", float(row["收盘_raw"]) + 0.1)
+        row.setdefault("最低", float(row["收盘_raw"]) - 0.1)
+    return pd.DataFrame(
+        rows,
+        columns=["日期", "开盘", "最高", "最低", "收盘_raw", "收盘_qfq", "成交量", "成交额"],
+    )
 
 
 class FakeHistoryClient:
@@ -75,7 +85,9 @@ def test_resume_skips_covered_symbol_without_refetch(tmp_path):
                 "code": "000001",
                 "close_raw": 5.0,
                 "close_qfq": 5.0,
-                "amount": 1_000_000.0,  # 覆盖判据含 amount：既有行字段齐备才跳过
+                "amount": 1_000_000.0,  # 覆盖判据含 amount/high/low：字段齐备才跳过
+                "high": 5.2,
+                "low": 4.8,
             }
         ],
         db_path=db,
@@ -124,11 +136,20 @@ def test_resume_skips_covered_symbol_without_refetch(tmp_path):
 
 
 def test_resume_refetches_rows_missing_amount(tmp_path):
-    """(a2) 区间内已有行但 amount 缺失 → 不跳过、重取 upsert 补齐（unify-quant-research-architecture）。"""
+    """(a2) 区间内已有行但 amount 缺失（high/low 齐备）→ 不跳过、重取 upsert 补齐。"""
     db = tmp_path / "snap.db"
     write_snapshot_rows(
         "2026-10-09",
-        [{"trade_date": "2026-10-09", "code": "000001", "close_raw": 5.0, "close_qfq": 5.0}],
+        [
+            {
+                "trade_date": "2026-10-09",
+                "code": "000001",
+                "close_raw": 5.0,
+                "close_qfq": 5.0,
+                "high": 5.2,
+                "low": 4.8,
+            }
+        ],
         db_path=db,
     )
     client = FakeHistoryClient(
@@ -163,6 +184,56 @@ def test_resume_refetches_rows_missing_amount(tmp_path):
     rows = _rows_of(db, "000001")
     assert len(rows) == 1  # upsert 不产生重复行
     assert rows[0]["amount"] == 2_500_000.0  # amount 已补齐
+
+
+def test_resume_refetches_rows_missing_high_low(tmp_path):
+    """(a3) 既有行 amount 齐备但 high/low 空（旧六列契约产物）→ 不跳过、重取补齐
+    （extend-backfill-high-low；spec 场景「缺 high/low 的既有行重取补齐」）。"""
+    db = tmp_path / "snap.db"
+    write_snapshot_rows(
+        "2026-10-09",
+        [
+            {
+                "trade_date": "2026-10-09",
+                "code": "000001",
+                "close_raw": 5.0,
+                "close_qfq": 5.0,
+                "amount": 1_000_000.0,
+            }
+        ],
+        db_path=db,
+    )
+    client = FakeHistoryClient(
+        data={
+            "000001": _frame(
+                [
+                    {
+                        "日期": date(2026, 10, 9),
+                        "开盘": 10.0,
+                        "收盘_raw": 10.5,
+                        "收盘_qfq": 10.5,
+                        "成交量": 1000.0,
+                        "成交额": 2_500_000.0,
+                    }
+                ]
+            )
+        }
+    )
+
+    summary = run_backfill(
+        start=_START,
+        end=_END,
+        symbols=["000001"],
+        client=client,
+        db_path=db,
+        sleep_seconds=0,
+    )
+
+    assert summary["skipped_resumed"] == 0  # 缺 high/low 不构成覆盖
+    assert client.calls == ["000001"]  # 重取
+    rows = _rows_of(db, "000001")
+    assert len(rows) == 1  # upsert 不产生重复行
+    assert rows[0]["high"] == 10.6 and rows[0]["low"] == 10.4  # 已补齐
 
 
 def test_fetch_none_counts_failed_and_continues(tmp_path, capsys):
@@ -208,7 +279,7 @@ def test_fetch_none_counts_failed_and_continues(tmp_path, capsys):
 
 
 def test_rows_mapping_field_by_field(tmp_path):
-    """(c) 行映射逐字段：双复权价/开/量/额 + 显式 0 状态位 + None 列 + 主表名。"""
+    """(c) 行映射逐字段：双复权价/开/高/低/量/额 + 显式 0 状态位 + None 列 + 主表名。"""
     db = tmp_path / "snap.db"
     upsert_security_master(
         [{"code": "600519", "name": "贵州茅台", "list_date": "2001-08-27"}], db_path=db
@@ -254,8 +325,8 @@ def test_rows_mapping_field_by_field(tmp_path):
         "code": "600519",
         "name": "贵州茅台",
         "open": 10.0,
-        "high": None,
-        "low": None,
+        "high": 10.6,  # 收盘_raw 10.5 + 0.1（_frame 缺省派生）
+        "low": 10.4,
         "close_raw": 10.5,
         "close_qfq": 9.8,
         "volume": 1000.0,

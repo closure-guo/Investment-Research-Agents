@@ -1703,12 +1703,13 @@ class AKShareClient:
     def fetch_symbol_history_raw_qfq(self, code: str, start: str, end: str) -> pd.DataFrame | None:
         """逐票历史日线双口径（回填用）：raw（``adjust=""``）+ qfq 两次调用按「日期」内连接。
 
-        输出列 ``[日期, 开盘, 收盘_raw, 收盘_qfq, 成交量, 成交额]``（成交量取 raw
-        口径、单位为手；成交额取 raw 口径、单位为元——unify-quant-research-architecture
-        补齐 amount 类因子可计算性），按日期升序。主源东财 ``stock_zh_a_hist``；
-        任一腿失败/空/缺列或按日期无交集 → 回退新浪 ``stock_zh_a_daily`` 双口径
-        （add-market-data-fallback：东财行情域 IP 封禁 #325 后回填同为东财单源，
-        与日批 spot 同款回退）。两源皆失败 → None（不产出半口径数据）。
+        输出列 ``[日期, 开盘, 最高, 最低, 收盘_raw, 收盘_qfq, 成交量, 成交额]``（成交量取
+        raw 口径、单位为手；成交额取 raw 口径、单位为元；最高/最低取 raw 口径、未复权原值
+        ——面板按复权因子派生 qfq 口径，与日批快照语义一致；extend-backfill-high-low），
+        按日期升序。主源东财 ``stock_zh_a_hist``；任一腿失败/空/缺列或按日期无交集 →
+        回退新浪 ``stock_zh_a_daily`` 双口径（add-market-data-fallback：东财行情域 IP
+        封禁 #325 后回填同为东财单源，与日批 spot 同款回退）。两源皆失败 → None
+        （不产出半口径数据）。
         """
         merged = self._fetch_symbol_history_em(code, start, end)
         if merged is not None:
@@ -1732,7 +1733,7 @@ class AKShareClient:
         if not isinstance(raw, pd.DataFrame) or raw.empty:
             logger.warning("历史日线 raw 腿失败/空: %s", code)
             return None
-        if not {"日期", "开盘", "收盘", "成交量", "成交额"} <= set(raw.columns):
+        if not {"日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"} <= set(raw.columns):
             logger.warning("历史日线 raw 腿缺列: %s", code)
             return None
         qfq = _call_ak(
@@ -1750,7 +1751,9 @@ class AKShareClient:
             logger.warning("历史日线 qfq 腿缺列: %s", code)
             return None
         merged = pd.merge(
-            raw[["日期", "开盘", "收盘", "成交量", "成交额"]].rename(columns={"收盘": "收盘_raw"}),
+            raw[["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]].rename(
+                columns={"收盘": "收盘_raw"}
+            ),
             qfq[["日期", "收盘"]].rename(columns={"收盘": "收盘_qfq"}),
             on="日期",
             how="inner",
@@ -1759,7 +1762,7 @@ class AKShareClient:
             logger.warning("历史日线 raw/qfq 按日期无交集: %s", code)
             return None
         return (
-            merged[["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量", "成交额"]]
+            merged[["日期", "开盘", "最高", "最低", "收盘_raw", "收盘_qfq", "成交量", "成交额"]]
             .sort_values("日期")
             .reset_index(drop=True)
         )
@@ -1774,7 +1777,7 @@ class AKShareClient:
         """
         symbol = self._to_sina_symbol(code)
         required = {
-            "": ("date", "open", "close", "volume", "amount"),
+            "": ("date", "open", "high", "low", "close", "volume", "amount"),
             "qfq": ("date", "close"),
         }
         frames: dict[str, pd.DataFrame] = {}
@@ -1793,10 +1796,12 @@ class AKShareClient:
                 logger.warning("新浪历史日线腿缺列 (adjust=%r): %s", adjust, code)
                 return None
             frames[adjust] = df
-        raw = frames[""].rename(columns={"date": "日期", "open": "开盘", "close": "收盘"})
+        raw = frames[""].rename(
+            columns={"date": "日期", "open": "开盘", "high": "最高", "low": "最低", "close": "收盘"}
+        )
         qfq = frames["qfq"].rename(columns={"date": "日期", "close": "收盘"})
         merged = pd.merge(
-            raw[["日期", "开盘", "收盘", "volume", "amount"]].rename(
+            raw[["日期", "开盘", "最高", "最低", "收盘", "volume", "amount"]].rename(
                 columns={"收盘": "收盘_raw", "volume": "成交量", "amount": "成交额"}
             ),
             qfq[["日期", "收盘"]].rename(columns={"收盘": "收盘_qfq"}),
@@ -1809,7 +1814,7 @@ class AKShareClient:
         merged["成交量"] = pd.to_numeric(merged["成交量"], errors="coerce") / _SINA_SHARES_PER_LOT
         merged["成交额"] = pd.to_numeric(merged["成交额"], errors="coerce")
         return (
-            merged[["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量", "成交额"]]
+            merged[["日期", "开盘", "最高", "最低", "收盘_raw", "收盘_qfq", "成交量", "成交额"]]
             .sort_values("日期")
             .reset_index(drop=True)
         )
