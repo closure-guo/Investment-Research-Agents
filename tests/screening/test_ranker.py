@@ -642,6 +642,13 @@ def test_has_scorable_factors_mirrors_ranker_refusal_condition() -> None:
     assert has_scorable_factors(factors, {1: (math.inf, 0.0)}) is True
 
 
+def test_has_scorable_factors_boundary_pinned() -> None:
+    """谓词边界钉死：Σ|IC| 恰等于阈值 → 可打分（>= 语义，与 factor_weights 的 < 拒绝对偶）。"""
+    factors = [_factor(1, "close")]
+    assert has_scorable_factors(factors, {1: (1e-12, 0.0)}) is True
+    assert has_scorable_factors(factors, {1: (0.5e-12, 0.0)}) is False
+
+
 def test_liquidity_fallback_rank_by_mean_amount_desc_with_symbol_tiebreak() -> None:
     """近 N 日日均成交额降序；同额按 symbol 升序；score=日均成交额、contribs 为空。"""
     amounts = {
