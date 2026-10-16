@@ -1,0 +1,32 @@
+{
+ "codes": 200,
+ "dates": 150,
+ "h": 1,
+ "expected": {
+  "div(close,ts_mean(close,20))": {
+   "ic_mean": -0.01967086465362092,
+   "icir": -0.09940991035142849,
+   "ic_days": 130
+  },
+  "sub(div(close,ts_mean(close,20)),1)": {
+   "ic_mean": -0.01967086465362092,
+   "icir": -0.09940991035142849,
+   "ic_days": 130
+  },
+  "delta(close,5)": {
+   "ic_mean": 0.0034310911086272333,
+   "icir": 0.019995243589258273,
+   "ic_days": 144
+  },
+  "div(volume,ts_mean(volume,20))": {
+   "ic_mean": -0.04040761682197815,
+   "icir": -0.2965318574443624,
+   "ic_days": 130
+  },
+  "ts_std(close,20)": {
+   "ic_mean": -0.03241030043157628,
+   "icir": -0.17021714897669035,
+   "ic_days": 130
+  }
+ }
+}
