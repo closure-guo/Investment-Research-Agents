@@ -6,13 +6,13 @@
 
 - [x] 先红后绿：`fetch_symbol_history_raw_qfq` 输出 +amount 列（新浪日线原生 amount，单位归一与日批一致）；源缺 amount → 取数失败不落半口径行（单测：回填行 amount 可算 `ts_mean(amount,20)` / 缺 amount 票计失败）
 - [x] 回填脚本兼容（列契约六列 + `write_snapshot_rows_bulk` 每票单事务——逐日提交在 16 进程并行下提交放大，实测吞吐降一个量级）+ 对既有回填区补 amount（齐备判据=amount 全覆盖，缺者重取 upsert）
-- [ ] 完成扩展回填（2026-01-05..07-09 剩余 ~2400 票 + ≤16 票 partial 修复），快照库 ≥150 交易日全票覆盖核验
+- [x] 完成扩展回填：[2026-01-05..10-14] 全量重取（amount 齐备判据自动重取缺 amount 既有行），5617 票全覆盖尝试（5265 票有数据 / 352 失败=北交所+特殊票）；库终态 977,327 行 / 187 交易日 / quick_check ok（incident 043 恢复后）
 
 ## P0-2 准入面板深度下限（factor-library ADDED）
 
 - [x] 先红后绿：`ADMISSION_PANEL_LOOKBACK_DAYS`（默认 150，`factors/constraints.py` 单一来源）+ 三入口（提案月批 / 基线注册 / 外部导入）面板构造切换；深度不足 fail loud（错误含补历史指引）
 - [x] 面板构造口径拆分：准入面板（新常量）与衰减监控面板（`DECAY_WINDOW+30` 不动）单测钉死互不影响
-- [ ] 生产实跑：基线注册补跑 → 深面板五条 builtin 过闸读数（预期 turnover_proxy 过闸①②，读数落验证报告）
+- [x] 生产实跑：基线注册补跑（run 93，150 日深面板）→ 0/5 入库但拒绝原因全部为真实读数（turnover_proxy 过①②③倒在闸④样本外；详见验证报告 §7）
 
 ## P0-3 外部供给接入（factor-proposal ADDED×2）
 
@@ -28,9 +28,9 @@
 
 ## 收口
 
-- [ ] `uv run pytest tests/factors tests/data tests/outcome -q` 全绿；ruff / mypy 干净
-- [ ] `openspec validate unify-quant-research-architecture --strict` 通过
-- [ ] 验证报告落 `tests/validation/`（深面板 builtin 读数 + spike 报告引用）+ sync + archive
+- [x] `uv run pytest tests/factors tests/data tests/outcome -q` 全绿；ruff / mypy 干净
+- [x] `openspec validate unify-quant-research-architecture --strict` 通过
+- [x] 验证报告落 `tests/validation/2026-10-16-unify-quant-research-architecture-p0-validation.md`（P0 阶段报告；深面板 builtin 读数已录）+ 实施已合并（PR #349）；**sync+archive 待 spike 完成后执行**（tasks 唯一未勾项=spike）
 
 ## Deferred（本 delta 不做，另行立项）
 

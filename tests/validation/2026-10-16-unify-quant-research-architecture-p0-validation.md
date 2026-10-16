@@ -26,6 +26,33 @@
 
 **③ 深面板预览（前序实测，64 日面板）**：五条 builtin `registered=0`（4×LOW_COVERAGE + reversal_5 WEAK_ICIR）——本 delta P0-1/P0-2 即针对该读数；170 日深面板实测 `turnover_proxy |ICIR|=0.341` 过闸②（见 wire-builtin-factor-registration 验证报告 §7）。
 
+## §7 生产读数（2026-10-16 08:31，run 93——回填完成后部署实跑）
+
+部署路径：#349 合并（dd043090）→ `deploy.py` 拉取 → 后端重启（`admission depth: 150` 容器内确认）→ `/api/v1/ops/jobs/factor_builtin_register/run`。
+
+```
+{"registered": 0, "rejected": 5, "skipped": 0, "reasons": [
+  {"expression": "delta(close,20)",                    "gate": 2, "reason": "WEAK_ICIR"},
+  {"expression": "div(ts_mean(close,5),close)",        "gate": 2, "reason": "WEAK_ICIR"},
+  {"expression": "div(volume,ts_mean(volume,20))",     "gate": 4, "reason": "NO_POOL_INCREMENT"},
+  {"expression": "ts_std(delta(close,1),20)",          "gate": 1, "reason": "LOW_COVERAGE"},
+  {"expression": "ts_mean(amount,20)",                 "gate": 2, "reason": "WEAK_ICIR"}]}
+```
+
+**对比昨晚（90 日面板 0/5 全 LOW_COVERAGE）的读数演进**：
+
+| builtin | 90 日面板（前） | 150 日深面板（今） | 解读 |
+|---|---|---|---|
+| momentum_20 | 闸① LOW_COVERAGE | 闸② WEAK_ICIR | 深度修复生效；真实 IC 弱（ICIR<0.3） |
+| reversal_5 | 闸② WEAK_ICIR | 闸② WEAK_ICIR | 与深面板实测一致（ICIR≈−0.008，近零） |
+| **turnover_proxy** | 闸① LOW_COVERAGE | **闸④ NO_POOL_INCREMENT（过①②③）** | 覆盖/ICIR/显著性全过，倒在样本外池增量 ≤0——最接近入库的一条 |
+| volatility_20 | 闸① LOW_COVERAGE | 闸① LOW_COVERAGE | 21 日热窗在 150 日面板 ≈14%+覆盖缺口，贴线未过 |
+| size_proxy | 闸① LOW_COVERAGE | 闸② WEAK_ICIR | **成交额补齐生效**（coverage 过了），真实 IC 弱 |
+
+**结论**：管线已在真实数据上端到端运行（数据→面板→五道闸→逐条裁决），裁决全部 fail-closed 如实留痕。因子库保持空库的原因从「机制阻断」变为「**基线因子真实 IC 不达标**」——这是系统在做它该做的事。解锁路径二选一（owner 裁决）：(a) 供给线产出真正有预测力的候选（RD-Agent spike / 提案阈值再校准）；(b) 闸②/闸④阈值再校准（0.3 为文档背书值，动它属口径变更）。
+
+**回填终态**：16/16 分片完成（ok=3797 / failed=352〔北交所 345+7 特殊〕/ skipped=1468，合计 5617）；本 pass 写 699,880 行；库终态 977,327 行 / 187 交易日 / amount 覆盖 5265 票 / `quick_check ok`。
+
 ## 未达成项（本阶段不做完，披露）
 
 1. **全量重取回填仍在运行**（amount 覆盖 1746/5617 @02:24，网络侧限速 ~28 只/分钟，ETA ~2h；后台 16 进程、不再中断）。**生产基线注册深面板读数**待回填覆盖足够后补录（面板最后 150 交易日需 ~全票 amount/行覆盖，否则闸①缺失率仍被部分覆盖拉高）。
