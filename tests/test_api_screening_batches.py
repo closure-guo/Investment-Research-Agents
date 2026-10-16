@@ -39,6 +39,8 @@ _HISTORY_FIELDS = {
     "l2_top",
     "l3_keep",
     "pool_size",
+    # add-screening-empty-library-fallback：批次字段新增选择模式（factor / fallback）
+    "selection_mode",
 }
 
 
