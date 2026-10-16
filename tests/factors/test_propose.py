@@ -516,7 +516,7 @@ class TestPromptAssembly:
         assert "近 3 月 IC 由 0.04 衰减至 0.005" in prompt
 
     def test_deep_prompt_without_feedback_is_explicit(self):
-        assert "（暂无因子库反馈）" in build_deep_prompt(feedback=[])
+        assert "（暂无拒收/衰减记录）" in build_deep_prompt(feedback=[])
 
     def test_batch_passes_alignment_score_through_without_rejection(self):
         """P5 端到端：alignment_score=0 的提案照常进入 proposals。"""

@@ -16,6 +16,7 @@ import pytest
 from finance_agent.factors.builtin import BUILTIN_FACTORS, run_factor_builtin_register
 from finance_agent.factors.library import add_factor, list_factors, set_status
 from tests.factors.test_builtin import _STRONG_SEED, _strong_panel
+from tests.factors.test_monthly import _seed_snapshot_dates
 
 _REVERSAL_EXPRESSION = "div(ts_mean(close,5),close)"
 
@@ -93,3 +94,13 @@ def test_missing_entries_without_panel_fail_loud(tmp_path):
 
     with pytest.raises(ValueError, match="快照库为空"):
         run_factor_builtin_register(db_path=db, snapshot_db_path=tmp_path / "empty_snapshot.db")
+
+
+def test_shallow_panel_fails_loud(tmp_path):
+    """快照可用历史不足准入下限（150 交易日）→ ValueError（unify-quant-research-architecture）。"""
+    db = _db(tmp_path)
+    snap = tmp_path / "shallow_snapshot.db"
+    _seed_snapshot_dates(snap, n=90)
+
+    with pytest.raises(ValueError, match="深度不足"):
+        run_factor_builtin_register(db_path=db, snapshot_db_path=snap)

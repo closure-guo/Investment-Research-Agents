@@ -28,8 +28,8 @@ _END = "2026-10-12"
 
 
 def _frame(rows: list[dict]) -> pd.DataFrame:
-    """按 T5 包装出口列构造历史帧（日期为 date 对象，同 akshare 出口形态）。"""
-    return pd.DataFrame(rows, columns=["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量"])
+    """按 T5 包装出口列构造历史帧（六列：日期为 date 对象，同 akshare 出口形态）。"""
+    return pd.DataFrame(rows, columns=["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量", "成交额"])
 
 
 class FakeHistoryClient:
@@ -69,7 +69,15 @@ def test_resume_skips_covered_symbol_without_refetch(tmp_path):
     db = tmp_path / "snap.db"
     write_snapshot_rows(
         "2026-10-09",
-        [{"trade_date": "2026-10-09", "code": "000001", "close_raw": 5.0, "close_qfq": 5.0}],
+        [
+            {
+                "trade_date": "2026-10-09",
+                "code": "000001",
+                "close_raw": 5.0,
+                "close_qfq": 5.0,
+                "amount": 1_000_000.0,  # 覆盖判据含 amount：既有行字段齐备才跳过
+            }
+        ],
         db_path=db,
     )
     write_snapshot_rows(
@@ -115,6 +123,48 @@ def test_resume_skips_covered_symbol_without_refetch(tmp_path):
     assert client.requested == ("20261001", "20261012")  # akshare 紧凑日期入参
 
 
+def test_resume_refetches_rows_missing_amount(tmp_path):
+    """(a2) 区间内已有行但 amount 缺失 → 不跳过、重取 upsert 补齐（unify-quant-research-architecture）。"""
+    db = tmp_path / "snap.db"
+    write_snapshot_rows(
+        "2026-10-09",
+        [{"trade_date": "2026-10-09", "code": "000001", "close_raw": 5.0, "close_qfq": 5.0}],
+        db_path=db,
+    )
+    client = FakeHistoryClient(
+        data={
+            "000001": _frame(
+                [
+                    {
+                        "日期": date(2026, 10, 9),
+                        "开盘": 10.0,
+                        "收盘_raw": 10.5,
+                        "收盘_qfq": 10.2,
+                        "成交量": 1000.0,
+                        "成交额": 2_500_000.0,
+                    }
+                ]
+            )
+        }
+    )
+
+    summary = run_backfill(
+        start=_START,
+        end=_END,
+        symbols=["000001"],
+        client=client,
+        db_path=db,
+        sleep_seconds=0.5,
+        sleep_func=lambda _: None,
+    )
+
+    assert summary["skipped_resumed"] == 0  # 缺 amount 不构成覆盖
+    assert client.calls == ["000001"]  # 重取
+    rows = _rows_of(db, "000001")
+    assert len(rows) == 1  # upsert 不产生重复行
+    assert rows[0]["amount"] == 2_500_000.0  # amount 已补齐
+
+
 def test_fetch_none_counts_failed_and_continues(tmp_path, capsys):
     """(b) 单票取数 None → failed 计数后继续；两次取数之间限速一次。"""
     db = tmp_path / "snap.db"
@@ -158,7 +208,7 @@ def test_fetch_none_counts_failed_and_continues(tmp_path, capsys):
 
 
 def test_rows_mapping_field_by_field(tmp_path):
-    """(c) 行映射逐字段：双复权价/开/量 + 显式 0 状态位 + None 列 + 主表名。"""
+    """(c) 行映射逐字段：双复权价/开/量/额 + 显式 0 状态位 + None 列 + 主表名。"""
     db = tmp_path / "snap.db"
     upsert_security_master(
         [{"code": "600519", "name": "贵州茅台", "list_date": "2001-08-27"}], db_path=db
@@ -173,6 +223,7 @@ def test_rows_mapping_field_by_field(tmp_path):
                         "收盘_raw": 10.5,
                         "收盘_qfq": 9.8,
                         "成交量": 1000.0,
+                        "成交额": 2_500_000.0,
                     },
                     {
                         "日期": date(2026, 10, 12),
@@ -180,6 +231,7 @@ def test_rows_mapping_field_by_field(tmp_path):
                         "收盘_raw": 10.8,
                         "收盘_qfq": 10.1,
                         "成交量": 1200.0,
+                        "成交额": 3_100_000.0,
                     },
                 ]
             )
@@ -207,7 +259,7 @@ def test_rows_mapping_field_by_field(tmp_path):
         "close_raw": 10.5,
         "close_qfq": 9.8,
         "volume": 1000.0,
-        "amount": None,
+        "amount": 2_500_000.0,
         "pct_chg": None,
         "prev_close": None,
         "is_st": 0,
@@ -303,6 +355,7 @@ def test_main_symbols_file_limit_and_exit_0(tmp_path, monkeypatch, capsys):
                         "收盘_raw": 10.5,
                         "收盘_qfq": 10.2,
                         "成交量": 1000.0,
+                        "成交额": 2_500_000.0,
                     }
                 ]
             ),
@@ -314,6 +367,7 @@ def test_main_symbols_file_limit_and_exit_0(tmp_path, monkeypatch, capsys):
                         "收盘_raw": 5.2,
                         "收盘_qfq": 5.1,
                         "成交量": 2000.0,
+                        "成交额": 1_100_000.0,
                     }
                 ]
             ),

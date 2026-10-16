@@ -324,6 +324,35 @@ def write_snapshot_rows(
         conn.close()
 
 
+def write_snapshot_rows_bulk(rows: list[dict], db_path: str | Path | None = None) -> int:
+    """多交易日整批 upsert（回填专用）：行内 ``trade_date`` 逐行取用，单事务提交。
+
+    与 ``write_snapshot_rows`` 同列契约与 upsert 语义（INSERT OR REPLACE），差别
+    只在提交粒度：本函数一次事务写多日——回填场景每票 ~190 日，逐日提交在 16 进程
+    并行下产生提交放大（WAL 写锁争用，实测吞吐降一个量级），本函数把每票收敛为
+    一次提交（unify-quant-research-architecture P0-1 运维修复）。日批仍走
+    ``write_snapshot_rows`` 的单交易日契约（批内日期漂移防线不变）。
+    空批 → 0（不建行、不建库）。
+    """
+    if not rows:
+        return 0
+    init_snapshot_db(db_path)
+    cols = ", ".join(_SNAPSHOT_COLUMNS)
+    placeholders = ", ".join("?" * len(_SNAPSHOT_COLUMNS))
+    payload = [tuple(row.get(col) for col in _SNAPSHOT_COLUMNS) for row in rows]
+    conn = _connect(db_path)
+    try:
+        conn.executemany(
+            # 列名/占位符均为模块常量生成，值全参数化（无外部拼接）
+            f"INSERT OR REPLACE INTO market_snapshot ({cols}) VALUES ({placeholders})",  # noqa: S608
+            payload,
+        )
+        conn.commit()
+        return len(payload)
+    finally:
+        conn.close()
+
+
 def apply_rebase(
     code: str, factor: float, before_date: str, db_path: str | Path | None = None
 ) -> int:

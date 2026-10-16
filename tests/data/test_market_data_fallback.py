@@ -284,12 +284,13 @@ class TestFetchSymbolHistoryRawQfqFallback:
         out = client.fetch_symbol_history_raw_qfq("600519", "20261001", "20261014")
 
         assert out is not None
-        assert list(out.columns) == ["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量"]
+        assert list(out.columns) == ["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量", "成交额"]
         assert list(out["日期"]) == [date(2026, 10, 10), date(2026, 10, 13)]  # 10-14 仅 qfq 有
         assert list(out["开盘"]) == [9.9, 10.0]
         assert list(out["收盘_raw"]) == [9.8, 10.5]
         assert list(out["收盘_qfq"]) == [9.0, 9.6]
         assert list(out["成交量"]) == [1000.0, 1200.0]  # 股 → 手（÷100）
+        assert list(out["成交额"]) == [980000.0, 1250000.0]  # 元，raw 腿直通（取 raw 口径）
 
         assert mock_ak.stock_zh_a_hist.call_count == 1  # raw 失败不浪费 qfq 腿
         calls = mock_ak.stock_zh_a_daily.call_args_list
@@ -317,6 +318,7 @@ class TestFetchSymbolHistoryRawQfqFallback:
                 "开盘": [9.9],
                 "收盘": [9.8],
                 "成交量": [1000.0],
+                "成交额": [2_000_000.0],
             }
         )
         raw, qfq = self._sina_pair()
@@ -329,6 +331,43 @@ class TestFetchSymbolHistoryRawQfqFallback:
         assert list(out["收盘_qfq"]) == [9.0, 9.6]  # 来自新浪腿
         assert mock_ak.stock_zh_a_hist.call_count == 2
         assert mock_ak.stock_zh_a_daily.call_count == 2
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_eastmoney_success_includes_amount_six_columns(self, mock_ak, client):
+        """东财双口径成功：出口六列契约（成交额取 raw 腿，元直通）。"""
+        em_raw = pd.DataFrame(
+            {
+                "日期": [date(2026, 10, 10), date(2026, 10, 13)],
+                "开盘": [9.9, 10.0],
+                "收盘": [9.8, 10.5],
+                "成交量": [1000.0, 1200.0],
+                "成交额": [2_000_000.0, 2_600_000.0],
+            }
+        )
+        em_qfq = pd.DataFrame(
+            {
+                "日期": [date(2026, 10, 10), date(2026, 10, 13)],
+                "收盘": [9.0, 9.6],
+            }
+        )
+        mock_ak.stock_zh_a_hist.side_effect = [em_raw, em_qfq]
+
+        out = client.fetch_symbol_history_raw_qfq("600519", "20261001", "20261014")
+
+        assert out is not None
+        assert list(out.columns) == ["日期", "开盘", "收盘_raw", "收盘_qfq", "成交量", "成交额"]
+        assert list(out["成交额"]) == [2_000_000.0, 2_600_000.0]
+        assert mock_ak.stock_zh_a_daily.call_count == 0  # 主源成功不触回退
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_sina_missing_amount_returns_none(self, mock_ak, client):
+        """新浪 raw 腿缺 amount 列 → None（不产出半口径数据，spec 场景「源缺成交额按失败处理」）。"""
+        raw, qfq = self._sina_pair()
+        raw = raw.drop(columns=["amount"])
+        mock_ak.stock_zh_a_hist.return_value = None
+        mock_ak.stock_zh_a_daily.side_effect = [raw, qfq]
+
+        assert client.fetch_symbol_history_raw_qfq("600519", "20261001", "20261014") is None
 
     @patch("finance_agent.data.akshare_client.ak")
     def test_both_sources_fail_returns_none(self, mock_ak, client):
