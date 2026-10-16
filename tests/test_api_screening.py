@@ -682,3 +682,65 @@ def test_analyze_endpoint_reads_snapshot_through_env_path(pool_seed, monkeypatch
     body = TestClient(app).post("/api/screening/analyze", json={}).json()
 
     assert [item["symbol"] for item in body["removed"]] == ["600005"]
+
+
+# ── 降级披露（add-screening-empty-library-fallback T4） ─────────────────────
+
+
+def _seed_fallback_batch(db_path) -> None:
+    record_screening_batch(
+        _AS_OF,
+        status="ok",
+        started_at="2026-10-13T15:30:00",
+        finished_at="2026-10-13T15:33:00",
+        l1_passed=20,
+        l2_top=10,
+        l3_keep=3,
+        pool_rows=_pool_rows(3),
+        selection_mode="fallback",
+        db_path=db_path,
+    )
+
+
+def test_pool_payload_discloses_fallback_mode(_screening_db) -> None:
+    """降级批次：池载荷含 selection_mode=fallback 与「非因子信号」披露文案。"""
+    _seed_fallback_batch(_screening_db)
+    body = TestClient(app).get("/api/screening/pool").json()
+
+    assert body["selection_mode"] == "fallback"
+    assert "非因子信号" in body["notice"]
+
+
+def test_pool_payload_factor_mode_has_no_notice(pool_seed) -> None:
+    body = TestClient(app).get("/api/screening/pool").json()
+
+    assert body["selection_mode"] == "factor"
+    assert body["notice"] is None
+
+
+def test_batches_endpoint_includes_selection_mode(_screening_db) -> None:
+    _seed_fallback_batch(_screening_db)
+    rows = TestClient(app).get("/api/screening/batches").json()
+
+    assert rows and rows[0]["selection_mode"] == "fallback"
+
+
+def test_seed_screening_accepts_selection_mode(testing_client, _screening_db) -> None:
+    """E2E 造数通道支持 selection_mode（页面降级横幅造态用）。"""
+    resp = testing_client.post(
+        "/api/test/seed",
+        json={
+            "screening": {
+                "batch": {
+                    "trade_date": _AS_OF,
+                    "status": "ok",
+                    "selection_mode": "fallback",
+                }
+            }
+        },
+    )
+
+    assert resp.status_code == 200
+    body = TestClient(app).get("/api/screening/pool").json()
+    assert body["selection_mode"] == "fallback"
+    assert "非因子信号" in body["notice"]

@@ -603,3 +603,72 @@ def test_freshness_clean_symbols_return_empty() -> None:
     rows = {"600519": _fresh_row()}
 
     assert _freshness(["600519"], rows, {"600519": []}) == []
+
+
+# ── 降级通道（add-screening-empty-library-fallback T2） ─────────────────────
+
+
+def test_empty_library_falls_back_to_liquidity_ranking(ws: _Workspace) -> None:
+    """库空 → L2 显式跳过：批次 ok + selection_mode=fallback + L2 名单/池照常产出。"""
+    _seed_pool_days(ws)
+    empty_library = ws.root / "empty_factor_library.db"
+
+    result = _run(ws, library_db_path=empty_library)
+
+    assert result["status"] == "ok"
+    assert result["selection_mode"] == "fallback"
+    assert result["l1_passed"] == 3
+    assert result["l2_top"] == 3
+    assert result["pool_size"] == 2  # 在榜门槛照常累计（降级名单同契约落库）
+
+    batch = latest_screening_batch(db_path=ws.screening_db)
+    assert batch is not None and batch["selection_mode"] == "fallback"
+
+    # L2 名单 = 流动性降序（amount 100/101/102 百万 → 300750 > 000001 > 600519）
+    l2_rows = list_l2_candidates(_AS_OF, db_path=ws.screening_db)
+    ranks = {row["symbol"]: row["rank"] for row in l2_rows}
+    assert ranks == {"300750": 1, "000001": 2, "600519": 3}
+    scores = {row["symbol"]: row["composite_score"] for row in l2_rows}
+    assert scores["300750"] == pytest.approx(102_000_000.0)
+
+    pool = list_selection_pool(_AS_OF, db_path=ws.screening_db)
+    assert {row["symbol"] for row in pool} == {"600519", "000001"}
+    assert all(row["factor_contribs"] == [] for row in pool)  # 无因子参与
+
+
+def test_factors_without_ic_records_fall_back(ws: _Workspace) -> None:
+    """库有 active 因子但无 IC 记录（监控未写入）→ 同走降级（镜像打分器拒绝条件）。"""
+    library_no_ic = ws.root / "no_ic_factor_library.db"
+    add_factor(
+        expression="close",
+        hypothesis="测试假设文本（≥30 字长度达标的合成因子说明）",
+        category="builtin",
+        status="active",
+        db_path=library_no_ic,
+    )
+    result = _run(ws, library_db_path=library_no_ic)
+    assert result["status"] == "ok"
+    assert result["selection_mode"] == "fallback"
+
+
+def test_factor_mode_regression_and_batch_tag(ws: _Workspace) -> None:
+    """库有可打分因子 → factor 模式（回归钉死）：批次标注 factor 且贡献分解在。"""
+    _seed_pool_days(ws)
+    result = _run(ws)
+    assert result["selection_mode"] == "factor"
+    batch = latest_screening_batch(db_path=ws.screening_db)
+    assert batch is not None and batch["selection_mode"] == "factor"
+    pool = list_selection_pool(_AS_OF, db_path=ws.screening_db)
+    assert pool and pool[0]["factor_contribs"]
+
+
+def test_fallback_with_l3_gateway_down_still_fails_closed(ws: _Workspace) -> None:
+    """降级不吞失败：库空 + L3 网关整体不可用 → 批次 failed、零池（fail-closed 不放宽）。"""
+    result = _run(
+        ws,
+        library_db_path=ws.root / "empty_factor_library.db",
+        triage_client=_ScriptedClient(fail_all=True),
+    )
+    assert result["status"] == "failed"
+    assert "L3" in str(result["error"])
+    assert _count(ws.screening_db, "SELECT COUNT(*) FROM selection_pool") == 0

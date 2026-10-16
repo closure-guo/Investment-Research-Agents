@@ -823,6 +823,10 @@ export interface ScreeningPoolResponse {
   batch_date: string | null
   batch_status: string | null
   stale: boolean
+  // 选择模式（add-screening-empty-library-fallback）：fallback = 降级模式（无因子信号）
+  selection_mode: 'factor' | 'fallback' | null
+  // 降级披露文案（后端单源；fallback 时非空，明示「非因子信号」）
+  notice: string | null
   pool: ScreeningPoolRow[]
   queue: ScreeningQueueEntry[]
 }

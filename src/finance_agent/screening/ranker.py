@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -242,3 +242,66 @@ def _cross_section_zscores(values: pd.Series) -> dict[str, float]:
     finite = numeric.where(np.isfinite(numeric))
     zscores = cross_section_zscore(finite.to_frame().T).iloc[0].fillna(0.0)
     return {str(symbol): float(value) for symbol, value in zscores.items()}
+
+
+# ── 降级通道（add-screening-empty-library-fallback） ─────────────────────────
+
+
+def has_scorable_factors(factors: Sequence[dict], ic_stats: dict[int, tuple[float, float]]) -> bool:
+    """L2 是否可打分：存在因子且 ``Σ|IC 均值| ≥ 阈值``（与 ``factor_weights`` 同一拒绝条件）。
+
+    降级通道触发谓词（pipeline 消费）：``False`` = 无 active 因子或全部因子无有效
+    IC 记录——此时 ``rank_universe`` 必拒（fail loud 语义不变），调用方改走显式
+    降级；非有限 IC 均值（数据错误）返回 ``True``，交回打分路径原样抛错
+    （降级 MUST NOT 吞掉数据错误）。
+    """
+    total = 0.0
+    for row in factors:
+        raw_mean, _icir = ic_stats.get(int(row["id"]), (0.0, 0.0))
+        ic_mean = float(raw_mean)
+        if not math.isfinite(ic_mean):
+            return True  # 数据错误：交回打分路径 fail loud（不因坏值触发降级）
+        total += abs(ic_mean)
+    return total >= _MIN_ABSOLUTE_IC_TOTAL
+
+
+def liquidity_fallback_rank(
+    *,
+    amounts_by_code: Mapping[str, Sequence[float]],
+    passed_codes: Sequence[str],
+    as_of: str,
+    top_n: int = 100,
+) -> list[Candidate]:
+    """降级排序：近 N 日日均成交额降序（同额 symbol 升序）→ Top-N ``Candidate``。
+
+    无可打分因子时的过渡排序（spec「无可打分因子降级通道」）：``composite_score``
+    = 日均成交额（元，语义为过渡排序键而非因子综合分）；``factor_contribs = ()``
+    （无因子参与）；窗口含非有限值/空窗口 → 剔除（fail-closed 不猜，与 L1
+    ``DATA_MISSING`` 同纪律）；全确定性（两次调用逐项相等）。
+    """
+    if not isinstance(top_n, int) or isinstance(top_n, bool) or top_n < 1:
+        raise ValueError(f"top_n 必须是正整数: {top_n!r}")
+    counts = Counter(passed_codes)
+    duplicated = sorted(code for code, count in counts.items() if count > 1)
+    if duplicated:
+        raise ValueError(f"passed_codes 重复: {duplicated}")
+    scored: list[tuple[str, float]] = []
+    for code in passed_codes:
+        window = amounts_by_code.get(code)
+        if not window:
+            continue
+        values = [float(value) for value in window]
+        if not all(math.isfinite(value) for value in values):
+            continue
+        scored.append((code, math.fsum(values) / len(values)))
+    scored.sort(key=lambda item: (-item[1], item[0]))
+    return [
+        Candidate(
+            symbol=code,
+            trade_date=as_of,
+            composite_score=score,
+            factor_contribs=(),
+            rank=rank,
+        )
+        for rank, (code, score) in enumerate(scored[:top_n], start=1)
+    ]

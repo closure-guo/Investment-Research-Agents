@@ -1030,6 +1030,7 @@ if TESTING:
                         l2_top=history_row.get("l2_top", 0),
                         l3_keep=history_row.get("l3_keep", 0),
                         pool_rows=history_row.get("pool") or [],
+                        selection_mode=history_row.get("selection_mode", "factor"),
                     )
             batch_seed = screening_seed.get("batch")
             if isinstance(batch_seed, dict):
@@ -1044,6 +1045,7 @@ if TESTING:
                     l2_top=batch_seed.get("l2_top", 0),
                     l3_keep=batch_seed.get("l3_keep", 0),
                     pool_rows=screening_seed.get("pool") or [],
+                    selection_mode=batch_seed.get("selection_mode", "factor"),
                 )
             queue_seed = screening_seed.get("queue")
             if isinstance(queue_seed, list):
@@ -3252,15 +3254,29 @@ def _reset_analyze_queue() -> None:
     _analyze_queue = None
 
 
+# 降级披露文案（add-screening-empty-library-fallback：单源在后端，前端原样渲染；
+# MUST 明示「非因子信号」——spec「无可打分因子降级通道」披露义务）
+_SCREENING_FALLBACK_NOTICE = (
+    "因子库无可打分因子：本次为降级模式，按近 20 日日均成交额排序（非因子信号）"
+)
+
+
 def _screening_pool_payload(queue_snapshot: list[dict]) -> dict[str, Any]:
-    """池端点载荷（同步体，供 to_thread 包裹）：最近成功池 + 最近尝试状态 + 队列。"""
+    """池端点载荷（同步体，供 to_thread 包裹）：最近成功池 + 最近尝试状态 + 队列。
+
+    披露（add-screening-empty-library-fallback）：``selection_mode`` 取自最近成功
+    批次；``fallback`` 时附 ``notice``（明示非因子信号），``factor`` 时为 ``None``。
+    """
     latest = latest_screening_batch()
     successful = latest_successful_pool()
+    selection_mode = successful["batch"].get("selection_mode") if successful else None
     return {
         "batch_date": successful["batch"]["trade_date"] if successful else None,
         "batch_status": latest["status"] if latest else None,
         # 最近一次尝试非 ok（含失败）→ stale：页面横幅可见，池仍展示最近成功批次
         "stale": bool(latest is not None and latest["status"] != "ok"),
+        "selection_mode": selection_mode,
+        "notice": _SCREENING_FALLBACK_NOTICE if selection_mode == "fallback" else None,
         "pool": successful["pool"] if successful else [],
         "queue": queue_snapshot,
     }

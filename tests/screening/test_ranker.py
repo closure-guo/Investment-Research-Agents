@@ -31,6 +31,8 @@ from finance_agent.factors.library import add_factor, list_factors, record_ic
 from finance_agent.screening.ranker import (
     Candidate,
     factor_weights,
+    has_scorable_factors,
+    liquidity_fallback_rank,
     rank_universe,
     recent_ic_stats,
 )
@@ -622,3 +624,88 @@ def test_recent_ic_stats_rejects_invalid_window(tmp_path) -> None:
     db = str(tmp_path / "factor_library.db")
     with pytest.raises(ValueError, match="window"):
         recent_ic_stats([], window=0, db_path=db)
+
+
+# ── 降级通道（add-screening-empty-library-fallback T1） ─────────────────────
+
+
+def test_has_scorable_factors_mirrors_ranker_refusal_condition() -> None:
+    """谓词镜像 L2 拒绝条件：无因子/全零 IC → False；任一 |IC 均值| 非零 → True。"""
+    factors = [_factor(1, "close"), _factor(2, "volume")]
+    assert has_scorable_factors([], {}) is False
+    assert has_scorable_factors(factors, {1: (0.0, 0.0), 2: (0.0, 0.0)}) is False
+    assert has_scorable_factors(factors, {}) is False  # IC 记录缺失按 0 计
+    assert has_scorable_factors(factors, {1: (0.0, 0.0), 2: (0.01, 0.3)}) is True
+    assert has_scorable_factors(factors, {1: (-0.02, -0.5)}) is True  # 负 IC 同样可打分
+    # 非有限 IC 属数据错误：谓词判可打分 → 交回打分路径 fail loud（降级不吞数据错误）
+    assert has_scorable_factors(factors, {1: (math.nan, 0.0)}) is True
+    assert has_scorable_factors(factors, {1: (math.inf, 0.0)}) is True
+
+
+def test_has_scorable_factors_boundary_pinned() -> None:
+    """谓词边界钉死：Σ|IC| 恰等于阈值 → 可打分（>= 语义，与 factor_weights 的 < 拒绝对偶）。"""
+    factors = [_factor(1, "close")]
+    assert has_scorable_factors(factors, {1: (1e-12, 0.0)}) is True
+    assert has_scorable_factors(factors, {1: (0.5e-12, 0.0)}) is False
+
+
+def test_liquidity_fallback_rank_by_mean_amount_desc_with_symbol_tiebreak() -> None:
+    """近 N 日日均成交额降序；同额按 symbol 升序；score=日均成交额、contribs 为空。"""
+    amounts = {
+        "b": [50.0, 70.0],
+        "a": [10.0, 20.0],
+        "c": [1.0, 1.0],
+        "d": [15.0, 15.0],
+    }
+    candidates = liquidity_fallback_rank(
+        amounts_by_code=amounts,
+        passed_codes=["b", "a", "c", "d"],
+        as_of=_AS_OF,
+        top_n=10,
+    )
+    # d 与 a 同额（15.0）→ symbol 升序 a 在前
+    assert [candidate.symbol for candidate in candidates] == ["b", "a", "d", "c"]
+    assert [candidate.rank for candidate in candidates] == [1, 2, 3, 4]
+    assert candidates[0].composite_score == pytest.approx(60.0)
+    assert candidates[2].composite_score == pytest.approx(15.0)
+    assert all(candidate.trade_date == _AS_OF for candidate in candidates)
+    assert all(candidate.factor_contribs == () for candidate in candidates)
+
+
+def test_liquidity_fallback_rank_top_n_truncation_and_determinism() -> None:
+    amounts = {f"c{index}": [float(index)] for index in range(5)}
+    first = liquidity_fallback_rank(
+        amounts_by_code=amounts, passed_codes=list(amounts), as_of=_AS_OF, top_n=3
+    )
+    second = liquidity_fallback_rank(
+        amounts_by_code=amounts, passed_codes=list(amounts), as_of=_AS_OF, top_n=3
+    )
+    assert [candidate.symbol for candidate in first] == ["c4", "c3", "c2"]
+    assert first == second  # 全确定性：两次调用逐项相等
+
+
+def test_liquidity_fallback_rank_excludes_nonfinite_and_missing_windows() -> None:
+    """窗口含 NaN/±inf 或空窗口 → 剔除（fail-closed 不猜，与 L1 DATA_MISSING 同纪律）。"""
+    amounts = {
+        "ok": [1.0, 3.0],
+        "nan": [1.0, math.nan],
+        "inf": [1.0, math.inf],
+        "empty": [],
+    }
+    candidates = liquidity_fallback_rank(
+        amounts_by_code=amounts,
+        passed_codes=["ok", "nan", "inf", "empty"],
+        as_of=_AS_OF,
+        top_n=10,
+    )
+    assert [candidate.symbol for candidate in candidates] == ["ok"]
+
+
+def test_liquidity_fallback_rank_empty_and_guards() -> None:
+    assert liquidity_fallback_rank(amounts_by_code={}, passed_codes=[], as_of=_AS_OF) == []
+    with pytest.raises(ValueError, match="top_n"):
+        liquidity_fallback_rank(
+            amounts_by_code={"a": [1.0]}, passed_codes=["a"], as_of=_AS_OF, top_n=0
+        )
+    with pytest.raises(ValueError, match="重复"):
+        liquidity_fallback_rank(amounts_by_code={"a": [1.0]}, passed_codes=["a", "a"], as_of=_AS_OF)
