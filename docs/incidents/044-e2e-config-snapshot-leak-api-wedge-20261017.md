@@ -1,9 +1,9 @@
-# 044：E2E 隔离配置缺 SNAPSHOT_DB_PATH → 跨挂载 SQLite 争用 → 生产后端 API 整体卡死
+# 044：uvicorn --reload 优雅停机等待运行中分析 → 生产 API 整体卡死（同窗口附带暴露：E2E 配置缺快照隔离）
 
 - 日期：2026-10-17
-- 状态：**已修复**（7 个 E2E 配置补快照隔离 + 套件复跑验证）；遗留：隔离清单门禁（建议项）
-- 关联：incident 043 / issue #344（同一「bind mount 上 SQLite 跨进程争用」家族的**读侧变体**）、
-  incident 038（E2E 打穿生产的另一形态：默认套件经 vite 代理命中生产后端）
+- 状态：**机制已定论**（reload 等待——纪律修复为主）；附带缺陷已修复（7 个 E2E 配置补快照隔离）
+- 关联：incident 043 / issue #344（SQLite 跨挂载争用家族——本事件的**次发现**属该家族读侧变体）、
+  incident 038（E2E 打穿生产的另一形态）
 
 ## 现象（2026-10-17 ~03:2x）
 
@@ -27,37 +27,46 @@
 - 重启后端恢复；run 109 由悬挂清扫按 `stale_process_restart` 收尾（failed）；601058 会话
   `interrupted`；今日 cohort 计数 7 completed + 1 interrupted（重跑 110 按 `duplicate` 去重只补缺失票）。
 
-## 根因（证据链）
+## 根因（两度实证，机制定论）
 
-**E2E 隔离配置缺 `SNAPSHOT_DB_PATH` → 其 webServer 后端默认读生产快照库 → 与生产容器
-跨挂载并发打开同一 SQLite 文件 → 生产容器读侧失败并拖垮 API。**
+**主机制（API 卡死）：`uvicorn --reload` 优雅停机无限等待运行中的分析后台任务。**
 
-1. **配置缺口**：`playwright.isolated.config.ts` 与 `playwright.timeline.config.ts`（三对后端
-   8001/8002/8003）以及 `debug/manual/resilience/eval-ops/track-record` 共 7 个配置**未设**
-   `SNAPSHOT_DB_PATH`（`playwright.config.ts` / `ui-baseline` 有）。未设时后端按代码默认读
-   `data/market_snapshot.db`——bind mount 与生产容器共享的**生产快照库**。
-2. **CI 从未暴露**：CI 工作区无 `data/market_snapshot.db`（gitignore）→ 这些配置在 CI 的
-   实际行为=空快照，从不接触生产库；**本机（Docker 栈在线）跑这些套件即命中**。
-3. **争用形态**：与 incident 043 / #344 同族——宿主侧进程与容器进程跨 bind mount 打开同一
-   SQLite 文件，WAL/锁语义在 9p/virtiofs 上不可靠；#344 记录的是**写侧**（回填使容器读全不可用），
-   本次为**读侧**（E2E 后端读生产库使容器读失败）。
-4. **卡死机制（推断，未取到线程栈）**：容器缺少 ptrace 能力（py-spy attach 失败）未获栈；
-   按证据（API 全挂 + 后台线程仍活 + 挂载 I/O 失败）最可能为**执行器线程在挂载 I/O 上阻塞 →
-   `asyncio.to_thread` 队列耗尽 → 所有走线程池的端点排队死等**。精确机制待下次复发时以
-   `cap_add: SYS_PTRACE` + py-spy 复现取证。
+1. 后端以 `--reload` 启动且 `src/` 为 bind mount；宿主侧任何 src 文件写入会触发 watchfiles
+   （**注意：与既有记忆「WSL2 bind mount 下 inotify 不传播、宿主机改码不触发 reload」相悖——
+   watchfiles 实际检测到了，疑走轮询回退**）。
+2. 本窗口内的触发源（日志逐条留档）：并发会话的 WIP 编辑（`litellm_adapter.py` / `report.py`）
+   + **本会话在共享主检出的分支切换**（`akshare_client.py` 等随 checkout 重写）。
+3. 触发后 uvicorn `Shutting down` → **`Waiting for background tasks to complete. (CTRL+C to
+   force quit)`** ——此时 cohort 分析正在进程内运行（~10-20 分钟级），优雅停机等它完成；
+   **停机期间 worker 不再接受/服务请求 → API 全端点停摆**。
+4. 证据：首次卡死日志第 2486–2488 行（litellm_adapter 变更 → Shutting down → Waiting…）；
+   本事件复盘时**实时复现同型**（第二次 reload 等待，`/api/sessions` 30s+ 超时）。
+   分析完成后 reload 自愈（无需重启；本次重启属恢复处置）。
 
+**次发现（独立缺陷，同窗口暴露，已修复）：7 个 E2E 配置缺 `SNAPSHOT_DB_PATH`。**
+
+- `isolated`/`timeline`（三对后端）/`debug`/`manual`/`resilience`/`eval-ops`/`track-record` 未设
+  → 未设时后端默认读 `data/market_snapshot.db`（生产快照，bind mount 共享）→ 本机跑这些套件
+  时与容器跨挂载争用（#344 家族读侧）→ 26 处 `unable to open database file` traceback
+  （快照状态端点降级返回 200，**未 500**）。
+- CI 从未暴露：CI 工作区无生产快照（gitignore）→ 这些配置在 CI 行为=空快照。
+- **与 API 卡死的关系**：tracebacks 是争用证据但非停摆机制（降级路径正常）；停摆由 reload
+  等待解释。两事同窗口叠加，处置上分列。
 ## 修复与防护
 
-- **已修复**：7 个配置全部补 `SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db'`（与默认 config
-  同口径；debug/manual 不 spawn 后端无需）；修复后 timeline 套件全量复跑验证（读数随 PR）。
-- **建议门禁（待落）**：脚本级「隔离清单」校验——遍历 `playwright*.config.ts` 断言每个
-  spawn 后端的 env 覆盖六库（SESSIONS/SNAPSHOT/SCREENING/FACTOR_LIBRARY/EXECUTION/REPORTS），
-  CI 执行；防同类新配置再漏。
-- **操作纪律（本次强化）**：本机跑任何 E2E 配置前，核对其 `SNAPSHOT_DB_PATH` 已隔离
-  （与 incident 038 的「先查端口占用」并列）。
+- **纪律（主修复）**：
+  1. **栈在跑分析时，共享主检出不得切分支/改 `src/` 文件**——实现改动一律走 worktree（并发会话
+     记忆已有此条，本次升级为「reload 会真触发且卡死」实证）；
+  2. 与并发会话并存时，任何宿主机 src 写入都视为「可能触发 reload 停机窗」——避开日批/cohort 时段。
+- **已修复（附带缺陷）**：7 个配置补 `SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db'`（与默认
+  config 同口径）；修复后 timeline 套件全量复跑 31 passed / 0 failed 验证。
+- **建议门禁（待落）**：
+  1. 隔离清单校验（遍历 `playwright*.config.ts` 断言六库 env 覆盖，CI 执行）；
+  2. reload 行为治理（部署形态评估：分析期禁 reload / `--reload` 换显式重启流程）；
+  3. `cap_add: SYS_PTRACE`（下次复现取证用）。
 
 ## 影响与损失
 
-- 生产 API 不可用窗口 ~40–60 分钟（凌晨，无用户在线影响；前端轮询降级自愈）；
+- 生产 API 不可用窗口合计 ~40–60 分钟（两段 reload 等待；凌晨无用户在线影响）；
 - cohort 10-16 批次 7/10 完成 + 1 interrupted + 2 未跑（重跑 110 去重补缺）；
 - 快照库零损伤（只读争用，无写入）。
