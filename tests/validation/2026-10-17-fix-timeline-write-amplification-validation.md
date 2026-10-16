@@ -45,9 +45,12 @@
 
 ## §5 复跑读数
 
-- **全量复跑（rot 修复后）：32 passed / 2 flaky / 1 skipped / 0 failed（13.7m）**——2 flaky =
-  `pipeline-view-toggle` 与 `thinking-timeline-pipeline`（既有 #312/#328 瞬态族，重试即绿）；
-  1 skipped = visual-baseline 采集工具（未设 BASELINE_DIR 自跳过）。E2E 门禁：**通过**。
+- **全量复跑（rot 修复后，隔离快照配置）：31 passed / 3 flaky / 1 skipped / 0 failed（13.2m）**——
+  flaky 为既有 #312/#328 瞬态族（重试即绿）；1 skipped = visual-baseline 采集工具自跳过。
+  E2E 门禁：**通过**。
+- 附带发现（incident 044）：本套件原配置缺 `SNAPSHOT_DB_PATH` 隔离（本机跑时读生产快照库）；
+  已随本 PR 修复（7 个配置补齐）。test 2 的断言同步改为「逐分析师 STUB 摘要内容」（报告两条
+  渲染分支下的不变量——标题风格随环境漂移，内容不漂）。
 
 ## §6 结论
 

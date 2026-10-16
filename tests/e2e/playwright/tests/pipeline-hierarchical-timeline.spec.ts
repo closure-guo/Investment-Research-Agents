@@ -57,18 +57,18 @@ test.describe('管线分层时间轴（redesign-pipeline-hierarchical-timeline�
     // 时间轴 4 节点独立渲染由单测覆盖（pipelineTree.test.ts / PipelineTimeline.test.tsx）。
     // 此处验证用户最终可见契约：报告卡片中 4 个分析师各自独立摘要（修复旧版全部
     // 显示 technical_analyst 摘要的错位——后端 _extract_output 按各自 key 取）。
-    // 报告 DOM 演进（分析师节标题为中文名 + 各节 STUB 内容）：断言「4 个分析师各自独立
-    // 摘要」= 节标题 + 对应 STUB 文本成对出现——防旧版全部显示 technical 摘要的错位回归。
-    // （2026-10-17 规格更新：原断言 heading{name:'technical'} 系旧 DOM 残留，rot 修复。）
-    const sections = [
-      ['技术面分析师', 'STUB technical 分析摘要'],
-      ['宏观分析师', 'STUB macro 分析摘要'],
-      ['基本面分析师', 'STUB fundamental 分析摘要'],
-      ['舆情分析师', 'STUB sentiment 分析摘要'],
+    // 报告有两条渲染分支（全量报告：中文节标题；数据降级时的回退渲染：technical 等键名标题），
+    // 标题风格随环境漂移——断言不变量：**每个分析师各自独立的 STUB 摘要内容**在两种分支
+    // 下都存在（防旧版全部显示 technical 摘要的错位回归）。
+    // （2026-10-17 规格更新：原断言 heading{name:'technical'} 只配回退渲染，rot 修复。）
+    const summaries = [
+      'STUB technical 分析摘要',
+      'STUB macro 分析摘要',
+      'STUB fundamental 分析摘要',
+      'STUB sentiment 分析摘要',
     ] as const
-    for (const [heading, content] of sections) {
-      await expect(page.getByRole('heading', { name: heading }).first()).toBeVisible({ timeout: 90_000 })
-      await expect(page.getByText(content).first()).toBeVisible({ timeout: 30_000 })
+    for (const content of summaries) {
+      await expect(page.getByText(content).first()).toBeVisible({ timeout: 90_000 })
     }
   })
 

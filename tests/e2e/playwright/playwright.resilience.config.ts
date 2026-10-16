@@ -25,7 +25,7 @@ export default defineConfig({
   webServer: [
     {
       command: 'uv run uvicorn finance_agent.api:app --port 8002',
-      env: { TESTING: '1', STUB_SCENARIO: 'pipeline', STUB_NODE_DELAY: '1.5', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', REPORTS_DIR: 'tmp/e2e-reports-8002' },
+      env: { TESTING: '1', STUB_SCENARIO: 'pipeline', STUB_NODE_DELAY: '1.5', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', REPORTS_DIR: 'tmp/e2e-reports-8002' },
       url: 'http://localhost:8002/api/health',
       timeout: 30_000,
       reuseExistingServer: true,

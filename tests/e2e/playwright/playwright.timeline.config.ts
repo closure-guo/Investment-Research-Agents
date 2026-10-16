@@ -75,7 +75,7 @@ export default defineConfig({
     {
       // 后端：TESTING=1 + STUB_SCENARIO=tool_call，确定性模拟思考-搜索-思考
       command: 'uv run uvicorn finance_agent.api:app --port 8001',
-      env: { TESTING: '1', STUB_SCENARIO: 'tool_call', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', REPORTS_DIR: 'tmp/e2e-reports-8001' },
+      env: { TESTING: '1', STUB_SCENARIO: 'tool_call', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', REPORTS_DIR: 'tmp/e2e-reports-8001' },
       url: 'http://localhost:8001/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
@@ -96,7 +96,7 @@ export default defineConfig({
     // 与 tool_call 场景隔离：两组后端 STUB_SCENARIO 不同，不能共用端口。
     {
       command: 'uv run uvicorn finance_agent.api:app --port 8002',
-      env: { TESTING: '1', STUB_SCENARIO: 'pipeline', STUB_NODE_DELAY: '1.5', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', REPORTS_DIR: 'tmp/e2e-reports-8002' },
+      env: { TESTING: '1', STUB_SCENARIO: 'pipeline', STUB_NODE_DELAY: '1.5', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', REPORTS_DIR: 'tmp/e2e-reports-8002' },
       url: 'http://localhost:8002/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
@@ -115,7 +115,7 @@ export default defineConfig({
     // LLM 在第 1 轮 raise 异常，验证前端展示错误信息而非无限等待。
     {
       command: 'uv run uvicorn finance_agent.api:app --port 8003',
-      env: { TESTING: '1', STUB_SCENARIO: 'llm_failure', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', REPORTS_DIR: 'tmp/e2e-reports-8003' },
+      env: { TESTING: '1', STUB_SCENARIO: 'llm_failure', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', REPORTS_DIR: 'tmp/e2e-reports-8003' },
       url: 'http://localhost:8003/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,

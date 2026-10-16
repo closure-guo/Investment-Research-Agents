@@ -43,6 +43,7 @@ export default defineConfig({
       env: {
         TESTING: '1',
         SESSIONS_DB_PATH: 'data/test-e2e-eval-ops.db',
+        SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db',
         REPORTS_DIR: 'tmp/e2e-reports-8005',
         COHORT_ENABLED: '0',
       },
