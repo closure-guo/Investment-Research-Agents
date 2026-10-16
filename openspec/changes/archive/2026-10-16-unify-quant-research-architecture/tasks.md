@@ -18,13 +18,13 @@
 
 - [x] 先红后绿：外部候选导入入口（脚本 `scripts/import_external_factors.py` + `factors/external.py` 通道——事件驱动无排程，审计走 factor_events + 脚本摘要）→ `source="external"` 过同一五道闸；不可解析计 `errors` 桶；摘要同本地口径
 - [x] 拒收原因回喂：深度改进提案上下文注入本批+近 3 次运行历史 gate/reason 聚合分布 + degraded 复盘（空时如实标注）；**核对结果：深度路径（`propose_deep_improvement`）此前无生产调用方（休眠）——已接线入月批（依序广度→深度，两批各自过闸），spec「提案月批排程」MODIFIED**
-- [ ] RD-Agent spike（投用前置，六步走，报告落 `tests/validation/`）：
-      ① 环境：WSL2 Ubuntu 发行版 + Docker Desktop 集成 + 独立 venv（Python 3.10–3.12；**不进**项目 3.14 环境）
-      ② 数据：Qlib 侧先用社区数据集 `chenditc/investment_data`（A 股 qlib_bin）——**不先做自有导出器**；社区数据质量/更新节奏不足时再另立「SQLite→Qlib 导出器」delta
-      ③ 运行：`rdagent fin_factor` 单循环真实跑（LLM 走 LiteLLM，接现有网关/DeepSeek 配置）
-      ④ 翻译：按「外部表达式翻译契约」TDD 实现翻译器（二值裁决/映射表可审计/拒绝猜测翻译；算子覆盖表与不可翻译清单随报告）
-      ⑤ 导入过闸：翻译产出经导入通道过五道闸，逐条读数（过闸率/拒收原因分布）落报告
-      ⑥ 结论：供给线③是否投用——不达标则导入通道保留、供给线不投用（架构零改动）
+- [x] RD-Agent spike（投用前置，六步走，报告落 `tests/validation/2026-10-16-rdagent-spike-validation.md`）：
+      ① 环境：WSL2 Ubuntu 发行版 + Docker Desktop 集成（GUI 勾选解锁 socket）+ 独立 conda env（py3.10 / pyqlib 0.9.7；**不进**项目 3.14 环境）
+      ② 数据：Qlib 侧先用社区数据集 `chenditc/investment_data`（A 股 qlib_bin，850MB）——**不先做自有导出器**
+      ③ 运行：`rdagent fin_factor` 单循环真实跑 5/5 步（LLM 走 LiteLLM→bigmodel glm-5.3-flash；Volatility_20 判 SUCCESS、47,378 非空因子值）
+      ④ 翻译：按「外部表达式翻译契约」TDD 实现翻译器（spike 工具 `tests/scripts/spike/qlib_translate.py`，23/23 绿；映射表 43 算子+7 字段，pyqlib 0.9.7 源码逐条核对；**规格场景例修正**：`Rank` 经源码核对为滚动秩（等价 `ts_rank`）→ 不可翻译例改 `Quantile`）
+      ⑤ 导入过闸：4/10 可翻译 → **0/4 过闸**（gate4 NO_POOL_INCREMENT×2 / gate2 WEAK_ICIR×1 / gate1 LOW_COVERAGE×1=回填缺 high/low 归因）；6 条不可翻译按设计入 errors 桶（gate=None）
+      ⑥ 结论：**供给线③不投用（当前形态）**——翻译覆盖 4/10（缺 `ref`）+ 可翻译者 0/4 过闸；导入通道保留、架构零改动；复跑条件=扩 DSL `ref` 后重跑本批输入
 
 ## 收口
 
