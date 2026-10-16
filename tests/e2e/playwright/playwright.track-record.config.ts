@@ -52,6 +52,7 @@ export default defineConfig({
       env: {
         TESTING: '1',
         SESSIONS_DB_PATH: 'data/test-e2e-track-record.db',
+        SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db',
         EXECUTION_DB_PATH: 'data/test-e2e-track-record-execution.db',
         REPORTS_DIR: 'tmp/e2e-reports-8004',
       },
