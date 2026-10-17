@@ -67,6 +67,19 @@ class TestStrictEquivalence:
         assert result.translatable
         assert result.dsl_expression == "ts_rank(close,5)"
 
+    def test_ref_strict_equivalence(self):
+        """Ref = series.shift(N)（ops.py L793），与本 DSL ref 严格等价（无热身期口径差）。
+
+        extend-factor-dsl-ref：Ref 从 missing 翻转为 equivalent——动量/反转族可翻译。
+        """
+        result = translate_qlib_expression("Ref($close, 20)")
+        assert result.translatable
+        assert result.dsl_expression == "ref(close,20)"
+        composite = translate_qlib_expression("$close / Ref($close, 20) - 1")
+        assert composite.translatable
+        assert composite.dsl_expression == "sub(div(close,ref(close,20)),1)"
+        assert any("Ref" in entry and "equivalent" in entry for entry in composite.used_mappings)
+
     def test_translated_output_is_legal_dsl(self):
         """产物必须能过生产解析器（含复杂度上限）——「合法 DSL 表达式」义务。"""
         for source in (
@@ -75,6 +88,7 @@ class TestStrictEquivalence:
             "($close - $low) / ($high - $low)",
             "Rank($close, 5)",
             "Corr($close, $volume, 10)",
+            "$close / Ref($close, 20) - 1",
         ):
             result = translate_qlib_expression(source)
             assert result.translatable
@@ -83,13 +97,6 @@ class TestStrictEquivalence:
 
 class TestUntranslatable:
     """契约场景 2/3：显式不可翻译（算子清单 + 语义差异说明），MUST NOT 猜测。"""
-
-    def test_ref_missing_untranslatable(self):
-        """Ref（后移引用）本 DSL 无对应算子——动量/反转族不可翻译。"""
-        result = translate_qlib_expression("$close / Ref($close, 20) - 1")
-        assert not result.translatable
-        assert result.dsl_expression is None
-        assert any("Ref" in blocker for blocker in result.blockers)
 
     def test_quantile_missing_untranslatable(self):
         result = translate_qlib_expression("Quantile($close, 20)")
@@ -106,14 +113,23 @@ class TestUntranslatable:
         assert any("Max" in entry and "逐元素" in entry for entry in result.used_mappings)
 
     def test_multiple_blockers_listed(self):
+        """Quantile 阻塞、Ref 已可翻译——完整清单只列真阻塞项（extend-factor-dsl-ref 翻转）。"""
         result = translate_qlib_expression("Quantile(Ref($close, 3), 20)")
         assert not result.translatable
         joined = " ".join(result.blockers)
-        assert "Quantile" in joined and "Ref" in joined
+        assert "Quantile" in joined
+        assert "算子 Ref" not in joined
 
     @pytest.mark.parametrize("source", ["Mean($close, 0)", "Mean($close, 0.5)"])
     def test_non_positive_int_window_refused(self, source):
         """N=0 为 expanding、0<N<1 为 ewm（pyqlib Rolling）——语义不同拒绝。"""
+        result = translate_qlib_expression(source)
+        assert not result.translatable
+        assert any("窗口" in blocker for blocker in result.blockers)
+
+    @pytest.mark.parametrize("source", ["Ref($close, 0)", "Ref($close, -5)"])
+    def test_ref_non_positive_window_refused(self, source):
+        """ref 窗口须正整数：N=0 恒等引用、N<0 前瞻引用（未来函数）——均拒收。"""
         result = translate_qlib_expression(source)
         assert not result.translatable
         assert any("窗口" in blocker for blocker in result.blockers)
@@ -160,7 +176,8 @@ class TestMappingTableAudit:
                 assert mapping.note, name
 
     def test_expected_statuses(self):
-        assert OPERATOR_MAPPINGS["Ref"].status == "missing"
+        assert OPERATOR_MAPPINGS["Ref"].status == "equivalent"  # extend-factor-dsl-ref 翻转
+        assert OPERATOR_MAPPINGS["Ref"].dsl_name == "ref"
         assert OPERATOR_MAPPINGS["Max"].status == "not_equivalent"
         assert OPERATOR_MAPPINGS["Min"].status == "not_equivalent"
         assert OPERATOR_MAPPINGS["Mean"].status == "equivalent"

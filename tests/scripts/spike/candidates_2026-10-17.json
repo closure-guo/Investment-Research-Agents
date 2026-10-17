@@ -1,0 +1,134 @@
+[
+ {
+  "name": "ret_1d_reversal",
+  "qlib_expression": "1 - $close / Ref($close, 1)",
+  "formulation": "-(C_t / C_{t-1} - 1)（代数等价改写：1 - C_t/C_{t-1}）",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "mom_5d",
+  "qlib_expression": "$close / Ref($close, 5) - 1",
+  "formulation": "C_t / C_{t-5} - 1",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "vol_ratio_5d",
+  "qlib_expression": "$volume / Mean(Ref($volume, 1), 5) - 1",
+  "formulation": "V_t / (1/5 * sum_{i=1..5} V_{t-i}) - 1（前 5 日均量，不含当日）",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "range_5d",
+  "qlib_expression": "Mean(($high - $low) / $close, 5)",
+  "formulation": "1/5 * sum_{i=0..4} (H_{t-i} - L_{t-i}) / C_{t-i}",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "overnight_gap_1d",
+  "qlib_expression": "$open / Ref($close, 1) - 1",
+  "formulation": "O_t / C_{t-1} - 1",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "klen_1d",
+  "qlib_expression": "($high - $low) / $open",
+  "formulation": "(H_t - L_t) / O_t",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "intraday_ret_1d",
+  "qlib_expression": "$close / $open - 1",
+  "formulation": "C_t / O_t - 1",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "vol_ratio_20d",
+  "qlib_expression": "$volume / Mean(Ref($volume, 1), 20) - 1",
+  "formulation": "V_t / (1/20 * sum_{i=1..20} V_{t-i}) - 1",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "roc_20d",
+  "qlib_expression": "$close / Ref($close, 20) - 1",
+  "formulation": "C_t / C_{t-20} - 1",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "ret_5d_reversal",
+  "qlib_expression": "1 - $close / Ref($close, 5)",
+  "formulation": "-(C_t / C_{t-5} - 1)（代数等价改写：1 - C_t/C_{t-5}）",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "mom_20d",
+  "qlib_expression": "$close / Ref($close, 20) - 1",
+  "formulation": "C_t / C_{t-20} - 1",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "park_vol_10d",
+  "qlib_expression": "Sqrt(Mean(Power(Log($high / $low), 2), 10))",
+  "formulation": "sqrt(1/10 * sum_{i=0..9} (ln(H_{t-i}/L_{t-i}))^2)",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "amihud_illiq_10d",
+  "qlib_expression": "1000000 * Mean(Abs($close / Ref($close, 1) - 1) / ($volume * $close), 10)",
+  "formulation": "10^6 * 1/10 * sum_{i=0..9} |C_{t-i}/C_{t-i-1} - 1| / (V_{t-i} * C_{t-i})",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "vol_ratio_10d",
+  "qlib_expression": "$volume / Mean(Ref($volume, 1), 10) - 1",
+  "formulation": "V_t / (1/10 * sum_{i=1..10} V_{t-i}) - 1",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "max_ret_20d",
+  "qlib_expression": "Max($close / Ref($close, 1) - 1, 20)",
+  "formulation": "max_{i=0..19} (C_{t-i}/C_{t-i-1} - 1)",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "amihud_illiq_20d",
+  "qlib_expression": "1000000 * Mean(Abs($close / Ref($close, 1) - 1) / ($volume * $close), 20)",
+  "formulation": "10^6 * 1/20 * sum_{i=0..19} |C_{t-i}/C_{t-i-1} - 1| / (V_{t-i} * C_{t-i})",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "rev_5d",
+  "qlib_expression": "1 - $close / Ref($close, 5)",
+  "formulation": "-(C_t / C_{t-5} - 1)（代数等价改写：1 - C_t/C_{t-5}）",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "clv_5d",
+  "qlib_expression": "Mean((2 * $close - $high - $low) / ($high - $low + 0.000001), 5)",
+  "formulation": "1/5 * sum_{i=0..4} (2C - H - L) / (H - L + eps)",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "dev_vwap_5d",
+  "qlib_expression": "$close / (Sum($volume * $close, 5) / Sum($volume, 5)) - 1",
+  "formulation": "C_t / (sum_{i=0..4} V*C / sum_{i=0..4} V) - 1（5 日 VWAP 偏离）",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "hl_range_1d",
+  "qlib_expression": "($high - $low) / $close",
+  "formulation": "(H_t - L_t) / C_t",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "overnight_gap_5d",
+  "qlib_expression": "Mean($open / Ref($close, 1) - 1, 5)",
+  "formulation": "1/5 * sum_{i=0..4} (O_{t-i}/C_{t-i-1} - 1)",
+  "category": "RD-Agent"
+ },
+ {
+  "name": "vwap_dev_5d",
+  "qlib_expression": "$close / (Sum($volume * $close, 5) / Sum($volume, 5)) - 1",
+  "formulation": "C_t / (sum_{i=0..4} V*C / sum_{i=0..4} V) - 1（5 日 VWAP 偏离）",
+  "category": "RD-Agent"
+ }
+]

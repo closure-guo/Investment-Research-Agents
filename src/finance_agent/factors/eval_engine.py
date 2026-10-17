@@ -3,8 +3,9 @@
 计划关键设计决策 E1/E2（实施者不得自行改口径）：
 
 - **E1 求值语义**：时间序列算子（``ts_mean``/``ts_std``/``ts_corr``/``ts_rank``/
-  ``delta``）沿**日期轴按 code** 计算（``min_periods=window``，窗口不足或窗口含
-  NaN → NaN）；横截面算子（``rank``/``zscore``）沿 **code 轴按日期** 计算
+  ``delta``/``ref``）沿**日期轴按 code** 计算（``min_periods=window``，窗口不足或窗口含
+  NaN → NaN；``ref`` 为纯 shift 无 min_periods 概念，前 N 行 NaN）；横截面算子
+  （``rank``/``zscore``）沿 **code 轴按日期** 计算
   （NaN 不参与排序，``rank`` 用 ``pct=True`` 平均秩）；逐元素算子 NaN 传播；
   ``div`` 分母 0 → NaN（不抛）；``log`` 非正 → NaN。全部向量化——`rolling` /
   `corrwith` / `ufunc` 实现，**无逐 code Python 循环**。
@@ -162,11 +163,21 @@ def _delta(frame: pd.DataFrame, window: int) -> pd.DataFrame:
     return frame - frame.shift(window)
 
 
+def _ref(frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    """``x.shift(window)``——沿日期轴后移 window 期（前 window 行 NaN）。
+
+    与 ``_delta`` 同源 shift 机制（DataFrame 索引为日期 → 逐标的后移，不跨标的）；
+    纯 shift 无 ``min_periods`` 概念（窗口参数为正整数由 D2 解析期保证）。
+    """
+    return frame.shift(window)
+
+
 _WINDOW_OPS: dict[str, Callable[[pd.DataFrame, int], pd.DataFrame]] = {
     "ts_mean": _ts_mean,
     "ts_std": _ts_std,
     "ts_rank": _ts_rank,
     "delta": _delta,
+    "ref": _ref,
 }
 
 

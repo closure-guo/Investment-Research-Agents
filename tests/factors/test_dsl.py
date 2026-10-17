@@ -59,6 +59,7 @@ SPEC_OPS = {
     "min",
     "abs",
     "log",
+    "ref",
 }
 SPEC_FIELDS = {"open", "high", "low", "close", "volume", "amount"}
 SPEC_ARITY = {
@@ -77,9 +78,10 @@ SPEC_ARITY = {
     "min": 2,
     "abs": 1,
     "log": 1,
+    "ref": 2,
 }
 # 每个算子一份合法样例（window 位置一律正整数数字字面量）
-_WINDOW_OPS = {"ts_mean", "ts_std", "ts_rank", "delta", "ts_corr"}
+_WINDOW_OPS = {"ts_mean", "ts_std", "ts_rank", "delta", "ts_corr", "ref"}
 _OP_SAMPLES = {
     "ts_mean": "ts_mean(close, 5)",
     "ts_std": "ts_std(close, 5)",
@@ -96,6 +98,7 @@ _OP_SAMPLES = {
     "min": "min(close, volume)",
     "abs": "abs(close)",
     "log": "log(close)",
+    "ref": "ref(close, 5)",
 }
 
 
@@ -115,10 +118,10 @@ def _assert_parse_error(expr: str, *, contains: Sequence[str] = (), pos: int | N
 # ── Task 1: 枚举逐字 ─────────────────────────────────────────────────────────
 
 
-def test_ops_enumeration_verbatim_15_names():
-    """算子枚举逐字（spec 列表 15 个）；元数表与 D2 逐条一致。"""
+def test_ops_enumeration_verbatim_16_names():
+    """算子枚举逐字（spec 列表：初版 15 + 扩展 ref）；元数表与 D2 逐条一致。"""
     assert OPS == SPEC_OPS
-    assert len(OPS) == 15
+    assert len(OPS) == 16
     assert ARITY == SPEC_ARITY
     assert FIELDS == SPEC_FIELDS
     assert len(FIELDS) == 6
@@ -158,6 +161,37 @@ def test_spec_scenario_round_trip_ast_equality():
     again = parse(serialize(original))
     assert again == original
     assert serialize(again) == serialize(original)
+
+
+def test_spec_scenario_ref_parse_and_window_form():
+    """spec 场景（extend-factor-dsl-ref）：ref 解析 + 窗口形态拒收（0 / 负 / 非常量）。
+
+    负窗口在词法期即拒收（无负数字面量），零窗口/小数窗口在窗口形态检查拒收——
+    三者都不得产出 AST（杜绝前瞻/恒等引用形态进入因子空间）。
+    """
+    node = parse("ref(close, 5)")
+    assert node == Call(op="ref", args=(Field("close"), Number(5)))
+    assert serialize(node) == "ref(close,5)"
+    for bad in ("ref(close, 0)", "ref(close, -5)", "ref(close, x)"):
+        with pytest.raises(DSLParseError):
+            parse(bad)
+
+
+def test_ref_nested_in_momentum_expression():
+    """ref 复合形态（动量族典型式）：`sub(div(close,ref(close,20)),1)` 解析 + round-trip。"""
+    expr = "sub(div(close,ref(close,20)),1)"
+    node = parse(expr)
+    assert node == Call(
+        op="sub",
+        args=(
+            Call(
+                op="div", args=(Field("close"), Call(op="ref", args=(Field("close"), Number(20))))
+            ),
+            Number(1),
+        ),
+    )
+    assert serialize(node) == expr
+    assert parse(serialize(node)) == node
 
 
 @pytest.mark.parametrize("name", sorted(SPEC_FIELDS))
@@ -263,6 +297,8 @@ def test_arity_errors(expr: str, expected_arity: str, actual: str):
         ("ts_mean(close, 0)", 15),  # 非正 window
         ("ts_std(volume, 1.0)", 15),  # 字面量是小数形态（1.0）→ 拒收（严格整数形态）
         ("ts_corr(close, volume, 10.5)", 23),  # ts_corr 的 window 在 3 号位
+        ("ref(close, 0)", 11),  # ref 非正 window
+        ("ref(close, 10.5)", 11),  # ref 非整数 window
     ],
 )
 def test_window_must_be_positive_integer_literal(expr: str, pos: int):
