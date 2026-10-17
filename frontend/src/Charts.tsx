@@ -73,17 +73,33 @@ function baseOption(theme: ChartTheme) {
   }
 }
 
+// ── chart-data-integrity 呈现层契约（前端，issue #336）──
+// 1) 金额单位：轴标「亿元」的序列 SHALL 以亿元渲染（原始元 / 1e8），
+//    MUST NOT 出现原始元数值（如 1.6e11）配「亿元」轴标；
+// 2) 时间轴：数据层「index 0 = 最新」（降序）契约不变，呈现层反转升序（最旧在左）；
+// 3) 缺失语义：元缺失 → NaN 断柱（禁填 0 冒充真实值）。
+const YI = 1e8
+
+function ascending<T>(values: readonly T[]): T[] {
+  return [...values].reverse()
+}
+
+function yiSeries(values: readonly (number | null | undefined)[]): number[] {
+  return values.map(v => (v == null ? NaN : v / YI))
+}
+
 // ── P0: Revenue & Profit ──
 export function RevenueProfitChart({ data }: { data: ChartData }) {
   const annual = data.annual
   if (annual.length < 2) return null
-  const years = annual.map(a => a.year)
-  const revenue = annual.map(a => a.revenue ?? 0)
-  const profit = annual.map(a => a.net_profit ?? 0)
+  const years = ascending(annual.map(a => a.year))
+  const revenue = yiSeries(ascending(annual.map(a => a.revenue)))
+  const profit = yiSeries(ascending(annual.map(a => a.net_profit)))
   const theme = getChartTheme()
 
   const option = {
     ...baseOption(theme),
+    xAxis: { ...baseOption(theme).xAxis, data: years },
     legend: { data: ['营业收入', '归母净利润'], bottom: 0, textStyle: { color: theme.textColor, fontSize: 10 } },
     yAxis: [
       { type: 'value', name: '营收(亿)', axisLabel: { color: theme.axisLabelColor }, splitLine: { lineStyle: { color: theme.splitLine } } },
@@ -110,11 +126,12 @@ export function GrowthChart({ data }: { data: ChartData }) {
   const theme = getChartTheme()
   const option = {
     ...baseOption(theme),
+    xAxis: { ...baseOption(theme).xAxis, data: ascending(g.years) },
     legend: { data: ['营收增速', '净利润增速'], bottom: 0, textStyle: { color: theme.textColor, fontSize: 10 } },
     yAxis: { type: 'value', axisLabel: { color: theme.axisLabelColor, formatter: '{value}%' }, splitLine: { lineStyle: { color: theme.splitLine } } },
     series: [
-      { name: '营收增速', type: 'line', data: g.revenue_growth, itemStyle: { color: theme.brand }, symbol: 'circle', symbolSize: 6 },
-      { name: '净利润增速', type: 'line', data: g.profit_growth, itemStyle: { color: theme.coral }, symbol: 'rect', symbolSize: 6 },
+      { name: '营收增速', type: 'line', data: ascending(g.revenue_growth), itemStyle: { color: theme.brand }, symbol: 'circle', symbolSize: 6 },
+      { name: '净利润增速', type: 'line', data: ascending(g.profit_growth), itemStyle: { color: theme.coral }, symbol: 'rect', symbolSize: 6 },
     ],
   }
 
@@ -129,13 +146,14 @@ export function GrowthChart({ data }: { data: ChartData }) {
 export function MarginChart({ data }: { data: ChartData }) {
   const annual = data.annual
   if (annual.length < 2) return null
-  const years = annual.map(a => a.year)
-  const gm = annual.map(a => a.gross_margin ?? null)
-  const nm = annual.map(a => a.net_margin ?? null)
+  const years = ascending(annual.map(a => a.year))
+  const gm = ascending(annual.map(a => a.gross_margin ?? null))
+  const nm = ascending(annual.map(a => a.net_margin ?? null))
 
   const theme = getChartTheme()
   const option = {
     ...baseOption(theme),
+    xAxis: { ...baseOption(theme).xAxis, data: years },
     legend: { data: ['毛利率', '净利率'], bottom: 0, textStyle: { color: theme.textColor, fontSize: 10 } },
     yAxis: { type: 'value', axisLabel: { color: theme.axisLabelColor, formatter: '{value}%' }, splitLine: { lineStyle: { color: theme.splitLine } } },
     series: [
@@ -155,12 +173,13 @@ export function MarginChart({ data }: { data: ChartData }) {
 export function RoeChart({ data }: { data: ChartData }) {
   const annual = data.annual
   if (annual.length < 2) return null
-  const years = annual.map(a => a.year)
-  const roe = annual.map(a => a.roe ?? null)
+  const years = ascending(annual.map(a => a.year))
+  const roe = ascending(annual.map(a => a.roe ?? null))
 
   const theme = getChartTheme()
   const option = {
     ...baseOption(theme),
+    xAxis: { ...baseOption(theme).xAxis, data: years },
     yAxis: { type: 'value', axisLabel: { color: theme.axisLabelColor, formatter: '{value}%' }, splitLine: { lineStyle: { color: theme.splitLine } } },
     series: [{
       type: 'line', data: roe, smooth: true,
@@ -188,12 +207,13 @@ export function RoeChart({ data }: { data: ChartData }) {
 export function CashflowChart({ data }: { data: ChartData }) {
   const annual = data.annual
   if (annual.length < 2) return null
-  const years = annual.map(a => a.year)
-  const ocf = annual.map(a => a.ocf ?? 0)
+  const years = ascending(annual.map(a => a.year))
+  const ocf = yiSeries(ascending(annual.map(a => a.ocf)))
 
   const theme = getChartTheme()
   const option = {
     ...baseOption(theme),
+    xAxis: { ...baseOption(theme).xAxis, data: years },
     yAxis: { type: 'value', name: '亿元', axisLabel: { color: theme.axisLabelColor }, splitLine: { lineStyle: { color: theme.splitLine } } },
     series: [{
       type: 'bar', data: ocf,
@@ -384,12 +404,13 @@ export function GrowthVsPriceChart({ data }: { data: ChartData }) {
   const theme = getChartTheme()
   const option = {
     ...baseOption(theme),
+    xAxis: { ...baseOption(theme).xAxis, data: ascending(g.years) },
     legend: { data: ['营收增速', '净利润增速', '股价涨幅'], bottom: 0, textStyle: { color: theme.textColor, fontSize: 10 } },
     yAxis: { type: 'value', axisLabel: { color: theme.axisLabelColor, formatter: '{value}%' }, splitLine: { lineStyle: { color: theme.splitLine } } },
     series: [
-      { name: '营收增速', type: 'bar', data: g.revenue_growth, itemStyle: { color: theme.brand } },
-      { name: '净利润增速', type: 'bar', data: g.profit_growth, itemStyle: { color: theme.coral } },
-      { name: '股价涨幅', type: 'bar', data: priceChanges, itemStyle: { color: theme.mint } },
+      { name: '营收增速', type: 'bar', data: ascending(g.revenue_growth), itemStyle: { color: theme.brand } },
+      { name: '净利润增速', type: 'bar', data: ascending(g.profit_growth), itemStyle: { color: theme.coral } },
+      { name: '股价涨幅', type: 'bar', data: ascending(priceChanges), itemStyle: { color: theme.mint } },
     ],
   }
 
@@ -404,13 +425,14 @@ export function GrowthVsPriceChart({ data }: { data: ChartData }) {
 export function AssetsChart({ data }: { data: ChartData }) {
   const annual = data.annual
   if (annual.length < 2) return null
-  const years = annual.map(a => a.year)
-  const assets = annual.map(a => a.total_assets ?? 0)
-  const equity = annual.map(a => a.equity ?? 0)
+  const years = ascending(annual.map(a => a.year))
+  const assets = yiSeries(ascending(annual.map(a => a.total_assets)))
+  const equity = yiSeries(ascending(annual.map(a => a.equity)))
 
   const theme = getChartTheme()
   const option = {
     ...baseOption(theme),
+    xAxis: { ...baseOption(theme).xAxis, data: years },
     legend: { data: ['总资产', '归母权益'], bottom: 0, textStyle: { color: theme.textColor, fontSize: 10 } },
     yAxis: { type: 'value', name: '亿元', axisLabel: { color: theme.axisLabelColor }, splitLine: { lineStyle: { color: theme.splitLine } } },
     series: [
@@ -431,12 +453,13 @@ export function ContractLiabChart({ data }: { data: ChartData }) {
   const annual = data.annual
   if (annual.length < 2) return null
   if (annual.every(a => !a.contract_liab)) return null
-  const years = annual.map(a => a.year)
-  const cl = annual.map(a => a.contract_liab ?? 0)
+  const years = ascending(annual.map(a => a.year))
+  const cl = yiSeries(ascending(annual.map(a => a.contract_liab)))
 
   const theme = getChartTheme()
   const option = {
     ...baseOption(theme),
+    xAxis: { ...baseOption(theme).xAxis, data: years },
     yAxis: { type: 'value', name: '亿元', axisLabel: { color: theme.axisLabelColor }, splitLine: { lineStyle: { color: theme.splitLine } } },
     series: [{ type: 'bar', data: cl, itemStyle: { color: theme.rose } }],
   }
@@ -453,12 +476,13 @@ export function DebtRatioChart({ data }: { data: ChartData }) {
   const annual = data.annual
   if (annual.length < 2) return null
   if (annual.every(a => !a.debt_ratio)) return null
-  const years = annual.map(a => a.year)
-  const dr = annual.map(a => a.debt_ratio ?? null)
+  const years = ascending(annual.map(a => a.year))
+  const dr = ascending(annual.map(a => a.debt_ratio ?? null))
 
   const theme = getChartTheme()
   const option = {
     ...baseOption(theme),
+    xAxis: { ...baseOption(theme).xAxis, data: years },
     yAxis: { type: 'value', axisLabel: { color: theme.axisLabelColor, formatter: '{value}%' }, splitLine: { lineStyle: { color: theme.splitLine } } },
     series: [{
       type: 'line', data: dr, smooth: true,
@@ -509,6 +533,11 @@ export function HeatmapChart({ data }: { data: ChartData }) {
   })
 
   const theme = getChartTheme()
+  // 呈现层升序（最旧在上）：标签反转 + y 坐标按新下标重映射（数据契约不变）
+  const ascLabels = ascending(yearLabels)
+  const ascHeatmap = heatmapData.map(
+    ([x, y, v]) => [x, yearLabels.length - 1 - y, v] as [number, number, number]
+  )
   const option = {
     tooltip: { position: 'top' },
     grid: { left: '15%', right: '10%', bottom: '15%', top: '10%' },
@@ -520,7 +549,7 @@ export function HeatmapChart({ data }: { data: ChartData }) {
     },
     yAxis: {
       type: 'category',
-      data: yearLabels,
+      data: ascLabels,
       axisLabel: { color: theme.axisLabelColor, fontSize: 10 },
       splitArea: { show: true },
     },
@@ -535,7 +564,7 @@ export function HeatmapChart({ data }: { data: ChartData }) {
     },
     series: [{
       type: 'heatmap',
-      data: heatmapData,
+      data: ascHeatmap,
       label: { show: true, fontSize: 9, color: '#fff' },
       emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0, 0, 0, 0.3)' } },
     }],
@@ -604,11 +633,11 @@ export function KpiCards({ data }: { data: ChartData }) {
   }
   if (latest?.revenue) {
     const growth = prev?.revenue ? ((latest.revenue - prev.revenue) / Math.abs(prev.revenue) * 100).toFixed(1) : null
-    cards.push({ label: `${latest.year} 营收`, value: `${latest.revenue.toFixed(1)}亿`, sub: growth ? `同比 ${growth}%` : undefined })
+    cards.push({ label: `${latest.year} 营收`, value: `${(latest.revenue / YI).toFixed(1)}亿`, sub: growth ? `同比 ${growth}%` : undefined })
   }
   if (latest?.net_profit) {
     const growth = prev?.net_profit ? ((latest.net_profit - prev.net_profit) / Math.abs(prev.net_profit) * 100).toFixed(1) : null
-    cards.push({ label: `${latest.year} 净利润`, value: `${latest.net_profit.toFixed(1)}亿`, sub: growth ? `同比 ${growth}%` : undefined })
+    cards.push({ label: `${latest.year} 净利润`, value: `${(latest.net_profit / YI).toFixed(1)}亿`, sub: growth ? `同比 ${growth}%` : undefined })
   }
   if (latest?.roe) {
     cards.push({ label: `${latest.year} ROE`, value: `${latest.roe.toFixed(1)}%` })
