@@ -23,3 +23,17 @@ if pgrep -f fin_factor > /dev/null 2>&1; then
 else
   echo "all clear"
 fi
+
+# 状态采集器收尾（add-factor-research-monitor）：先停守护（防状态文件双写竞态），
+# 再 --once 写末次快照（supervisor.running=false，监控页即时反映停止）。
+COLLECTOR_PIDFILE="$WORKDIR/factor_status_collector.pid"
+if [ -f "$COLLECTOR_PIDFILE" ]; then
+  kill "$(cat "$COLLECTOR_PIDFILE")" 2>/dev/null || true
+  rm -f "$COLLECTOR_PIDFILE"
+  echo "stopped status collector"
+fi
+if python3 /root/collect_factor_status.py --workdir "$WORKDIR" --once 2>/dev/null; then
+  echo "final status snapshot written"
+else
+  echo "WARN: final status snapshot failed"
+fi

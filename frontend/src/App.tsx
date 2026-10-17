@@ -20,6 +20,7 @@ import { DownloadCenter } from './pages/downloads/DownloadCenter'
 import { ScreeningPage } from './pages/screening/ScreeningPage'
 import { MemoryPage } from './pages/memory/MemoryPage'
 import { FactorLibraryPage } from './pages/factors/FactorLibraryPage'
+import { FactorResearchPage } from './pages/factors/FactorResearchPage'
 import { BrokerConsolePage } from './pages/broker/BrokerConsolePage'
 import { DailyOpsPage } from './pages/ops/DailyOpsPage'
 import { TrackRecordPage } from './pages/trackRecord/TrackRecordPage'
@@ -897,6 +898,7 @@ export default function App() {
         onOpenScreening={() => navigate('/screening')}
         onOpenMemory={() => navigate('/memory')}
         onOpenFactors={() => navigate('/factors')}
+        onOpenFactorResearch={() => navigate('/factor-research')}
         onOpenBroker={() => navigate('/broker')}
         onOpenOps={() => navigate('/ops')}
         onOpenSettings={() => { setSettingsFocus(undefined); navigate('/settings') }}
@@ -930,6 +932,9 @@ export default function App() {
         ) : pathname === '/factors' ? (
           // 因子库页（delta add-factor-library-page T2）：资产目录（筛选 + 行展开，只读）
           <FactorLibraryPage onBack={() => navigate('/')} />
+        ) : pathname === '/factor-research' ? (
+          // 因子研发监控页（delta add-factor-research-monitor T3）：看护/进度/历史（只读）
+          <FactorResearchPage onBack={() => navigate('/')} />
         ) : pathname === '/broker' ? (
           // 执行台账页（delta add-broker-console T2.1）：资金/持仓/订单四态/门禁拒绝（只读）
           <BrokerConsolePage onBack={() => navigate('/')} />
@@ -1138,6 +1143,7 @@ export default function App() {
         onOpenDownloads={() => navigate('/downloads')}
         onOpenMemory={() => navigate('/memory')}
         onOpenFactors={() => navigate('/factors')}
+        onOpenFactorResearch={() => navigate('/factor-research')}
         onOpenBroker={() => navigate('/broker')}
         onOpenOps={() => navigate('/ops')}
         onCycleTheme={cycleTheme}
@@ -1156,7 +1162,7 @@ export default function App() {
 }
 
 // ── Sidebar（add-collapsible-sidebar：shadcn Sidebar 原语重构）──
-function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenMemory, onOpenFactors, onOpenBroker, onOpenOps, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
+function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenMemory, onOpenFactors, onOpenFactorResearch, onOpenBroker, onOpenOps, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
   sessions: SessionMeta[]
   currentSessionId: string | null
   onSelect: (id: string) => void
@@ -1168,6 +1174,7 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
   onOpenScreening: () => void
   onOpenMemory: () => void
   onOpenFactors: () => void
+  onOpenFactorResearch: () => void
   onOpenBroker: () => void
   onOpenOps: () => void
   onOpenSettings: () => void
@@ -1232,6 +1239,11 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
           <SidebarIcon label="因子库">
             <Button variant="ghost" size="icon" onClick={onOpenFactors} aria-label="因子库" data-testid="sidebar-factors-collapsed">
               <i className="fas fa-flask text-xs"></i>
+            </Button>
+          </SidebarIcon>
+          <SidebarIcon label="因子研发">
+            <Button variant="ghost" size="icon" onClick={onOpenFactorResearch} aria-label="因子研发" data-testid="sidebar-factor-research-collapsed">
+              <i className="fas fa-microscope text-xs"></i>
             </Button>
           </SidebarIcon>
           <SidebarIcon label="执行台账">
