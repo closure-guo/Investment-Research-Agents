@@ -50,3 +50,39 @@ CLI 修改 + 两种重启顺序均未生效；共享 socket 对非集成 distro 
      `qrun: No such file or directory` 连败（2026-10-17 首轮 15 次试验全废实测）。
 - **实证**：修复后 14 个完整循环 × 5 步（direct_exp_gen→coding→running→feedback→record）
   全部通过，115 个候选实现落工作区；`--loop-n` 默认无界（手动停）。
+
+## 2026-10-17：研发代理与控制面（delta add-factor-research-control）
+
+`factor_research_agent.py` = 观测（采集快照）+ 控制（期望态调和）合一，**常驻、独立于看护存活**
+（看护停止后继续写 `running=false` 快照并受理控制——否则停机后快照陈旧、开关无法再开启）。
+
+**部署步骤**（替换旧采集守护；看护不重启）：
+
+```bash
+# 1) 推文件（宿主侧，仓库根；stdin 管道入 distro）
+wsl -d rdagent -u root -- bash -c 'cat > /root/factor_research_agent.py'    < tests/scripts/spike/factor_research_agent.py
+wsl -d rdagent -u root -- bash -c 'cat > /root/collect_factor_status.py'    < tests/scripts/spike/collect_factor_status.py
+wsl -d rdagent -u root -- bash -c 'cat > /root/start-factor-research.sh'    < tests/scripts/spike/start-factor-research.sh
+wsl -d rdagent -u root -- bash -c 'cat > /root/stop-factor-research.sh'     < tests/scripts/spike/stop-factor-research.sh
+wsl -d rdagent -u root -- bash -c 'cat > /root/status-factor-research.sh'   < tests/scripts/spike/status-factor-research.sh
+wsl -d rdagent -u root -- chmod +x /root/start-factor-research.sh /root/stop-factor-research.sh /root/status-factor-research.sh
+
+# 2) 停旧采集守护（若在跑），起新代理守护（看护不重启）
+wsl -d rdagent -u root -- bash -c '
+  W=/root/rdagent-work
+  [ -f "$W/factor_status_collector.pid" ] && kill "$(cat "$W/factor_status_collector.pid")" 2>/dev/null; rm -f "$W/factor_status_collector.pid"
+  python3 /root/factor_research_agent.py --ensure-daemon
+  python3 /root/factor_research_agent.py --reconcile-once
+'
+# 3) 核对：status 脚本可见「代理: RUNNING」+ 控制文件；快照 collected_at 持续推进
+wsl -d rdagent -u root -- bash /root/status-factor-research.sh
+```
+
+**控制面语义**（界面开关 / `start` / `stop` 三入口同一条意图源）：
+
+- 控制文件：`/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/control.json`
+  （宿主 `data/` 桥反向；后端 `PUT /api/factor-research/control` 原子写，代理 ≤15s 轮询调和）；
+- `desired_running=true` 且未运行 → 拉起；`false` 且运行中 → 停止（终止当前会话）；
+  期望=实态 → 零动作；文件缺失/损坏 → **不干预**（fail-safe）；
+- 手动 `start/stop` 脚本会同步写期望态（否则代理会把「手动停止」按旧意图扳回去）；
+- 代理与看护都是**手动常驻**（distro 重启后需重新 `start`；不做开机自启——与看护同级运维前提）。
