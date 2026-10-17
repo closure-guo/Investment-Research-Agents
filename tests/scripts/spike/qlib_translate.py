@@ -23,6 +23,10 @@ MUST NOT 输出语义近似的猜测翻译。
 - `Delta` = `series - series.shift(N)`（L1204）；
 - `Max/Min` = **滚动**窗口算子（Rolling 子类，L951/L999）——与本系统逐元素二元
   `max/min` 同名不同义 → not_equivalent（拒绝机械替换）；
+- `Sum` = Rolling 求和（L847）——与本系统 `ts_sum` formulation 等价（热身期口径差同其他滚动算子）；
+- `Power` = NpPairOperator（L338，可变指数）——本 DSL 无幂算子；**特例**：`Power(x, 0.5)`
+  ≡ `sqrt(x)`（0.5 次幂 = 平方根，负值两侧均 NaN）→ 特例映射启用；其余指数拒绝。
+  注：pyqlib 无独立 `Sqrt` 算子（ops.py 实测）——平方根形态的合法转写即 `Power(·,0.5)`；
 - `Div` = `np.divide`（L418；x/0 → ±inf）、`Log` = `np.log`（L167；x=0 → −inf）、
   `Abs` = `np.abs`（L122）、`Add/Sub/Mul` = `np.*`（L358+）。
 
@@ -127,7 +131,7 @@ OPERATOR_MAPPINGS: dict[str, OperatorMapping] = {
         "无热身期口径差；窗口须正整数（N≤0 为恒等/前瞻引用，拒绝）",
     ),
     # ── 本 DSL 无对应算子（扩 DSL 候选） ──
-    "Sum": OperatorMapping("Sum", None, "missing", "滚动求和——本 DSL 无"),
+    "Sum": OperatorMapping("Sum", "ts_sum", "equivalent", f"滚动求和（窗口含当日）；{_WARMUP}"),
     "Var": OperatorMapping(
         "Var", None, "missing", "滚动方差——本 DSL 无（ts_std 为平方根形态，无 var 算子）"
     ),
@@ -144,7 +148,13 @@ OPERATOR_MAPPINGS: dict[str, OperatorMapping] = {
     "EMA": OperatorMapping("EMA", None, "missing", "指数移动平均——本 DSL 无"),
     "Cov": OperatorMapping("Cov", None, "missing", "滚动协方差——本 DSL 无"),
     "Sign": OperatorMapping("Sign", None, "missing", "符号函数——本 DSL 无"),
-    "Power": OperatorMapping("Power", None, "missing", "幂运算——本 DSL 无"),
+    "Power": OperatorMapping(
+        "Power",
+        None,
+        "missing",
+        "幂运算（NpPairOperator，L338，可变指数）——本 DSL 无；特例 Power(x,0.5) ≡ sqrt(x) "
+        "（0.5 次幂 = 平方根）由 _build_call 特例分支映射，其余指数拒绝",
+    ),
     "Greater": OperatorMapping("Greater", None, "missing", "比较算子——本 DSL 无"),
     "Less": OperatorMapping("Less", None, "missing", "比较算子——本 DSL 无"),
     "Gt": OperatorMapping("Gt", None, "missing", "比较算子——本 DSL 无"),
@@ -462,6 +472,23 @@ def _build_call(
     node: _CallNode, blockers: list[str], used: list[str], seen: set[str]
 ) -> AstNode | None:
     """函数调用/二元运算映射裁决：等价→构建；缺失/不等价→blocker（含清单）；未知→blocker。"""
+    # 特例映射（extend-factor-dsl-coverage）：Power(x, 0.5) ≡ sqrt(x)——0.5 次幂 = 平方根，
+    # 精确等价（负值两侧均 NaN）；其余指数走通用分支（Power 条目 missing → 拒绝）。
+    if (
+        node.name == "Power"
+        and len(node.args) == 2
+        and isinstance(node.args[1], _Num)
+        and node.args[1].value == 0.5
+    ):
+        inner = _build(node.args[0], blockers, used, seen)
+        _record(
+            used,
+            seen,
+            "算子 Power(·,0.5) → sqrt [equivalent] 0.5 次幂 = 平方根（负值 NaN 两侧一致）",
+        )
+        if inner is None:
+            return None
+        return Call(op="sqrt", args=(inner,))
     mapping = OPERATOR_MAPPINGS.get(node.name)
     if mapping is None:
         blockers.append(f"未知算子 {node.name!r}（映射表无记录）")

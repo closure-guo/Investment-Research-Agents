@@ -3,11 +3,11 @@
 计划关键设计决策 E1/E2（实施者不得自行改口径）：
 
 - **E1 求值语义**：时间序列算子（``ts_mean``/``ts_std``/``ts_corr``/``ts_rank``/
-  ``delta``/``ref``）沿**日期轴按 code** 计算（``min_periods=window``，窗口不足或窗口含
+  ``delta``/``ref``/``ts_sum``）沿**日期轴按 code** 计算（``min_periods=window``，窗口不足或窗口含
   NaN → NaN；``ref`` 为纯 shift 无 min_periods 概念，前 N 行 NaN）；横截面算子
   （``rank``/``zscore``）沿 **code 轴按日期** 计算
   （NaN 不参与排序，``rank`` 用 ``pct=True`` 平均秩）；逐元素算子 NaN 传播；
-  ``div`` 分母 0 → NaN（不抛）；``log`` 非正 → NaN。全部向量化——`rolling` /
+  ``div`` 分母 0 → NaN（不抛）；``log`` 非正 → NaN、``sqrt`` 负值 → NaN。全部向量化——`rolling` /
   `corrwith` / `ufunc` 实现，**无逐 code Python 循环**。
 - **E2 IC 定义**：``rank_ic_series`` 逐日对全市场做 Spearman 相关（= 因子值秩与
   远期收益秩的 Pearson）；任一日有效样本 < ``MIN_IC_SAMPLES`` → 该日 NaN。
@@ -172,12 +172,18 @@ def _ref(frame: pd.DataFrame, window: int) -> pd.DataFrame:
     return frame.shift(window)
 
 
+def _ts_sum(frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    """窗口求和（min_periods=window：窗口不足或含 NaN → NaN）。"""
+    return frame.rolling(window, min_periods=window).sum()
+
+
 _WINDOW_OPS: dict[str, Callable[[pd.DataFrame, int], pd.DataFrame]] = {
     "ts_mean": _ts_mean,
     "ts_std": _ts_std,
     "ts_rank": _ts_rank,
     "delta": _delta,
     "ref": _ref,
+    "ts_sum": _ts_sum,
 }
 
 
@@ -212,6 +218,11 @@ def _log(frame: pd.DataFrame) -> pd.DataFrame:
     return _wrap(np.log(frame.where(frame > 0)), frame)
 
 
+def _sqrt(frame: pd.DataFrame) -> pd.DataFrame:
+    """逐元素平方根；负值 → NaN（与 ``log`` 非正 → NaN 同约定；NaN 传播）。"""
+    return _wrap(np.sqrt(frame.where(frame >= 0)), frame)
+
+
 def _maximum(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
     """逐元素取大；任一侧 NaN → NaN。"""
     left_aligned, right_aligned = left.align(right)
@@ -241,6 +252,7 @@ _ELEMENTWISE_OPS: dict[str, Callable[..., pd.DataFrame]] = {
     "min": _minimum,
     "abs": lambda frame: frame.abs(),
     "log": _log,
+    "sqrt": _sqrt,
 }
 
 

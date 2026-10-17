@@ -60,6 +60,8 @@ SPEC_OPS = {
     "abs",
     "log",
     "ref",
+    "ts_sum",
+    "sqrt",
 }
 SPEC_FIELDS = {"open", "high", "low", "close", "volume", "amount"}
 SPEC_ARITY = {
@@ -79,9 +81,11 @@ SPEC_ARITY = {
     "abs": 1,
     "log": 1,
     "ref": 2,
+    "ts_sum": 2,
+    "sqrt": 1,
 }
 # 每个算子一份合法样例（window 位置一律正整数数字字面量）
-_WINDOW_OPS = {"ts_mean", "ts_std", "ts_rank", "delta", "ts_corr", "ref"}
+_WINDOW_OPS = {"ts_mean", "ts_std", "ts_rank", "delta", "ts_corr", "ref", "ts_sum"}
 _OP_SAMPLES = {
     "ts_mean": "ts_mean(close, 5)",
     "ts_std": "ts_std(close, 5)",
@@ -99,6 +103,8 @@ _OP_SAMPLES = {
     "abs": "abs(close)",
     "log": "log(close)",
     "ref": "ref(close, 5)",
+    "ts_sum": "ts_sum(volume, 5)",
+    "sqrt": "sqrt(close)",
 }
 
 
@@ -118,10 +124,10 @@ def _assert_parse_error(expr: str, *, contains: Sequence[str] = (), pos: int | N
 # ── Task 1: 枚举逐字 ─────────────────────────────────────────────────────────
 
 
-def test_ops_enumeration_verbatim_16_names():
-    """算子枚举逐字（spec 列表：初版 15 + 扩展 ref）；元数表与 D2 逐条一致。"""
+def test_ops_enumeration_verbatim_18_names():
+    """算子枚举逐字（spec 列表：初版 15 + ref + ts_sum + sqrt）；元数表与 D2 逐条一致。"""
     assert OPS == SPEC_OPS
-    assert len(OPS) == 16
+    assert len(OPS) == 18
     assert ARITY == SPEC_ARITY
     assert FIELDS == SPEC_FIELDS
     assert len(FIELDS) == 6
@@ -190,6 +196,25 @@ def test_ref_nested_in_momentum_expression():
             Number(1),
         ),
     )
+    assert serialize(node) == expr
+    assert parse(serialize(node)) == node
+
+
+def test_spec_scenario_ts_sum_sqrt_parse():
+    """spec 场景（add-factor-dsl-ts-sum-sqrt）：`sqrt(ts_sum(volume, 5))` 解析 + round-trip。"""
+    node = parse("sqrt(ts_sum(volume, 5))")
+    assert node == Call(
+        op="sqrt",
+        args=(Call(op="ts_sum", args=(Field("volume"), Number(5))),),
+    )
+    assert serialize(node) == "sqrt(ts_sum(volume,5))"
+    assert parse(serialize(node)) == node
+
+
+def test_ts_sum_vwap_deviation_composite():
+    """VWAP 偏离复合式（本 delta 的立项形态）：比值结构含双 ts_sum，round-trip 相等。"""
+    expr = "sub(div(close,div(ts_sum(mul(volume,close),5),ts_sum(volume,5))),1)"
+    node = parse(expr)
     assert serialize(node) == expr
     assert parse(serialize(node)) == node
 
@@ -299,6 +324,8 @@ def test_arity_errors(expr: str, expected_arity: str, actual: str):
         ("ts_corr(close, volume, 10.5)", 23),  # ts_corr 的 window 在 3 号位
         ("ref(close, 0)", 11),  # ref 非正 window
         ("ref(close, 10.5)", 11),  # ref 非整数 window
+        ("ts_sum(volume, 0)", 15),  # ts_sum 非正 window
+        ("ts_sum(volume, 10.5)", 15),  # ts_sum 非整数 window
     ],
 )
 def test_window_must_be_positive_integer_literal(expr: str, pos: int):
@@ -329,8 +356,8 @@ def test_parse_error_is_value_error():
 
 
 def test_complexity_caps_verbatim():
-    """三条上限逐字：深度 5 / 自由参数 3 / 字段种类 3；错误类型为 ValueError 子类。"""
-    assert MAX_AST_DEPTH == 5
+    """三条上限逐字：深度 6 / 自由参数 3 / 字段种类 3；错误类型为 ValueError 子类。"""
+    assert MAX_AST_DEPTH == 6
     assert MAX_FREE_PARAMS == 3
     assert MAX_FIELDS == 3
     assert issubclass(FactorComplexityError, ValueError)
@@ -342,24 +369,25 @@ def test_parse_enforce_complexity_is_keyword_only():
         parse("close", False)  # type: ignore[call-arg]
 
 
-def test_depth_boundary_5_passes_6_rejected():
-    """spec 场景：深度恰 5 通过；深度 6 → 拒收且消息含「深度 6 > 上限 5」逐字要素。"""
-    ok = parse("abs(rank(zscore(ts_mean(close, 10))))")
-    assert ast_depth(ok) == 5
+def test_depth_boundary_6_passes_7_rejected():
+    """spec 场景：深度恰 6 通过；深度 7 → 拒收且消息含「深度 7 > 上限 6」逐字要素。"""
+    ok = parse("log(abs(rank(zscore(ts_mean(close, 10)))))")
+    assert ast_depth(ok) == 6
     with pytest.raises(FactorComplexityError) as excinfo:
-        parse("log(abs(rank(zscore(ts_mean(close, 10)))))")
-    assert "深度 6 > 上限 5" in str(excinfo.value)
+        parse("sqrt(log(abs(rank(zscore(ts_mean(close, 10))))))")
+    assert "深度 7 > 上限 6" in str(excinfo.value)
 
 
-def test_depth_5_natural_forms_now_allowed():
-    """ref 时代自然形态（滚动统计量套一层价量比值/差值）深度恰 5 → 通过（本轮上限的立项证据）。"""
+def test_depth_6_natural_forms_now_allowed():
+    """本轮立项证据：CLV 平滑与 VWAP 偏离（外层统计量套一层比值）深度恰 6 → 通过。"""
     for expr in (
-        "ts_std(sub(div(close,ref(close,1)),1),20)",  # 20 日收益波动
-        "ts_mean(sub(div(open,ref(close,1)),1),5)",  # 5 日均隔夜跳空
-        "sub(ts_mean(div(close,ref(close,5)),5),1)",  # 反转族平滑
+        # CLV 平滑：mean((2C−H−L)/(H−L+eps), 5)
+        "ts_mean(div(sub(sub(mul(2,close),high),low),add(sub(high,low),0.000001)),5)",
+        # VWAP 偏离：C/(ΣV·C/ΣV) − 1
+        "sub(div(close,div(ts_sum(mul(volume,close),5),ts_sum(volume,5))),1)",
     ):
         node = parse(expr)
-        assert ast_depth(node) == 5
+        assert ast_depth(node) == 6
         assert parse(serialize(node)) == node
 
 
@@ -420,25 +448,25 @@ def test_count_fields_deduplicates_repeated_names():
 def test_all_three_violations_listed_in_one_message():
     """三条约束同时违反 → 消息含全部违规项（实现钉住「不短路，全部列出」）。"""
     expr = (
-        "abs(add(add(add(ts_mean(close, 1), ts_mean(volume, 2)), ts_mean(open, 3)), "
-        "add(ts_mean(high, 4), low)))"
+        "sqrt(abs(add(add(add(ts_mean(close, 1), ts_mean(volume, 2)), ts_mean(open, 3)), "
+        "add(ts_mean(high, 4), low))))"
     )
     with pytest.raises(FactorComplexityError) as excinfo:
         parse(expr)
     message = str(excinfo.value)
-    assert "深度 6 > 上限 5" in message
+    assert "深度 7 > 上限 6" in message
     assert "自由参数 4 > 上限 3" in message
     assert "字段种类 5 > 上限 3" in message
 
 
 def test_enforce_complexity_false_bypasses_caps():
     """D7：``enforce_complexity=False`` 旁路三条上限（仅供工具/验证）——默认路径同式拒收。"""
-    expr = "log(abs(rank(zscore(ts_mean(close, 10)))))"
+    expr = "sqrt(log(abs(rank(zscore(ts_mean(close, 10))))))"
     with pytest.raises(FactorComplexityError):
         parse(expr)
     node = parse(expr, enforce_complexity=False)
-    assert ast_depth(node) == 6
-    assert serialize(node) == "log(abs(rank(zscore(ts_mean(close,10)))))"
+    assert ast_depth(node) == 7
+    assert serialize(node) == "sqrt(log(abs(rank(zscore(ts_mean(close,10))))))"
 
 
 # ── Task 3: 规范化（D5）与子树同构（D6） ─────────────────────────────────────
@@ -574,15 +602,15 @@ def test_pathological_nesting_raises_complexity_error_not_recursion_error():
     expr = "abs(" * 2000 + "close" + ")" * 2000
     with pytest.raises(FactorComplexityError) as excinfo:
         parse(expr)
-    assert str(excinfo.value) == "复杂度超限：表达式嵌套过深（> 上限 5 层）"
+    assert str(excinfo.value) == "复杂度超限：表达式嵌套过深（> 上限 6 层）"
 
 
 def test_normal_depth_violation_message_stays_verbatim():
-    """对照钉住：正常深度 6 超限路径消息逐字不变（嵌套转译不得污染该路径）。"""
+    """对照钉住：正常深度 7 超限路径消息逐字不变（嵌套转译不得污染该路径）。"""
     with pytest.raises(FactorComplexityError) as excinfo:
-        parse("log(abs(rank(zscore(ts_mean(close, 10)))))")
+        parse("sqrt(log(abs(rank(zscore(ts_mean(close, 10))))))")
     message = str(excinfo.value)
-    assert "深度 6 > 上限 5" in message
+    assert "深度 7 > 上限 6" in message
     assert "嵌套过深" not in message
 
 

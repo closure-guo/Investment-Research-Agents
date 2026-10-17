@@ -67,8 +67,8 @@
  },
  {
   "name": "park_vol_10d",
-  "qlib_expression": "Sqrt(Mean(Power(Log($high / $low), 2), 10))",
-  "formulation": "sqrt(1/10 * sum_{i=0..9} (ln(H_{t-i}/L_{t-i}))^2)",
+  "qlib_expression": "Power(Mean(Log($high / $low) * Log($high / $low), 10), 0.5)",
+  "formulation": "sqrt(1/10 * sum_{i=0..9} (ln(H_{t-i}/L_{t-i}))^2)（qlib 合法转写：平方→mul 改写、开方→Power(·,0.5)）",
   "category": "RD-Agent"
  },
  {

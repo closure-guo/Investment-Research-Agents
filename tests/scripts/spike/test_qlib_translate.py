@@ -80,6 +80,26 @@ class TestStrictEquivalence:
         assert composite.dsl_expression == "sub(div(close,ref(close,20)),1)"
         assert any("Ref" in entry and "equivalent" in entry for entry in composite.used_mappings)
 
+    def test_sum_strict_equivalence(self):
+        """Sum = Rolling 求和（ops.py L847），与 ts_sum formulation 等价（热身期口径差同其他滚动算子）。
+
+        add-factor-dsl-ts-sum-sqrt：Sum 从 missing 翻转为 equivalent——VWAP 偏离族可翻译。
+        """
+        result = translate_qlib_expression("Sum($volume, 5)")
+        assert result.translatable
+        assert result.dsl_expression == "ts_sum(volume,5)"
+        assert any("Sum" in entry and "equivalent" in entry for entry in result.used_mappings)
+
+    def test_vwap_deviation_composite_translatable(self):
+        """VWAP 偏离复合式（本 delta 立项形态）：Sum 比值结构可翻译。"""
+        result = translate_qlib_expression(
+            "$close / (Sum($volume * $close, 5) / Sum($volume, 5)) - 1"
+        )
+        assert result.translatable
+        assert result.dsl_expression == (
+            "sub(div(close,div(ts_sum(mul(volume,close),5),ts_sum(volume,5))),1)"
+        )
+
     def test_translated_output_is_legal_dsl(self):
         """产物必须能过生产解析器（含复杂度上限）——「合法 DSL 表达式」义务。"""
         for source in (
@@ -157,8 +177,8 @@ class TestUntranslatable:
         assert result.blockers
 
     def test_complexity_overflow_refused(self):
-        """深度 6 > 上限 5（5 层嵌套 Mean）——超出 DSL 复杂度硬约束拒绝。"""
-        result = translate_qlib_expression("Mean(Mean(Mean(Mean(Mean($close,2),2),2),2),2)")
+        """深度 7 > 上限 6（6 层嵌套 Mean）——超出 DSL 复杂度硬约束拒绝。"""
+        result = translate_qlib_expression("Mean(Mean(Mean(Mean(Mean(Mean($close,2),2),2),2),2),2)")
         assert not result.translatable
         assert any("复杂度" in blocker for blocker in result.blockers)
 
@@ -167,6 +187,26 @@ class TestUntranslatable:
         result = translate_qlib_expression("Mean($open / Ref($close, 1) - 1, 5)")
         assert result.translatable
         assert result.dsl_expression == "ts_mean(sub(div(open,ref(close,1)),1),5)"
+
+    def test_power_half_exponent_special_case(self):
+        """Power(·,0.5) ≡ sqrt（特例映射，extend-factor-dsl-coverage）；其余指数拒绝。"""
+        half = translate_qlib_expression("Power($close, 0.5)")
+        assert half.translatable
+        assert half.dsl_expression == "sqrt(close)"
+        assert any("Power" in entry and "sqrt" in entry for entry in half.used_mappings)
+        square = translate_qlib_expression("Power($close, 2)")
+        assert not square.translatable
+        assert any("Power" in blocker for blocker in square.blockers)
+
+    def test_parkinson_vol_composite_translatable(self):
+        """Parkinson 波动率复合式：Power(·,0.5) 特例 + 平方 mul 改写 + 深度 6 恰通过。"""
+        result = translate_qlib_expression(
+            "Power(Mean(Log($high / $low) * Log($high / $low), 10), 0.5)"
+        )
+        assert result.translatable
+        assert result.dsl_expression == (
+            "sqrt(ts_mean(mul(log(div(high,low)),log(div(high,low))),10))"
+        )
 
 
 class TestMappingTableAudit:
@@ -184,10 +224,12 @@ class TestMappingTableAudit:
     def test_expected_statuses(self):
         assert OPERATOR_MAPPINGS["Ref"].status == "equivalent"  # extend-factor-dsl-ref 翻转
         assert OPERATOR_MAPPINGS["Ref"].dsl_name == "ref"
+        assert OPERATOR_MAPPINGS["Sum"].status == "equivalent"  # extend-factor-dsl-coverage 翻转
+        assert OPERATOR_MAPPINGS["Sum"].dsl_name == "ts_sum"
         assert OPERATOR_MAPPINGS["Max"].status == "not_equivalent"
         assert OPERATOR_MAPPINGS["Min"].status == "not_equivalent"
         assert OPERATOR_MAPPINGS["Mean"].status == "equivalent"
-        assert OPERATOR_MAPPINGS["Sum"].status == "missing"
+        assert OPERATOR_MAPPINGS["Power"].status == "missing"  # 可变指数无对应；0.5 走特例分支
 
     def test_field_mappings_declare_caliber(self):
         assert FIELD_MAPPINGS["$close"].dsl_field == "close"

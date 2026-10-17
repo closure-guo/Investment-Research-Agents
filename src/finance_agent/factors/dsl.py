@@ -59,6 +59,9 @@ OPS: frozenset[str] = frozenset(
         "log",
         # extend-factor-dsl-ref：后移引用（动量/反转/收益率族外部表达式的单点瓶颈）
         "ref",
+        # extend-factor-dsl-coverage：滚动求和（VWAP 偏离族）与逐元素平方根（Parkinson 族）
+        "ts_sum",
+        "sqrt",
     }
 )
 
@@ -82,6 +85,8 @@ ARITY: dict[str, int] = {
     "abs": 1,
     "log": 1,
     "ref": 2,
+    "ts_sum": 2,
+    "sqrt": 1,
 }
 
 # window 参数所在位置（D2）：必须为正整数数字字面量
@@ -92,13 +97,16 @@ WINDOW_ARG_INDEX: dict[str, int] = {
     "delta": 1,
     "ts_corr": 2,
     "ref": 1,
+    "ts_sum": 1,
 }
 
 # 复杂度上限（解析期硬约束；默认路径超限即拒收）
-# 深度上限 4 → 5（raise-factor-dsl-depth-cap）：ref 使价量比值/差值子树普遍达深度 3，
-# 「滚动统计量套一层比值/差值」的自然形态（5 日均隔夜跳空、20 日收益波动）深度恰 5——
-# 上限 4 曾截断 9/32 条外部候选（复跑读数）。
-MAX_AST_DEPTH: int = 5
+# 深度上限 4 → 5 → 6（raise-factor-dsl-depth-cap + extend-factor-dsl-coverage）：
+# ref 使价量比值/差值子树普遍达深度 3；「滚动统计量套一层比值/差值」自然形态深度 5、
+# 「外层统计量再套一层」（CLV 平滑、VWAP 偏离、Parkinson 波动率）深度 6——上限 4 曾截断
+# 9/32 条外部候选、5 曾截断 4/32（复跑读数机械归因）。7+ 当前无解锁对象（amihud 另受
+# 自由参数上限约束）。
+MAX_AST_DEPTH: int = 6
 MAX_FREE_PARAMS: int = 3
 MAX_FIELDS: int = 3
 
@@ -122,8 +130,8 @@ class FactorComplexityError(ValueError):
     """复杂度硬约束超限（深度 / 自由参数 / 字段种类）。
 
     消息**不短路**：一次列出全部违规项，形如
-    ``复杂度超限：深度 6 > 上限 5；自由参数 4 > 上限 3``
-    （spec 场景要求的「深度 6 > 上限 5」子串逐字保留）。
+    ``复杂度超限：深度 7 > 上限 6；自由参数 4 > 上限 3``
+    （spec 场景要求的「深度 7 > 上限 6」子串逐字保留）。
     """
 
 
@@ -377,7 +385,7 @@ def parse(expr: str, *, enforce_complexity: bool = True) -> AstNode:
 
     错误契约恒为 ``ValueError`` 家族：深嵌套触发解释器递归栈溢出
     （``RecursionError``）时转译为 ``FactorComplexityError``（消息形如
-    「表达式嵌套过深（> 上限 5 层）」），不泄漏 ``RecursionError``；该转译与
+    「表达式嵌套过深（> 上限 6 层）」），不泄漏 ``RecursionError``；该转译与
     ``enforce_complexity`` 取值无关——``False`` 旁路只跳过上限检查，不豁免
     解释器物理栈限。
     """
