@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -438,11 +439,10 @@ def collect_once(
         },
     }
     atomic_write_json(out_path, snapshot)
-    try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(new_state, ensure_ascii=False), encoding="utf-8")
-    except OSError:
-        pass  # 状态文件写失败不阻断快照（下轮重建，代价=重扫本会话）
+    with contextlib.suppress(OSError):
+        # 原子写（delta add-factor-research-control：代理守护与手动兜底并存，防半读重建）；
+        # 状态文件写失败不阻断快照（下轮重建，代价=重扫本会话）
+        atomic_write_json(state_path, new_state)
     return snapshot
 
 
