@@ -1,17 +1,19 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 
 /**
  * delta add-factor-research-monitor T4：因子研发监控页 E2E 门禁（默认 config，8000/5173）。
+ * delta add-factor-research-control T4：看护启停开关用例。
  *
- * 红线：不 mock 业务接口——fixture 快照文件由本 spec 以真实文件写入测试隔离路径
- * （playwright.config.ts webServer env FACTOR_RESEARCH_STATUS_PATH=
- * data/test-e2e-factor-research-status.json），后端真实 GET /api/factor-research/status
- * 读文件 + 派生 stale，前端经真实接口渲染。缺失/损坏态直接操作文件（删除/写垃圾）。
+ * 红线：不 mock 业务接口——fixture 快照/控制文件由本 spec 以真实文件写入测试隔离路径
+ * （playwright.config.ts webServer env FACTOR_RESEARCH_STATUS_PATH=…）：
+ * 后端真实 GET /api/factor-research/status 读文件 + 派生 stale + control 块、
+ * 真实 PUT /api/factor-research/control 写控制文件（断言其真值）。
+ * 缺失/损坏态直接操作文件（删除/写垃圾）；「研发侧调和完成」用推进快照文件模拟。
  *
- * 用例串行（serial）：共享同一快照文件，setup/teardown 互相覆盖，并行会互踩。
+ * 用例串行（serial）：共享同一快照/控制文件，setup/teardown 互相覆盖，并行会互踩。
  */
 
 test.describe.configure({ mode: 'serial', timeout: 60_000 })
@@ -22,14 +24,31 @@ const STATUS_PATH = path.resolve(
   fileURLToPath(new URL('.', import.meta.url)),
   '../../../../data/test-e2e-factor-research-status.json'
 )
+const CONTROL_PATH = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  '../../../../data/test-e2e-factor-research-control.json'
+)
 
-// 防御：fixture 路径必须测试隔离，绝不落到生产 data/factor_research/status.json
-if (!STATUS_PATH.includes('test-e2e')) {
-  throw new Error(`fixture 路径未隔离: ${STATUS_PATH}`)
+// 防御：fixture 路径必须测试隔离，绝不落到生产 data/factor_research/status.json 与控制文件
+if (!STATUS_PATH.includes('test-e2e') || !CONTROL_PATH.includes('test-e2e')) {
+  throw new Error(`fixture 路径未隔离: ${STATUS_PATH} / ${CONTROL_PATH}`)
 }
 
 function isoAt(epoch: number): string {
   return new Date(epoch * 1000).toISOString()
+}
+
+/** 控制文件读取（PUT 真实落盘后的真值断言；不存在/损坏 → null）。 */
+function readControl(): { desired_running?: unknown } | null {
+  try {
+    return JSON.parse(readFileSync(CONTROL_PATH, 'utf-8')) as { desired_running?: unknown }
+  } catch {
+    return null
+  }
+}
+
+function removeControl() {
+  rmSync(CONTROL_PATH, { force: true })
 }
 
 /** 合法快照 fixture：形状与采集器契约（factor-research-monitor spec）一致。 */
@@ -79,6 +98,7 @@ function removeSnapshot() {
 
 test.afterAll(() => {
   removeSnapshot()
+  removeControl()
 })
 
 test('1. 运行中：看护徽章/pid/循环·步骤·进度/因子/日志尾/历史表/累计计数', async ({ page }) => {
@@ -165,4 +185,63 @@ test('5. 入口：侧边栏收起态图标与命令面板动作均进入 /factor
   await action.click()
   await expect(page).toHaveURL(/\/factor-research$/)
   await expect(page.getByTestId('factor-research-page')).toBeVisible()
+})
+
+// ── 看护启停开关（delta add-factor-research-control T4）──
+
+test('6. 看护开关：停止需确认 → 控制文件真写入 → 「切换中」→ 快照推进后翻转', async ({ page }) => {
+  writeSnapshot(snapshotBody()) // running=true，新鲜
+  removeControl()
+  await page.goto('/factor-research')
+
+  const sw = page.getByTestId('factor-research-control-switch')
+  await expect(sw).toBeVisible()
+  await expect(sw).toHaveAttribute('aria-checked', 'true')
+  await expect(sw).toBeEnabled()
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('已开启')
+
+  // 点击停止 → 二次确认弹窗；未确认前 MUST NOT 发请求（控制文件不存在）
+  await sw.click()
+  const dialog = page.getByTestId('factor-research-control-confirm-dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('将终止当前研发会话')
+  expect(existsSync(CONTROL_PATH)).toBe(false)
+
+  // 确认 → 真实 PUT → 控制文件真值落地（非 mock）
+  await page.getByTestId('factor-research-control-confirm').click()
+  await expect.poll(() => readControl()?.desired_running).toBe(false)
+
+  // pending（期望≠实态）→ 「切换中」+ 禁用；位置不翻转（仍显示实态开）
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('切换中', {
+    timeout: 15_000,
+  })
+  await expect(sw).toBeDisabled()
+  await expect(sw).toHaveAttribute('aria-checked', 'true')
+
+  // 模拟 distro 代理调和完成：快照推进为 running=false → 开关翻转 + 恢复可操作
+  writeSnapshot(snapshotBody({ supervisor: { running: false, pid: null, started_at: null } }))
+  await expect(sw).toHaveAttribute('aria-checked', 'false', { timeout: 15_000 })
+  await expect(sw).toBeEnabled()
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('已关闭')
+})
+
+test('7. 陈旧数据：开关禁用 + 明示理由（控制通道无存活证据）', async ({ page }) => {
+  const epoch = Math.floor(Date.now() / 1000) - 400
+  writeSnapshot(snapshotBody({ collected_at: isoAt(epoch), collected_at_epoch: epoch }))
+  await page.goto('/factor-research')
+
+  await expect(page.getByTestId('factor-research-stale-banner')).toBeVisible()
+  const sw = page.getByTestId('factor-research-control-switch')
+  await expect(sw).toBeDisabled()
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('数据已陈旧')
+})
+
+test('8. 快照缺失：空态照旧 + 控制条开关禁用「控制通道未接入」', async ({ page }) => {
+  removeSnapshot()
+  await page.goto('/factor-research')
+
+  await expect(page.getByTestId('factor-research-empty-missing')).toBeVisible()
+  const sw = page.getByTestId('factor-research-control-switch')
+  await expect(sw).toBeDisabled()
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('控制通道未接入')
 })

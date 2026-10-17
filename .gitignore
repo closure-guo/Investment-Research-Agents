@@ -276,6 +276,7 @@ data/factor_library.db*
 # （delta add-factor-research-monitor：spec 直接写隔离 fixture，生产快照不得入库）
 data/factor_research/
 data/test-e2e-factor-research-status.json*
+data/test-e2e-factor-research-control.json*
 data/execution.db*
 data/test-repro.db*
 data/*.corrupt-backup
