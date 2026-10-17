@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { StatusBadge } from '../../components/StatusBadge'
 import { Button } from '../../components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../../components/ui/dialog'
 import { formatSessionTime } from '../../lib/format'
 import type {
   FactorResearchCurrentSession,
@@ -9,12 +17,17 @@ import type {
 } from '../../types'
 
 /**
- * 因子研发监控页（delta add-factor-research-monitor T3；spec frontend「因子研发监控页」）。
+ * 因子研发监控页（delta add-factor-research-monitor T3；spec frontend「因子研发监控页」；
+ * delta add-factor-research-control：看护启停开关）。
  *
- * 只读展示外部因子研发（RD-Agent 持续循环看护）的运行状态：
- * - 取数 ``GET /api/factor-research/status``（端点透传采集器快照 + 派生 stale）；
+ * 展示外部因子研发（RD-Agent 持续循环看护）的运行状态 + 看护启停控制：
+ * - 取数 ``GET /api/factor-research/status``（端点透传采集器快照 + 派生 stale + control 块）；
  * - 看护状态区：运行中/已停止徽章（StatusBadge 五态）+ pid + 启动时刻 + 已运行时长 +
  *   累计会话/候选实现数；
+ * - 控制条（常驻）：启停开关 + 状态文案。开关位置反映快照**实际**状态（MUST NOT 乐观翻转）；
+ *   停止经二次确认（终止当前会话）后 ``PUT /api/factor-research/control``；``control.pending``
+ *   期间显示「切换中」并禁用重复操作；快照缺失/损坏/陈旧（控制通道无存活证据）→ 开关禁用并
+ *   明示理由；请求失败如实提示、位置不翻转；
  * - 当前会话进度区：循环序号 · 当前步骤（中文映射，未知原值如实）· 步骤进度 x/5 ·
  *   本步已用/预计剩余 · 本会话因子列表 · 日志尾（等宽字体）；
  * - 会话历史表：开始时刻 / 时长 / 状态（新→旧）；
@@ -23,7 +36,7 @@ import type {
  *   MUST NOT 以骨架屏或错误提示冒充；
  * - 轮询自动刷新（默认 10s，≤ 15s 契约；测试可注入间隔）；单轮失败静默重试。
  *
- * 只读页：MUST NOT 提供启停/控制入口（控制面另议，后端容器无法执行 distro 命令）。
+ * 数据面只读；控制面仅看护启停一项（MUST NOT 增设其它控制入口）。
  */
 
 export const FACTOR_RESEARCH_POLL_MS = 10_000
@@ -81,6 +94,10 @@ export function FactorResearchPage({
   // null = 加载中；error = 首屏取数失败（与「未接入/损坏」空态严格区分）
   const [data, setData] = useState<FactorResearchStatusResponse | null>(null)
   const [error, setError] = useState(false)
+  // 控制面（delta add-factor-research-control）：确认弹窗 / 提交中 / 失败提示
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [controlError, setControlError] = useState<string | null>(null)
   const timerRef = useRef<number | null>(null)
 
   const load = useCallback(async () => {
@@ -106,12 +123,79 @@ export function FactorResearchPage({
     }
   }, [load, pollIntervalMs])
 
+  // 控制提交：只发布尔期望态（零命令面）；失败如实提示、位置不翻转（不乐观改状态）
+  const submitControl = useCallback(
+    async (desired: boolean) => {
+      setSubmitting(true)
+      setControlError(null)
+      try {
+        const resp = await fetch('/api/factor-research/control', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ desired_running: desired }),
+        })
+        if (!resp.ok) {
+          let detail = ''
+          try {
+            detail = ((await resp.json()) as { detail?: string }).detail ?? ''
+          } catch {
+            // 非 JSON 响应：按状态码如实提示
+          }
+          setControlError(
+            resp.status === 409 && detail === 'control_unavailable'
+              ? '控制通道不可用（快照未更新，请求未受理）'
+              : `请求失败（HTTP ${resp.status}）`
+          )
+          return
+        }
+        await load() // 刷新 → control.pending 决定「切换中」
+      } catch {
+        setControlError('请求失败：网络错误')
+      } finally {
+        setSubmitting(false)
+      }
+    },
+    [load]
+  )
+
   const supervisor = data?.supervisor ?? null
   const current = data?.current_session ?? null
   const sessions = data?.sessions ?? []
   const totals = data?.totals ?? null
   const stale = data?.stale === true
   const collectedAt = data?.collected_at ? formatSessionTime(data.collected_at) : '—'
+
+  // ── 控制面派生（开关位置 = 快照实态；通道存活证据 = 新鲜快照）──
+  const control = data?.control ?? null
+  const running = supervisor?.running === true
+  const pending = control?.pending === true
+  const channelReady = data !== null && data.available === true && !stale
+  const switchDisabled = submitting || pending || !channelReady
+
+  let controlStateText: string
+  if (data === null) {
+    controlStateText = '—'
+  } else if (data.available !== true) {
+    controlStateText =
+      data.reason === 'corrupt' ? '控制通道未接入（快照损坏）' : '控制通道未接入（采集器未接入）'
+  } else if (stale) {
+    controlStateText = '控制通道暂不可用（数据已陈旧）'
+  } else if (pending) {
+    controlStateText = control?.requested_at
+      ? `切换中…（${formatSessionTime(control.requested_at)} 发起，等待研发侧受理）`
+      : '切换中…（等待研发侧受理）'
+  } else {
+    controlStateText = running ? '已开启' : '已关闭'
+  }
+
+  const onSwitchClick = () => {
+    if (switchDisabled) return
+    if (running) {
+      setConfirmOpen(true) // 停止为破坏性方向（终止当前会话）→ 二次确认
+      return
+    }
+    void submitControl(true)
+  }
 
   // 看护已运行时长：客户端按启动时刻实时推算（每次轮询重算）
   const uptimeS = supervisor?.started_at
@@ -140,6 +224,84 @@ export function FactorResearchPage({
           </span>
         </div>
       </div>
+
+      {/* 控制条（常驻：开关 + 状态文案 + 失败提示；delta add-factor-research-control） */}
+      <div
+        data-testid="factor-research-control"
+        className="shrink-0 border-b border-border px-6 py-2.5"
+      >
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+            研发看护
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={running}
+            aria-label="研发看护开关"
+            data-testid="factor-research-control-switch"
+            disabled={switchDisabled}
+            onClick={onSwitchClick}
+            className="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            style={{
+              background: running ? 'var(--status-success-default)' : 'var(--bg-overlay-l1)',
+            }}
+          >
+            <span
+              aria-hidden="true"
+              className="inline-block h-4 w-4 rounded-full bg-white shadow transition-transform"
+              style={{ transform: running ? 'translateX(1.125rem)' : 'translateX(0.125rem)' }}
+            />
+          </button>
+          <span
+            data-testid="factor-research-control-state"
+            className="text-xs"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            {controlStateText}
+          </span>
+          {controlError !== null && (
+            <span
+              data-testid="factor-research-control-error"
+              className="text-xs"
+              style={{ color: 'var(--status-error-default)' }}
+            >
+              {controlError}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* 停止二次确认（指定「终止当前研发会话」语义；启动方向直接生效） */}
+      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogContent data-testid="factor-research-control-confirm-dialog">
+          <DialogHeader>
+            <DialogTitle>停止研发看护？</DialogTitle>
+            <DialogDescription>
+              将终止当前研发会话（进行中的实验作废）并停止后续循环；工作区与候选产物保留，重新开启后从既有工作区继续。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              data-testid="factor-research-control-cancel"
+              onClick={() => setConfirmOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              variant="outline"
+              data-testid="factor-research-control-confirm"
+              onClick={() => {
+                setConfirmOpen(false)
+                void submitControl(false)
+              }}
+            >
+              确认停止
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <div className="flex-1 overflow-y-auto p-6">
         {data === null && !error && (
