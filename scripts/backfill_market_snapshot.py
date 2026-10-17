@@ -1,5 +1,17 @@
 """历史回填：market_snapshot 逐票双复权口径落库（add-market-snapshot T11，运维脚本）。
 
+**推荐以容器内执行**（issue #344）：快照库经 bind mount 同时暴露给宿主机与容器，
+宿主机写 WAL 期间容器侧读库会间歇 `disk I/O error`（跨挂载边界的 WAL 不受支持，
+incident 043 同族；2026-10-15 实证：宿主机 16 进程回填期间容器内 paper/选股/面板
+读快照全不可用）::
+
+    docker compose exec -T backend python scripts/backfill_market_snapshot.py \\
+        --start 2024-01-01 --end 2025-12-31 --symbols 600519,000001
+
+容器内读写同侧（``scripts/`` 经 compose 只读挂载），容器内日批写读并发已验证正常。
+宿主机直跑会被护栏拒绝（库落在主检出 ``data/`` 且 backend 容器运行中）——
+``--allow-host-write`` 可显式绕过，仅限确认无容器读的时段（如栈已停）。
+
 用法::
 
     uv run python scripts/backfill_market_snapshot.py \\
@@ -14,21 +26,26 @@
 - 落库经 ``write_snapshot_rows_bulk``——一票一次事务整批 upsert（~190 日/票；
   逐日提交在 16 进程并行下提交放大严重，unify-quant-research-architecture P0-1
   运维修复）；进程中断在票间。
+- 运维纪律（incident 043 + 准入面板深度回填实证）：分片并发 ≤8；运行期间不硬杀
+  进程（要停等自然结束或逐进程 SIGTERM 后等待）；收尾后查 ``/api/snapshot/status``。
 - ⚠ 回填行不含停牌合成/前收盘/状态位（``is_suspended`` 等显式为 0，
   ``prev_close``/涨跌幅为 NULL）：**不得**把回填区间接入
   ``compute_rebase_factors`` 链（停牌合成依赖状态链，会把缺行误判）；正式日频
   数据以 ``market_snapshot_daily`` 日批为准。
-- ``--dry-run`` 只取数并计数、不写库；退出码 0（正常）/ 2（参数或标的池错误）。
+- ``--dry-run`` 只取数并计数、不写库；退出码 0（正常）/ 2（参数、标的池或环境护栏错误）。
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
+import shlex
 import sqlite3
+import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +72,81 @@ _BACKFILL_CAVEAT = (
     "不得把回填区间接入 compute_rebase_factors 链（停牌合成需要状态链）；"
     "正式日频数据以 market_snapshot_daily 日批为准。"
 )
+
+# ── 宿主机直跑护栏（issue #344：跨 bind mount WAL 争用） ──
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_DOCKERENV = Path("/.dockerenv")
+
+
+def _running_in_container() -> bool:
+    """容器内检测：Docker 建 ``/.dockerenv``；``BACKFILL_IN_CONTAINER=1`` 兜底。"""
+    return _DOCKERENV.exists() or os.getenv("BACKFILL_IN_CONTAINER") == "1"
+
+
+def _backend_container_running() -> bool:
+    """标准栈（含 dev override）backend 服务是否运行中。
+
+    best-effort：docker 不可用 / compose 解析失败 → False（按「无容器读方」放行，
+    此时跨侧风险面不存在——护栏宁可漏拦不误拦）。
+    """
+    try:
+        result = subprocess.run(  # noqa: S603 - 固定 docker 参数,无外部输入
+            ["docker", "compose", "ps", "--services", "--status", "running"],  # noqa: S607
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "backend" in result.stdout.split()
+
+
+def _host_write_guard(
+    *,
+    db_path: str | Path | None,
+    allow_host_write: bool = False,
+    dry_run: bool = False,
+    in_container: bool | None = None,
+    container_running: Callable[[], bool] | None = None,
+    repo_root: Path | None = None,
+    argv: Sequence[str] = (),
+) -> str | None:
+    """宿主机直跑护栏：返回拒绝原因；None = 放行（issue #344）。
+
+    风险面三条件同时成立才拒绝：①非容器内直跑；②目标库落在主检出 ``data/``
+    （bind mount 面）；③容器读方在跑（backend 服务）。``--dry-run`` 零写入、
+    ``--allow-host-write`` 显式绕过、库在别处、无容器读方 → 一律放行。
+    """
+    if dry_run or allow_host_write:
+        return None
+    if in_container is None:
+        in_container = _running_in_container()
+    if in_container:
+        return None
+    resolved = Path(db_path).resolve() if db_path else Path(_default_db_path()).resolve()
+    root = repo_root if repo_root is not None else _REPO_ROOT
+    try:
+        resolved.relative_to((root / "data").resolve())
+    except ValueError:
+        return None  # 库不在主检出 data/（非 bind mount 面）→ 无跨侧争用
+    check = container_running if container_running is not None else _backend_container_running
+    if not check():
+        return None
+    in_cmd = (
+        "docker compose exec -T backend python scripts/backfill_market_snapshot.py "
+        + " ".join(shlex.quote(str(a)) for a in argv)
+    ).strip()
+    return (
+        "错误：拒绝在宿主机直跑回填——目标库经 bind mount 同时被容器读"
+        f"（{resolved}；跨挂载 WAL 争用会令容器侧读库全不可用，issue #344）。\n"
+        "请改用容器内执行（读写同侧）：\n"
+        f"    {in_cmd}\n"
+        "如确认栈已停/无容器读的时段，可加 --allow-host-write 显式绕过。"
+    )
 
 
 def _split_csv(value: str) -> list[str]:
@@ -265,9 +357,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=None, help="最多处理 N 只（标的池截断）")
     parser.add_argument("--db", default=None, help="快照库路径（缺省 SNAPSHOT_DB_PATH/默认）")
     parser.add_argument("--dry-run", action="store_true", help="只取数计数，不写库")
+    parser.add_argument(
+        "--allow-host-write",
+        action="store_true",
+        help="显式绕过宿主机直跑护栏（仅限确认无容器读方的时段；见 issue #344）",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    # 宿主机直跑护栏（issue #344）：先于一切库操作（含只读打开）
+    guard_reason = _host_write_guard(
+        db_path=args.db,
+        allow_host_write=args.allow_host_write,
+        dry_run=args.dry_run,
+        argv=sys.argv[1:] if argv is None else list(argv),
+    )
+    if guard_reason:
+        print(guard_reason, file=sys.stderr)
+        return 2
 
     try:
         start = _parse_date_param(args.start, param="--start").isoformat()
