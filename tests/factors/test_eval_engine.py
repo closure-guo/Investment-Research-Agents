@@ -154,6 +154,27 @@ def test_ref_one_period_shift_and_composite():
     _assert_frame(_eval("div(close,ref(close,1))", panel), ratio)
 
 
+def test_ts_sum_is_rolling_sum():
+    """ts_sum(x,w) = 窗口求和（min_periods=window：前 w−1 行 NaN、逐标的独立）。"""
+    volume = _frame({"A": [1.0, 2.0, 3.0, 4.0], "B": [10.0, 20.0, 30.0, 40.0]})
+    expected = _frame({"A": [_NAN, _NAN, 6.0, 9.0], "B": [_NAN, _NAN, 60.0, 90.0]})
+    _assert_frame(_eval("ts_sum(volume,3)", _panel(volume=volume)), expected)
+
+
+def test_sqrt_elementwise_domain():
+    """sqrt 逐元素：正数开方、0 → 0、负值 → NaN、NaN 传播。"""
+    close = _frame({"A": [4.0, 0.0, -1.0, _NAN]})
+    expected = _frame({"A": [2.0, 0.0, _NAN, _NAN]})
+    _assert_frame(_eval("sqrt(close)", _panel(close=close)), expected)
+
+
+def test_sqrt_of_ts_sum_composite():
+    """spec 场景复合式：sqrt(ts_sum(volume,2))——求和后逐元素开方（前 1 行 NaN）。"""
+    volume = _frame({"A": [1.0, 3.0, 5.0]})
+    expected = _frame({"A": [_NAN, 2.0, 8.0**0.5]})
+    _assert_frame(_eval("sqrt(ts_sum(volume,2))", _panel(volume=volume)), expected)
+
+
 def test_time_series_operators_are_per_code():
     """时序算子按 code 各自独立滚动（列间不串味）。"""
     close = _frame({"A": [1.0, 2.0, 3.0], "B": [10.0, 20.0, 40.0]})

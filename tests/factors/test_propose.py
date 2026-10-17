@@ -99,7 +99,7 @@ class TestContractValidation:
 
     def test_complexity_violation_rejected_via_default_parse_path(self):
         """提案路径必须走默认复杂度硬约束（enforce_complexity=True）。"""
-        expr = "add(close, add(close, add(close, add(close, add(close, close)))))"
+        expr = "add(close, add(close, add(close, add(close, add(close, add(close, close))))))"
         proposal, error = validate_proposal_payload(_payload(expression=expr))
         assert proposal is None
         assert error is not None
