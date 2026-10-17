@@ -23,7 +23,7 @@
 | L1 前端  | React 18 + Vite | 自然语言输入 + SSE 流式渲染 + 报告展示 + 文件下载 + 会话管理      |
 | L2 Agent | LangGraph + ReAct Harness | 5 层架构 + 多 Agent 辩论 + Send 并行派发 + 三模式编排     |
 | L3 数据  | pandas + SQLite | AKShare 拉取 + 指标计算 + K 线/宏观/新闻 + 报表持久化 + 行情缓存  |
-| L4 LLM   | LLM Provider Gateway | ProfileResolver 唯一解析入口 + 能力探测门禁（两级判定）+ LiteLLM 收口适配 + fallback 链执行（typed error 按链自动切换 profile，每跳 trace 可审计）+ 纯文本输出合同守卫（思考独白泄露/截断/空正文不进交付物）；默认 opencode zen 网关 deepseek-v4-flash |
+| L4 LLM   | LLM Provider Gateway | ProfileResolver 唯一解析入口 + 能力探测门禁（两级判定）+ LiteLLM 收口适配 + fallback 链执行（typed error 按链自动切换 profile，每跳 trace 可审计）+ 纯文本输出合同守卫（思考独白泄露/截断/空正文不进交付物）；默认 opencode zen/go 网关 deepseek-v4.1-flash |
 | 可观测性 | Langfuse        | LLM 调用链路追踪 + Prompt 版本管理 + 引用校验评分                 |
 
 > L2 Agent 5 层：4 分析师并行 -> Bull/Bear 辩论 -> Trader -> Risk Management 辩论 -> Fund Manager（详见 [ADR-0011](docs/adr/0011-five-layer-architecture.md)）
@@ -56,7 +56,7 @@
 
 ## 质量保障
 
-- 后端 310 个 pytest 测试文件（4,132 个用例，含 `tests/llm_contracts/` provider 合同套件）、前端 76 个 Vitest 测试文件（636 个用例）、36 个 Playwright E2E spec / 79 个用例（stub 套件 62 例为 CI 门禁，`@live` 标记 17 例不进门禁、真模型验证显式运行，nightly 防漂移）
+- 后端 323 个 pytest 测试文件（4,335 个用例，含 `tests/llm_contracts/` provider 合同套件）、前端 78 个 Vitest 测试文件（665 个用例）、41 个 Playwright E2E spec / 87 个用例（stub 套件 69 例为 CI 门禁，`@live` 标记 18 例不进门禁、真模型验证显式运行，nightly 防漂移）
 - `evals/` 评估框架（详见下节「评估体系」）：judge 评分与人工校准 / 版本对比 / 消融实验 / claim 验证基准 / golden set / 决策回放显著性检验
 
 ## 评估体系
@@ -149,8 +149,8 @@ cp .env.example .env
 | 变量 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
 | `LLM_API_KEY` | **是** | - | LLM API Key；也可用 `DEEPSEEK_API_KEY` 作为回退 |
-| `LLM_MODEL` | 否 | `openai/deepseek-v4-flash` | 深度模式模型名，litellm 格式 |
-| `LLM_QUICK_MODEL` | 否 | `openai/deepseek-v4-flash` | 快速/追问模式模型名 |
+| `LLM_MODEL` | 否 | `openai/deepseek-v4.1-flash` | 深度模式模型名，litellm 格式 |
+| `LLM_QUICK_MODEL` | 否 | `openai/deepseek-v4.1-flash` | 快速/追问模式模型名 |
 | `LLM_BASE_URL` | **条件必填** | -（无代码默认，见 `.env.example` 模板值） | API 端点。**与 `LLM_API_KEY` 搭配使用时必填**——配了 key 缺端点启动即报 `IncompleteLLMConfigError`（有意收紧，见 5.1-B2）；只配 `LLM_MODEL` 不配 key 时按模型前缀走官方端点，可省略 |
 | `LLM_THINKING` | 否 | `enabled` | 思考模式 `enabled` / `disabled` |
 | `LLM_REASONING_EFFORT` | 否 | `max` | 思考强度 `low` / `high` / `max` |
@@ -164,11 +164,14 @@ cp .env.example .env
 
 ### 示例
 
-**默认配置（opencode zen/go 网关 + deepseek-v4-flash）**：
+**默认配置（opencode zen/go 网关 + deepseek-v4.1-flash）**：
 
 ```bash
 # .env
 LLM_API_KEY=sk-xxxxxxxxxxxxxxxx
+LLM_MODEL=openai/deepseek-v4.1-flash
+LLM_QUICK_MODEL=openai/deepseek-v4.1-flash
+LLM_BASE_URL=https://opencode.ai/zen/go/v1
 ```
 
 **直连 DeepSeek**：
@@ -290,7 +293,7 @@ frontend/src/
 - [x] **P8 Langfuse 可观测性** - LLM 追踪 + Prompt 管理 + 评分上报 (ADR-0015/0016)
 - [x] **P9 意图澄清对话流** - 标的不明确时 Agent 反问澄清 (ADR-0017)
 
-> P9 之后的演进以 OpenSpec delta 为单位管理（`openspec/changes/archive/` 已归档 151 个变更）。近期主题：LLM Provider Gateway 防腐层、Kimi 风格前端 UX（命令面板/下载中心/深色模式/报告侧栏）、引用校验语义覆盖强化（术语/期次一致性 + 分桶定向重试）、决策结果跟踪与价位申报必填化、决策滞回与前向战绩仪表盘（跑赢指数对比/组合 β/α/观点日志状态 tab）、LLM 治理续章（能力探测两级判定/kimi reasoning_effort 温度契约/纯文本输出合同守卫）、事件投递韧性五联、评估体系 judge 人工校准与 rubric 判例迭代。
+> P9 之后的演进以 OpenSpec delta 为单位管理（`openspec/changes/archive/` 已归档 162 个变更）。近期主题：LLM Provider Gateway 防腐层、Kimi 风格前端 UX（命令面板/下载中心/深色模式/报告侧栏）、引用校验语义覆盖强化（术语/期次一致性 + 分桶定向重试 + 期次键消歧）、决策结果跟踪与价位申报必填化（含误拦治理与打回反馈可执行化）、决策滞回与前向战绩仪表盘（跑赢指数对比/组合 β/α/观点日志状态 tab/观点池完整性）、LLM 治理续章（能力探测两级判定/kimi reasoning_effort 温度契约/纯文本输出合同守卫）、事件投递韧性五联及续章（运维出口/终态有界送达）、报告 K 线升级、评估体系 judge 人工校准与 rubric 判例迭代。
 
 ## 文档
 
@@ -302,9 +305,9 @@ frontend/src/
 - [专题设计](docs/design/) - LLM Provider Gateway、E2E 方案、评估体系等专项设计档案
 - [评估体系](evals/) - 评估框架（judge/对比/消融/claim 基准），基线说明见 [docs/evals/](docs/evals/)
 - [项目工作流](docs/project-workflow.md) - OpenSpec + Superpowers 双框架实施指南
-- [事故记录](docs/incidents/) - 系统性问题与解决方案（001-037，37 个编号 / 41 份文档）
+- [事故记录](docs/incidents/) - 系统性问题与解决方案（001-038，38 个编号 / 40 份文档）
 - [AGENTS.md](AGENTS.md) - Agent 工作指南（任务路由、契约红线、测试约束）
-- [OpenSpec](openspec/specs/) - 系统行为规范（唯一真相来源，60 个 capability）
+- [OpenSpec](openspec/specs/) - 系统行为规范（唯一真相来源，63 个 capability）
 
 ## 思路来源
 
@@ -313,8 +316,8 @@ frontend/src/
 | 来源 | 用途 | 说明 |
 |------|------|------|
 | [TradingAgents (arXiv:2412.20138)](https://arxiv.org/abs/2412.20138) | 5 层架构 | 4 分析师并行 -> Bull/Bear 辩论 -> Trader -> Risk Management 辩论 -> Fund Manager 的整体流程参考 |
-| [MarketSenseAI 2.0 (arXiv:2502.00415)](https://arxiv.org/abs/2502.00415) | 多源信号→综合 agent | 同团队单 LLM 版→agent 化的自然升级路径；组合级前瞻验证见其续作 [Signal or Noise (arXiv:2604.17327)](https://arxiv.org/abs/2604.17327)（4 agent 单独均不跑赢市场、优势集体涌现，+25.2% 超额 / 蒙特卡洛 99.7 分位） |
-| [Should we be going MAD? (arXiv:2311.17371)](https://arxiv.org/abs/2311.17371) | 辩论层选型的反面校准 | 算力对齐下标准多 agent 辩论常被单 agent 自一致性采样追平——本项目坚持对辩论层做两代消融实测的动机 |
+| [MarketSenseAI 2.0 (arXiv:2502.00415)](https://arxiv.org/abs/2502.00415) | 多源信号→综合 agent | 同团队单 LLM 版→agent 化的自然升级路径；组合级前瞻验证见其续作 [Signal or Noise (arXiv:2604.17327)](https://arxiv.org/abs/2604.17327)（无单一 agent 主导、各 agent 日期级 IC 均不显著，超额来自互补组合涌现，+25.2% 超额 / 蒙特卡洛 99.7 分位） |
+| [Should we be going MAD? (arXiv:2311.17371)](https://arxiv.org/abs/2311.17371) | 辩论层选型的反面校准 | 标准多 agent 辩论不能可靠优于单 agent 自一致性采样、且 API 成本更高（全文已核）——本项目坚持对辩论层做两代消融实测的动机 |
 | [Why Do Multi-Agent LLM Systems Fail? (arXiv:2503.13657)](https://arxiv.org/abs/2503.13657) | 多 agent 失效模式意识 | MAST 分类学：协调/规范失效主导——本项目结构化通信与图状态通道契约测试（incident 027/035 治理）的动机 |
 | [FinGround (arXiv:2604.23588)](https://arxiv.org/abs/2604.23588) | 引用校验 | Claim 6 类分类法 + computational 公式重算机制（见 [citation.py](src/finance_agent/citation.py)） |
 | [LangChain qa_sources](https://python.langchain.com/docs/how_to/qa_sources/) | 引用结构 | 结构化 Citation 对象设计参考 |

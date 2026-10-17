@@ -300,7 +300,8 @@ class TestGenerateReport:
         # 报告头部标注研究聚焦
         assert "研究聚焦: 估值是否合理" in report
         # fundamental（命中 valuation/growth）为重点，标星且出现在 technical 之前
-        assert report.index("fundamental") < report.index("technical")
+        # （标题已中文化，按中文显示名断言顺序）
+        assert report.index("基本面分析师") < report.index("技术面分析师")
         assert "★ 重点" in report
         # technical（未命中）被折叠
         assert "<details>" in report
@@ -348,6 +349,84 @@ class TestDeriveFocusFromQuery:
         from finance_agent.nodes.report import derive_focus_from_query
 
         assert derive_focus_from_query("") == ""
+
+
+class TestReportTitlesChinese:
+    """报告标题中文化：分析师标题渲染为中文显示名，辩论发言人中文标注。
+
+    此前报告直接以 state 键名作标题（### technical 等），中文报告夹生英文标题。
+    显示名映射仅作用于渲染层——state 键名（trace/eval/路由契约）不变，
+    未知键名回退原值（新增分析师/历史数据容错）。
+    """
+
+    @staticmethod
+    def _analyst(name: str) -> AnalystReport:
+        return AnalystReport(
+            agent_name=name,
+            summary=f"{name} 摘要正文",
+            plain_conclusion="结论：中性",
+            key_findings=[],
+            claims=[],
+            markdown="",
+        )
+
+    def test_four_analyst_titles_rendered_in_chinese(self):
+        state = {
+            "stock_name": "贵州茅台",
+            "stock_code": "600519",
+            "analyst_reports": {
+                "technical": self._analyst("technical"),
+                "macro": self._analyst("macro"),
+                "fundamental": self._analyst("fundamental"),
+                "sentiment": self._analyst("sentiment"),
+            },
+        }
+        md = generate_report(state)["final_report"]
+        assert "### 技术面分析师" in md
+        assert "### 宏观分析师" in md
+        assert "### 基本面分析师" in md
+        assert "### 舆情分析师" in md
+        for raw in ("### technical", "### macro", "### fundamental", "### sentiment"):
+            assert raw not in md, f"英文键名标题残留：{raw}"
+
+    def test_starred_analyst_title_keeps_chinese(self, monkeypatch):
+        """focus 命中时标星标题同样是中文显示名。"""
+        from finance_agent.nodes import report as report_mod
+
+        monkeypatch.setattr(report_mod, "complete_text", lambda *a, **k: ("聚焦摘要", {}))
+        state = {
+            "stock_name": "贵州茅台",
+            "stock_code": "600519",
+            "focus": "估值是否合理",
+            "analyst_reports": {"fundamental": self._analyst("fundamental")},
+        }
+        md = generate_report(state)["final_report"]
+        assert "### 基本面分析师（★ 重点）" in md
+
+    def test_unknown_analyst_key_falls_back_to_raw(self):
+        """映射表外的键名（新增分析师/历史数据）回退原值，不空标题。"""
+        state = {
+            "stock_code": "600519",
+            "analyst_reports": {"esg": self._analyst("esg")},
+        }
+        md = generate_report(state)["final_report"]
+        assert "### esg" in md
+
+    def test_risk_debate_speakers_rendered_in_chinese(self):
+        state = {
+            "stock_code": "600519",
+            "risk_debate_history": [
+                {"role": "aggressive", "round": 1, "content": "激进方观点", "key_arguments": []},
+                {"role": "conservative", "round": 1, "content": "保守方观点", "key_arguments": []},
+                {"role": "neutral", "round": 1, "content": "中性方观点", "key_arguments": []},
+            ],
+        }
+        md = generate_report(state)["final_report"]
+        assert "**激进风控**: 激进方观点" in md
+        assert "**保守风控**: 保守方观点" in md
+        assert "**中性风控**: 中性方观点" in md
+        for raw in ("aggressive", "conservative", "neutral"):
+            assert raw not in md, f"英文 role 残留：{raw}"
 
 
 class TestTradeDecisionOperationalParams:

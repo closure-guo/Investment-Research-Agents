@@ -421,7 +421,7 @@ def after_fund_manager(state):
 | --------- | ----------------- | --------------- | ------------------------------- |
 | 前端      | React 18 + Vite   | Gradio          | 组件生态 + 状态管理(zustand) + ECharts 图表   |
 | Agent     | LangGraph         | CrewAI          | Supervisor + Sub-graph 原生支持 |
-| LLM(开发) | GLM-5.2 (方舟) / deepseek-v4-flash (judge) | Qwen 系列 | 经 LLM Provider Gateway 切换；方舟 GLM-5.2 深度，opencode flash 判 分 |
+| LLM(开发) | deepseek-v4.1-flash (opencode zen/go) / glm-5.3-flash (judge, bigmodel) | Qwen 系列 | 经 LLM Provider Gateway 切换；opencode deepseek-v4.1-flash 深度分析，bigmodel glm-5.3-flash 判分 |
 | LLM 路由  | LiteLLM（关在 llm/adapters/**） | 自定义          | 100+ 模型统一接口               |
 | PDF       | pdfplumber        | Unstructured.io | 表格准确率 98.3%，速度快 6x     |
 | 数据      | AKShare           | Tushare         | 免费无 API Key                  |

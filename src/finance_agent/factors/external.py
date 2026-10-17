@@ -30,6 +30,7 @@ from finance_agent.factors.eval_engine import MarketPanel
 from finance_agent.factors.monthly import (  # noqa: PLC2701 - 预检/面板口径单一来源（同先例）
     _panel_from_snapshot,
     _preflight,
+    _rejected_gate_detail,
     _rejection_reason,
 )
 from finance_agent.factors.validate import admit_candidates
@@ -92,6 +93,8 @@ def run_factor_external_import(
                     "expression": normalized[position]["expression"],
                     "gate": result.rejected_gate,
                     "reason": _rejection_reason(result),
+                    # 判定读数（阈值/统计量等）：拒收可判读，不再只给原因码
+                    "detail": _rejected_gate_detail(result),
                 }
             )
 

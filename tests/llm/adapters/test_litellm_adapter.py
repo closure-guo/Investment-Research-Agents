@@ -152,6 +152,56 @@ def test_raw_stream_opencode_base_injects_session_header(monkeypatch):
     assert headers.get("x-opencode-session")
 
 
+def test_raw_completion_opencode_base_url_alias_injects_session_header(monkeypatch):
+    """base_url= 是 litellm 的 api_base 别名，能力探测（probes/设置页测试）
+    用该形态调用 opencode 端点——同样必须注入会话头，否则探测直接 400。"""
+    import litellm
+
+    from finance_agent.llm.adapters import litellm_adapter
+
+    captured: dict = {}
+
+    def fake_completion(**kwargs):
+        captured.update(kwargs)
+        from unittest.mock import MagicMock
+
+        return MagicMock()
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    litellm_adapter.raw_completion(
+        model="openai/deepseek-v4.1-flash",
+        messages=[{"role": "user", "content": "hi"}],
+        base_url="https://opencode.ai/zen/go/v1",
+        api_key="sk-test",
+    )
+    headers = captured.get("extra_headers") or {}
+    assert headers.get("x-opencode-session")
+
+
+def test_raw_stream_opencode_base_url_alias_injects_session_header(monkeypatch):
+    """流式同规约：base_url= 别名形态同样触发会话头注入。"""
+    import litellm
+
+    from finance_agent.llm.adapters import litellm_adapter
+
+    captured: dict = {}
+
+    def fake_completion(**kwargs):
+        captured.update(kwargs)
+        from unittest.mock import MagicMock
+
+        return MagicMock()
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    litellm_adapter.raw_stream(
+        model="openai/deepseek-v4.1-flash",
+        messages=[{"role": "user", "content": "hi"}],
+        base_url="https://opencode.ai/zen/go/v1",
+    )
+    headers = captured.get("extra_headers") or {}
+    assert headers.get("x-opencode-session")
+
+
 # ── temperature 拒绝自动降级（update-temperature-degrade-fallback）──
 
 

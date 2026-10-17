@@ -25,6 +25,8 @@ REQUIRED_CAPS: dict[str, dict[str, set[str]]] = {
     # 因子提案（add-factor-proposal-agent）：结构化合同硬要求；双档（quick/deep）
     # 候选由调用方按序传入，本表只做能力过滤（保序 → broad 档 primary=quick）
     "factor_proposal": {"json_schema": {"json_mode", "strict_schema"}},
+    # 因子转译（add-factor-harvest-bridge）：结构化载荷硬要求（二值裁决 JSON）
+    "factor_transcription": {"json_schema": {"json_mode", "strict_schema"}},
 }
 
 # 能力偏序 rank（越大越强）；fallback 链成员 rank 不得低于 primary
