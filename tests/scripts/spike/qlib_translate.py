@@ -13,7 +13,9 @@ MUST NOT 输出语义近似的猜测翻译。
 - Rolling 基类：`series.rolling(self.N, min_periods=1)`（L752）——热身期输出
   部分窗口统计量；本系统 ts_* 为 min_periods=window（热身期 NaN）。N=0 为
   expanding（L747）、0<N<1 为 ewm（L750）→ 非整数正窗一律拒绝；
-- `Ref` = `series.shift(N)`（L793）——本 DSL 无 ref 算子；
+- `Ref` = `series.shift(N)`（L793）——与本系统 `ref`（extend-factor-dsl-ref）严格等价：
+  同为空值前移 N 期的纯 shift，**无热身期口径差**（shift 无 min_periods 概念）；
+  N 须正整数（pyqlib 负 N 为前瞻引用，超出支持面，拒绝）；
 - `Mean/Std/Sum/...` = Rolling func（L827+）；
 - `Rank` = 滚动 pct 秩（`rolling(N, min_periods=1).rank(pct=True)`，L1156）——
   **滚动秩而非截面排名**，与本系统 `ts_rank`（窗口内当前值 pct 秩、并列平均秩）
@@ -116,13 +118,15 @@ OPERATOR_MAPPINGS: dict[str, OperatorMapping] = {
         "not_equivalent",
         "pyqlib 为滚动窗口最小值（Rolling 子类，L999）；本系统 min 为逐元素二元算子——同名不同义，拒绝机械替换",
     ),
-    # ── 本 DSL 无对应算子（扩 DSL 候选） ──
+    # ── 后移引用（extend-factor-dsl-ref：missing → equivalent） ──
     "Ref": OperatorMapping(
         "Ref",
-        None,
-        "missing",
-        "后移引用 x.shift(N)（L793）——本 DSL v1 无 ref 算子（动量/反转/收益率族不可翻译）",
+        "ref",
+        "equivalent",
+        "后移引用 x.shift(N)（L793）——本系统 ref 同为沿日期轴后移 N 期（前 N 行 NaN），"
+        "无热身期口径差；窗口须正整数（N≤0 为恒等/前瞻引用，拒绝）",
     ),
+    # ── 本 DSL 无对应算子（扩 DSL 候选） ──
     "Sum": OperatorMapping("Sum", None, "missing", "滚动求和——本 DSL 无"),
     "Var": OperatorMapping(
         "Var", None, "missing", "滚动方差——本 DSL 无（ts_std 为平方根形态，无 var 算子）"

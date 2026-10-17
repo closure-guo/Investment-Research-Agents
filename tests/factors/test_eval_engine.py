@@ -132,6 +132,28 @@ def test_delta_is_value_minus_shift():
     _assert_frame(_eval("delta(close,2)", panel), two)
 
 
+def test_ref_shifts_within_instrument_only():
+    """spec 场景（extend-factor-dsl-ref）：ref(close, 2) 逐标的后移 2 期（前 2 行 NaN、不跨标的）。"""
+    close = _frame({"A": [10.0, 11.0, 12.0, 13.0], "B": [20.0, 21.0, 22.0, 23.0]})
+    expected = _frame(
+        {
+            "A": [_NAN, _NAN, 10.0, 11.0],
+            "B": [_NAN, _NAN, 20.0, 21.0],
+        }
+    )
+    _assert_frame(_eval("ref(close,2)", _panel(close=close)), expected)
+
+
+def test_ref_one_period_shift_and_composite():
+    """ref(x,1) = 前一日值；复合式 `div(close,ref(close,1))` 逐元素相除（前 1 行 NaN）。"""
+    close = _frame({"A": [10.0, 12.0, 9.0]})
+    one = _frame({"A": [_NAN, 10.0, 12.0]})
+    ratio = _frame({"A": [_NAN, 12.0 / 10.0, 9.0 / 12.0]})
+    panel = _panel(close=close)
+    _assert_frame(_eval("ref(close,1)", panel), one)
+    _assert_frame(_eval("div(close,ref(close,1))", panel), ratio)
+
+
 def test_time_series_operators_are_per_code():
     """时序算子按 code 各自独立滚动（列间不串味）。"""
     close = _frame({"A": [1.0, 2.0, 3.0], "B": [10.0, 20.0, 40.0]})

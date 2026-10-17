@@ -38,7 +38,7 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal
 
-# ── 枚举（逐字；spec「初版」列表） ───────────────────────────────────────────
+# ── 枚举（逐字；spec「初版」列表 + 扩展 ref） ────────────────────────────────
 
 OPS: frozenset[str] = frozenset(
     {
@@ -57,6 +57,8 @@ OPS: frozenset[str] = frozenset(
         "min",
         "abs",
         "log",
+        # extend-factor-dsl-ref：后移引用（动量/反转/收益率族外部表达式的单点瓶颈）
+        "ref",
     }
 )
 
@@ -79,6 +81,7 @@ ARITY: dict[str, int] = {
     "min": 2,
     "abs": 1,
     "log": 1,
+    "ref": 2,
 }
 
 # window 参数所在位置（D2）：必须为正整数数字字面量
@@ -88,6 +91,7 @@ WINDOW_ARG_INDEX: dict[str, int] = {
     "ts_rank": 1,
     "delta": 1,
     "ts_corr": 2,
+    "ref": 1,
 }
 
 # 复杂度上限（解析期硬约束；默认路径超限即拒收）
