@@ -35,3 +35,18 @@ CLI 修改 + 两种重启顺序均未生效；共享 socket 对非集成 distro 
   2. RD-Agent 默认 embedding=text-embedding-3-small 在 bigmodel 不存在（错误码 1211）→ `.env` 补 `EMBEDDING_MODEL=openai/embedding-3`（实测 dim 2048 ✓）
   3. LiteLLM 对 `openai/` 前缀回落读 OPENAI_API_KEY → `.env` 补 OPENAI_API_KEY/OPENAI_API_BASE
 - 遗留：MLflow 文件存储后端弃用告警（record 步）；WSL 下 runtime info 内省补丁（见 patch-runtime-info.sh）
+
+## 2026-10-17：chat 档切 opencode deepseek-v4.1-flash（多循环实证）
+
+- **凭据/端点分离**：chat = opencode `deepseek-v4.1-flash`（`CHAT_OPENAI_API_KEY`/`CHAT_OPENAI_BASE_URL`），
+  embedding 留 bigmodel `embedding-3`（`OPENAI_API_KEY`/`OPENAI_API_BASE` 走 env 回落）。
+  **opencode 强制 `x-opencode-session` 头（缺头 400 MissingSessionID）**——`patch-opencode-chat.py`
+  给 RD-Agent 的 `rdagent/oai/backend/litellm.py` 打补丁：completion 调用消费
+  `chat_openai_*` 字段 + opencode 端点注入会话头（备份 `.bak-opencode-patch`）。
+- **启动器（`launch-fin-factor.sh`）两条硬语义**（历次踩坑）：
+  1. `DOCKER_HOST` = GUI 解锁后的 bind socket；
+  2. **必须 `conda.sh + conda activate rdagent4qlib`**——只把 env 的 bin 加 PATH 不够：
+     conda 本体解析不到 → LocalEnv 误判「环境缺失」→ `conda create` 退 127 → running 步
+     `qrun: No such file or directory` 连败（2026-10-17 首轮 15 次试验全废实测）。
+- **实证**：修复后 14 个完整循环 × 5 步（direct_exp_gen→coding→running→feedback→record）
+  全部通过，115 个候选实现落工作区；`--loop-n` 默认无界（手动停）。
