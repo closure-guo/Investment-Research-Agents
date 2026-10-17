@@ -9,7 +9,7 @@
   - 可用算子：ts_mean / ts_std / ts_corr / ts_rank / delta / rank / zscore / add / sub / mul / div / max / min / abs / log
   - 可用字段（前复权口径）：open / high / low / close / volume / amount
   - 窗口参数必须是正整数数字字面量（如 `ts_mean(close, 5)`）
-  - 复杂度硬约束：AST 深度 ≤ 4、数字字面量总数（自由参数）≤ 3、字段种类 ≤ 3
+  - 复杂度硬约束：AST 深度 ≤ 5、数字字面量总数（自由参数）≤ 3、字段种类 ≤ 3
 - hypothesis：该因子为何有效的经济学假设，不少于 30 字
 - category：五选一 —— {{categories}}
 - alignment_score：0-1 自评分，表示「假设与表达式」的一致性（可选；不填视为未评分）

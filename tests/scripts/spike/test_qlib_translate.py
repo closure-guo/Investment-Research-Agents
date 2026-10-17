@@ -157,10 +157,16 @@ class TestUntranslatable:
         assert result.blockers
 
     def test_complexity_overflow_refused(self):
-        """深度 5 > 上限 4（Mean 嵌套四层）——超出 DSL 复杂度硬约束拒绝。"""
-        result = translate_qlib_expression("Mean(Mean(Mean(Mean($close,2),2),2),2)")
+        """深度 6 > 上限 5（5 层嵌套 Mean）——超出 DSL 复杂度硬约束拒绝。"""
+        result = translate_qlib_expression("Mean(Mean(Mean(Mean(Mean($close,2),2),2),2),2)")
         assert not result.translatable
         assert any("复杂度" in blocker for blocker in result.blockers)
+
+    def test_depth_5_now_translatable(self):
+        """raise-factor-dsl-depth-cap：深度 5 自然形态（滚动统计量套价量差值）现可翻译。"""
+        result = translate_qlib_expression("Mean($open / Ref($close, 1) - 1, 5)")
+        assert result.translatable
+        assert result.dsl_expression == "ts_mean(sub(div(open,ref(close,1)),1),5)"
 
 
 class TestMappingTableAudit:
