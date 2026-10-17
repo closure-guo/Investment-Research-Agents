@@ -15,8 +15,9 @@
   定时批失败不得炸 API 进程;手动补跑的失败经返回值与历史展示);
 - 历史层自身故障(``job_runs`` 建行失败)不伪装成任务失败:上抛给调用方
   (scheduler 按失败尝试重试),但单飞锁必在 ``finally`` 释放。
-- 运行行的**所有权**:本进程开出的 running 行登记在 ``active_run_ids()``(收尾即注销),
-  悬挂行清扫据此跳过——时钟只作次要条件,所有权才是「本进程在跑」的硬证据。
+- 运行行的**所有权**:本进程开出的 running 行登记在 ``active_run_ids()``(收尾即注销;
+  按库作用域,run_id 只在其所属库内唯一),悬挂行清扫据此跳过——时钟只作次要条件,
+  所有权才是「本进程在跑」的硬证据。
 
 ``JOB_FUNCS`` 是默认注册表;``run_job`` 的 ``func`` 参数供 scheduler 传入**它自己
 模块级**的任务函数引用——既有测试在那里打桩,且保证调用期才解析(不把 env/config
@@ -41,6 +42,7 @@ from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.ops.model import (
+    _default_db_path,
     finish_job_run,
     get_cohort_settings,
     insert_job_run,
@@ -216,28 +218,40 @@ class CohortDisabled(RuntimeError):  # noqa: N818 —— 名称是实施计划�
 # (全局约束),互斥只需进程内锁,不得据此假设多 worker 场景。
 _LOCKS: dict[str, threading.Lock] = {job_id: threading.Lock() for job_id in JOB_IDS}
 
-# 本进程正在执行的 run_id 集合:悬挂行清扫的**所有权**依据(时钟可被回拨/人工回填,
+# 本进程正在执行的运行行集合:悬挂行清扫的**所有权**依据(时钟可被回拨/人工回填,
 # 不可作为「这行是不是本进程在跑」的证据)。长任务经 ``ops_api._spawn_task`` 亦登记。
-_ACTIVE_RUN_IDS: set[int] = set()
+#
+# 键为 ``(库路径, run_id)``（issue #334）：run_id 只在单个库内唯一自增，进程级裸
+# 集合会在多库共进程时串库——测试逐用例新建库 + 后台任务线程跨用例存活，他库同号
+# 所有权会把本库悬挂行的清扫挡掉（CI flake 实证签名）。所有权证据顺带按库收窄后，
+# 跨库误保护一并消除。
+_ACTIVE_RUN_IDS: set[tuple[str, int]] = set()
 _ACTIVE_RUNS_LOCK = threading.Lock()
 
 
-def mark_run_active(run_id: int) -> None:
+def _active_key(run_id: int, db_path: str | Path | None) -> tuple[str, int]:
+    """所有权键：run_id 解析到其所属库（与 ``insert_job_run`` 的落库解析同源）。"""
+    path = Path(db_path) if db_path is not None else _default_db_path()
+    return (str(Path(path).resolve()), int(run_id))
+
+
+def mark_run_active(run_id: int, *, db_path: str | Path | None = None) -> None:
     """登记本进程正在执行的运行行(悬挂清扫据此跳过该行)。"""
     with _ACTIVE_RUNS_LOCK:
-        _ACTIVE_RUN_IDS.add(int(run_id))
+        _ACTIVE_RUN_IDS.add(_active_key(run_id, db_path))
 
 
-def mark_run_finished(run_id: int) -> None:
+def mark_run_finished(run_id: int, *, db_path: str | Path | None = None) -> None:
     """注销已收尾的运行行(注销后不再受所有权保护,按时钟判定)。"""
     with _ACTIVE_RUNS_LOCK:
-        _ACTIVE_RUN_IDS.discard(int(run_id))
+        _ACTIVE_RUN_IDS.discard(_active_key(run_id, db_path))
 
 
-def active_run_ids() -> frozenset[int]:
-    """当前在跑的行 id 快照(清扫时一次取齐,避免逐行加锁)。"""
+def active_run_ids(*, db_path: str | Path | None = None) -> frozenset[int]:
+    """指定库的当前在跑行 id 快照(清扫时一次取齐,避免逐行加锁)。"""
+    db_key = _active_key(0, db_path)[0]
     with _ACTIVE_RUNS_LOCK:
-        return frozenset(_ACTIVE_RUN_IDS)
+        return frozenset(run_id for key_db, run_id in _ACTIVE_RUN_IDS if key_db == db_key)
 
 
 def run_job(
@@ -277,7 +291,7 @@ def run_job(
         # 历史层故障(建行失败)不伪装成任务失败:上抛给调用方(scheduler 按失败尝试
         # 计数重试);关键是 finally 必须释放锁——否则该 job 在本进程内永久被占。
         run_id = insert_job_run(job_id, kind, "running", source=source, db_path=db_path)
-        mark_run_active(run_id)
+        mark_run_active(run_id, db_path=db_path)
         active_run_id = run_id
         try:
             result = (func or JOB_FUNCS[job_id])()
@@ -294,5 +308,5 @@ def run_job(
         return {"run_id": run_id, "status": "ok", "summary": summary, "error": None}
     finally:
         if active_run_id is not None:
-            mark_run_finished(active_run_id)
+            mark_run_finished(active_run_id, db_path=db_path)
         lock.release()

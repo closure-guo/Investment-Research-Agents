@@ -419,3 +419,48 @@ class TestCohortGating:
         monkeypatch.setitem(JOB_FUNCS, "cohort_batch", lambda: {"enabled": True, "success": 1})
         out = run_job("cohort_batch", source="scheduled", db_path=tmp_path / "o.db")
         assert out["status"] == "ok" and out["summary"]["success"] == 1
+
+
+class TestActiveOwnershipScope:
+    """issue #334：所有权登记按库作用域（跨库 run_id 撞号不得互相干扰）。
+
+    `_ACTIVE_RUN_IDS` 为进程级、job_runs 的 run_id 却在每个库内独立自增——
+    测试环境逐用例新建库 + 后台任务线程跨用例存活时，他库的同号 active 会把
+    本库的悬挂行清扫挡掉（CI flake 实证签名）。
+    """
+
+    def test_ownership_scoped_by_db_path(self, tmp_path):
+        from finance_agent.outcome.ops.jobs import (
+            active_run_ids,
+            mark_run_active,
+            mark_run_finished,
+        )
+
+        db_a = tmp_path / "a.db"
+        db_b = tmp_path / "b.db"
+        mark_run_active(7, db_path=db_a)
+        try:
+            assert active_run_ids(db_path=db_a) == frozenset({7})
+            assert 7 not in active_run_ids(db_path=db_b)
+        finally:
+            mark_run_finished(7, db_path=db_a)
+        assert active_run_ids(db_path=db_a) == frozenset()
+
+    def test_run_job_registers_ownership_in_its_own_db(self, tmp_path):
+        """run_job 的所有权登记跟随其 db_path；他库查询不到。"""
+        from finance_agent.outcome.ops.jobs import active_run_ids
+
+        db_a = tmp_path / "a.db"
+        db_b = tmp_path / "b.db"
+        seen: list[frozenset[int]] = []
+
+        def probe() -> dict:
+            seen.append(active_run_ids(db_path=db_a))
+            return {"ok": True}
+
+        monkeypatch_result = run_job("integrity_check", db_path=db_a, func=probe)
+        assert monkeypatch_result["status"] == "ok"
+        assert seen and seen[0] == frozenset({monkeypatch_result["run_id"]})
+        # 收尾即注销；他库视角始终为空
+        assert active_run_ids(db_path=db_a) == frozenset()
+        assert active_run_ids(db_path=db_b) == frozenset()

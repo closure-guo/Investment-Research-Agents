@@ -42,6 +42,9 @@ from finance_agent.outcome.ops.jobs import (
     SCHEDULES,
     CohortDisabled,
     JobAlreadyRunning,
+    active_run_ids,
+    mark_run_active,
+    mark_run_finished,
     run_job,
 )
 from finance_agent.outcome.ops.model import (
@@ -350,7 +353,11 @@ class TestJobsEndpoint:
         )
         job = _job(client.get(f"{BASE}/jobs").json(), "daily_marking")
         assert job["last_run"]["run_id"] == stale
-        assert job["last_run"]["status"] == "failed"
+        row = last_job_run("daily_marking")
+        assert job["last_run"]["status"] == "failed", (
+            f"悬挂行未被清扫（issue #334 失败现场）：active_run_ids={sorted(active_run_ids())} "
+            f"row.started_at={row['started_at']!r} _PROCESS_STARTED_AT={ops_api._PROCESS_STARTED_AT!r}"
+        )
         assert job["last_run"]["finished_at"] is not None
         assert "stale_process_restart" in (job["last_run"]["error"] or "")
         assert job["last_run"]["summary"]["reason"] == "stale_process_restart"
@@ -361,6 +368,27 @@ class TestJobsEndpoint:
         job = _job(client.get(f"{BASE}/jobs").json(), "daily_marking")
         assert job["last_run"]["run_id"] == live
         assert job["last_run"]["status"] == "running"
+
+    def test_foreign_db_leaked_active_does_not_block_sweep(self, client, monkeypatch, tmp_path):
+        """issue #334 回归：他库（跨用例线程遗留）同号 active 不得挡住本库悬挂行清扫。
+
+        机制：`_ACTIVE_RUN_IDS` 进程级、run_id 每库独立自增——所有权须按库作用域，
+        否则前一测试的漏注销 id 会把后一测试的同号悬挂行永远挡在清扫之外（CI flake）。
+        """
+        stale = insert_job_run("daily_marking", "scheduled", "running", source="scheduled")
+        monkeypatch.setattr(
+            ops_api, "_PROCESS_STARTED_AT", (datetime.now() + timedelta(minutes=5)).isoformat()
+        )
+        foreign_db = tmp_path / "other-process.db"
+        mark_run_active(stale, db_path=foreign_db)  # 模拟他库遗留的所有权
+        try:
+            job = _job(client.get(f"{BASE}/jobs").json(), "daily_marking")
+            assert job["last_run"]["run_id"] == stale
+            assert job["last_run"]["status"] == "failed", (
+                f"他库同号 active 挡住了本库清扫：active(all)={sorted(active_run_ids())}"
+            )
+        finally:
+            mark_run_finished(stale, db_path=foreign_db)
 
     def test_backdated_inflight_run_not_swept_but_foreign_stale_row_is(self, client, monkeypatch):
         """清扫以所有权为准:在跑的行即使 started_at 被回拨也不得清扫,无主的陈旧行仍被清扫。"""
