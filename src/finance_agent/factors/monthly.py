@@ -4,7 +4,7 @@
 Asia/Shanghai）的编排入口，走统一日批通道（``ops.jobs.run_job``：调度 / 运行历史 /
 手动补跑 / 单飞锁）：
 
-1. **面板**：快照库最近 ``ADMISSION_PANEL_LOOKBACK_DAYS``（≥150 交易日，独立于
+1. **面板**：快照库最近 ``ADMISSION_PANEL_LOOKBACK_DAYS``（≥250 交易日，独立于
    衰减监控口径）个交易日 → ``MarketPanel``（取数辅助与 ``monitor`` 单一来源）；
    快照库为空 / 深度不足 / ``as_of`` 前无数据 → ``ValueError``（fail loud，先建
    面板后提案——网关调用不发生）；
@@ -199,7 +199,7 @@ def _panel_from_snapshot(
 ) -> MarketPanel:
     """快照库 → 准入面板（fail loud：空库/深度不足/窗口内无数据 → ``ValueError``）。
 
-    准入面板深度 = ``ADMISSION_PANEL_LOOKBACK_DAYS``（≥150 交易日，**独立于**衰减
+    准入面板深度 = ``ADMISSION_PANEL_LOOKBACK_DAYS``（≥250 交易日，**独立于**衰减
     监控的 ``DECAY_WINDOW+30`` 口径）——闸①缺失率含热身期 NaN，浅面板使长窗因子
     结构性拒收；可用深度不足下限 → fail loud（MUST NOT 以浅面板放行评估，
     unify-quant-research-architecture D1）。
