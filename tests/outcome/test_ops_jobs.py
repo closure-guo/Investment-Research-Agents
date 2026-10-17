@@ -207,8 +207,8 @@ class TestMonthlyBatchRegistration:
         # 月批附于末尾：月批两任务下标不动；cohort 因 15:50 日批链内插入后移一位
         assert JOB_IDS[-2:] == ("memory_extract_monthly", "factor_proposal_monthly")
         assert (
-            JOB_IDS.index("cohort_batch") == 10
-        )  # 9→10：+factor_builtin_register（15:50 插入其前）
+            JOB_IDS.index("cohort_batch") == 11
+        )  # 9→10：+内置注册；13→14：+factor_harvest_daily（15:55 插入其前）
 
     def test_monthly_schedule_specs_verbatim(self):
         """月粒度以 ``day_of_month=1`` 表达（09:00 / 10:00，Asia/Shanghai）。"""
