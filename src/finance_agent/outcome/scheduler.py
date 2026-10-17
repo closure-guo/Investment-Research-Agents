@@ -54,6 +54,7 @@ from finance_agent.data.snapshot_job import run_market_snapshot_batch
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.execution.driver import run_execution_daily
 from finance_agent.factors.builtin import run_factor_builtin_register
+from finance_agent.factors.harvest import run_factor_harvest
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
@@ -173,6 +174,15 @@ def _factor_builtin_register_job() -> None:
     面板不可得上抛（run_job 记 failed）。注册本身零 LLM 调用。
     """
     _with_retry("factor_builtin_register", "factor builtin register", run_factor_builtin_register)
+
+
+def _factor_harvest_job() -> None:
+    """add-factor-harvest-bridge：因子收割日批（15:55，内置注册之后、结算链之前）。
+
+    RD-Agent 候选 → LLM 转译 → 翻译器 → 同一五道闸；无新候选零摘要（非错误）；
+    网关/面板不可得上抛（run_job 记 failed，次日重试；state 幂等不重复消费）。
+    """
+    _with_retry("factor_harvest_daily", "factor harvest daily", run_factor_harvest)
 
 
 def _settle_job() -> None:
@@ -319,6 +329,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-factor-harvest-bridge：因子收割日批（15:55）——RD-Agent 候选转译过闸；
+    # 排在内置注册（15:50）之后、结算链（16:00 起）之前，不争 LLM 网关。
+    scheduler.add_job(
+        _factor_harvest_job,
+        _cron_for("factor_harvest_daily"),
+        id="factor_harvest_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     scheduler.add_job(
         _settle_job,
         _cron_for("decision_settle_daily"),
@@ -399,6 +418,7 @@ def start_scheduler() -> BackgroundScheduler | None:
     _scheduler = scheduler
     logger.info(
         "decision settle scheduler 已启动(market snapshot 15:30;factor decay monitor 15:45;"
+        "factor builtin register 15:50;factor harvest 15:55;"
         "decision settle 16:00;paper execute 16:10;paper settle 16:20);"
         "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"
         "monthly: memory extract day-1 09:00 / factor proposal day-1 10:00;"

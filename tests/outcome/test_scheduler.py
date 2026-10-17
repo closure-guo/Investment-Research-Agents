@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from finance_agent.outcome.ops.jobs import SCHEDULES, JobAlreadyRunning
+from finance_agent.outcome.ops.jobs import JOB_IDS, SCHEDULES, JobAlreadyRunning
 from finance_agent.outcome.ops.model import (
     COHORT_ENABLED_KEY,
     COHORT_HOUR_KEY,
@@ -161,6 +161,32 @@ class TestJobRetry:
         assert mock_settle.call_count == 2
 
 
+class TestSchedulerRegistryMirror:
+    """注册表镜像守护:调度器 add_job 面必须与 ``JOB_IDS`` 全等。
+
+    add-factor-harvest-bridge 的教训:``factor_harvest_daily`` 进了 JOB_IDS /
+    JOB_FUNCS / SCHEDULES 与前端镜像,唯独漏了 start_scheduler 的 add_job 面——
+    而本文件既有断言用的是**硬编码集合**(两边同时缺同一项 → 照样全绿),没有
+    任何用例把注册面钉回 JOB_IDS 真源。本用例补上这最后一环:任何新任务只补
+    JOB_IDS 而不接调度器,在此红。
+    """
+
+    @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
+    @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
+    def test_add_job_ids_match_job_ids_exactly(self, mock_sched_cls):
+        os.environ.pop("COHORT_HOUR", None)
+        os.environ.pop("COHORT_MINUTE", None)
+        sched = MagicMock()
+        mock_sched_cls.return_value = sched
+        start_scheduler()
+        ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
+        assert set(ids) == set(JOB_IDS), (
+            f"调度器注册面与 JOB_IDS 不一致:未注册={set(JOB_IDS) - set(ids)},"
+            f"多余注册={set(ids) - set(JOB_IDS)}"
+        )
+        assert len(ids) == len(JOB_IDS), f"注册数不一致(有重复?):{ids}"
+
+
 class TestCohortJobRegistration:
     """Δ3 Task 5：cohort 盘后跑批接线（per-job 门控，不并入全局 early-return）。"""
 
@@ -173,12 +199,14 @@ class TestCohortJobRegistration:
         mock_sched_cls.return_value = sched
         assert start_scheduler() is sched
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 13, (
+        assert len(ids) == 14, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
-        # 12→13：+factor_builtin_register（内置因子注册接线）
+        # 12→13：+factor_builtin_register（内置因子注册接线）；
+        # 13→14：+factor_harvest_daily（收割桥接线；本集合漏项与注册面同步漏过，
+        # 真源守护见 TestSchedulerRegistryMirror）
         assert ids[-1] == "cohort_batch"
         assert set(ids) == {
             "decision_settle_daily",
@@ -192,6 +220,7 @@ class TestCohortJobRegistration:
             "screening_daily",
             "factor_decay_monitor",
             "factor_builtin_register",
+            "factor_harvest_daily",
             "memory_extract_monthly",
             "factor_proposal_monthly",
         }
@@ -498,12 +527,13 @@ class TestMisfireHardening:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 13, (
+        assert len(ids) == 14, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
-        # 12→13：+factor_builtin_register（内置因子注册接线）
+        # 12→13：+factor_builtin_register（内置因子注册接线）；
+        # 13→14：+factor_harvest_daily（收割桥接线）
         for call in sched.add_job.call_args_list:
             job_id = call.kwargs.get("id")
             assert call.kwargs.get("misfire_grace_time") == 3600, job_id
