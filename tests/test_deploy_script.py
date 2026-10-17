@@ -16,6 +16,8 @@ from scripts.deploy import (
     check_running_sessions,
     classify_wip_overlap,
     deploy,
+    needs_image_rebuild,
+    plan_reload_services,
     plan_runtime_file_actions,
     predict_stash_merge,
     probe_endpoints,
@@ -178,6 +180,7 @@ class FakeStack:
         self.sessions_calls = 0
         self.restart_calls = 0
         self.restart_repo: Path | None = None
+        self.restart_services: list[tuple[str, ...]] = []
 
     def fetch_sessions(self) -> object:
         self.sessions_calls += 1
@@ -189,9 +192,10 @@ class FakeStack:
     def probe_frontend(self) -> int | None:
         return self.frontend()
 
-    def restart(self, repo: Path) -> int:
+    def restart(self, repo: Path, services: Sequence[str] = ("backend", "frontend")) -> int:
         self.restart_calls += 1
         self.restart_repo = repo
+        self.restart_services.append(tuple(services))
         return self._restart_rc
 
     def deploy_kwargs(
@@ -531,6 +535,130 @@ class TestProbeRetry:
         text = "\n".join(out)
         assert "第 1 轮" in text and "第 2 轮" in text
         assert "部署失败" in text
+
+
+# ── 新代码加载（issue #343：healthy-but-stale 静默半完成） ──
+
+
+class TestPlanReloadServices:
+    """纯函数：incoming 文件清单 → pull 后需重启的服务。"""
+
+    def test_src_touches_backend(self):
+        assert plan_reload_services(["src/finance_agent/api.py"]) == ("backend",)
+
+    def test_frontend_touches_frontend(self):
+        assert plan_reload_services(["frontend/src/Charts.tsx"]) == ("frontend",)
+
+    def test_both(self):
+        assert plan_reload_services(["src/a.py", "frontend/b.ts"]) == ("backend", "frontend")
+
+    def test_docs_and_scripts_need_no_restart(self):
+        assert plan_reload_services(["docs/x.md", "scripts/deploy.py", "tests/y.py"]) == ()
+
+    def test_empty_incoming(self):
+        assert plan_reload_services([]) == ()
+
+
+class TestNeedsImageRebuild:
+    """纯函数：restart 加载不到的镜像类路径（evals/ 为镜像 COPY，非挂载）。"""
+
+    def test_evals_requires_rebuild(self):
+        assert needs_image_rebuild(["evals/hallucination/x.py"]) is True
+
+    def test_dependency_files_require_rebuild(self):
+        assert needs_image_rebuild(["requirements.txt"]) is True
+        assert needs_image_rebuild(["Dockerfile"]) is True
+        assert needs_image_rebuild(["docker-compose.override.yml"]) is True
+
+    def test_src_alone_no_rebuild_hint(self):
+        assert needs_image_rebuild(["src/finance_agent/api.py"]) is False
+
+
+class TestReloadOnNewCode:
+    """pull 推进且 incoming 含后端/前端源码 → 无条件重启对应服务后才探针。
+
+    红线：探针只判「栈是否健康」，不判「新码是否加载」——旧码照常服务 200 时
+    MUST NOT 判定「✓ 部署完成」（issue #343 实证：#342 部署 21 分钟里容器跑旧码）。
+    """
+
+    def test_src_incoming_restarts_backend_before_probe(self, sandbox):
+        sha = sandbox.incoming({"src/new.py": "incoming\n"})
+        stack = FakeStack()
+        out: list[str] = []
+        assert deploy(sandbox.work, **stack.deploy_kwargs(out)) == 0
+        assert sandbox.head() == sha
+        assert stack.restart_calls == 1
+        assert stack.restart_services == [("backend",)]
+        assert "新代码加载" in "\n".join(out)
+
+    def test_frontend_incoming_restarts_frontend(self, sandbox):
+        sandbox.incoming({"frontend/src/x.ts": "x\n"})
+        stack = FakeStack()
+        out: list[str] = []
+        assert deploy(sandbox.work, **stack.deploy_kwargs(out)) == 0
+        assert stack.restart_services == [("frontend",)]
+
+    def test_both_sources_restart_both_services(self, sandbox):
+        sandbox.incoming({"src/new.py": "a\n", "frontend/src/y.ts": "b\n"})
+        stack = FakeStack()
+        out: list[str] = []
+        assert deploy(sandbox.work, **stack.deploy_kwargs(out)) == 0
+        assert stack.restart_services == [("backend", "frontend")]
+
+    def test_docs_only_incoming_no_restart(self, sandbox):
+        sandbox.incoming({"docs/x.md": "doc\n"})
+        stack = FakeStack()
+        out: list[str] = []
+        assert deploy(sandbox.work, **stack.deploy_kwargs(out)) == 0
+        assert stack.restart_calls == 0
+
+    def test_reload_restart_failure_never_claims_success(self, sandbox):
+        """新码加载重启失败 → 退出码 2 且不进探针（旧码 200 也不得冒充部署完成）。"""
+        sandbox.incoming({"src/new.py": "incoming\n"})
+        stack = FakeStack(restart_rc=1)
+        out: list[str] = []
+        assert deploy(sandbox.work, **stack.deploy_kwargs(out)) == 2
+        text = "\n".join(out)
+        assert "✓ 部署完成" not in text
+        assert "新代码加载重启失败" in text
+        assert stack.backend.calls == 0
+
+    def test_reload_then_unhealthy_restarts_again_for_health(self, sandbox):
+        """新码重启后探针不健康 → 既有健康恢复路径仍生效（第二次 restart 双服务）。"""
+        sandbox.incoming({"src/new.py": "incoming\n"})
+        stack = FakeStack(backend=(503, 200))
+        out: list[str] = []
+        assert deploy(sandbox.work, **stack.deploy_kwargs(out)) == 0
+        assert stack.restart_services == [("backend",), ("backend", "frontend")]
+
+    def test_already_latest_zero_side_effects(self, sandbox):
+        """幂等场景不受影响：已最新 → 零重启（spec「已最新重复执行」）。"""
+        before = sandbox.snapshot()
+        stack = FakeStack()
+        out: list[str] = []
+        assert deploy(sandbox.work, **stack.deploy_kwargs(out)) == 0
+        assert stack.restart_calls == 0
+        assert sandbox.snapshot() == before
+
+    def test_image_class_incoming_logs_rebuild_hint(self, sandbox):
+        """evals/（镜像 COPY，非挂载）变更：restart 加载不到 → 显式提示需 rebuild。"""
+        sandbox.incoming({"evals/hallucination/x.py": "x\n"})
+        stack = FakeStack()
+        out: list[str] = []
+        assert deploy(sandbox.work, **stack.deploy_kwargs(out)) == 0
+        assert stack.restart_calls == 0  # evals/ 不触发 restart（restart 也加载不到）
+        assert "up -d --build" in "\n".join(out)
+
+    def test_dry_run_prints_reload_plan(self, sandbox):
+        sandbox.incoming({"src/new.py": "incoming\n"})
+        before = sandbox.snapshot()
+        stack = FakeStack()
+        out: list[str] = []
+        assert deploy(sandbox.work, **stack.deploy_kwargs(out, dry_run=True)) == 0
+        text = "\n".join(out)
+        assert "新代码加载" in text and "backend" in text
+        assert stack.restart_calls == 0
+        assert sandbox.snapshot() == before
 
 
 # ── CLI 直跑（脚本模式回归，对齐 tests/test_prompt_history.py 先例） ──
