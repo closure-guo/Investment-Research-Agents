@@ -2,7 +2,9 @@
 
 三段式：
   1. **前置检查（只读，全过才继续）**；
-  2. **拉取** —— `git pull --ff-only`（禁 merge 提交）；
+  2. **拉取 + 新码加载** —— `git pull --ff-only`（禁 merge 提交）；pull 推进且 incoming
+     含后端/前端源码 → 无条件重启对应服务（dev override 下 src//frontend/ 为 bind mount，
+     restart 强制容器重新读取；running 门禁已在前置①通过）；
   3. **探针** —— 后端 `/api/sessions` 200 + 前端 `/` 200；不健康 → 重启应用容器一次并复探。
 
 四类实测坑的处置法（2026-10-14/15 四次手动部署）：
@@ -18,9 +20,13 @@
    untracked → 挪开留证；已跟踪+已修改 → `git checkout HEAD -- <path>` 丢弃（可再生成）并报告。
    **白名单式**：非 `data/` 前缀 + untracked 同名 → 中止人工裁决；非 `data/` 前缀 +
    已跟踪已修改 → 归 ③（默认中止，`--stash` 预判无冲突才放行）。
-4. **reload 无验证**：pull 之后新代码是否生效过去靠人工 curl → 探针两端点，不健康时
-   `docker compose restart backend frontend`（在仓库目录执行，幂等）一次后复探；
-   仍不健康非零退出（MUST NOT 以「已 pull」冒充部署完成）。
+4. **healthy-but-stale（issue #343）**：探针只判「栈是否健康」，不判「新码是否加载」——
+   宿主机改码不触发容器内 reload（WSL2 bind mount 的 inotify 不传播），旧码照常服务 200。
+   若 pull 后不重启，脚本会以退出码 0 谎报「部署完成」而容器仍跑旧码（2026-10-15 实证）。
+   处置：pull 推进且 incoming 触碰 `src/` → 重启 backend；触碰 `frontend/` → 重启 frontend；
+   重启失败非零退出（MUST NOT 以「已 pull」冒充部署完成）。`evals/`/依赖/构建文件为镜像
+   内容（非挂载）→ restart 加载不到，显式提示需 `docker compose up -d --build`。
+   已是最新（无拉取）→ 零副作用仅探针（幂等契约不变）。
 
 用法（**推荐先跑 `--dry-run` 看计划**，全检查零变更）：
 
@@ -55,6 +61,21 @@ BACKEND_BASE_URL = "http://127.0.0.1:8000"
 SESSIONS_URL = f"{BACKEND_BASE_URL}/api/sessions"
 FRONTEND_URL = "http://localhost:5173/"
 RUNTIME_PREFIX = "data/"
+
+# ── 新码加载判据（issue #343）──
+# dev override 下主检出 src/ 与 frontend/ 为 bind mount；宿主机改码不触发容器内
+# reload（inotify 不跨 WSL2 bind mount 传播）→ pull 推进后必须 restart 才能加载。
+BACKEND_SOURCE_PREFIXES = ("src/",)
+FRONTEND_SOURCE_PREFIXES = ("frontend/",)
+# 镜像内容（非挂载）：restart 加载不到，需 up -d --build —— 仅提示，不代做。
+REBUILD_REQUIRED_PREFIXES = (
+    "evals/",  # Dockerfile COPY evals（ops_api 模块级依赖），容器内非挂载
+    "requirements.txt",
+    "pyproject.toml",
+    "Dockerfile",
+    "docker-compose",
+)
+HEALTH_RESTART_SERVICES = ("backend", "frontend")
 
 HTTP_TIMEOUT_S = 5.0
 RESTART_WAIT_S = 5.0
@@ -154,6 +175,25 @@ class ProbeResult:
     @property
     def healthy(self) -> bool:
         return self.backend == 200 and self.frontend == 200
+
+
+def plan_reload_services(incoming: Collection[str]) -> tuple[str, ...]:
+    """incoming 文件清单 → pull 后需无条件重启的服务（纯函数；空 = 无需重启）。
+
+    判据为挂载路径（dev override）：`src/` → backend、`frontend/` → frontend。
+    顺序固定 backend 在前，便于断言与日志稳定。
+    """
+    services: list[str] = []
+    if any(path.startswith(BACKEND_SOURCE_PREFIXES) for path in incoming):
+        services.append("backend")
+    if any(path.startswith(FRONTEND_SOURCE_PREFIXES) for path in incoming):
+        services.append("frontend")
+    return tuple(services)
+
+
+def needs_image_rebuild(incoming: Collection[str]) -> bool:
+    """incoming 是否含镜像类路径（restart 加载不到，需 up -d --build）。纯函数。"""
+    return any(path.startswith(REBUILD_REQUIRED_PREFIXES) for path in incoming)
 
 
 def probe_endpoints(
@@ -273,11 +313,15 @@ def probe_frontend() -> int | None:
     return _http_status(FRONTEND_URL)
 
 
-def restart_app_containers(repo: Path, timeout: float = RESTART_TIMEOUT_S) -> int:
-    """`docker compose restart backend frontend`（在仓库目录执行；幂等，不动数据卷）。"""
+def restart_app_containers(
+    repo: Path,
+    services: Sequence[str] = HEALTH_RESTART_SERVICES,
+    timeout: float = RESTART_TIMEOUT_S,
+) -> int:
+    """`docker compose restart <services>`（在仓库目录执行；幂等，不动数据卷）。"""
     try:
         result = subprocess.run(  # noqa: S603 - 固定 docker 参数,无外部输入
-            ["docker", "compose", "restart", "backend", "frontend"],  # noqa: S607 - docker 走 PATH
+            ["docker", "compose", "restart", *services],  # noqa: S607 - docker 走 PATH
             cwd=repo,
             capture_output=True,
             text=True,
@@ -326,7 +370,7 @@ def deploy(
     fetch_sessions: Callable[[], object | None] = fetch_sessions,
     backend_probe: Callable[[], int | None] = probe_backend,
     frontend_probe: Callable[[], int | None] = probe_frontend,
-    restart: Callable[[Path], int] = restart_app_containers,
+    restart: Callable[[Path, Sequence[str]], int] = restart_app_containers,
     post_restart_wait_s: float = RESTART_WAIT_S,
     now_stamp: Callable[[], str] = timestamp_now,
     out: Callable[[str], None] = print,
@@ -425,6 +469,17 @@ def deploy(
             log(f"[deploy] 拉取: 跳过（HEAD == origin/main {_short(head)}）")
         else:
             log(f"[deploy] 拉取: git pull --ff-only（{_short(head)} → {_short(origin_main)}）")
+            reload_plan = plan_reload_services(incoming)
+            if reload_plan:
+                log(
+                    "[deploy] 新代码加载: docker compose restart "
+                    f"{' '.join(reload_plan)}（bind mount 不触发容器内 reload，pull 后必须重启）"
+                )
+            if needs_image_rebuild(incoming):
+                log(
+                    "[deploy] ! incoming 含镜像类路径（evals//依赖/构建文件）: "
+                    "restart 不足以加载，需 docker compose up -d --build"
+                )
         for rel in plan.discard:
             log(f"[deploy] 丢弃运行时文件: {rel}（git checkout HEAD -- 丢弃，可再生成）")
         for rel in plan.move_aside:
@@ -493,6 +548,26 @@ def deploy(
     else:
         log(f"[deploy] 提交: {_short(head)} → {_short(new_head)}")
 
+    # 新代码加载（issue #343）：pull 推进 → 无条件重启挂载侧服务后再探针。
+    # 红线：探针只判「栈健康」，旧码照常服务 200 —— MUST NOT 以「已 pull」冒充部署完成。
+    reload_services = plan_reload_services(incoming) if not up_to_date else ()
+    if reload_services:
+        log(
+            f"[deploy] 新代码加载: docker compose restart {' '.join(reload_services)}"
+            "（bind mount 不触发容器内 reload；running 门禁①已过，无运行中分析）"
+        )
+        reload_rc = restart(repo, reload_services)
+        if reload_rc != 0:
+            log(f"[deploy] ✗ 新代码加载重启失败（返回码 {reload_rc}）——不以「已 pull」冒充部署完成")
+            return EXIT_FAILED
+        if post_restart_wait_s > 0:
+            time.sleep(post_restart_wait_s)
+    if not up_to_date and needs_image_rebuild(incoming):
+        log(
+            "[deploy] ! incoming 含镜像类路径（evals//依赖/构建文件）："
+            "restart 加载不到，需 docker compose up -d --build"
+        )
+
     # 探针：后端 /api/sessions 200 + 前端 / 200；不健康重启一次复探
     first = probe_endpoints(backend_probe, frontend_probe)
     log(
@@ -503,7 +578,7 @@ def deploy(
         log("[deploy] ✓ 部署完成：两探针均 200")
         return EXIT_OK
     log("[deploy] 不健康 → docker compose restart backend frontend（在仓库目录执行）")
-    restart_rc = restart(repo)
+    restart_rc = restart(repo, HEALTH_RESTART_SERVICES)
     log(f"[deploy] 重启返回码: {restart_rc}")
     if post_restart_wait_s > 0:
         time.sleep(post_restart_wait_s)
