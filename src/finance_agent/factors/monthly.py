@@ -234,6 +234,18 @@ def _rejection_reason(result: AdmissionResult) -> str:
     return "UNKNOWN"
 
 
+def _rejected_gate_detail(result: AdmissionResult) -> dict[str, Any]:
+    """拒收闸口的判定读数（首个未过闸口的 detail；编排契约保证拒收必有未过闸口）。
+
+    与 ``_rejection_reason`` 同源同序——拒收记录携带读数（missing_rate/icir 等），
+    使外部导入/收割批的拒收可判读（add-factor-harvest-bridge）。
+    """
+    for gate in result.gates:
+        if not gate.passed:
+            return dict(gate.detail)
+    return {}
+
+
 def _preflight(
     candidates: list[dict[str, Any]],
 ) -> tuple[list[int], list[dict[str, Any]], dict[int, str]]:

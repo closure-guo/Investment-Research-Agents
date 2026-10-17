@@ -24,12 +24,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# spike 工具（与 qlib_translate 同目录）——显式入 path 以支持任意 CWD 运行
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import qlib_translate  # noqa: E402
-
-from finance_agent.factors.external import run_factor_external_import  # noqa: E402
+# 翻译器（已入生产：factors/qlib_translate.py，映射表随产物留档）
+from finance_agent.factors import qlib_translate
+from finance_agent.factors.external import run_factor_external_import
 
 
 def build_payload(

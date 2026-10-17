@@ -48,11 +48,20 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _PROGRESS_RE = re.compile(r"loop_index=(\d+),\s*step_index=(\d+),\s*step_name=(\w+)")
 _TQDM_RE = re.compile(r"(\d+)/(\d+)\s*\[(?:(\d+):)?(\d+):(\d+)<(?:(\d+):)?(\d+):(\d+)")
 _FACTOR_NAME_RE = re.compile(r"factor_name:\s*([A-Za-z][A-Za-z0-9_]{0,63})")
+# 因子块（harvest 桥输入面）：name/description/formulation 三元组连续行
+_FACTOR_BLOCK_RE = re.compile(
+    r"factor_name:\s*([A-Za-z][A-Za-z0-9_]{0,63})[^\n]*\n"
+    r"factor_description:\s*([^\n]*)\n"
+    r"factor_formulation:\s*([^\n]*)\n"
+    r"variables:"
+)
 _SUPERVISOR_START_RE = re.compile(r"^\[supervisor\] started at (\S+) pid (\d+)")
 _SUPERVISOR_END_RE = re.compile(
     r"^\[supervisor\] session ended after (\d+)s \(log: (.+?)\) at (\S+)"
 )
 _SESSION_FILE_RE = re.compile(r"^session-(\d{8})-(\d{6})\.log$")
+# 增量解析重叠窗（防因子块跨 chunk 边界被截断；去重使重复解析无害）
+_INCREMENT_OVERLAP_BYTES = 4096
 
 
 # ── 纯解析函数（单测面）────────────────────────────────────────────────────
@@ -104,6 +113,29 @@ def extract_factor_names(text: str) -> list[str]:
             seen.add(name)
             names.append(name)
     return names
+
+
+def extract_factor_blocks(text: str) -> list[dict]:
+    """因子块（name/description/formulation 三元组）按出现顺序去重抽取。
+
+    harvest 桥的输入面（``candidates.json``）：半块（缺 description/formulation）
+    不产出——MUST NOT 以残缺元数据冒充；ANSI 转义先清理再匹配。
+    """
+    blocks: list[dict] = []
+    seen: set[str] = set()
+    for match in _FACTOR_BLOCK_RE.finditer(strip_ansi(text)):
+        name = match.group(1)
+        if name in seen:
+            continue
+        seen.add(name)
+        blocks.append(
+            {
+                "name": name,
+                "description": match.group(2).strip(),
+                "formulation": match.group(3).strip(),
+            }
+        )
+    return blocks
 
 
 def parse_supervisor_log(text: str) -> dict:
@@ -237,10 +269,11 @@ def _load_state(state_path: Path) -> dict:
     return {}
 
 
-def _incremental_factors(log_path: Path, state: dict) -> tuple[list[str], dict]:
-    """增量提取因子名：仅解析自上次 offset 起的新增字节（会话切换重置）。
+def _incremental_factors(log_path: Path, state: dict) -> tuple[list[str], list[dict], dict]:
+    """增量提取因子名（会话内）+ 因子块（全局候选）：仅解析新增字节，会话切换重置。
 
-    状态文件损坏/缺失 → 从当前文件头重建（如实，不虚构）。
+    重叠窗（``_INCREMENT_OVERLAP_BYTES``）防因子块跨 chunk 边界截断；重复解析由
+    去重兜底。状态文件损坏/缺失 → 从当前文件头重建（如实，不虚构）。
     """
     name = log_path.name
     if state.get("log_file") != name:
@@ -254,17 +287,56 @@ def _incremental_factors(log_path: Path, state: dict) -> tuple[list[str], dict]:
     if offset > size:  # 文件被截断/替换 → 从头重建
         offset = 0
         factors = []
+    blocks: list[dict] = []
     if offset < size:
+        start = max(0, offset - _INCREMENT_OVERLAP_BYTES)
         with log_path.open("rb") as fh:
-            fh.seek(offset)
+            fh.seek(start)
             chunk = fh.read(INCREMENT_CHUNK_BYTES)
-        offset += len(chunk)
+        offset = start + len(chunk)
+        text = chunk.decode("utf-8", errors="replace")
         seen = set(factors)
-        for found in extract_factor_names(chunk.decode("utf-8", errors="replace")):
+        for found in extract_factor_names(text):
             if found not in seen:
                 seen.add(found)
                 factors.append(found)
-    return factors, {"log_file": name, "offset": offset, "factors": factors}
+        blocks = extract_factor_blocks(text)
+    return factors, blocks, {"log_file": name, "offset": offset, "factors": factors}
+
+
+def _merge_candidates(
+    path: Path, blocks: list[dict], *, session_name: str, now_epoch: float
+) -> None:
+    """因子块并入候选文件（全局去重按 name；跨会话/跨周期不丢不重）。"""
+    existing = _load_state(path).get("candidates")
+    candidates: list[dict] = (
+        [c for c in existing if isinstance(c, dict)] if isinstance(existing, list) else []
+    )
+    known = {str(c.get("name")) for c in candidates}
+    changed = False
+    for block in blocks:
+        if block["name"] in known:
+            continue
+        known.add(block["name"])
+        candidates.append(
+            {
+                "name": block["name"],
+                "description": block["description"],
+                "formulation": block["formulation"],
+                "session": session_name,
+                "first_seen_at": datetime.fromtimestamp(now_epoch, tz=_TZ).isoformat(),
+            }
+        )
+        changed = True
+    if not changed:
+        return
+    atomic_write_json(
+        path,
+        {
+            "generated_at": datetime.fromtimestamp(now_epoch, tz=_TZ).isoformat(),
+            "candidates": candidates,
+        },
+    )
 
 
 def collect_once(
@@ -272,10 +344,15 @@ def collect_once(
     out_path: Path,
     state_path: Path,
     *,
+    candidates_out: Path | None = None,
     now_epoch: float | None = None,
     session_alive=None,
 ) -> dict:
-    """采集一次并原子落盘；返回快照（单字段失败不阻断整体，如实置空）。"""
+    """采集一次并原子落盘；返回快照（单字段失败不阻断整体，如实置空）。
+
+    ``candidates_out``（缺省 = 状态文件同目录 ``candidates.json``）：harvest 桥的
+    候选文件——因子块（name/description/formulation）全局去重追加。
+    """
     now_epoch = time.time() if now_epoch is None else now_epoch
     alive_probe = session_alive or _rdagent_session_alive
     logdir = workdir / "factor_research_logs"
@@ -313,7 +390,16 @@ def collect_once(
     new_state = _load_state(state_path)
     if session_files:
         latest = session_files[-1]
-        factors, new_state = _incremental_factors(latest, new_state)
+        factors, blocks, new_state = _incremental_factors(latest, new_state)
+        if blocks:
+            candidates_path = (
+                candidates_out
+                if candidates_out is not None
+                else out_path.with_name("candidates.json")
+            )
+            _merge_candidates(
+                candidates_path, blocks, session_name=latest.name, now_epoch=now_epoch
+            )
         started = session_started_at(latest.name)
         duration = None
         if started is not None:

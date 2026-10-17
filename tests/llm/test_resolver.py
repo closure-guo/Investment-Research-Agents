@@ -372,7 +372,8 @@ class TestContextLengthOverride:
 
     def test_empty_follows_registry_default(self):
         """请求与 env 均未配置 → registry 静态 max_context（openai-compatible 128000）。"""
-        profile = resolve_profile(purpose="deep", llm_config=self._request())
+        # _env={} 隔离真实环境（宿主 .env 设 LLM_MAX_CONTEXT 时本测试不得被泄漏污染）
+        profile = resolve_profile(purpose="deep", llm_config=self._request(), _env={})
         assert profile.capability.max_context == 128000
 
 

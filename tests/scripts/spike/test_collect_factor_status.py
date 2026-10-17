@@ -31,6 +31,17 @@ SESSION_LOG = (
     "plain tail line\n"
 )
 
+# 因子块（harvest 桥输入面：name/description/formulation 三元组；真实日志形态）
+FACTOR_BLOCK = (
+    "Content: --------------Factor information:---------------\n"
+    "factor_name: max_ret_20d\n"
+    "factor_description: [Lottery/MAX Effect] Twenty-day maximum daily close-to-close return.\n"
+    "factor_formulation: \\max_{i=0,\\ldots,19}\\left(\\frac{C_{t-i}}{C_{t-i-1}} - 1\\right)\n"
+    "variables: {'C_{t-i}': 'Adjusted close price on day t-i.'}\n"
+)
+
+SESSION_LOG_WITH_BLOCK = SESSION_LOG + FACTOR_BLOCK
+
 
 class TestStripAnsi:
     def test_removes_escape_sequences(self):
@@ -75,6 +86,34 @@ class TestExtractFactorNames:
 
     def test_stops_at_non_word_char(self):
         assert cfs.extract_factor_names("factor_name: vol_ratio_20d。\n") == ["vol_ratio_20d"]
+
+
+class TestExtractFactorBlocks:
+    """harvest 桥输入面：因子块（name/description/formulation）抽取。"""
+
+    def test_block_metadata_extracted(self):
+        blocks = cfs.extract_factor_blocks(SESSION_LOG_WITH_BLOCK)
+        assert blocks == [
+            {
+                "name": "max_ret_20d",
+                "description": "[Lottery/MAX Effect] Twenty-day maximum daily close-to-close return.",
+                "formulation": "\\max_{i=0,\\ldots,19}\\left(\\frac{C_{t-i}}{C_{t-i-1}} - 1\\right)",
+            }
+        ]
+
+    def test_incomplete_block_skipped(self):
+        """缺 description/formulation 的半块不产出（MUST NOT 以残缺元数据冒充）。"""
+        partial = (
+            "Content: --------------Factor information:---------------\n"
+            "factor_name: foo\n"
+            "variables: {}\n"
+        )
+        assert cfs.extract_factor_blocks(partial) == []
+
+    def test_duplicate_blocks_deduped_in_order(self):
+        text = FACTOR_BLOCK + FACTOR_BLOCK
+        blocks = cfs.extract_factor_blocks(text)
+        assert [b["name"] for b in blocks] == ["max_ret_20d"]
 
 
 class TestParseSupervisorLog:
@@ -270,3 +309,79 @@ class TestCollectOnce:
         assert snap["current_session"] is None
         assert snap["sessions"] == []
         assert snap["totals"]["sessions"] == 0
+
+
+class TestCandidatesFile:
+    """候选文件（harvest 桥）：因子块元数据随采集落盘，全局去重、跨会话不丢。"""
+
+    def _fixture(self, tmp_path, session_log):
+        return _make_workdir(
+            tmp_path,
+            pid=os.getpid(),
+            supervisor_log="[supervisor] started at 2026-10-17T11:36:00+08:00 pid 1\n",
+            session_logs=(("session-20261017-113600.log", session_log),),
+            workspace_dirs=(("aaa", True),),
+        )
+
+    def test_candidates_written_with_metadata(self, tmp_path):
+        wd = self._fixture(tmp_path, SESSION_LOG_WITH_BLOCK)
+        out = tmp_path / "status.json"
+        cand = tmp_path / "candidates.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        cfs.collect_once(
+            wd,
+            out,
+            state,
+            candidates_out=cand,
+            now_epoch=1_800_000_000.0,
+            session_alive=lambda: True,
+        )
+        data = json.loads(cand.read_text(encoding="utf-8"))
+        assert [c["name"] for c in data["candidates"]] == ["max_ret_20d"]
+        entry = data["candidates"][0]
+        assert entry["formulation"].startswith("\\max_")
+        assert entry["session"] == "session-20261017-113600.log"
+        assert entry["first_seen_at"].startswith("20")
+
+    def test_dedupe_across_cycles_and_sessions(self, tmp_path):
+        wd = self._fixture(tmp_path, SESSION_LOG_WITH_BLOCK)
+        out = tmp_path / "status.json"
+        cand = tmp_path / "candidates.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        cfs.collect_once(
+            wd,
+            out,
+            state,
+            candidates_out=cand,
+            now_epoch=1_800_000_000.0,
+            session_alive=lambda: True,
+        )
+        # 第二轮：同块重复 + 新会话追加一个新因子块 → 只追加新名字
+        new_block = (
+            "Content: --------------Factor information:---------------\n"
+            "factor_name: hl_range_1d\n"
+            "factor_description: [Range] High-low range scaled by close.\n"
+            "factor_formulation: \\frac{H_t - L_t}{C_t}\n"
+            "variables: {}\n"
+        )
+        (wd / "factor_research_logs" / "session-20261017-120000.log").write_text(
+            SESSION_LOG_WITH_BLOCK + new_block, encoding="utf-8"
+        )
+        cfs.collect_once(
+            wd,
+            out,
+            state,
+            candidates_out=cand,
+            now_epoch=1_800_000_060.0,
+            session_alive=lambda: True,
+        )
+        data = json.loads(cand.read_text(encoding="utf-8"))
+        assert [c["name"] for c in data["candidates"]] == ["max_ret_20d", "hl_range_1d"]
+
+    def test_candidates_out_defaults_next_to_status(self, tmp_path):
+        """缺省候选文件与状态文件同目录（daemon 无需额外配置）。"""
+        wd = self._fixture(tmp_path, SESSION_LOG_WITH_BLOCK)
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        cfs.collect_once(wd, out, state, now_epoch=1_800_000_000.0, session_alive=lambda: True)
+        assert (tmp_path / "candidates.json").is_file()

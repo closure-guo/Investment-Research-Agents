@@ -19,10 +19,14 @@
 from __future__ import annotations
 
 import pytest
-import qlib_translate
-from qlib_translate import FIELD_MAPPINGS, OPERATOR_MAPPINGS, translate_qlib_expression
 
+from finance_agent.factors import qlib_translate
 from finance_agent.factors.dsl import OPS, parse
+from finance_agent.factors.qlib_translate import (
+    FIELD_MAPPINGS,
+    OPERATOR_MAPPINGS,
+    translate_qlib_expression,
+)
 
 
 class TestStrictEquivalence:

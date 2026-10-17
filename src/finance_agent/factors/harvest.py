@@ -1,0 +1,316 @@
+"""因子收割桥（add-factor-harvest-bridge）：RD-Agent 产出 → 转译 → 同一五道闸。
+
+链路（全自动，日批；供 `factor_harvest_daily` 零参数调用）：
+
+1. **候选源**：distro 采集器写出的候选文件（缺省 ``data/factor_research/candidates.json``，
+   经 ``FACTOR_RESEARCH_CANDIDATES_PATH`` 可覆盖）——RD-Agent 因子块
+   （``name`` / ``description`` / ``formulation``）；
+2. **转译**（LLM，``purpose="factor_transcription"``）：RD-Agent 原生形态 → Qlib Alpha
+   表达式，**二值裁决**（严格等价或显式不可翻译；MUST NOT 猜测/近似）；
+3. **翻译**（确定性，``factors.qlib_translate`` 映射表可审计）：Qlib → DSL；
+   不可翻译/超复杂度逐条留 blocker；
+4. **过闸**：``run_factor_external_import``（与外部导入/月批**同一五道闸**，
+   ``source="external"``，逐条裁决留事件史含闸口读数 ``detail``）；
+5. **幂等**：已处理候选记状态文件（``harvest_state.json``，``FACTOR_RESEARCH_HARVEST_STATE_PATH``
+   可覆盖），不重复导入；LLM 网关不可用/编排级异常一律上抛（job 记 failed——fail loud，
+   MUST NOT 静默跳过或伪造候选）。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Protocol
+
+from finance_agent.factors import qlib_translate
+from finance_agent.factors.eval_engine import MarketPanel
+from finance_agent.factors.external import run_factor_external_import
+from finance_agent.llm.contracts import extract_json
+from finance_agent.llm.gateway import complete_text
+from finance_agent.llm.types import Purpose
+from finance_agent.prompts.loader import load_prompt
+
+logger = logging.getLogger(__name__)
+
+# trace 用途标签 / 路由 purpose（PolicyRouter 硬要求见 router.REQUIRED_CAPS）
+PURPOSE_TAG: Purpose = "factor_transcription"
+
+DEFAULT_CANDIDATES_PATH = "data/factor_research/candidates.json"
+DEFAULT_STATE_PATH = "data/factor_research/harvest_state.json"
+# 单批上限（闸③ BH-FDR 分辨率覆盖 K ≤ 100；留裕度，超量候选顺延下一批）
+DEFAULT_BATCH_LIMIT = 60
+DEFAULT_CATEGORY = "外部"
+
+
+class TranscriptionResponseError(ValueError):
+    """转译响应不合载荷合同（非法 JSON / 缺字段）。"""
+
+    def __init__(self, message: str, raw_text: str) -> None:
+        super().__init__(message)
+        self.raw_text = raw_text
+
+
+class TranscriptionLLMClient(Protocol):
+    """转译 LLM 客户端协议（stub 可替，单测零网络）。"""
+
+    def complete_json(
+        self, prompt: str, *, purpose: Purpose, metadata: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+
+class GatewayTranscriptionClient:
+    """默认客户端：gateway ``complete_text`` 薄适配（唯一生产 LLM 入口）。"""
+
+    def __init__(self, *, max_tokens: int | None = None) -> None:
+        self._max_tokens = max_tokens
+
+    def complete_json(
+        self, prompt: str, *, purpose: Purpose, metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        text, _meta = complete_text(
+            [{"role": "user", "content": prompt}],
+            purpose=purpose,
+            max_tokens=self._max_tokens,
+            trace={"name": PURPOSE_TAG, "metadata": metadata},
+        )
+        try:
+            return extract_json(text)
+        except json.JSONDecodeError as exc:
+            raise TranscriptionResponseError(
+                f"转译响应不是合法 JSON：{exc}", raw_text=text
+            ) from exc
+
+
+@dataclass(frozen=True)
+class Transcription:
+    """二值裁决：``qlib_expression`` 非空 XOR ``reason`` 非空。"""
+
+    qlib_expression: str | None
+    reason: str | None
+
+
+def parse_transcription_payload(payload: Mapping[str, Any]) -> Transcription:
+    """载荷校验：``{"qlib_expression": str}`` 或 ``{"untranslatable": true, "reason": str}``。"""
+    if payload.get("untranslatable") is True:
+        reason = str(payload.get("reason") or "").strip()
+        if not reason:
+            raise ValueError("untranslatable 载荷缺 reason（MUST 显式给出拒译原因）")
+        return Transcription(qlib_expression=None, reason=reason)
+    expression = payload.get("qlib_expression")
+    if not isinstance(expression, str) or not expression.strip():
+        raise ValueError("转译载荷须含非空 qlib_expression 或 untranslatable=true")
+    return Transcription(qlib_expression=expression.strip(), reason=None)
+
+
+def build_transcription_prompt(candidate: Mapping[str, Any]) -> str:
+    """组装转译 prompt（模板 ``factor_transcription``，占位符 ``{{factor_block}}``）。"""
+    block = (
+        f"factor_name: {candidate.get('name')}\n"
+        f"factor_description: {candidate.get('description')}\n"
+        f"factor_formulation: {candidate.get('formulation')}"
+    )
+    return load_prompt("factor_transcription").replace("{{factor_block}}", block)
+
+
+def transcribe_candidate(
+    candidate: Mapping[str, Any], client: TranscriptionLLMClient
+) -> Transcription:
+    """单条候选转译（LLM）→ 二值裁决；响应不合合同 → ``TranscriptionResponseError``。"""
+    name = str(candidate.get("name"))
+    prompt = build_transcription_prompt(candidate)
+    payload = client.complete_json(
+        prompt,
+        purpose=PURPOSE_TAG,
+        metadata={"factor_name": name, "source": "rdagent_harvest"},
+    )
+    return parse_transcription_payload(payload)
+
+
+def _now() -> str:
+    return datetime.now().astimezone().isoformat()
+
+
+def _load_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _candidates_path(explicit: str | Path | None) -> Path:
+    if explicit is not None:
+        return Path(explicit)
+    return Path(os.environ.get("FACTOR_RESEARCH_CANDIDATES_PATH", DEFAULT_CANDIDATES_PATH))
+
+
+def _state_path(explicit: str | Path | None) -> Path:
+    if explicit is not None:
+        return Path(explicit)
+    return Path(os.environ.get("FACTOR_RESEARCH_HARVEST_STATE_PATH", DEFAULT_STATE_PATH))
+
+
+def run_factor_harvest(
+    *,
+    candidates_path: str | Path | None = None,
+    state_path: str | Path | None = None,
+    client: TranscriptionLLMClient | None = None,
+    panel: MarketPanel | None = None,
+    db_path: str | Path | None = None,
+    snapshot_db_path: str | Path | None = None,
+    limit: int = DEFAULT_BATCH_LIMIT,
+) -> dict[str, Any]:
+    """收割批入口（job 零参数调用）：候选文件 → 转译 → 翻译 → 五道闸 → 状态回填。
+
+    无新候选 → 零摘要（非错误）。LLM 网关不可用/面板不可得 → 上抛（fail loud）。
+    """
+    cand_file = _candidates_path(candidates_path)
+    st_file = _state_path(state_path)
+    raw_candidates = _load_json(cand_file).get("candidates")
+    all_candidates = (
+        [c for c in raw_candidates if isinstance(c, dict) and c.get("name")]
+        if isinstance(raw_candidates, list)
+        else []
+    )
+    processed: dict[str, Any] = dict(_load_json(st_file).get("processed") or {})
+    pending = [c for c in all_candidates if str(c.get("name")) not in processed][: max(limit, 0)]
+
+    summary: dict[str, Any] = {
+        "proposed": len(pending),
+        "transcribed": 0,
+        "untranslatable": 0,
+        "transcription_errors": 0,
+        "admitted": 0,
+        "rejected": 0,
+        "errors": 0,
+        "rejections": [],
+    }
+    if not pending:
+        return summary
+
+    llm = client if client is not None else GatewayTranscriptionClient()
+    payload: list[dict[str, Any]] = []
+    verdicts: dict[str, dict[str, Any]] = {}
+
+    for candidate in pending:
+        name = str(candidate["name"])
+        description = str(candidate.get("description") or "").strip()
+        formulation = str(candidate.get("formulation") or "").strip()
+        try:
+            transcription = transcribe_candidate(candidate, llm)
+        except (TranscriptionResponseError, ValueError) as exc:
+            verdicts[name] = {"status": "transcription_error", "detail": str(exc), "at": _now()}
+            payload.append(
+                {
+                    "expression": formulation,
+                    "hypothesis": f"[RD-Agent/{name}] 转译失败：{exc}",
+                    "category": DEFAULT_CATEGORY,
+                }
+            )
+            continue
+        if transcription.qlib_expression is None:
+            verdicts[name] = {
+                "status": "untranslatable",
+                "stage": "llm",
+                "detail": transcription.reason,
+                "at": _now(),
+            }
+            payload.append(
+                {
+                    "expression": formulation,
+                    "hypothesis": f"[RD-Agent/{name}] 不可翻译（LLM）：{transcription.reason}",
+                    "category": DEFAULT_CATEGORY,
+                }
+            )
+            continue
+        qlib_expression = transcription.qlib_expression
+        translated = qlib_translate.translate_qlib_expression(qlib_expression)
+        if not translated.translatable:
+            verdicts[name] = {
+                "status": "untranslatable",
+                "stage": "translator",
+                "detail": "；".join(translated.blockers),
+                "qlib_expression": qlib_expression,
+                "at": _now(),
+            }
+            payload.append(
+                {
+                    "expression": qlib_expression,  # 预检失败 → errors 桶（gate=None）
+                    "hypothesis": (
+                        f"[RD-Agent/{name}] 不可翻译（确定性映射）："
+                        f"{'；'.join(translated.blockers)}"
+                    ),
+                    "category": DEFAULT_CATEGORY,
+                }
+            )
+            continue
+        verdicts[name] = {
+            "status": "pending_gate",
+            "expression": translated.dsl_expression,
+            "qlib_expression": qlib_expression,
+            "at": _now(),
+        }
+        payload.append(
+            {
+                "expression": translated.dsl_expression,
+                "hypothesis": (
+                    f"[RD-Agent/{name}] {description}；formulation: {formulation}；"
+                    f"转译 {qlib_expression} → {translated.dsl_expression}"
+                ),
+                "category": DEFAULT_CATEGORY,
+            }
+        )
+
+    summary["transcribed"] = sum(1 for v in verdicts.values() if v["status"] == "pending_gate")
+    summary["untranslatable"] = sum(1 for v in verdicts.values() if v["status"] == "untranslatable")
+    summary["transcription_errors"] = sum(
+        1 for v in verdicts.values() if v["status"] == "transcription_error"
+    )
+
+    if payload:
+        import_summary = run_factor_external_import(
+            payload, panel=panel, db_path=db_path, snapshot_db_path=snapshot_db_path
+        )
+        summary["admitted"] = import_summary["admitted"]
+        summary["rejected"] = import_summary["rejected"]
+        summary["errors"] = import_summary["errors"]
+        summary["rejections"] = import_summary["rejections"]
+        rejected_by_expression = {str(r.get("expression")): r for r in import_summary["rejections"]}
+        for verdict in verdicts.values():
+            if verdict["status"] != "pending_gate":
+                continue
+            rejection = rejected_by_expression.get(str(verdict["expression"]))
+            if rejection is None:
+                verdict["status"] = "admitted"
+            else:
+                verdict["status"] = "rejected"
+                verdict["gate"] = rejection.get("gate")
+                verdict["reason"] = rejection.get("reason")
+                verdict["detail"] = rejection.get("detail")
+
+    processed.update(verdicts)
+    _write_json(st_file, {"updated_at": _now(), "processed": processed})
+    logger.info(
+        "factor harvest: proposed=%s transcribed=%s untranslatable=%s admitted=%s rejected=%s errors=%s",
+        summary["proposed"],
+        summary["transcribed"],
+        summary["untranslatable"],
+        summary["admitted"],
+        summary["rejected"],
+        summary["errors"],
+    )
+    return summary

@@ -35,6 +35,7 @@ from finance_agent.data.snapshot_job import MARKET_SNAPSHOT_SCHEDULE, run_market
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.execution.driver import run_execution_daily
 from finance_agent.factors.builtin import run_factor_builtin_register
+from finance_agent.factors.harvest import run_factor_harvest
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
@@ -59,6 +60,7 @@ JOB_IDS: tuple[str, ...] = (
     "screening_daily",
     "factor_decay_monitor",
     "factor_builtin_register",
+    "factor_harvest_daily",
     "decision_settle_daily",
     "paper_execute_daily",
     "paper_settle_daily",
@@ -75,6 +77,7 @@ JOB_LABELS: dict[str, str] = {
     "screening_daily": "选股",
     "factor_decay_monitor": "因子衰减监控",
     "factor_builtin_register": "内置因子注册",
+    "factor_harvest_daily": "因子收割",
     "decision_settle_daily": "判定",
     "paper_execute_daily": "仿真执行",
     "paper_settle_daily": "paper 结算",
@@ -92,6 +95,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "screening_daily": run_screening_daily,
     "factor_decay_monitor": run_factor_decay_monitor,
     "factor_builtin_register": run_factor_builtin_register,
+    "factor_harvest_daily": run_factor_harvest,
     "decision_settle_daily": settle_open_predictions,
     "paper_execute_daily": run_execution_daily,
     "paper_settle_daily": run_paper_settle_daily,
@@ -133,6 +137,14 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 15,
         "minute": 50,
+        "timezone": "Asia/Shanghai",
+    },
+    # 因子收割（add-factor-harvest-bridge）：15:55——快照/选股/衰减/内置注册之后、
+    # 结算链之前；候选源为采集器当日累积的 RD-Agent 因子块，全自动过同一五道闸
+    "factor_harvest_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 15,
+        "minute": 55,
         "timezone": "Asia/Shanghai",
     },
     "decision_settle_daily": {

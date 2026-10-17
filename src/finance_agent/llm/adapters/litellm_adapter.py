@@ -576,8 +576,10 @@ def _maybe_opencode_session(kwargs: dict[str, Any]) -> dict[str, Any]:
     """api_base 指向 opencode.ai 时注入 x-opencode-session（见 incident 021）。
 
     仅 opencode zen/go 网关需要该头；其余端点（方舟 glm 等）不注入，避免行为漂移。
+    ``base_url`` 是 litellm 的 ``api_base`` 别名（能力探测/设置页测试用该形态），
+    两个键都识别——只认 api_base 会让 probe 路径漏头 400。
     """
-    base = str(kwargs.get("api_base") or "")
+    base = str(kwargs.get("api_base") or kwargs.get("base_url") or "")
     if "opencode.ai" not in base:
         return kwargs
     headers = dict(kwargs.get("extra_headers") or {})

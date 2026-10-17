@@ -111,6 +111,26 @@ _ANALYST_TAGS: dict[str, set[str]] = {
     "sentiment": {"sentiment"},
 }
 
+# 分析师键名 -> 报告标题中文显示名（与 prompts/*.md 角色自称一致；仅渲染层，
+# state 键名是 trace/eval/路由契约不动）。表外键名回退原值。
+_ANALYST_DISPLAY_NAMES: dict[str, str] = {
+    "technical": "技术面分析师",
+    "macro": "宏观分析师",
+    "fundamental": "基本面分析师",
+    "sentiment": "舆情分析师",
+}
+
+# 辩论 role -> 报告发言人中文标注（对齐前端 NODE_DISPLAY_NAMES；仅渲染层）
+_DEBATE_ROLE_DISPLAY_NAMES: dict[str, str] = {
+    "bull": "多头辩手",
+    "bear": "空头辩手",
+    "aggressive": "激进风控",
+    "conservative": "保守风控",
+    "neutral": "中性风控",
+    "research_manager": "研究经理",
+    "risk_judge": "风控裁决",
+}
+
 # 基金经理决策的中文标注（ADR-0011 Layer V 三种决策语义）
 _FUND_MANAGER_ANNOTATIONS: dict[str, str] = {
     "approve": "审批通过",
@@ -909,7 +929,7 @@ def _format_analyst_report(name: str, report: AnalystReport | dict, star: bool =
         summary = report.get("summary", "")
         findings = report.get("key_findings", [])
 
-    title = f"### {name}" + ("（★ 重点）" if star else "")
+    title = f"### {_ANALYST_DISPLAY_NAMES.get(name, name)}" + ("（★ 重点）" if star else "")
     lines = [f"{title}\n", f"{summary}\n"]
     if findings:
         lines.append("**关键发现：**\n")
@@ -1145,4 +1165,4 @@ def _format_debate_message(msg: DebateMessage | dict) -> str:
         role = msg.get("role", "?")
         content = msg.get("content", "")
 
-    return f"**{role}**: {content}\n"
+    return f"**{_DEBATE_ROLE_DISPLAY_NAMES.get(role, role)}**: {content}\n"
