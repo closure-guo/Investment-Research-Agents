@@ -939,6 +939,55 @@ export interface FactorDetail extends FactorRow {
   events: FactorEvent[]
 }
 
+// ── 因子研发监控契约（delta add-factor-research-monitor：GET /api/factor-research/status） ──
+// 快照由 distro 采集器（collect_factor_status.py）周期写入宿主 data/factor_research/status.json，
+// 端点透传 + 派生 available/age_seconds/stale；缺失/损坏 → available=false + reason。
+
+export interface FactorResearchSupervisor {
+  running: boolean
+  pid: number | null
+  started_at: string | null
+}
+
+export interface FactorResearchSession {
+  log_file: string
+  started_at: string | null
+  ended_at: string | null
+  duration_s: number | null
+}
+
+export interface FactorResearchCurrentSession extends FactorResearchSession {
+  alive: boolean
+  loop_index: number | null
+  step_index: number | null
+  step_name: string | null
+  steps_total: number | null
+  step_elapsed_s: number | null
+  step_eta_s: number | null
+  factors: string[]
+  log_tail: string[]
+}
+
+export interface FactorResearchTotals {
+  sessions: number
+  candidates: number
+  workspace_tasks: number
+}
+
+export interface FactorResearchStatusResponse {
+  available: boolean
+  /** available=false 时如实二分：missing（未接入）/ corrupt（快照损坏） */
+  reason?: 'missing' | 'corrupt'
+  age_seconds?: number
+  stale?: boolean
+  collected_at?: string | null
+  collected_at_epoch?: number | null
+  supervisor?: FactorResearchSupervisor | null
+  current_session?: FactorResearchCurrentSession | null
+  sessions?: FactorResearchSession[]
+  totals?: FactorResearchTotals | null
+}
+
 // ── 执行台账只读契约（delta add-broker-console：GET /api/broker/*） ──
 
 export interface BrokerOverview {

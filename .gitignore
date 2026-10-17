@@ -272,6 +272,10 @@ data/test-e2e-ui-baseline*.db*
 data/market_snapshot.db*
 data/screening.db*
 data/factor_library.db*
+# 因子研发监控快照（distro 采集器经 /mnt/d 桥写入的运行时产物）+ E2E fixture 文件
+# （delta add-factor-research-monitor：spec 直接写隔离 fixture，生产快照不得入库）
+data/factor_research/
+data/test-e2e-factor-research-status.json*
 data/execution.db*
 data/test-repro.db*
 data/*.corrupt-backup

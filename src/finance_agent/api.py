@@ -3693,6 +3693,51 @@ async def factor_library_detail(factor_id: int) -> dict[str, Any]:
     return payload
 
 
+# ── 因子研发监控（delta add-factor-research-monitor：快照透传 + 陈旧派生）──
+#
+# 只读面：读取 distro 采集器（collect_factor_status.py）经宿主 data/ 桥写入的 JSON
+# 快照，零写入、零业务复制。路径调用期读 ``FACTOR_RESEARCH_STATUS_PATH``
+# （E2E env 注入即生效，同 SNAPSHOT_DB_PATH 纪律）。缺失/损坏二分如实——
+# 监控页需要第一类「未接入」状态，MUST NOT 以 500 或伪快照冒充。
+FACTOR_RESEARCH_STALE_AFTER_S = 180  # 3× 采集周期（契约 ≤60s）；阈值单源
+
+
+def _factor_research_status_payload() -> dict[str, Any]:
+    path = Path(os.environ.get("FACTOR_RESEARCH_STATUS_PATH", "data/factor_research/status.json"))
+    if not path.is_file():
+        return {"available": False, "reason": "missing"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("snapshot is not an object")
+        epoch = data.get("collected_at_epoch")
+        if epoch is None:
+            # epoch 缺失 → 回退解析 ISO（采集器契约两者均写；fixture/旧快照容错）
+            iso = data.get("collected_at")
+            if not isinstance(iso, str):
+                raise ValueError("no timestamp")
+            epoch = datetime.fromisoformat(iso).timestamp()
+        epoch = float(epoch)
+    except (OSError, ValueError, TypeError):
+        return {"available": False, "reason": "corrupt"}
+    age = max(0, int(time.time() - epoch))
+    payload = dict(data)
+    payload.update(
+        {
+            "available": True,
+            "age_seconds": age,
+            "stale": age > FACTOR_RESEARCH_STALE_AFTER_S,
+        }
+    )
+    return payload
+
+
+@app.get("/api/factor-research/status")
+async def factor_research_status() -> dict[str, Any]:
+    """因子研发监控快照（只读）：透传采集器快照 + 派生 ``age_seconds`` / ``stale``。"""
+    return await asyncio.to_thread(_factor_research_status_payload)
+
+
 # ── 执行台账只读查询（delta add-broker-console：暴露 + 呈现，零业务复制） ──
 #
 # 写路径铁律：本层只包装执行侧既有只读面（``store.list_orders`` /

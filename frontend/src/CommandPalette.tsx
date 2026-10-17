@@ -17,6 +17,8 @@ export interface CommandPaletteProps {
   onOpenMemory: () => void
   /** 因子库页入口（delta add-factor-library-page：与侧边栏折叠图标同源 navigate） */
   onOpenFactors: () => void
+  /** 因子研发监控页入口（delta add-factor-research-monitor：与侧边栏折叠图标同源 navigate） */
+  onOpenFactorResearch: () => void
   /** 执行台账页入口（delta add-broker-console：与侧边栏折叠图标同源 navigate） */
   onOpenBroker: () => void
   /** 日批运维页入口（delta add-daily-ops-page：与侧边栏折叠图标同源 navigate） */
@@ -26,7 +28,7 @@ export interface CommandPaletteProps {
   themeChoice: ThemeChoice
 }
 
-export function CommandPalette({ open, onClose, sessions, onSelectSession, onNewSession, onOpenDownloads, onOpenMemory, onOpenFactors, onOpenBroker, onOpenOps, onCycleTheme, themeChoice }: CommandPaletteProps) {
+export function CommandPalette({ open, onClose, sessions, onSelectSession, onNewSession, onOpenDownloads, onOpenMemory, onOpenFactors, onOpenFactorResearch, onOpenBroker, onOpenOps, onCycleTheme, themeChoice }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -52,12 +54,14 @@ export function CommandPalette({ open, onClose, sessions, onSelectSession, onNew
     { id: 'action-memory', icon: 'fa-brain', label: '打开记忆确认', hint: '', run: onOpenMemory },
     // add-factor-library-page：因子库页入口（与侧边栏折叠图标同源 navigate）
     { id: 'action-factors', icon: 'fa-flask', label: '打开因子库', hint: '', run: onOpenFactors },
+    // add-factor-research-monitor：因子研发监控页入口（与侧边栏折叠图标同源 navigate）
+    { id: 'action-factor-research', icon: 'fa-microscope', label: '打开因子研发监控', hint: '', run: onOpenFactorResearch },
     // add-broker-console：执行台账页入口（与侧边栏折叠图标同源 navigate）
     { id: 'action-broker', icon: 'fa-book-open', label: '打开执行台账', hint: '', run: onOpenBroker },
     // add-daily-ops-page：日批运维页入口（与侧边栏折叠图标同源 navigate）
     { id: 'action-ops', icon: 'fa-list-check', label: '打开日批运维', hint: '', run: onOpenOps },
     { id: 'action-theme', icon: 'fa-moon', label: `切换主题（当前：${themeChoice === 'system' ? '跟随系统' : themeChoice === 'dark' ? '深色' : '浅色'}）`, hint: '', run: onCycleTheme },
-  ]), [onNewSession, onOpenDownloads, onOpenMemory, onOpenFactors, onOpenBroker, onOpenOps, onCycleTheme, themeChoice])
+  ]), [onNewSession, onOpenDownloads, onOpenMemory, onOpenFactors, onOpenFactorResearch, onOpenBroker, onOpenOps, onCycleTheme, themeChoice])
 
   const q = query.trim().toLowerCase()
   const matchedSessions = q
