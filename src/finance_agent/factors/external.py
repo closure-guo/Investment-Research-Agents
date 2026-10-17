@@ -11,7 +11,7 @@
   proposal/builtin 一律覆盖，MUST NOT 借通道伪造来源）；
 - **预检**：DSL 解析/复杂度失败 → ``errors`` 桶（gate=None）留痕，单条失败不阻断
   整批（与月批 ``_preflight`` 同一套 ``parse`` 单一来源）；
-- **面板**：缺省经 ``monthly._panel_from_snapshot``（准入面板深度下限 150 交易日，
+- **面板**：缺省经 ``monthly._panel_from_snapshot``（准入面板深度下限 250 交易日，
   浅面板 fail loud 共用路径）；
 - **真源唯一**：未过闸者不入库（``admit_candidates`` 语义），本因子库是唯一生产
   因子真源。
