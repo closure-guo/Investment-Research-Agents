@@ -51,3 +51,28 @@ blocker 已注明「可用 sub 重排表达」）；其余为滚动极值/偏度
 - [x] 收割桥全链可用（采集器 → 转译 → 翻译 → 五道闸 → 幂等状态）；781 回归绿；变异 3/3
 - [x] 首次真实收割读数落档（0 入库、闸②为主、读数可判读）；日批 15:55 全自动接管
 - [x] 后续项明确：负数常量改写 / 滚动 Max/Min / 准入面板深度（回填中，独立 delta）
+
+---
+
+## 勘误与后续（2026-10-18 凌晨，产线评估轮发现并修复）
+
+**上文「日批 15:55 全自动接管」在当时**不成立**——注册面漏接，属本报告结论的勘误。**
+
+- **缺陷**：`factor_harvest_daily` 已入 `JOB_IDS`/`JOB_FUNCS`/`SCHEDULES` 与前端/E2E 镜像，
+  但 `start_scheduler()` 的 `add_job` 面漏注册（第 4 个镜像点）→ 日批永不触发；
+  `tests/outcome/test_scheduler.py` 既有断言为**硬编码集合**（与注册面同缺同一项）→ 全绿不报警。
+  实网取证：`GET /api/v1/ops/jobs` 仅 13 任务、无 `factor_harvest_daily`；
+  `job_runs` 无任何 scheduled 收割行。
+- **修复**：#376（a29fd01c，squash）——`_factor_harvest_job` 包装 + add_job 注册（内置注册之后、
+  结算链之前）+ 启动日志；硬编码断言 13→14；**新增 `TestSchedulerRegistryMirror` 把注册面钉回
+  `JOB_IDS` 真源**（TDD 红：`未注册={'factor_harvest_daily'}` → 绿）。CI 全绿
+  （lint-and-test 14m16s / stub 15m21s）；本地 43（test_scheduler）+ 601（outcome/ + harvest）绿。
+- **部署验证**（10-18 00:14 重启，先查 0 running 会话）：ops 页 14 任务，
+  `factor_harvest_daily` next_fire = **周一 2026-10-19 15:55**。
+- **手动收割补跑两次被并发会话停栈撞死**（其本地 E2E「诚实跑法」停 backend+frontend 腾
+  8000/5173）：run 114 被 SIGKILL（137，stale 清扫记 failed）；run 115 运行 16 分钟被停栈打断
+  （stale 清扫收尾）。两次均**幂等无损**：`harvest_state.json` 未写、库未动、候选未消费——
+  由周一 15:55 日批自动接管（积压 98 条，60/批）。**非模块缺陷**，属共享栈并发争用。
+- **旁证（排查副产品）**：受控实验证明同容器全新进程 `start_scheduler()` 探针
+  23:47:00.0009 精确开火——环境与 APScheduler（3.11.3）无缺陷；另发现预存缺陷
+  `reschedule_cohort`/`modify_job` 不重算 `next_run_time`（UI 改 cohort 时刻滞后一个周期生效，未修）。
