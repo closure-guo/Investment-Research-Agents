@@ -59,22 +59,30 @@ CLI 修改 + 两种重启顺序均未生效；共享 socket 对非集成 distro 
 **部署步骤**（替换旧采集守护；看护不重启）：
 
 ```bash
-# 1) 推文件（宿主侧，仓库根；stdin 管道入 distro）
-wsl -d rdagent -u root -- bash -c 'cat > /root/factor_research_agent.py'    < tests/scripts/spike/factor_research_agent.py
-wsl -d rdagent -u root -- bash -c 'cat > /root/collect_factor_status.py'    < tests/scripts/spike/collect_factor_status.py
-wsl -d rdagent -u root -- bash -c 'cat > /root/start-factor-research.sh'    < tests/scripts/spike/start-factor-research.sh
-wsl -d rdagent -u root -- bash -c 'cat > /root/stop-factor-research.sh'     < tests/scripts/spike/stop-factor-research.sh
-wsl -d rdagent -u root -- bash -c 'cat > /root/status-factor-research.sh'   < tests/scripts/spike/status-factor-research.sh
+# 1) 推文件（宿主侧，仓库根；stdin 管道入 distro）。
+#    Windows 检出的 .sh 带 CRLF → 必须以 tr -d '\r' 去 CR，否则 distro 上 bash 报 $'\r'
+wsl -d rdagent -u root -- bash -c "tr -d '\\r' > /root/factor_research_agent.py"  < tests/scripts/spike/factor_research_agent.py
+wsl -d rdagent -u root -- bash -c "tr -d '\\r' > /root/collect_factor_status.py"  < tests/scripts/spike/collect_factor_status.py
+wsl -d rdagent -u root -- bash -c "tr -d '\\r' > /root/start-factor-research.sh"  < tests/scripts/spike/start-factor-research.sh
+wsl -d rdagent -u root -- bash -c "tr -d '\\r' > /root/stop-factor-research.sh"   < tests/scripts/spike/stop-factor-research.sh
+wsl -d rdagent -u root -- bash -c "tr -d '\\r' > /root/status-factor-research.sh" < tests/scripts/spike/status-factor-research.sh
 wsl -d rdagent -u root -- chmod +x /root/start-factor-research.sh /root/stop-factor-research.sh /root/status-factor-research.sh
 
-# 2) 停旧采集守护（若在跑），起新代理守护（看护不重启）
-wsl -d rdagent -u root -- bash -c '
-  W=/root/rdagent-work
-  [ -f "$W/factor_status_collector.pid" ] && kill "$(cat "$W/factor_status_collector.pid")" 2>/dev/null; rm -f "$W/factor_status_collector.pid"
-  python3 /root/factor_research_agent.py --ensure-daemon
-  python3 /root/factor_research_agent.py --reconcile-once
-'
-# 3) 核对：status 脚本可见「代理: RUNNING」+ 控制文件；快照 collected_at 持续推进
+# 2) 停旧采集守护（若在跑），起新代理守护（看护不重启）。
+#    显式全参（避免 --workdir 缺省歧义：空串会退化成 "."）
+wsl -d rdagent -u root -- bash -s < <(cat <<'EOS'
+set -u
+W=/root/rdagent-work
+CTRL=/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/control.json
+OUT=/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/status.json
+[ -f "$W/factor_status_collector.pid" ] && kill "$(cat "$W/factor_status_collector.pid")" 2>/dev/null; rm -f "$W/factor_status_collector.pid"
+python3 /root/factor_research_agent.py --ensure-daemon --workdir "$W" --control "$CTRL" --out "$OUT" \
+  --state "$W/factor_research_logs/.collector_state.json" --interval 15
+python3 /root/factor_research_agent.py --workdir "$W" --control "$CTRL" --out "$OUT" \
+  --state "$W/factor_research_logs/.collector_state.json" --reconcile-once
+EOS
+)
+# 3) 核对：「代理: RUNNING」+ 快照 collected_at 持续推进
 wsl -d rdagent -u root -- bash /root/status-factor-research.sh
 ```
 
