@@ -70,6 +70,7 @@ from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.events.job import (
+    run_cb_daily,
     run_earnings_fetch_daily,
     run_earnings_triage_daily,
     run_event_settle_daily,
@@ -284,6 +285,16 @@ def _microcap_lane_job() -> None:
     _with_retry("microcap_screening_daily", "microcap screening daily", run_microcap_lane)
 
 
+def _cb_daily_job() -> None:
+    """add-convertible-bond-coverage：转债日批（16:50，小票通道之后、cohort 之前）。
+
+    标的/行情/强赎/下修落库 → 条款事件入观察清单（``source=cbb``，规则化标注，零 LLM）；
+    核心源失败上抛（run_job 记 failed + 原因），次要源失败记摘要留痕不阻断。
+    **仅观察通道**：不接执行链、不产生订单。
+    """
+    _with_retry("cb_daily", "cb daily", run_cb_daily)
+
+
 def _cohort_job() -> None:
     """add-forward-paper-trading-cohort：探班池盘后跑批（时刻取自 ops_config）。
 
@@ -495,6 +506,16 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-convertible-bond-coverage：转债日批（16:50）——小票通道（16:45）之后、
+    # cohort（18:00）之前；标的/行情/强赎/下修落库 + 条款事件入观察清单（零 LLM，
+    # 仅观察通道：不接执行链、不产生订单）。
+    scheduler.add_job(
+        _cb_daily_job,
+        _cron_for("cb_daily"),
+        id="cb_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     # add-monthly-batch-scheduling：两月批任务（每月 1 日 09:00 记忆提炼 / 10:00
     # 因子提案）——盘前错峰，互不竞争 LLM 网关；排期与日批链（15:30 起）也错开。
     # 注册位置在 cohort 之前（cohort 仍是末位注册，既有断言不变）。
@@ -531,7 +552,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         "decision settle 16:00;earnings fetch 16:05;paper execute 16:10;"
         "earnings triage 16:15;paper settle 16:20;event settle 16:25);"
         "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"
-        "microcap screening 16:45;"
+        "microcap screening 16:45;cb daily 16:50;"
         "monthly: memory extract day-1 09:00 / factor proposal day-1 10:00;"
         "cohort batch %02d:%02d(开关关闭时记 skipped-disabled,零 LLM 调用)",
         cohort["hour"],

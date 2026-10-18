@@ -16,6 +16,7 @@ from finance_agent.execution.driver import run_execution_daily
 from finance_agent.factors.builtin import run_factor_builtin_register
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
+from finance_agent.outcome.events.job import run_cb_daily
 from finance_agent.outcome.ops.jobs import (
     JOB_FUNCS,
     JOB_IDS,
@@ -40,7 +41,7 @@ class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 19
+            len(JOB_IDS) == 20
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线，add-execution-chain-driver）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
@@ -49,6 +50,7 @@ class TestRegistry:
         # 14→15：+regime_daily（拥挤度日批，add-crowding-regime-positioning，15:35 日批链内插入）；
         # 15→18：+earnings_fetch_daily/earnings_triage_daily/event_settle_daily
         # 18→19：+microcap_screening_daily（小票通道，add-microcap-lane-guardrails，16:45）
+        # 19→20：+cb_daily（转债日批，add-convertible-bond-coverage，16:50）
         # （业绩预告事件线，add-event-driven-lane，按时刻序插入 16:05/16:15/16:25）
         assert all(JOB_LABELS[jid] for jid in JOB_IDS)
 
@@ -62,8 +64,8 @@ class TestRegimeDailyRegistration:
         assert JOB_FUNCS["regime_daily"] is run_regime_daily
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 19
-        )  # 14→15：+regime_daily；15→18：+事件线三件；18→19：+microcap_screening_daily（小票通道）；10→12：+月批；12→13：+内置注册；13→14：+因子收割
+            len(JOB_IDS) == 20
+        )  # 14→15：+regime_daily；15→18：+事件线三件；18→19：+microcap_screening_daily（小票通道）；10→12：+月批；12→13：+内置注册；13→14：+因子收割；19→20：+cb_daily（转债日批）
         assert (
             JOB_IDS.index("market_snapshot_daily")
             < JOB_IDS.index("regime_daily")
@@ -93,9 +95,10 @@ class TestPaperExecuteDailyRegistration:
         assert JOB_FUNCS["paper_execute_daily"] is run_execution_daily
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 19
+            len(JOB_IDS) == 20
         )  # 9→10：+paper_execute_daily；10→12：+月批两任务；12→13：+内置注册；
-        # 13→14：+因子收割；14→15：+regime_daily（拥挤度）；15→18：+事件线三件；18→19：+小票通道
+        # 13→14：+因子收割；14→15：+regime_daily（拥挤度）；15→18：+事件线三件；18→19：+小票通道；
+        # 19→20：+cb_daily（转债日批，16:50）
         assert (
             JOB_IDS.index("decision_settle_daily")
             < JOB_IDS.index("earnings_fetch_daily")
@@ -131,9 +134,9 @@ class TestScreeningDailyRegistration:
         assert JOB_LABELS["screening_daily"] == "选股"
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 19
+            len(JOB_IDS) == 20
         )  # 8→9：+screening_daily；9→10：+paper_execute_daily；10→12：+月批；12→13：+内置注册；
-        # 13→14：+收割；14→15：+regime_daily；15→18：+事件线三件
+        # 13→14：+收割；14→15：+regime_daily；15→18：+事件线三件；19→20：+cb_daily（转债日批）
         assert (
             JOB_IDS.index("market_snapshot_daily")
             < JOB_IDS.index("regime_daily")
@@ -250,15 +253,17 @@ class TestMonthlyBatchRegistration:
         assert JOB_FUNCS["memory_extract_monthly"] is run_memory_extract_monthly
         assert JOB_FUNCS["factor_proposal_monthly"] is run_factor_proposal_monthly
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 19  # 12→13：+内置注册；13→14：+因子收割；18→19：+小票通道；
+        assert len(JOB_IDS) == 20  # 12→13：+内置注册；13→14：+因子收割；18→19：+小票通道；
+        # 19→20：+cb_daily（转债日批，16:50 插于小票通道与 cohort 之间）
         # 14→15：+regime_daily（拥挤度，15:35 日批链内插入）；15→18：+事件线三件
         # 月批附于末尾：月批两任务下标不动；cohort 因日批链内插入后移
         assert JOB_IDS[-2:] == ("memory_extract_monthly", "factor_proposal_monthly")
         assert (
-            JOB_IDS.index("cohort_batch") == 16
+            JOB_IDS.index("cohort_batch") == 17
         )  # 9→10：+内置注册；13→14：+因子收割（15:55 插入其前）；18→19：+小票通道（16:45 插入其前）；
         # 14→15：+regime_daily（15:35 插入其前）；
-        # 15→18：+事件线三件（16:05/16:15/16:25 插入其前）
+        # 15→18：+事件线三件（16:05/16:15/16:25 插入其前）；
+        # 19→20：+cb_daily（16:50 插入其前）
 
     def test_monthly_schedule_specs_verbatim(self):
         """月粒度以 ``day_of_month=1`` 表达（09:00 / 10:00，Asia/Shanghai）。"""
@@ -301,6 +306,32 @@ class TestMonthlyBatchRegistration:
         assert row["run_id"] == out["run_id"]
         assert row["kind"] == "manual" and row["source"] == "manual"
         assert row["status"] == "ok" and row["finished_at"] is not None
+
+
+class TestCbDailyRegistration:
+    """add-convertible-bond-coverage：转债日批接线（16:50，小票通道之后、cohort 之前）。"""
+
+    def test_registered_aligned_and_ordered(self):
+        assert "cb_daily" in JOB_IDS
+        assert JOB_LABELS["cb_daily"] == "转债日批"
+        assert JOB_FUNCS["cb_daily"] is run_cb_daily
+        assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
+        assert (
+            JOB_IDS.index("microcap_screening_daily")
+            < JOB_IDS.index("cb_daily")
+            < JOB_IDS.index("cohort_batch")
+        ), "展示顺序 = 时刻顺序（小票通道 16:45 → 转债日批 16:50 → cohort 18:00）"
+
+    def test_schedule_spec_is_1650_monfri(self):
+        """转债日批 16:50（mon-fri，Asia/Shanghai）逐字钉死；小票通道之后、cohort 之前。"""
+        assert SCHEDULES["cb_daily"] == {
+            "day_of_week": "mon-fri",
+            "hour": 16,
+            "minute": 50,
+            "timezone": "Asia/Shanghai",
+        }
+        microcap = SCHEDULES["microcap_screening_daily"]
+        assert (microcap["hour"], microcap["minute"]) == (16, 45)
 
 
 class TestMicrocapLaneRegistration:

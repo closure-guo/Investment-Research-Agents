@@ -14,6 +14,11 @@
 - ``run_event_settle_daily``：记账入场（T+1 开盘口径，交易日历识别停牌缺口）+ 到期
   结算，返回两步摘要。
 
+可转债日批（add-convertible-bond-coverage）：``run_cb_daily``（16:50）——
+``sync_cb_master`` → ``sync_cb_quotes`` → ``sync_cb_events`` → ``sync_cb_adj_events``
+（转股价变化触发的有界下修接入）→ ``build_watchlist``（``source=cbb``，规则化标注，
+**零 LLM 调用**）；核心源失败上抛留痕，次要源失败记摘要不阻断。
+
 horizon 由 ``EVENTS_HORIZON_DAYS``（默认 5）在**调用期**读取（配置不冻结）。
 """
 
@@ -27,6 +32,12 @@ from pathlib import Path
 from typing import Any
 
 from finance_agent.data.akshare_client import AKShareClient, _default_report_period
+from finance_agent.outcome.events.cb_sync import (
+    sync_cb_adj_events,
+    sync_cb_events,
+    sync_cb_master,
+    sync_cb_quotes,
+)
 from finance_agent.outcome.events.journal import (
     DEFAULT_HORIZON_DAYS,
     entry_candidates,
@@ -261,4 +272,71 @@ def run_event_settle_daily(
     )
     summary = {"as_of": as_of, "entry": entry_summary, "settle": settle_summary}
     logger.info("事件记账结算日批完成: %s", summary)
+    return summary
+
+
+def run_cb_daily(
+    *,
+    client: Any = None,
+    as_of: str | None = None,
+    db_path: str | Path | None = None,
+    snapshot_db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """可转债日批（add-convertible-bond-coverage）：标的 → 行情 → 条款事件 → 观察清单。
+
+    编排（口径见 docs/evals/metrics.md §1.17，**零 LLM 调用**）：
+
+    1. ``sync_cb_master``：``bond_zh_cov`` → ``cb_master``（幂等），并检出转股价相对上次
+       落库发生变化的代码（下修有界接入的触发面）；
+    2. ``sync_cb_quotes``：``bond_zh_hs_cov_spot`` → ``cb_quotes``（``交易日+代码`` 唯一）；
+       ``trade_date`` = ``as_of``，须在快照库交易日历内，否则跳过（留痕 ``non_trading_day``）；
+    3. ``sync_cb_events``：``bond_cb_redeem_jsl`` → 强赎事件（公告日 = 首次观测日，键稳定）；
+    4. ``sync_cb_adj_events``：仅对第 1 步检出的变化代码逐代码查下修（有界，命中即落库）；
+    5. ``build_watchlist``：条款事件入观察清单（``source=cbb``，规则化标注）。
+
+    **失败留痕**：核心源（标的/强赎事件）失败 → 已成功部分照常落库，随后上抛
+    ``RuntimeError``（``run_job`` 记 ``failed`` + 原因），MUST NOT 以零条新增冒充成功；
+    次要源（行情 / 逐代码下修）失败记摘要 ``failed_secondary_sources`` 与 ERROR 日志，
+    不阻断整批（对应要素如实缺值 null，前端 ``—``）。
+    """
+    as_of = as_of or date.today().isoformat()
+    client = client or AKShareClient()
+    calendar = read_snapshot_calendar(snapshot_db_path)
+    master = sync_cb_master(db_path=db_path, client=client)
+    quotes = sync_cb_quotes(db_path=db_path, client=client, trade_date=as_of, calendar=calendar)
+    events = sync_cb_events(db_path=db_path, client=client, as_of=as_of)
+    adj = sync_cb_adj_events(
+        db_path=db_path,
+        client=client,
+        codes=master["convert_price_changed"],
+        as_of=as_of,
+    )
+    added = build_watchlist(db_path=db_path, as_of=as_of, calendar=calendar or [])
+    failed_core = [
+        name
+        for name, info in (("cb_master", master), ("cb_redeem", events))
+        if info["source_failed"]
+    ]
+    failed_secondary = (["cb_quotes"] if quotes["source_failed"] else []) + (
+        ["cb_adj"] if adj["failed_codes"] else []
+    )
+    summary = {
+        "as_of": as_of,
+        "master": master,
+        "quotes": quotes,
+        "events": events,
+        "adj": adj,
+        "watchlist_added": added,
+        "calendar_available": calendar is not None,
+        "failed_core_sources": failed_core,
+        "failed_secondary_sources": failed_secondary,
+    }
+    if failed_core:
+        logger.error("可转债日批核心源失败（已成功部分照常落库）: %s", summary)
+        raise RuntimeError(
+            f"可转债日批核心源失败（信源缺失/返回失败）: failed={failed_core} "
+            f"watchlist_added={added} as_of={as_of}——本次运行留痕失败原因，"
+            "不得以零条新增冒充成功"
+        )
+    logger.info("可转债日批完成: %s", summary)
     return summary

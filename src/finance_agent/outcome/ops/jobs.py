@@ -42,6 +42,7 @@ from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.events.job import (
+    run_cb_daily,
     run_earnings_fetch_daily,
     run_earnings_triage_daily,
     run_event_settle_daily,
@@ -85,6 +86,9 @@ JOB_IDS: tuple[str, ...] = (
     # 小票通道（add-microcap-lane-guardrails）：16:45——完整性校验（16:40）之后、
     # cohort（18:00）之前；独立档位 + 前置门禁记录，observation_only（不下单）
     "microcap_screening_daily",
+    # 转债日批（add-convertible-bond-coverage）：16:50——小票通道（16:45）之后、
+    # cohort（18:00）之前；仅观察通道（零 LLM 准入、不接执行链、不产生订单）
+    "cb_daily",
     "cohort_batch",
     "memory_extract_monthly",
     "factor_proposal_monthly",
@@ -108,6 +112,8 @@ JOB_LABELS: dict[str, str] = {
     "integrity_check": "完整性校验",
     # add-microcap-lane-guardrails：小票通道日批（独立档位；observation_only，不下单）
     "microcap_screening_daily": "小票通道",
+    # add-convertible-bond-coverage：转债日批（规则化标注、零 LLM；仅观察通道）
+    "cb_daily": "转债日批",
     "cohort_batch": "cohort 跑批",
     "memory_extract_monthly": "记忆提炼",
     "factor_proposal_monthly": "因子提案",
@@ -131,6 +137,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "metrics_snapshot": persist_metrics_snapshot,
     "integrity_check": integrity_check,
     "microcap_screening_daily": run_microcap_lane,
+    "cb_daily": run_cb_daily,
     "cohort_batch": run_cohort_batch,
     "memory_extract_monthly": run_memory_extract_monthly,
     "factor_proposal_monthly": run_factor_proposal_monthly,
@@ -252,6 +259,14 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 45,
+        "timezone": "Asia/Shanghai",
+    },
+    # 转债日批（add-convertible-bond-coverage）：16:50——小票通道（16:45）之后、
+    # cohort（18:00）之前；标的/行情/强赎/下修落库 + 条款事件入观察清单（零 LLM）
+    "cb_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 50,
         "timezone": "Asia/Shanghai",
     },
     "cohort_batch": {
