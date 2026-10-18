@@ -69,6 +69,10 @@ export default defineConfig({
     // paper_equity 双曲线种子）→ 同迁入 track-record 专属 config（testMatch 显式收录，
     // 后端带 SESSIONS_DB_PATH + EXECUTION_DB_PATH 双隔离）
     'paper-broker.spec.ts',
+    // add-strategy-family-scorecards：策略族成绩单 spec 同属战绩页造数面（每例
+    // track_record_reset 清共享库的 predictions/paper_equity）→ 归入 track-record
+    // 专属 config（那边 testMatch 显式收录）；文件名无 track-record- 前缀，故此处单列
+    'strategy-scorecard.spec.ts',
     // eval-ops 手动补跑用例在服务端同步执行 20-60s（AKShare 重试退避），与本套件并行时
     // 独占单进程后端+共享 SQLite 写窗口致流式用例随机红（issue #252，trace 实证）——
     // 迁入 playwright.eval-ops.config.ts 专属端口对（8005/5178）物理隔离，默认套件恢复并行门禁
