@@ -4,7 +4,7 @@
 - 计划：`docs/superpowers/plans/2026-10-18-microcap-lane.md`（Task 1–6）
 - 工作区：`.worktrees/personal-edge-program`（分支 `feat/personal-edge-program`）
 - 日期：2026-10-18｜执行者：agent（SDD 子任务 1–6）
-- 提交：`e6e0a21f`(T1) / `c1643e06`(T2) / `ebf94033`(T3) / `cf4ef0c4`(T4) / `c9b5d521`(T5) / 见 T6 收口提交
+- 提交：`e6e0a21f`(T1) / `c1643e06`(T2) / `ebf94033`(T3) / `cf4ef0c4`(T4) / `c9b5d521`(T5) / `814be43e`(T6 收口)
 
 ## 1. 机器门禁
 
