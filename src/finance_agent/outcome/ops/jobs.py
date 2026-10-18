@@ -56,7 +56,7 @@ from finance_agent.outcome.regime.job import run_regime_daily
 from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
-from finance_agent.screening.pipeline import run_screening_daily
+from finance_agent.screening.pipeline import run_microcap_lane, run_screening_daily
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,9 @@ JOB_IDS: tuple[str, ...] = (
     "daily_marking",
     "metrics_snapshot",
     "integrity_check",
+    # 小票通道（add-microcap-lane-guardrails）：16:45——完整性校验（16:40）之后、
+    # cohort（18:00）之前；独立档位 + 前置门禁记录，observation_only（不下单）
+    "microcap_screening_daily",
     "cohort_batch",
     "memory_extract_monthly",
     "factor_proposal_monthly",
@@ -103,6 +106,8 @@ JOB_LABELS: dict[str, str] = {
     "daily_marking": "盯市",
     "metrics_snapshot": "指标快照",
     "integrity_check": "完整性校验",
+    # add-microcap-lane-guardrails：小票通道日批（独立档位；observation_only，不下单）
+    "microcap_screening_daily": "小票通道",
     "cohort_batch": "cohort 跑批",
     "memory_extract_monthly": "记忆提炼",
     "factor_proposal_monthly": "因子提案",
@@ -125,6 +130,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "daily_marking": run_daily_marking,
     "metrics_snapshot": persist_metrics_snapshot,
     "integrity_check": integrity_check,
+    "microcap_screening_daily": run_microcap_lane,
     "cohort_batch": run_cohort_batch,
     "memory_extract_monthly": run_memory_extract_monthly,
     "factor_proposal_monthly": run_factor_proposal_monthly,
@@ -237,6 +243,15 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 40,
+        "timezone": "Asia/Shanghai",
+    },
+    # 小票通道日批（add-microcap-lane-guardrails）：16:45——完整性校验（16:40）之后、
+    # cohort（18:00）之前；独立档位（流动性 1000 万）+ 前置门禁记录；observation_only
+    # （不产生订单，不接执行链）
+    "microcap_screening_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 45,
         "timezone": "Asia/Shanghai",
     },
     "cohort_batch": {

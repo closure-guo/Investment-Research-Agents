@@ -41,6 +41,9 @@ _HISTORY_FIELDS = {
     "pool_size",
     # add-screening-empty-library-fallback：批次字段新增选择模式（factor / fallback）
     "selection_mode",
+    # add-microcap-lane-guardrails：档位标注与前置门禁记录字段（主档恒 'main'/NULL）
+    "pool",
+    "frontier_gate",
 }
 
 

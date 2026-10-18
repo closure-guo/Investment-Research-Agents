@@ -85,7 +85,7 @@ from finance_agent.outcome.regime.job import run_regime_daily
 from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
-from finance_agent.screening.pipeline import run_screening_daily
+from finance_agent.screening.pipeline import run_microcap_lane, run_screening_daily
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +272,16 @@ def _metrics_job() -> None:
 def _integrity_job() -> None:
     """add-track-record-stage-c：快照哈希完整性校验（16:40，篡改告警）。"""
     _with_retry("integrity_check", "integrity check", integrity_check)
+
+
+def _microcap_lane_job() -> None:
+    """add-microcap-lane-guardrails：小票通道日批（16:45，完整性校验之后、cohort 之前）。
+
+    独立档位（流动性下限 1000 万）跑同一 L1→L2→L3 链 → ``pool='microcap'`` 批次行 +
+    前置门禁记录字段（退市池就绪 / regime 新鲜）；批次 failed 上抛（run_job 记 failed）。
+    **v1 不接执行链、不产生订单**（observation_only）。
+    """
+    _with_retry("microcap_screening_daily", "microcap screening daily", run_microcap_lane)
 
 
 def _cohort_job() -> None:
@@ -476,6 +486,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-microcap-lane-guardrails：小票通道日批（16:45）——完整性校验（16:40）之后、
+    # cohort（18:00）之前；独立档位 + 前置门禁（observation_only，不产生订单）。
+    scheduler.add_job(
+        _microcap_lane_job,
+        _cron_for("microcap_screening_daily"),
+        id="microcap_screening_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     # add-monthly-batch-scheduling：两月批任务（每月 1 日 09:00 记忆提炼 / 10:00
     # 因子提案）——盘前错峰，互不竞争 LLM 网关；排期与日批链（15:30 起）也错开。
     # 注册位置在 cohort 之前（cohort 仍是末位注册，既有断言不变）。
@@ -512,6 +531,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         "decision settle 16:00;earnings fetch 16:05;paper execute 16:10;"
         "earnings triage 16:15;paper settle 16:20;event settle 16:25);"
         "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"
+        "microcap screening 16:45;"
         "monthly: memory extract day-1 09:00 / factor proposal day-1 10:00;"
         "cohort batch %02d:%02d(开关关闭时记 skipped-disabled,零 LLM 调用)",
         cohort["hour"],

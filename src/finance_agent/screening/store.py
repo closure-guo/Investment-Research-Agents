@@ -11,12 +11,16 @@
   日批重跑时当日旧决策随 ``rewrite_day_l2_board`` 同事务清空后重写。
   两表供消融（±L3 粗筛）与前向命中率分层（后续 change）查询，是稳定性门槛查询的
   唯一数据源；
-- ``screening_batches(trade_date PK, status, error, started_at, finished_at,
-  l1_passed, l2_top, l3_keep, pool_size)``：日批批次行（``status ∈ {ok, failed}``；
-  失败批次与当日池零行的不变量由 ``record_screening_batch`` 单事务保证）；
-- ``selection_pool(trade_date, symbol, composite_score, rank, consecutive_days,
-  l3_verdict, l3_reason, factor_contribs_json, PK(trade_date, symbol))``：
-  精选池（keep ∩ 连续在榜门槛达标），同日写入为**原子替换**；
+- ``screening_batches(trade_date, pool, status, error, started_at, finished_at,
+  l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate)``：
+  日批批次行（``status ∈ {ok, failed}``；``pool ∈ {main, microcap}``——主档/小票通道
+  同日各一行，主键 ``(trade_date, pool)``（add-microcap-lane-guardrails）；
+  ``frontier_gate`` = 小票通道前置门禁记录字段（主档恒 NULL）；
+  失败批次与当日池零行的不变量由 ``record_screening_batch`` 单事务保证，清空**按 pool 收窄**）；
+- ``selection_pool(trade_date, pool, symbol, composite_score, rank, consecutive_days,
+  l3_verdict, l3_reason, factor_contribs_json, PK(trade_date, pool, symbol))``：
+  精选池（keep ∩ 连续在榜门槛达标），同 ``(交易日, 档位)`` 写入为**原子替换**；
+  读侧 ``pool`` 缺省 ``'main'``（既有页面/接口口径零变化）；
 - ``screening_removals(trade_date, symbol, reason, detail, removed_at,
   PK(trade_date, symbol, reason))``：分析前时效性校验的移除审计行（``trade_date``
   = 校验基准日 = 快照日；同标的多因多行，幂等覆盖）。
@@ -71,7 +75,8 @@ CREATE TABLE IF NOT EXISTS triage_decisions (
 CREATE INDEX IF NOT EXISTS idx_triage_decisions_symbol_date
   ON triage_decisions (symbol, trade_date);
 CREATE TABLE IF NOT EXISTS screening_batches (
-  trade_date  TEXT PRIMARY KEY,
+  trade_date  TEXT NOT NULL,
+  pool        TEXT NOT NULL DEFAULT 'main',
   status      TEXT NOT NULL,
   error       TEXT,
   started_at  TEXT NOT NULL,
@@ -80,10 +85,13 @@ CREATE TABLE IF NOT EXISTS screening_batches (
   l2_top      INTEGER NOT NULL DEFAULT 0,
   l3_keep     INTEGER NOT NULL DEFAULT 0,
   pool_size   INTEGER NOT NULL DEFAULT 0,
-  selection_mode TEXT NOT NULL DEFAULT 'factor'
+  selection_mode TEXT NOT NULL DEFAULT 'factor',
+  frontier_gate  TEXT,
+  PRIMARY KEY (trade_date, pool)
 );
 CREATE TABLE IF NOT EXISTS selection_pool (
   trade_date           TEXT NOT NULL,
+  pool                 TEXT NOT NULL DEFAULT 'main',
   symbol               TEXT NOT NULL,
   composite_score      REAL NOT NULL,
   rank                 INTEGER NOT NULL,
@@ -91,7 +99,7 @@ CREATE TABLE IF NOT EXISTS selection_pool (
   l3_verdict           TEXT NOT NULL,
   l3_reason            TEXT NOT NULL,
   factor_contribs_json TEXT NOT NULL,
-  PRIMARY KEY (trade_date, symbol)
+  PRIMARY KEY (trade_date, pool, symbol)
 );
 CREATE INDEX IF NOT EXISTS idx_selection_pool_date_rank
   ON selection_pool (trade_date, rank);
@@ -109,6 +117,10 @@ CREATE TABLE IF NOT EXISTS screening_removals (
 BATCH_STATUSES: tuple[str, ...] = ("ok", "failed")
 # 选择模式（add-screening-empty-library-fallback）：factor = 因子打分路径；fallback = 流动性降级
 SELECTION_MODES: tuple[str, ...] = ("factor", "fallback")
+# 通道档位（add-microcap-lane-guardrails）：main = 主档（默认，既有行为）；microcap = 小票通道
+POOL_MAIN = "main"
+POOL_MICROCAP = "microcap"
+POOLS: tuple[str, ...] = (POOL_MAIN, POOL_MICROCAP)
 
 # 稳定性门槛默认值（Global Constraints：默认连续 3 个交易日）
 DEFAULT_MIN_DAYS = 3
@@ -137,11 +149,72 @@ def _connect(db_path: str | Path | None) -> sqlite3.Connection:
     return conn
 
 
+def _table_pk_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    """表主键列名（按 ``PRAGMA table_info`` 的 pk 序号升序）；无主键 → []。"""
+    columns = [
+        (int(row[5]), str(row[1]))
+        for row in conn.execute(f"PRAGMA table_info({table})")  # noqa: S608
+    ]
+    return [name for pk, name in sorted(columns) if pk > 0]
+
+
+# 批次/池表重建（加 pool 进主键）的 SQL：列集合与 SCREENING_DDL 逐字一致
+_BATCH_TABLE_REBUILD_SQL = (
+    "CREATE TABLE screening_batches__migrate ("
+    "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', status TEXT NOT NULL, "
+    "error TEXT, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, "
+    "l1_passed INTEGER NOT NULL DEFAULT 0, l2_top INTEGER NOT NULL DEFAULT 0, "
+    "l3_keep INTEGER NOT NULL DEFAULT 0, pool_size INTEGER NOT NULL DEFAULT 0, "
+    "selection_mode TEXT NOT NULL DEFAULT 'factor', frontier_gate TEXT, "
+    "PRIMARY KEY (trade_date, pool));"
+    "INSERT INTO screening_batches__migrate (trade_date, pool, status, error, started_at, "
+    "finished_at, l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate) "
+    "SELECT trade_date, 'main', status, error, started_at, finished_at, l1_passed, l2_top, "
+    "l3_keep, pool_size, selection_mode, NULL FROM screening_batches;"
+    "DROP TABLE screening_batches;"
+    "ALTER TABLE screening_batches__migrate RENAME TO screening_batches;"
+)
+_POOL_TABLE_REBUILD_SQL = (
+    "CREATE TABLE selection_pool__migrate ("
+    "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', symbol TEXT NOT NULL, "
+    "composite_score REAL NOT NULL, rank INTEGER NOT NULL, consecutive_days INTEGER NOT NULL, "
+    "l3_verdict TEXT NOT NULL, l3_reason TEXT NOT NULL, factor_contribs_json TEXT NOT NULL, "
+    "PRIMARY KEY (trade_date, pool, symbol));"
+    "INSERT INTO selection_pool__migrate (trade_date, pool, symbol, composite_score, rank, "
+    "consecutive_days, l3_verdict, l3_reason, factor_contribs_json) "
+    "SELECT trade_date, 'main', symbol, composite_score, rank, consecutive_days, l3_verdict, "
+    "l3_reason, factor_contribs_json FROM selection_pool;"
+    "DROP TABLE selection_pool;"
+    "ALTER TABLE selection_pool__migrate RENAME TO selection_pool;"
+    # DROP TABLE 连带删掉旧索引：重建后恢复（与 SCREENING_DDL 同名同形）
+    "CREATE INDEX IF NOT EXISTS idx_selection_pool_date_rank ON selection_pool (trade_date, rank);"
+)
+
+
+def _migrate_pool_columns(conn: sqlite3.Connection) -> None:
+    """旧库主键（单列 ``trade_date``）→ 重建为含 ``pool`` 的复合主键（幂等）。
+
+    ``add-microcap-lane-guardrails``：小票通道与主档同一交易日各写一行批次 →
+    旧主键会互相覆盖（且 upsert 会连带清掉对方当日池行）。重建把旧行一律落
+    ``pool='main'``（既有批次全是主档产物）；列集合与新建库 DDL 一致。
+    已含 ``pool`` 主键（新库/已迁移）→ 无操作。全程单连接单事务：中途失败回滚后
+    仍是旧表（不会留下「已 DROP 未 RENAME」的半态）。
+    """
+    if "pool" not in _table_pk_columns(conn, "screening_batches"):
+        conn.executescript(_BATCH_TABLE_REBUILD_SQL)
+    if "pool" not in _table_pk_columns(conn, "selection_pool"):
+        conn.executescript(_POOL_TABLE_REBUILD_SQL)
+
+
 def init_screening_db(db_path: str | Path | None = None) -> Path:
     """幂等建表 + 索引 + 增量迁移，返回实际使用的库路径。
 
-    迁移：旧库 ``screening_batches`` 缺 ``selection_mode`` 列 → ALTER 补列
-    （默认 ``'factor'``——旧行语义 = 因子路径批次）。
+    迁移（按序）：
+    ① 旧库 ``screening_batches`` 缺 ``selection_mode`` 列 → ALTER 补列
+       （默认 ``'factor'``——旧行语义 = 因子路径批次）；
+    ② 旧库 ``screening_batches`` / ``selection_pool`` 主键为单列 ``trade_date``
+       → 重建为含 ``pool`` 的复合主键（add-microcap-lane-guardrails，旧行落
+       ``pool='main'``）。
     """
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
@@ -153,6 +226,7 @@ def init_screening_db(db_path: str | Path | None = None) -> Path:
                 "ALTER TABLE screening_batches ADD COLUMN selection_mode TEXT NOT NULL "
                 "DEFAULT 'factor'"
             )
+        _migrate_pool_columns(conn)
         conn.commit()
     finally:
         conn.close()
@@ -442,8 +516,13 @@ def _non_negative_int(value: Any, field_name: str) -> int:
     return value
 
 
-def _pool_row_payload(trade_date: str, row: dict[str, Any]) -> tuple[Any, ...]:
-    """精选池行 dict → SQLite payload（字段 fail loud，坏值不入库）。"""
+def _pool_row_payload(
+    trade_date: str, row: dict[str, Any], *, pool: str = POOL_MAIN
+) -> tuple[Any, ...]:
+    """精选池行 dict → SQLite payload（字段 fail loud，坏值不入库）。
+
+    输出列序与 ``selection_pool`` 表列一致：``(trade_date, pool, symbol, ...)``。
+    """
     if not isinstance(row, dict):
         raise ValueError(f"池行必须是 dict: {row!r}")
     symbol = str(row.get("symbol") or "").strip()
@@ -474,6 +553,7 @@ def _pool_row_payload(trade_date: str, row: dict[str, Any]) -> tuple[Any, ...]:
         raise ValueError(f"池行 factor_contribs 不可 JSON 序列化: {exc}") from exc
     return (
         trade_date,
+        pool,
         symbol,
         _finite_float(row.get("composite_score"), "composite_score"),
         rank,
@@ -496,16 +576,23 @@ def record_screening_batch(
     l3_keep: int = 0,
     pool_rows: Sequence[dict[str, Any]] = (),
     selection_mode: str = "factor",
+    pool: str = POOL_MAIN,
+    frontier_gate: str | None = None,
     db_path: str | Path | None = None,
 ) -> int:
     """批次行 + 当日精选池**单事务**写入（S1 落库口径；fail-closed 不变量）。
 
     - ``status`` 逐字 ∈ {``"ok"``, ``"failed"``}；``selection_mode`` 逐字 ∈
       {``"factor"``, ``"fallback"``}（add-screening-empty-library-fallback）；
-      ``pool_size`` 恒 = ``len(pool_rows)``
-      （不独立入参，避免与池行数漂移）；同 ``trade_date`` upsert 覆盖（幂等重跑）；
-    - **失败批次传 ``pool_rows=()`` → 当日池行先清空**：失败日零池行是不变量，不被
-      同日旧行/部分写入破坏；批次行与池行同一事务提交（ok 与池同生共死）；
+      ``pool`` 逐字 ∈ {``"main"``, ``"microcap"``}（add-microcap-lane-guardrails：
+      通道档位标注；同 ``trade_date`` 两档各一行，主键 ``(trade_date, pool)``）；
+      ``pool_size`` 恒 = ``len(pool_rows)``（不独立入参，避免与池行数漂移）；
+      同 ``(trade_date, pool)`` upsert 覆盖（幂等重跑）；
+    - ``frontier_gate`` = 前置门禁记录字段（``None`` = 未评估；主档恒 None）；
+      非空字符串（``ready`` / ``observation_only:missing=<要点>``），空串 → ``ValueError``；
+    - **失败批次传 ``pool_rows=()`` → 该档当日池行先清空**：失败日零池行是不变量，不被
+      同日旧行/部分写入破坏；批次行与池行同一事务提交（ok 与池同生共死）。
+      清空**按 pool 收窄**——小票通道批次不得动主档当日池行；
     - 池行字段 fail loud（见 ``_pool_row_payload``）；同批重复 ``symbol`` → ``ValueError``。
 
     返回写入池行数（= ``pool_size``）。
@@ -515,6 +602,12 @@ def record_screening_batch(
         raise ValueError(f"非法批次 status {status!r}；允许: {list(BATCH_STATUSES)}")
     if selection_mode not in SELECTION_MODES:
         raise ValueError(f"非法 selection_mode {selection_mode!r}；允许: {list(SELECTION_MODES)}")
+    if pool not in POOLS:
+        raise ValueError(f"非法批次 pool {pool!r}；允许: {list(POOLS)}")
+    if frontier_gate is not None and (
+        not isinstance(frontier_gate, str) or not frontier_gate.strip()
+    ):
+        raise ValueError(f"frontier_gate 必须是 None 或非空字符串: {frontier_gate!r}")
     if not isinstance(started_at, str) or not started_at:
         raise ValueError(f"started_at 不能为空: {started_at!r}")
     if not isinstance(finished_at, str) or not finished_at:
@@ -526,28 +619,34 @@ def record_screening_batch(
         _non_negative_int(l2_top, "l2_top"),
         _non_negative_int(l3_keep, "l3_keep"),
     ]
-    payload = [_pool_row_payload(normalized, row) for row in pool_rows]
-    symbols = [row[1] for row in payload]
+    payload = [_pool_row_payload(normalized, row, pool=pool) for row in pool_rows]
+    symbols = [row[2] for row in payload]
     duplicated = sorted({symbol for symbol in symbols if symbols.count(symbol) > 1})
     if duplicated:
         raise ValueError(f"池行 symbol 重复: {duplicated}（每标的至多一行）")
     init_screening_db(db_path)
     conn = _connect(db_path)
     try:
-        # 单事务：池行原子替换（失败批次 → 清空）与批次行 upsert 同生共死
-        conn.execute("DELETE FROM selection_pool WHERE trade_date = ?", (normalized,))
+        # 单事务：本档池行原子替换（失败批次 → 清空）与批次行 upsert 同生共死；
+        # DELETE 按 (trade_date, pool) 收窄 → 不触碰另一档当日池行
+        conn.execute(
+            "DELETE FROM selection_pool WHERE trade_date = ? AND pool = ?", (normalized, pool)
+        )
         conn.execute(
             "INSERT INTO screening_batches "
-            "(trade_date, status, error, started_at, finished_at, l1_passed, l2_top, l3_keep, pool_size, selection_mode) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(trade_date) DO UPDATE SET "
+            "(trade_date, pool, status, error, started_at, finished_at, l1_passed, l2_top, "
+            "l3_keep, pool_size, selection_mode, frontier_gate) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(trade_date, pool) DO UPDATE SET "
             "status = excluded.status, error = excluded.error, "
             "started_at = excluded.started_at, finished_at = excluded.finished_at, "
             "l1_passed = excluded.l1_passed, l2_top = excluded.l2_top, "
             "l3_keep = excluded.l3_keep, pool_size = excluded.pool_size, "
-            "selection_mode = excluded.selection_mode",
+            "selection_mode = excluded.selection_mode, "
+            "frontier_gate = excluded.frontier_gate",
             (
                 normalized,
+                pool,
                 status,
                 error,
                 started_at,
@@ -555,14 +654,15 @@ def record_screening_batch(
                 *counts,
                 len(payload),
                 selection_mode,
+                frontier_gate,
             ),
         )
         if payload:
             conn.executemany(
                 "INSERT INTO selection_pool "
-                "(trade_date, symbol, composite_score, rank, consecutive_days, "
+                "(trade_date, pool, symbol, composite_score, rank, consecutive_days, "
                 "l3_verdict, l3_reason, factor_contribs_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 payload,
             )
         conn.commit()
@@ -571,20 +671,26 @@ def record_screening_batch(
         conn.close()
 
 
-def list_selection_pool(trade_date: str, db_path: str | Path | None = None) -> list[dict[str, Any]]:
-    """某交易日精选池（rank 升序，同 rank 按 symbol 升序）；无记录 → 空列表。
+def list_selection_pool(
+    trade_date: str, db_path: str | Path | None = None, *, pool: str = POOL_MAIN
+) -> list[dict[str, Any]]:
+    """某交易日某档精选池（rank 升序，同 rank 按 symbol 升序）；无记录 → 空列表。
 
-    ``factor_contribs`` 由 ``factor_contribs_json`` 解析回列表（坏 JSON 防御性回退 ``[]``）。
+    ``pool`` 缺省 ``'main'``（既有调用路径/接口口径不变）；小票通道读侧显式传
+    ``pool='microcap'``。``factor_contribs`` 由 ``factor_contribs_json`` 解析回列表
+    （坏 JSON 防御性回退 ``[]``）。
     """
     normalized = _parse_trade_date(trade_date)
+    if pool not in POOLS:
+        raise ValueError(f"非法池 pool {pool!r}；允许: {list(POOLS)}")
     init_screening_db(db_path)
     conn = _connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT trade_date, symbol, composite_score, rank, consecutive_days, "
+            "SELECT trade_date, pool, symbol, composite_score, rank, consecutive_days, "
             "l3_verdict, l3_reason, factor_contribs_json FROM selection_pool "
-            "WHERE trade_date = ? ORDER BY rank, symbol",
-            (normalized,),
+            "WHERE trade_date = ? AND pool = ? ORDER BY rank, symbol",
+            (normalized, pool),
         ).fetchall()
     finally:
         conn.close()
@@ -601,30 +707,46 @@ def list_selection_pool(trade_date: str, db_path: str | Path | None = None) -> l
     return pool
 
 
-def latest_screening_batch(db_path: str | Path | None = None) -> dict[str, Any] | None:
-    """最近一次日批尝试（``MAX(trade_date)`` 行，含 failed）；空库 → None。"""
+def latest_screening_batch(
+    db_path: str | Path | None = None, *, pool: str = POOL_MAIN
+) -> dict[str, Any] | None:
+    """最近一次日批尝试（该档 ``MAX(trade_date)`` 行，含 failed）；无 → None。
+
+    ``pool`` 缺省 ``'main'``（既有页面/接口口径不变）；小票通道行经
+    ``pool='microcap'`` 显式读取。
+    """
+    if pool not in POOLS:
+        raise ValueError(f"非法批次 pool {pool!r}；允许: {list(POOLS)}")
     init_screening_db(db_path)
     conn = _connect(db_path)
     try:
         row = conn.execute(
-            "SELECT trade_date, status, error, started_at, finished_at, "
-            "l1_passed, l2_top, l3_keep, pool_size, selection_mode FROM screening_batches "
-            "ORDER BY trade_date DESC LIMIT 1"
+            "SELECT trade_date, pool, status, error, started_at, finished_at, "
+            "l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate "
+            "FROM screening_batches WHERE pool = ? "
+            "ORDER BY trade_date DESC LIMIT 1",
+            (pool,),
         ).fetchone()
         return dict(row) if row is not None else None
     finally:
         conn.close()
 
 
-def latest_successful_batch(db_path: str | Path | None = None) -> dict[str, Any] | None:
-    """最近一次成功批次（``status='ok'`` 且 ``trade_date`` 最大）；无 → None。"""
+def latest_successful_batch(
+    db_path: str | Path | None = None, *, pool: str = POOL_MAIN
+) -> dict[str, Any] | None:
+    """最近一次成功批次（该档 ``status='ok'`` 且 ``trade_date`` 最大）；无 → None。"""
+    if pool not in POOLS:
+        raise ValueError(f"非法批次 pool {pool!r}；允许: {list(POOLS)}")
     init_screening_db(db_path)
     conn = _connect(db_path)
     try:
         row = conn.execute(
-            "SELECT trade_date, status, error, started_at, finished_at, "
-            "l1_passed, l2_top, l3_keep, pool_size, selection_mode FROM screening_batches "
-            "WHERE status = 'ok' ORDER BY trade_date DESC LIMIT 1"
+            "SELECT trade_date, pool, status, error, started_at, finished_at, "
+            "l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate "
+            "FROM screening_batches WHERE pool = ? AND status = 'ok' "
+            "ORDER BY trade_date DESC LIMIT 1",
+            (pool,),
         ).fetchone()
         return dict(row) if row is not None else None
     finally:
@@ -632,25 +754,33 @@ def latest_successful_batch(db_path: str | Path | None = None) -> dict[str, Any]
 
 
 def list_batches(
-    limit: int = DEFAULT_BATCH_HISTORY_LIMIT, db_path: str | Path | None = None
+    limit: int = DEFAULT_BATCH_HISTORY_LIMIT,
+    db_path: str | Path | None = None,
+    *,
+    pool: str = POOL_MAIN,
 ) -> list[dict[str, Any]]:
-    """近 ``limit`` 条批次历史（``trade_date`` 倒序，含失败行）；空库 → 空列表。
+    """近 ``limit`` 条批次历史（该档 ``trade_date`` 倒序，含失败行）；空库 → 空列表。
 
     字段与服务端「当日运维」页逐字对齐：状态 / 错误（失败原因原样，不改写不归类）/
-    起止时间 / 各层计数（``l1_passed``/``l2_top``/``l3_keep``）/ 池数（``pool_size``）。
+    起止时间 / 各层计数（``l1_passed``/``l2_top``/``l3_keep``）/ 池数（``pool_size``）/
+    档位（``pool``）/ 门禁（``frontier_gate``）。``pool`` 缺省 ``'main'``——既有页面
+    口径零变化（小票通道行不混入）；小票通道读侧显式传 ``pool='microcap'``。
     ``limit`` 须正整数（bool 为非整数，fail loud）——**上/下界钳制在端点层**，本函数
     只做严格校验（与 ``_non_negative_int`` 等写入口径一致，不静默改正调用方入参）。
     """
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError(f"limit 必须是正整数: {limit!r}")
+    if pool not in POOLS:
+        raise ValueError(f"非法批次 pool {pool!r}；允许: {list(POOLS)}")
     init_screening_db(db_path)
     conn = _connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT trade_date, status, error, started_at, finished_at, "
-            "l1_passed, l2_top, l3_keep, pool_size, selection_mode FROM screening_batches "
+            "SELECT trade_date, pool, status, error, started_at, finished_at, "
+            "l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate "
+            "FROM screening_batches WHERE pool = ? "
             "ORDER BY trade_date DESC LIMIT ?",
-            (limit,),
+            (pool, limit),
         ).fetchall()
         return [dict(row) for row in rows]
     finally:

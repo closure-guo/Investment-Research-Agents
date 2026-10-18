@@ -36,7 +36,8 @@ test.describe.configure({ timeout: 120_000 })
 // add-factor-harvest-bridge（13→14：因子收割 15:55）；
 // add-crowding-regime-positioning（14→15：拥挤度 15:35，插于快照之后）；
 // add-event-driven-lane（15→18：预告抓取 16:05 / 预告分诊 16:15 / 事件结算 16:25，
-// 按时刻序插于既有日批链空档）。
+// 按时刻序插于既有日批链空档）；
+// add-microcap-lane-guardrails（18→19：小票通道 16:45，插于完整性校验 16:40 之后）。
 const JOB_IDS = [
   'market_snapshot_daily',
   'regime_daily',
@@ -53,6 +54,7 @@ const JOB_IDS = [
   'daily_marking',
   'metrics_snapshot',
   'integrity_check',
+  'microcap_screening_daily',
   'cohort_batch',
   'memory_extract_monthly',
   'factor_proposal_monthly',
@@ -123,7 +125,7 @@ async function cohortAuditCount(request: APIRequestContext): Promise<number> {
 }
 
 test.describe('评估运维分区（设置中心）', () => {
-  test('分区渲染任务卡片（当前 18 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
+  test('分区渲染任务卡片（当前 19 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
     await openEvalOps(page)
 
     // TESTING=1 → 调度器未启动：显式提示，不得空白、不得以空列表冒充「一切正常」

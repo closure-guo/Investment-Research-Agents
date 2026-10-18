@@ -199,7 +199,7 @@ class TestCohortJobRegistration:
         mock_sched_cls.return_value = sched
         assert start_scheduler() is sched
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 18, (
+        assert len(ids) == 19, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
@@ -209,7 +209,8 @@ class TestCohortJobRegistration:
         # 真源守护见 TestSchedulerRegistryMirror）；
         # 14→15：+regime_daily（拥挤度日批接线，add-crowding-regime-positioning）
         # 15→18：+earnings_fetch_daily/earnings_triage_daily/event_settle_daily
-        # （业绩预告事件线接线，add-event-driven-lane）
+        # （业绩预告事件线接线，add-event-driven-lane）；
+        # 18→19：+microcap_screening_daily（小票通道接线，add-microcap-lane-guardrails）
         assert ids[-1] == "cohort_batch"
         assert set(ids) == {
             "decision_settle_daily",
@@ -230,6 +231,7 @@ class TestCohortJobRegistration:
             "earnings_fetch_daily",
             "earnings_triage_daily",
             "event_settle_daily",
+            "microcap_screening_daily",
         }
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
@@ -534,7 +536,7 @@ class TestMisfireHardening:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 18, (
+        assert len(ids) == 19, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
@@ -614,6 +616,44 @@ class TestPaperSettleJobRegistration:
         assert mock_settle.call_count == 3
         assert mock_sleep.call_count == 2
         row = last_job_run("paper_settle_daily", tmp_path / "s.db")
+        assert row["status"] == "failed" and row["kind"] == "scheduled"
+        assert "snapshot down" in row["error"]
+
+
+class TestMicrocapLaneJobRegistration:
+    """add-microcap-lane-guardrails：小票通道日批（16:45 mon-fri）注册与重试包装。"""
+
+    @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
+    @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
+    def test_registers_1645_monfri_cron(self, mock_sched_cls):
+        sched = MagicMock()
+        mock_sched_cls.return_value = sched
+        start_scheduler()
+        assert _job_field(sched, "microcap_screening_daily", "hour") == ["16"]
+        assert _job_field(sched, "microcap_screening_daily", "minute") == ["45"]
+        assert "mon-fri" in _job_field(sched, "microcap_screening_daily", "day_of_week")
+        ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
+        assert ids.index("integrity_check") < ids.index("microcap_screening_daily")
+        assert ids.index("microcap_screening_daily") < ids.index("cohort_batch")
+
+    @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
+    @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
+    @patch("finance_agent.outcome.scheduler.time.sleep")
+    def test_job_uses_retry(self, mock_sleep, mock_sched_cls, tmp_path, monkeypatch):
+        """异常重试 3 次（2 次退避）且不上抛（旁路铁律，与主档同纪律）。"""
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "s.db"))
+        sched = MagicMock()
+        mock_sched_cls.return_value = sched
+        start_scheduler()
+        job_fn = _job_fn(sched, "microcap_screening_daily")
+        with patch(
+            "finance_agent.outcome.scheduler.run_microcap_lane",
+            side_effect=RuntimeError("snapshot down"),
+        ) as mock_lane:
+            job_fn()  # 不抛异常
+        assert mock_lane.call_count == 3
+        assert mock_sleep.call_count == 2
+        row = last_job_run("microcap_screening_daily", tmp_path / "s.db")
         assert row["status"] == "failed" and row["kind"] == "scheduled"
         assert "snapshot down" in row["error"]
 

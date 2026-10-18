@@ -452,3 +452,194 @@ def test_record_screening_batch_rejects_unknown_selection_mode(tmp_path) -> None
             selection_mode="degraded",
             db_path=tmp_path / "screening.db",
         )
+
+
+# ── 小票通道批次（pool 列 + 主键重建迁移，add-microcap-lane-guardrails T5） ─────
+
+
+def test_pool_migration_rebuilds_pk_and_preserves_rows(tmp_path) -> None:
+    """旧库（trade_date 单主键、无 selection_mode/frontier_gate）→ init 幂等重建：
+    旧行落 pool='main'，主键变 (trade_date, pool)，同 trade_date 可并存 microcap 行。"""
+    from finance_agent.screening.store import (
+        latest_screening_batch,
+        list_batches,
+        list_selection_pool,
+        record_screening_batch,
+    )
+
+    db = tmp_path / "legacy_screening.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            "CREATE TABLE screening_batches ("
+            "trade_date TEXT PRIMARY KEY, status TEXT NOT NULL, error TEXT, "
+            "started_at TEXT NOT NULL, finished_at TEXT NOT NULL, "
+            "l1_passed INTEGER NOT NULL DEFAULT 0, l2_top INTEGER NOT NULL DEFAULT 0, "
+            "l3_keep INTEGER NOT NULL DEFAULT 0, pool_size INTEGER NOT NULL DEFAULT 0);"
+            "CREATE TABLE selection_pool ("
+            "trade_date TEXT NOT NULL, symbol TEXT NOT NULL, composite_score REAL NOT NULL, "
+            "rank INTEGER NOT NULL, consecutive_days INTEGER NOT NULL, "
+            "l3_verdict TEXT NOT NULL, l3_reason TEXT NOT NULL, "
+            "factor_contribs_json TEXT NOT NULL, PRIMARY KEY (trade_date, symbol));"
+            "CREATE INDEX idx_selection_pool_date_rank ON selection_pool (trade_date, rank);"
+        )
+        conn.execute(
+            "INSERT INTO screening_batches (trade_date, status, started_at, finished_at) "
+            "VALUES ('2026-10-01', 'ok', 'x', 'y')"
+        )
+        conn.execute(
+            "INSERT INTO selection_pool VALUES "
+            "('2026-10-01', '600519', 1.0, 1, 3, 'keep', '无风险事件', '[]')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_screening_db(db)
+    init_screening_db(db)  # 第二次仍幂等（不重复重建、不丢行）
+
+    conn = sqlite3.connect(db)
+    try:
+        batch_pk = [
+            row[1]
+            for row in conn.execute("PRAGMA table_info(screening_batches)").fetchall()
+            if row[5] > 0
+        ]
+        pool_pk = [
+            row[1]
+            for row in conn.execute("PRAGMA table_info(selection_pool)").fetchall()
+            if row[5] > 0
+        ]
+        pool_indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='selection_pool'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert batch_pk == ["trade_date", "pool"]
+    assert pool_pk == ["trade_date", "pool", "symbol"]
+    assert "idx_selection_pool_date_rank" in pool_indexes  # 重建后索引恢复
+
+    legacy = latest_screening_batch(db_path=db)
+    assert legacy is not None
+    assert legacy["trade_date"] == "2026-10-01"
+    assert legacy["pool"] == "main"  # 旧行语义 = 主档批次
+    assert legacy["selection_mode"] == "factor"
+    assert legacy["frontier_gate"] is None
+    assert list_selection_pool("2026-10-01", db_path=db)[0]["pool"] == "main"
+
+    # 同 trade_date 可并存 microcap 行（主键重建后不再互相覆盖）
+    record_screening_batch(
+        "2026-10-01",
+        status="ok",
+        started_at="x2",
+        finished_at="y2",
+        pool="microcap",
+        frontier_gate="observation_only:missing=delist_pool",
+        db_path=db,
+    )
+    assert len(list_batches(db_path=db)) == 1  # 主档读出不受影响
+    micro = list_batches(db_path=db, pool="microcap")
+    assert len(micro) == 1 and micro[0]["pool"] == "microcap"
+
+
+def test_record_and_read_back_pool_and_frontier_gate(tmp_path) -> None:
+    """``record_screening_batch`` 携带 pool/frontier_gate；读侧按 pool 过滤。"""
+    from finance_agent.screening.store import (
+        latest_screening_batch,
+        latest_successful_batch,
+        list_batches,
+        record_screening_batch,
+    )
+
+    db = tmp_path / "screening.db"
+    record_screening_batch(
+        _D1,
+        status="ok",
+        started_at="t0",
+        finished_at="t1",
+        pool="microcap",
+        frontier_gate="observation_only:missing=regime_data",
+        db_path=db,
+    )
+
+    # 主档读侧看不到 microcap 行（既有页面/接口口径零变化）
+    assert latest_screening_batch(db_path=db) is None
+    assert latest_successful_batch(db_path=db) is None
+    assert list_batches(db_path=db) == []
+
+    micro = latest_screening_batch(db_path=db, pool="microcap")
+    assert micro is not None
+    assert micro["pool"] == "microcap"
+    assert micro["frontier_gate"] == "observation_only:missing=regime_data"
+
+    record_screening_batch(
+        _D1,
+        status="ok",
+        started_at="t2",
+        finished_at="t3",
+        db_path=db,
+    )
+    main = latest_screening_batch(db_path=db)
+    assert main is not None and main["pool"] == "main" and main["frontier_gate"] is None
+
+
+def test_record_screening_batch_rejects_unknown_pool(tmp_path) -> None:
+    from finance_agent.screening.store import record_screening_batch
+
+    with pytest.raises(ValueError, match="pool"):
+        record_screening_batch(
+            _D1,
+            status="ok",
+            started_at="t0",
+            finished_at="t1",
+            pool="sidecar",
+            db_path=tmp_path / "screening.db",
+        )
+    with pytest.raises(ValueError, match="frontier_gate"):
+        record_screening_batch(
+            _D1,
+            status="ok",
+            started_at="t0",
+            finished_at="t1",
+            frontier_gate="",
+            db_path=tmp_path / "screening.db",
+        )
+
+
+def test_pool_rows_are_namespaced_by_pool(tmp_path) -> None:
+    """同日两次批次（main/microcap）互不删对方池行（单事务 DELETE 按 pool 收窄）。"""
+    from finance_agent.screening.store import (
+        list_selection_pool,
+        record_screening_batch,
+    )
+
+    db = tmp_path / "screening.db"
+    pool_row = {
+        "symbol": "600519",
+        "composite_score": 1.5,
+        "rank": 1,
+        "consecutive_days": 3,
+        "l3_verdict": "keep",
+        "l3_reason": "无风险事件",
+        "factor_contribs": [],
+    }
+    record_screening_batch(
+        _D1, status="ok", started_at="t0", finished_at="t1", pool_rows=[pool_row], db_path=db
+    )
+    record_screening_batch(
+        _D1,
+        status="ok",
+        started_at="t2",
+        finished_at="t3",
+        pool="microcap",
+        pool_rows=[{**pool_row, "symbol": "300750"}],
+        db_path=db,
+    )
+
+    assert [row["symbol"] for row in list_selection_pool(_D1, db_path=db)] == ["600519"]
+    assert [row["symbol"] for row in list_selection_pool(_D1, db_path=db, pool="microcap")] == [
+        "300750"
+    ]
