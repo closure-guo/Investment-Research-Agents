@@ -183,6 +183,7 @@ def resolve_reports_path(file_name: str) -> Path:
 # 决策日志表(幂等建表,decision_log 与 sessions 同库;decision-outcome-tracking)
 # cohort 跑批记账表(delta add-forward-paper-trading-cohort;独立于 predictions)
 from finance_agent.outcome.cohort.model import init_cohort_runs  # noqa: E402
+from finance_agent.outcome.regime.payload import build_regime_payload  # noqa: E402
 from finance_agent.outcome.store import (  # noqa: E402
     DECISION_STATUSES,
     decision_stats,
@@ -3190,6 +3191,19 @@ async def snapshot_status() -> dict:
             "last_error": "status_unavailable",
             "last_error_date": None,
         }
+
+
+@app.get("/api/regime")
+async def regime_status() -> dict:
+    """市场拥挤度 regime 只读端点（add-crowding-regime-positioning）。
+
+    返回最新判定（``state`` / ``multiplier`` / ``reasons``）+ 四指标（当日值 +
+    历史分位）+ 近 250 交易日历史序列 + ``as_of`` / ``age_days`` / ``stale``；
+    无记录或不可解析 → 200 + ``available=false`` + 原因码（``missing`` /
+    ``corrupt``），MUST NOT 500 或以伪数据冒充。只读：不写/不改任何状态
+    （阻塞 IO 走线程池，不占事件循环）。
+    """
+    return await asyncio.to_thread(build_regime_payload)
 
 
 # ── 选股（add-screening-pipeline T3；S3/S4：池 / 状态 / 批量深度分析） ──
