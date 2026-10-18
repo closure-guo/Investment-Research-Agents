@@ -38,13 +38,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from scripts.backfill_market_snapshot import (
-    _BACKFILL_CAVEAT,
-    _has_rows_in_window,
-    _history_rows,
-    _host_write_guard,
-    verify_snapshot_integrity,
-)
+# 复用既有回填脚本的内部件（唯一实现源，不复制取数/落库/护栏逻辑）。
+# 两种调用形态都要成立：包形态（tests 走 ``scripts.backfill_delisted``，仓库根在
+# sys.path）与直接路径运行（``python scripts/backfill_delisted.py``——此时
+# ``scripts/`` 无 __init__.py，脚本目录才是 sys.path 首位）。
+try:  # pragma: no cover - 分支由调用形态决定
+    from scripts import backfill_market_snapshot as backfill_module
+except ModuleNotFoundError:  # pragma: no cover
+    import backfill_market_snapshot as backfill_module
 
 from finance_agent.data.akshare_client import AKShareClient
 from finance_agent.data.snapshot import (
@@ -55,6 +56,13 @@ from finance_agent.data.snapshot import (
     init_snapshot_db,
     write_snapshot_rows_bulk,
 )
+
+# 既有内部件的模块级引用（测试经本模块名 monkeypatch 桩替换）
+_BACKFILL_CAVEAT = backfill_module._BACKFILL_CAVEAT
+_has_rows_in_window = backfill_module._has_rows_in_window
+_history_rows = backfill_module._history_rows
+_host_write_guard = backfill_module._host_write_guard
+verify_snapshot_integrity = backfill_module.verify_snapshot_integrity
 
 logger = logging.getLogger(__name__)
 
