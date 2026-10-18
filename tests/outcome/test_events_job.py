@@ -168,6 +168,46 @@ class TestTriageDaily:
         assert summary["snapshot_ctx_missing"] == 0
         assert stub.calls == 0  # 无未分诊记录 → 零 LLM 调用
 
+    def test_triage_daily_does_not_degrade_cbb_notes(self, monkeypatch, _events_env) -> None:
+        """兄弟日批（预告分诊）不得清空/降级既有 cbb 条目注记（评审 F2：无日历只插不覆盖）。"""
+        import json
+
+        from finance_agent.outcome.events.cb_model import cb_event_key, upsert_cb_events
+        from finance_agent.outcome.events.model import upsert_forecasts
+        from finance_agent.outcome.events.watchlist import build_watchlist
+
+        db = _events_env / "events.db"
+        upsert_cb_events(
+            [
+                {
+                    "event_key": cb_event_key("113046", "强赎", "2026-10-15"),
+                    "code": "113046",
+                    "event_type": "强赎",
+                    "announce_date": "2026-10-15",
+                    "trigger_price": 13.234,
+                    "trigger_ratio": 130.0,
+                    "count_text": "12/15 | 30",
+                    "last_trade_date": "2026-10-20",
+                    "remain_scale": 9.905,
+                    "raw_json": json.dumps({"强赎状态": "已公告强赎"}, ensure_ascii=False),
+                }
+            ],
+            db_path=db,
+        )
+        calendar = ["2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20"]
+        assert build_watchlist(db_path=db, as_of="2026-10-16", calendar=calendar) == 1
+        before = list_watchlist(source="cbb", db_path=db)[0]["note"]
+        assert json.loads(before)["call_countdown_days"] == 2
+
+        upsert_forecasts([_forecast_row("2025-04-15")], db_path=str(db))
+        monkeypatch.setattr(events_job, "GatewayTriageClient", lambda: _StubTriageClient())
+        summary = events_job.run_earnings_triage_daily(db_path=db)
+
+        assert summary["watchlist_added"] == 1, "业绩预告条目照常入清单"
+        cbb = list_watchlist(source="cbb", db_path=db)
+        assert len(cbb) == 1
+        assert cbb[0]["note"] == before, "分诊日批不得把 cbb 倒计时注记降级/清空"
+
     def test_snapshot_context_is_point_in_time_per_row(self, monkeypatch, _events_env) -> None:
         """逐行时点化：每行取 ≤ available_at 的最近快照日该股字段（消除回填前视）。
 

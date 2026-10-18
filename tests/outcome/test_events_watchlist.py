@@ -189,6 +189,30 @@ class TestBuildWatchlistCbb:
         assert json.loads(items[0]["note"])["call_countdown_days"] == 1
         assert items[0]["status"] == "pending" and items[0]["created_at"] == first["created_at"]
 
+    def test_missing_calendar_keeps_existing_note_insert_only(self, tmp_path):
+        """无日历重跑（兄弟日批路径）：既有注记保持不动，**只插不覆盖**（评审 F2）。"""
+        db = tmp_path / "events.db"
+        upsert_cb_events([_cb_event()], db_path=db)
+        assert build_watchlist(db_path=db, as_of="2026-10-16", calendar=_CALENDAR) == 1
+        before = list_watchlist(source="cbb", db_path=db)[0]["note"]
+        assert json.loads(before)["call_countdown_days"] == 2
+
+        # 另一来源的日批（分诊）调用无 as_of/calendar 的构建：不得把倒计时清成 null
+        added = build_watchlist(db_path=db)
+        assert added == 0
+        assert list_watchlist(source="cbb", db_path=db)[0]["note"] == before
+
+        # 无日历仍照常接新事件（注记如实 null + note，不阻断入库）
+        upsert_cb_events(
+            [_cb_event("110076", count_text="临近到期 2026/10/27 最后交易", redeem_status="")],
+            db_path=db,
+        )
+        assert build_watchlist(db_path=db) == 1
+        items = {item["forecast_key"]: item for item in list_watchlist(source="cbb", db_path=db)}
+        assert items[cb_event_key("113046", "强赎", "2026-10-15")]["note"] == before
+        fresh = json.loads(items[cb_event_key("110076", "强赎", "2026-10-15")]["note"])
+        assert fresh["call_countdown_days"] is None and "交易日历" in fresh["reason"]
+
     def test_earnings_branch_untouched_by_cbb_rows(self, tmp_path):
         """两来源并存：各自入清单、互不干扰（业绩预告仍按 outperform 准入）。"""
         db = tmp_path / "events.db"

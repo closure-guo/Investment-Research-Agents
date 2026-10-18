@@ -101,12 +101,19 @@ def _build_cbb_watchlist(
     as_of: str | None = None,
     calendar: list[str] | None = None,
 ) -> int:
-    """条款事件分支：全部事件入清单（规则化标注，零 LLM），注记每日刷新。"""
+    """条款事件分支：全部事件入清单（规则化标注，零 LLM），注记按日历刷新的**只插不覆盖**。
+
+    刷新纪律（评审 F2）：只有**交易日历可得**时才刷新既有条目的注记（倒计时需日历推算）；
+    无日历（``None``/空，如业绩预告分诊日批经本函数顺带构建、或快照库缺失）→ **只插不覆盖**
+    ——既有注记保持不动，MUST NOT 用「降级为 null + 日历不可用」的文案冒充刷新
+    （新条目照常入清单，其倒计时如实 null + note）。
+    """
     rows = list_cb_events(db_path=db_path)
     if not rows:
         return 0
     anchor = as_of or date.today().isoformat()
     days = [str(day) for day in calendar or []]
+    refresh = bool(days)
     added = 0
     for row in rows:
         key = str(row["event_key"])
@@ -116,9 +123,13 @@ def _build_cbb_watchlist(
             is not None
         ):
             added += 1
-        else:
+        elif refresh:
             update_watchlist_note(key, note=note, db_path=db_path)
-    logger.info("事件观察清单新增 %d 条（条款事件 cbb，规则化标注，零 LLM）", added)
+    logger.info(
+        "事件观察清单新增 %d 条（条款事件 cbb，规则化标注，零 LLM；注记刷新=%s）",
+        added,
+        "on" if refresh else "skip-no-calendar",
+    )
     return added
 
 
