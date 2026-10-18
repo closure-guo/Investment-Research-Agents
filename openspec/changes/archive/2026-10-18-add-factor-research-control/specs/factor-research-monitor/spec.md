@@ -27,11 +27,12 @@ SHALL 只读观测（MUST NOT 修改研发进程状态、MUST NOT 干预会话�
 - **THEN** 快照文件含完整 JSON（含 `collected_at`、`collected_at_epoch` 与全部顶层字段）
 - **AND** 读取方任一时刻读到的都是完整快照（无半写内容）
 
-#### Scenario: 停止后代理持续快照
+#### Scenario: 停止写末次快照
 
 - **GIVEN** 看护进程被显式停止（控制通道调和或手动脚本）
-- **WHEN** 停止流程收尾及此后任一采集周期
-- **THEN** 快照 `supervisor.running=false` 且 `collected_at_epoch` 随周期持续推进
+- **WHEN** 停止流程收尾
+- **THEN** 快照 `supervisor.running=false` 且 `collected_at_epoch` 为停止时刻
+  （其后由代理续写推进——「末次」语义由代理接管，不再以退出收尾）
 - **AND** 代理进程仍在运行（MUST NOT 因看护停止而退出）
 
 #### Scenario: 未知字段如实置空
