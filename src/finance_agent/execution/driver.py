@@ -22,8 +22,14 @@
    ``skipped_backlog`` 留痕，防历史存量一次性砸入）。
    幂等：已存在信号的 ``decision_id`` 集合（全量 ``list_signals``）去重。
 ② **信号 → 目标**：尚无订单的 signal（``signal_ids_with_orders`` 判定）为待执行集；
-   ``long`` 集合经 ``aggregate_targets(method="equal")`` 得目标权重（单票 20% /
-   总仓 80% 上限与缩减记录复用既有实现）；``flat`` 单独处理（目标权重 0）。
+   ``long`` 集合经 ``aggregate_targets(method="equal", regime_multiplier=…)`` 得目标
+   权重（单票 20% / 总仓 80% 上限与缩减记录复用既有实现；市场状态总仓位系数在
+   总仓缩减之后应用）；``flat`` 单独处理（目标权重 0）。
+   **regime 接线**（add-crowding-regime-positioning）：聚合前读 ``regime.db`` 最新
+   行 + 判定（``load_regime_config`` / ``judge`` / ``staleness``）；正常 →
+   系数与状态传入聚合并在摘要 ``regime`` 留痕；缺失/陈旧（> ``stale_days`` 自然日）/
+   库或配置损坏 → 系数按 1.0 并留痕 ``no_regime_data``（披露式降级，MUST NOT
+   使执行日批失败，MUST NOT 静默）。
 ③ **目标 → 订单**：目标市值 = ``weight × equity``（equity = 现金 + 持仓按快照
    ``close_raw`` 市值；缺行/缺价的标的跳过并记 ``skipped_symbols``）；目标股数 =
    ``floor(目标市值 / 开盘价 / 100) × 100``；与当前持仓比较——**仅当目标 > 当前时
@@ -80,6 +86,9 @@ from finance_agent.execution.store import (
     record_signal,
     signal_ids_with_orders,
 )
+from finance_agent.outcome.regime.config import load_regime_config
+from finance_agent.outcome.regime.judgment import judge, staleness
+from finance_agent.outcome.regime.model import latest_regime
 from finance_agent.outcome.track_record.model import list_predictions
 from finance_agent.screening.constraints import LOT_SIZE
 
@@ -372,11 +381,15 @@ def _plan_long_entries(
     equity: float,
     projected_value: float,
     skipped_symbols: set[str],
+    regime_multiplier: float = 1.0,
 ) -> tuple[list[_PlannedOrder], float]:
-    """③-b long 入场：按聚合目标权重与当前持仓差分，只补不缩（delta 整手）。"""
+    """③-b long 入场：按聚合目标权重与当前持仓差分，只补不缩（delta 整手）。
+
+    ``regime_multiplier``（市场状态总仓位系数，默认 1.0）透传 ``aggregate_targets``。
+    """
     planned: list[_PlannedOrder] = []
     first_long = _first_signal_by_symbol(signals)
-    for target in aggregate_targets(signals, method="equal"):
+    for target in aggregate_targets(signals, method="equal", regime_multiplier=regime_multiplier):
         symbol = target.symbol
         signal = first_long.get(symbol)
         context = contexts.get(symbol)
@@ -420,12 +433,49 @@ def _skipped(summary: dict[str, Any], skipped_symbols: set[str]) -> dict[str, An
     return summary
 
 
+def _resolve_regime(regime_db_path: str | Path | None) -> tuple[float, dict[str, Any]]:
+    """最新 regime 行 →（总仓位系数, 摘要块）；缺失/陈旧/损坏 → 1.0 + ``no_regime_data``。
+
+    披露式降级（delta spec trade-execution）：数据缺失或陈旧（最新记录距执行时刻
+    超过 ``stale_days`` 自然日）时系数按 1.0 处理并留痕 ``no_regime_data``，
+    MUST NOT 静默；regime 库损坏 / 配置损坏同缺失处理（WARN 留痕，MUST NOT 使
+    执行日批失败）。正常路径返回 ``{"state","multiplier","source_date"}``。
+    """
+    try:
+        config = load_regime_config()
+        row = latest_regime(regime_db_path)
+        if row is None:
+            logger.warning("regime 无数据，执行链按系数 1.0 处理（no_regime_data）")
+        else:
+            _, is_stale = staleness(str(row.get("trade_date")), stale_days=config.stale_days)
+            if not is_stale:
+                verdict = judge(row, config)
+                return float(verdict["multiplier"]), {
+                    "state": verdict["state"],
+                    "multiplier": verdict["multiplier"],
+                    "source_date": str(row.get("trade_date")),
+                }
+            logger.warning(
+                "regime 数据陈旧（source_date=%s），执行链按系数 1.0 处理（no_regime_data）",
+                row.get("trade_date"),
+            )
+    except Exception as exc:  # noqa: BLE001 - regime 侧故障不得使执行日批失败（披露式降级）
+        logger.warning("regime 读取/解析失败，执行链按系数 1.0 处理: %s", exc, exc_info=True)
+    return 1.0, {
+        "state": None,
+        "multiplier": 1.0,
+        "source_date": None,
+        "no_regime_data": True,
+    }
+
+
 def run_execution_daily(
     as_of: str | None = None,
     *,
     db_path: str | Path | None = None,
     execution_db_path: str | Path | None = None,
     snapshot_db_path: str | Path | None = None,
+    regime_db_path: str | Path | None = None,
     window_days: int = _DEFAULT_BACKLOG_WINDOW_DAYS,
 ) -> dict[str, Any]:
     """执行链日批入口：五段编排（见模块 docstring），返回摘要字典。
@@ -434,10 +484,11 @@ def run_execution_daily(
     ``created_at[:10] < as_of`` 保证）；``db_path`` 观点库（缺省 env
     ``SESSIONS_DB_PATH``）；``execution_db_path`` 执行库（缺省 env
     ``EXECUTION_DB_PATH``）；``snapshot_db_path`` 快照库（缺省 env
-    ``SNAPSHOT_DB_PATH``）；``window_days`` 存量窗口（自然日，默认 5——窗口外
+    ``SNAPSHOT_DB_PATH``）；``regime_db_path`` 拥挤度库（缺省 env
+    ``REGIME_DB_PATH``）；``window_days`` 存量窗口（自然日，默认 5——窗口外
     旧观点不回填执行，摘要 ``skipped_backlog`` 留痕）。返回 ``{trade_date,
     signals_created, orders_placed, rejected, pending, skipped_reason,
-    skipped_symbols, skipped_backlog, skipped_unapproved}``；快照不可用时
+    skipped_symbols, skipped_backlog, skipped_unapproved, regime}``；快照不可用时
     ``skipped_reason="no_snapshot_data"``（信号已照常落库，仅跳过撮合与持仓变动）。
     """
     latest = latest_snapshot_date(snapshot_db_path)
@@ -462,6 +513,9 @@ def run_execution_daily(
         "skipped_backlog": skipped_backlog,
         "skipped_unapproved": skipped_unapproved,
     }
+    # 市场状态总仓位系数（聚合前判定；缺失/陈旧/损坏 → 1.0 + no_regime_data 留痕）
+    regime_multiplier, regime_block = _resolve_regime(regime_db_path)
+    summary["regime"] = regime_block
     if not trade_date or latest is None:
         # 快照库为空（含显式 as_of 但库内无任何数据）：仅跳过撮合（信号已落库）
         return _skipped(summary, skipped_symbols)
@@ -523,6 +577,7 @@ def run_execution_daily(
         equity=equity,
         projected_value=projected_value,
         skipped_symbols=skipped_symbols,
+        regime_multiplier=regime_multiplier,
     )
     planned.extend(long_planned)
 
