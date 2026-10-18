@@ -5,16 +5,22 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # 每天 UTC 19:30（北京 03:30）——与 e2e nightly（18:00 UTC）错峰；跑全历史密钥扫描
+    - cron: '30 19 * * *'
   workflow_dispatch:
 
 # 同分支并发取消（update-ci-pipeline R1）：连推同一分支时取消在跑的旧 run，分钟不叠加。
 # 手动 workflow_dispatch 同受组约束（design 已声明为预期行为）。
+# schedule 豁免（与 e2e nightly 同旨）：历史扫描是唯一"全历史"信号，不得被普通 push 的 run 取消。
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   lint-and-test:
+    # schedule 触发时只跑 history-secret-scan（不整夜重复全量套件）
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +39,11 @@ jobs:
         run: uv sync --group dev
 
       - name: Secret leak scan
-        run: uv run python tests/scripts/check_secrets.py
+        # 扫描器本体 + 其守门测试（tests/scripts 整目录因个别用例需后端服务被单测步排除，
+        # 本文件纯 stdlib/离线，显式在此跑，防扫描器回归失守）
+        run: |
+          uv run python tests/scripts/check_secrets.py
+          uv run pytest tests/scripts/test_check_secrets.py -q
 
       - name: Ruff check
         run: uv run ruff check src/ tests/
@@ -88,3 +98,19 @@ jobs:
       # prompt/模型/校验器变更后守卫被削弱即红
       - name: Fault injection regression gate
         run: uv run pytest tests/regression/fault_injection -m fault_regression -q
+
+  # 全历史密钥扫描（tests/scripts/check_secrets.py --history）：当前树扫描看不见
+  # "提交后删除"的历史泄露——本仓库两次真实泄露（已吊销）恰属后者。nightly + 手动触发；
+  # 纯 stdlib + git，无需装依赖（故不引 uv）。判定口径：已知吊销项/占位符报告不判失败，
+  # 其余命中（新/未知密钥形态）即红。
+  history-secret-scan:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 全历史必需（默认 depth=1 只有单提交，历史扫描会空转）
+
+      - name: Scan full git history for secrets
+        run: python3 tests/scripts/check_secrets.py --history

@@ -66,6 +66,7 @@ cd frontend && npm test               # 前端测试
 - [ ] 系统性问题记录到 `docs/incidents/`（编号文档 + 更新 README 索引）
 - [ ] 指标低 ≠ 能力差：任何聚合指标进入处置（重试 / 改 prompt / 判定 agent 缺陷 / 写进报告结论）前，必须先分桶归因、逐条人工终裁；自动化处置只允许挂在终裁为「真错误」的桶上（incident 026）
 - [ ] Issue 一律用 `gh` CLI；标签规范见 `docs/agents/triage-labels.md`
+- [ ] 密钥永不进仓：新增 provider key 形态先补扫描器（`KEY_PATTERNS` + 测试），轮换/泄露处置按 `docs/agents/secret-hygiene.md`（四层防线 + 先轮换 doctrine）
 
 ---
 
