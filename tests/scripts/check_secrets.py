@@ -2,8 +2,9 @@
 
 扫描 git 已跟踪文件（排除 .env、依赖目录、构建产物），用正则检测常见密钥模式：
   - sk- 开头的高熵 API Key（OpenAI 风格，≥20 字符）
+  - oc_sk_（opencode zen/go；2026-10-18 轮换后的在用网关 key 格式）
   - pk-lf- / sk-lf-（Langfuse）
-  - tvly-（Tavily）
+  - tvly-（Tavily；真实格式含连字符：tvly-<env>-<token>）
   - AKIA（AWS Access Key）
   - 已知泄露的真实密钥（黑名单，防止回滚复发）
 
@@ -32,9 +33,13 @@ KNOWN_LEAKED_KEYS = [
 # 常见密钥模式（高熵字符串）。字符数下限避免误报（如 stub-key-for-testing 不含长随机串）。
 KEY_PATTERNS = [
     re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
+    # oc_sk_<id>_<token>：opencode 网关 key；GitHub push protection 不认该提供商，
+    # 本扫描器是唯一兜底（2026-10-18 轮换后启用；盲点即泄露通道）。
+    re.compile(r"\boc_sk_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bpk-lf-[A-Za-z0-9]{10,}\b"),
     re.compile(r"\bsk-lf-[A-Za-z0-9]{10,}\b"),
-    re.compile(r"\btvly-[A-Za-z0-9]{10,}\b"),
+    # 真实 Tavily key 形如 tvly-dev-xxxx-yyyy（含连字符）——旧式 [A-Za-z0-9] 会漏检。
+    re.compile(r"\btvly-[A-Za-z0-9-]{10,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 ]
 

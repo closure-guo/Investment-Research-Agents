@@ -5,3 +5,14 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
+  # 防泄露本地门禁：提交前扫描硬编码密钥（与 CI 的 check_secrets 步同源）。
+  # language: python 用 pre-commit 隔离环境跑（脚本仅 stdlib）；always_run 保证
+  # 即使本次提交不含相关文件也扫描全树（防"顺手带进已有密钥"）。
+  - repo: local
+    hooks:
+      - id: check-secrets
+        name: check-secrets（硬编码密钥门禁）
+        entry: python tests/scripts/check_secrets.py
+        language: python
+        pass_filenames: false
+        always_run: true
