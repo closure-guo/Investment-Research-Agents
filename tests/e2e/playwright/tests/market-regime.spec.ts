@@ -23,6 +23,10 @@ import { expect, test, type APIRequestContext } from '@playwright/test'
  *
  * 证伪自检（T8 交付要求）：临时改错一处期望值（如徽章期望文案）必须变红，改回变绿；
  * 两段输出进 task-8-report.md。
+ *
+ * 首屏取数守卫（T8 评审修正）：`market-regime-card` 是无条件外层容器（goto 后即渲染，
+ * 数据未到先出 `regime-loading`），把 15s 挂它等于空转 → 现挂在各例**第一条数据依赖
+ * 断言**上（elevated=徽章 / stale=陈旧提示 / 空态=空态文案），其后断言一律默认 5s。
  */
 test.describe.configure({ mode: 'serial', timeout: 60_000 })
 
@@ -102,12 +106,13 @@ test('elevated：徽章/系数/指标卡/理由/曲线可见，无陈旧提示',
   ])
 
   await page.goto('/screening')
-  // 首屏取数在默认套件 8 并发 worker 下偶见 >5s（与 screening-page.spec 同款处置）
-  await expect(page.getByTestId('market-regime-card')).toBeVisible({ timeout: 15_000 })
+  // 首屏取数守卫挂在**第一条数据依赖断言**上：`market-regime-card` 是无条件外层容器
+  // （数据未到也照渲染 loading 态），挂它等于空转。首屏取数在默认套件 8 并发 worker
+  // 下偶见 >5s（与 screening-page.spec 同款处置）→ 显式 15s 只此一处，后续断言回默认 5s。
+  const badge = page.getByTestId('regime-state-badge')
+  await expect(badge).toBeVisible({ timeout: 15_000 })
 
   // 三态徽章：elevated →「偏热」（语义色不在 E2E 断言范围，组件单测已钉）
-  const badge = page.getByTestId('regime-state-badge')
-  await expect(badge).toBeVisible()
   await expect(badge).toHaveAttribute('data-state', 'elevated')
   await expect(badge).toHaveText('偏热')
 
@@ -145,10 +150,9 @@ test('stale：旧日期 → 陈旧提示可见且内容照常渲染', async ({ p
   await seedRegime(request, baseURL, [regimeRow(oldDate)])
 
   await page.goto('/screening')
-  await expect(page.getByTestId('market-regime-card')).toBeVisible({ timeout: 15_000 })
-
+  // 首屏取数守卫落在数据依赖的陈旧提示上（容器是无条件外层 div，挂它等于空转）
   const notice = page.getByTestId('regime-stale-notice')
-  await expect(notice).toBeVisible()
+  await expect(notice).toBeVisible({ timeout: 15_000 })
   await expect(notice).toContainText('数据已陈旧')
   await expect(notice).toContainText(oldDate)
 
@@ -162,10 +166,9 @@ test('stale：旧日期 → 陈旧提示可见且内容照常渲染', async ({ p
 test('空态：regime_reset 后 → 未接入文案，不冒充数据', async ({ page }) => {
   // beforeEach 已 reset；本用例不 seed → missing 空态
   await page.goto('/screening')
-  await expect(page.getByTestId('market-regime-card')).toBeVisible({ timeout: 15_000 })
-
+  // 首屏取数守卫落在数据依赖的空态文案上（容器是无条件外层 div，挂它等于空转）
   const empty = page.getByTestId('regime-empty')
-  await expect(empty).toBeVisible()
+  await expect(empty).toBeVisible({ timeout: 15_000 })
   await expect(empty).toHaveText('温度计未接入：暂无市场状态数据（等待日批采集）')
 
   // 不冒充：徽章/系数/指标/理由/曲线/加载中/错误态均不出现
