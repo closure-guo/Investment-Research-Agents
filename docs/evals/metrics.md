@@ -178,6 +178,23 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 | ⑥ 参考价护栏 | 落库：quote 价与最近 K 线收盘偏离 > `TRACK_ENTRY_PRICE_MAX_DEVIATION`（默认 0.30，覆盖各板块涨跌幅限制）→ 拒绝采信 quote、降级 K 线收盘 + WARN；盯市：entry_price 与 created 后首个交易日收盘偏离 > 阈值 → skipped + WARN 不写 marks（append-only 冻结语义下不修存量 entry_price，供人工甄别） |
 | ⑦ as_of | 总览 `portfolio.as_of` = equity_curve 最新数据日期，SHALL NOT 用快照写入日期（metric_date）冒充数据日期 |
 
+### 1.13 策略族成绩单（delta `add-strategy-family-scorecards`，2026-10-18 登记）
+
+**族定义**：观点线 `predictions`（`status ∈ {resolved_win, resolved_loss, resolved_neutral}`，与既有 prediction_stats 分母一致）
+／执行线 `execution`（`paper_equity` 净值派生，已含撮合费模型）。
+
+**四槽口径**：
+1. **期望值**：毛 = 样本收益均值（观点线 = `raw_return`；执行线 = 组合级日收益均值）；净 = 毛 − 往返成本估算率
+   （= `max(commission_rate × 100_000, min_commission)/100_000 × 2 + stamp_tax_rate + 中档 slippage_rate × 2`，
+   参数同源 `config/matching_engine.json`，默认 ≈ 0.30%）；执行线毛=净（已含费）。样本 < 10 → null + `insufficient_sample`。
+2. **最大回撤**：按日期聚合样本等权收益（`resolved_at` 前 10 字符）→ 复利净值 → `MDD = 1 − min(nav/峰值)`（输出 ≤ 0）；
+   执行线直接用净值序列。结算日样本 < 20 → null + `insufficient_history`。
+3. **容量提示**：最近 20 个样本标的（观点线 = 最近判定 symbol；执行线 = 当前持仓）近 20 交易日日均成交额（快照 `amount`）
+   × 参与率 1% 的最小值 → 建议资金上限；缺数据标的剔除计数，全缺 → null + `no_liquidity_data`。
+4. **极端样本**：观点线 `raw_return ≤ -0.15`、执行线组合日收益 ≤ -0.05（具名常量）；清单含 ticker/日期/收益。
+
+**胜率定位**：`win_rate` 保留为展示字段（四槽之后）；MUST NOT 作为任何自动处置/门禁/告警输入。
+
 ---
 
 ## 2. 时间线（每轮一行，收口时追加）
