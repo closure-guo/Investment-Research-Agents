@@ -294,6 +294,77 @@ MUST NOT 谎报覆盖。缺失/覆盖明细随非 dry-run 运行落 `snapshot_me
 逗号分隔）并披露缺失前置，MUST NOT 静默按可执行对待。
 **v1 MUST NOT 向执行链产生订单**（不接 `execution/`、不进目标权重；执行接通属后续立项）。
 
+### 1.17 可转债覆盖与条款事件（delta `add-convertible-bond-coverage`，2026-10-18 登记）
+
+**数据源与字段口径**（2026-10-18 本机 akshare 1.18.94 实探；docs 口径以本小节 + 实现映射表为准）：
+
+- **标的要素**：`ak.bond_zh_cov()`（东方财富可转债数据；本机 1063 行）。列 `债券代码 / 债券简称 / 正股代码 /
+  转股价 / 转股溢价率 / 债现价 / 发行规模 / 上市时间 / 信用评级`。落 `cb_master(code PK, name, stock_code,
+  convert_price, premium_rate, remain_scale, rating, updated_at)`（`updated_at` = 落库时刻）。
+  **单位**：`转股溢价率` = **%**（原样落 `premium_rate`，不除 100）；`发行规模` 单位 亿元（本表不落，
+  仅口径核对用）；价格类字段单位 元。**该源无「剩余规模」列 → `remain_scale` 置 NULL**，
+  MUST NOT 以发行规模冒充剩余规模（缺值如实缺，§design「缺值一律 —」）。
+  未上市标的（`上市时间` 缺失、转股价 NaN）照落主表，字段缺失如实 NULL、不估算、不剔除。
+- **日行情**：`ak.bond_zh_hs_cov_spot()`（新浪财经沪深可转债实时行情；本机 320 行）→ `cb_quotes(trade_date,
+  code)` 唯一。`close` ← `trade`（元）、`amount` ← `amount`（元，源单位原样落库，不换算万元/亿元）。
+  `trade` 缺失或 ≤ 0（停牌/零成交）→ 跳过该行并计数（WARNING），MUST NOT 折算 0 冒充价格。
+  **交易日注记**：`trade_date` = 日批 `as_of`，且必须落在快照库交易日历内；日历判非交易日 → 当次跳过
+  行情落库（摘要留痕 `quotes_skipped=non_trading_day`），MUST NOT 拿前一交易日价位冒充当日。
+- **条款事件（强赎）**：`ak.bond_cb_redeem_jsl()`（集思录强赎；本机 317 行）→ `cb_events`，
+  `event_type='强赎'`。列映射 `强赎触发价→trigger_price` / `强赎触发比→trigger_ratio`（%口径原样，样本 130）/
+  `强赎天计数→count_text`（原样文本）/ `最后交易日→last_trade_date`（归一 `YYYY-MM-DD`）/
+  `剩余规模→remain_scale`（**亿元**，实探交叉核验：与 `bond_zh_cov.发行规模` 同口径同数量级——样本
+  金田转债 规模 15.000 / 剩余规模 9.905；设计冻结 `remaining_size` 单位 = 亿元，本表同口径直落）/
+  `强赎状态` 与其余源列入 `raw_json`（专用列不含状态；状态经 raw_json 提取供状态推导）。
+- **公告日口径（可得时点）**：源**无公告日字段**（实探确认）→ `announce_date` = **首次观测日**，即日批首次
+  见到该 `(code, event_type)` 的 `as_of`；重跑复用既有行的 `announce_date`（键稳定、幂等零重复）。
+  语义 = 可得时点上界（真实公告日 ≤ 本值），保守不前视；MUST NOT 以「最后交易日」等倒推公告日。
+  唯一键 `event_key = code|event_type|announce_date`。
+- **条款事件（下修）**：`ak.bond_cb_adj_logs_jsl(symbol=…)`（集思录转股价调整记录；**逐代码**接口，
+  无全市场批量模式，空 symbol 返回 0 行——本机实探）→ `cb_events`，`event_type='下修'`。
+  `announce_date` = **股东大会日**（源真实日期，归一 ISO）；关键要素（下修前/后转股价、新转股价生效日期、
+  下修底价）入 `raw_json`，专用列留空（不硬塞语义不符的列）。**接入方式 = 转股价变化触发**
+  （日调用量有界，避免逐代码扫全市场的分钟级/封 IP 风险）：`sync_cb_master` 检出 `convert_price`
+  相对上次落库发生变化的代码（每日 0~10 个量级；下修必致转股价变化），仅对这些代码逐代码查询，
+  且只收 `股东大会日 ≥ as_of − 30 天` 的记录（历史条目一次性重放不入清单）。
+  **首跑不回填历史下修**（无变化基线）；分派/送股等非下修引起的转股价变化由查询结果自然排除（空日志 → 不落事件）。
+- **条款事件（回售）**：akshare **无回售公告接口**（本机实探：`dir(ak)` 无回售类接口、接口 docstring 无
+  「回售」命中；仅 `bond_zh_cov_info` 逐代码详情含回售条款文本与回售触发价）→ **v1 事件类型 = 强赎 + 下修**。
+  spec 事件类型清单含回售，是否修订待 owner 决策（回售公告源缺失，非本变实现缺口）。
+
+**状态推导规则**（读时纯函数 `outcome/events/cb_status.py::derive_redeem_status`，零 LLM，同输入同输出）：
+
+- 输入：事件行（`count_text` / `announce_date` / `last_trade_date` / 状态文本，状态取自 `raw_json` 的
+  `强赎状态`）+ `as_of` + 交易日历。输出 `{state, days_done, days_needed, trading_days_to_last, note}`。
+- `count_text` 解析：`已触发天数/所需天数 | 上限天数`（形如 `12/15 | 30`，兼容空格/全角竖线变体）→
+  `days_done=12`、`days_needed=15`；不可解析（如到期类文案「临近到期 …」）→ 两者 None，MUST NOT 猜测。
+- 状态判定（生命周期序 counting → triggered → announced，故 announced 优先级最高）：
+  - `强赎状态 == "已公告强赎"` → **announced**；**此状态要求 `last_trade_date` 存在且可解析，缺失 → undetermined**
+    （spec 场景「缺少最后交易日的强赎公告 → 不可判定」）；`公告不强赎` 无专用状态位，沿用天计数判定
+    （不强赎事实保留于 raw_json），口径写明不误读为「已公告强赎」。
+  - 否则 `days_done >= days_needed` 且 `as_of >= announce_date` → **triggered**；天计数可解析但未达标 → **counting**。
+  - 天计数不可解析且非「已公告强赎」→ **undetermined** + note 指明缺失/不可解析字段；`announce_date` 缺失/
+    不可解析 → **undetermined**（任一路径）；MUST NOT 猜测数值。
+  - 边界：`days_done == days_needed` 判 triggered（含边界）；差一天判 counting。
+- **倒计时**：`trading_days_to_last` = 交易日历中 `as_of < d ≤ last_trade_date` 的交易日个数
+  （`last_trade_date ≤ as_of` → 0，含边界不含当日）；跨周末/节假日由日历自然扣除。
+  日历缺失（空/不可得）或 `last_trade_date` 缺失 → `None` + note（如实缺值，不估算自然日）。
+- `as_of` 非规范 ISO 日期 → 上抛 `ValueError`（调用方缺陷，不静默降级）。
+
+**清单接线（规则化准入，零 LLM）**：`cb_events` 全部条目进入既有观察清单（`source="cbb"`，
+复用 `event_watchlist` 表与只读端点，键 = `event_key`）；条目**载荷四键冻结**（跨变更契约，2026-10-18 裁决）：
+`price`（元，取 `cb_quotes` 该代码最新交易日 `close`）/ `premium_rate`（%，取 `cb_master`）/
+`remaining_size`（**亿元**，取事件行 `remain_scale`）/ `call_countdown_days`（交易日个数，构建时按日历推导后落
+清单注记）——缺值一律 null（前端 `—`），MUST NOT 折算/估算/换单位。清单构建**零 LLM 调用**（MUST NOT 依赖
+LLM 分诊）；`reason` = 规则化标注文本（状态标签 + 天计数 + 距最后交易日 + 不可判定 note）。
+清单条目不因状态为 undetermined 而被剔除（如实入清单，倒计时 null + note）。
+每日构建时刷新既有 cbb 条目的注记（倒计时随交易日递减），**不动** `status`/`session_id`/`created_at`。
+
+**家族隔离声明**：本变不注册策略族成绩单、不建记账（`event_journal` 仅事件线业绩预告写入），
+**不进 T+20 观点统计**（`predictions` 族样本不含转债样本）；转债观察清单为纯观察/研究通道，
+不接 regime 仓位系数、不进执行链目标、**不产生订单**（与 §1.16 小票通道同纪律）。
+转债行情/事件的日批 job 为 `cb_daily`（16:50，见 `outcome/scheduler.py`）。
+
 ---
 
 ## 2. 时间线（每轮一行，收口时追加）
