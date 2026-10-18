@@ -604,6 +604,60 @@ export interface IndexCompareResponse {
   disclaimer: string
 }
 
+// 策略族成绩单（delta add-strategy-family-scorecards：GET /api/scorecards）。
+// 键名权威源 src/finance_agent/outcome/scorecards.py::build_family_payload；
+// 槽位缺数据 = null + 随行 *_reason 原因码（MUST NOT 折算 0），有值时原因码字段缺省。
+export type ScorecardReason =
+  | 'insufficient_sample'
+  | 'insufficient_history'
+  | 'no_liquidity_data'
+  | 'no_samples'
+  | 'no_loader'
+
+export interface ScorecardExpectancy {
+  gross: number
+  net: number
+  n: number
+  insufficient: boolean
+}
+
+export interface ScorecardDrawdown {
+  value: number
+  n_days: number
+}
+
+export interface ScorecardCapacity {
+  suggested_capital: number
+  min_adv20: number
+  excluded: number
+}
+
+export interface ScorecardExtremeSample {
+  ticker: string
+  date: string
+  ret: number
+}
+
+export interface ScorecardFamily {
+  family_id: string
+  name: string
+  as_of: string | null
+  expectancy: ScorecardExpectancy | null
+  expectancy_reason?: ScorecardReason | null
+  max_drawdown: ScorecardDrawdown | null
+  max_drawdown_reason?: ScorecardReason | null
+  capacity: ScorecardCapacity | null
+  capacity_reason?: ScorecardReason | null
+  extreme_samples: ScorecardExtremeSample[]
+  /** 展示位（四槽之后）；执行线无胜率口径 → null */
+  win_rate: number | null
+  caliber_note: string
+}
+
+export interface ScorecardsResponse {
+  families: ScorecardFamily[]
+}
+
 // 校准分桶（add-track-record-stage-c）
 export interface CalibrationBucket {
   bucket: string
