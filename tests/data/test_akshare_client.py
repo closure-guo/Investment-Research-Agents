@@ -9,6 +9,7 @@ API 调用用 mock，不测外部网络。
 """
 
 from datetime import date
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -1243,6 +1244,137 @@ class TestFetchTencentQuote:
     def test_symbol_prefix(self, client):
         """深市代码走 sz 前缀（_to_sina_symbol 复用）。"""
         assert client._to_sina_symbol("002371") == "sz002371"
+
+
+class TestFetchMarketCapsBulk:
+    """市值兜底链（design「市值兜底源（腾讯批量）」）：qt.gtimg.cn 批量报价取流通市值。
+
+    串形与单标的相同（`v_<symbol>="...";` 批量拼接，`;` 分隔）；field 44 =
+    流通市值（亿）×1e8 归一到元。整批失败/整串不可解析 → ERROR + None
+    （调用方 cap_data_missing，MUST NOT 以成交额等替代口径冒充）；个别码缺失
+    （停牌/退市/字段空）→ WARNING 并返回已解析子集（覆盖校验交调用方）。
+    """
+
+    FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "tencent_batch_quotes_sample.txt"
+
+    @staticmethod
+    def _gbk_response(payload: str | bytes):
+        resp = requests.Response()
+        resp.status_code = 200
+        resp._content = payload if isinstance(payload, bytes) else payload.encode("gbk")
+        return resp
+
+    @staticmethod
+    def _quote_line(symbol: str, code: str, float_cap: str) -> str:
+        """与真实串同形的报价行（88 段；仅代码/价格/市值段填值）。"""
+        fields = [""] * 88
+        fields[0], fields[1], fields[2], fields[3] = "1", "示例", code, "10.00"
+        fields[44], fields[45] = float_cap, float_cap
+        body = "~".join(fields)
+        return f'v_{symbol}="{body}";'
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_real_batch_sample_parses_float_caps(self, mock_get, client):
+        """真实抓取样本（2026-10-16，GBK 原始字节）：五码全解，数值=流通市值（元）。"""
+        mock_get.return_value = self._gbk_response(self.FIXTURE.read_bytes())
+
+        caps = client.fetch_market_caps_bulk(["600519", "000001", "300750", "688981", "430047"])
+
+        assert caps is not None
+        assert caps["600519"] == pytest.approx(16613.58e8)  # 茅台流通市值 ~1.66 万亿元
+        assert caps["000001"] == pytest.approx(2231.65e8)
+        assert caps["300750"] == pytest.approx(11801.91e8)
+        assert caps["688981"] == pytest.approx(2053.81e8)  # A 股流通口径（非总市值 8790 亿）
+        assert caps["430047"] == pytest.approx(14.71e8)
+        assert client.sources_seen["market_cap"] == {"tencent"}
+        # 单请求批量（非逐标的）：URL 携带全部代码
+        url = mock_get.call_args.args[0]
+        assert mock_get.call_count == 1
+        assert "sh600519" in url and "sz300750" in url and "bj430047" in url
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_prefixed_codes_accepted_and_normalized(self, mock_get, client):
+        """入参兼容带交易所前缀形 → 返回键统一 6 位裸码。"""
+        mock_get.return_value = self._gbk_response(
+            self._quote_line("sh600519", "600519", "16613.58")
+        )
+
+        caps = client.fetch_market_caps_bulk(["sh600519"])
+
+        assert caps == {"600519": pytest.approx(16613.58e8)}
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_splits_into_chunks_of_100(self, mock_get, client, monkeypatch):
+        """>100 码切批（≤100 码/批）+ 批间小睡；每批各自请求。"""
+        monkeypatch.setattr("finance_agent.data.akshare_client._TENCENT_BATCH_SLEEP_S", 0.0)
+
+        def fake_get(url: str, timeout: float):
+            symbols = url.split("=", 1)[1].split(",")
+            body = "\n".join(
+                self._quote_line(symbol, symbol[2:], f"{index + 1}.5")
+                for index, symbol in enumerate(symbols)
+            )
+            return self._gbk_response(body)
+
+        mock_get.side_effect = fake_get
+
+        caps = client.fetch_market_caps_bulk([f"{index:06d}" for index in range(150)])
+
+        assert caps is not None
+        assert len(caps) == 150
+        assert mock_get.call_count == 2
+        for call in mock_get.call_args_list:
+            symbols = call.args[0].split("=", 1)[1].split(",")
+            assert len(symbols) <= 100
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_unparseable_body_returns_none_and_logs_error(self, mock_get, client, caplog):
+        """整串不可解析（网关错误页等）→ ERROR + None，不返回空 dict 冒充。"""
+        mock_get.return_value = self._gbk_response("<html>gateway error</html>")
+
+        with caplog.at_level("ERROR", logger="finance_agent.data.akshare_client"):
+            caps = client.fetch_market_caps_bulk(["600519"])
+
+        assert caps is None
+        assert client.sources_seen["market_cap"] == set()
+        assert any("批量" in record.getMessage() for record in caplog.records), "无 ERROR 日志"
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_request_exception_returns_none(self, mock_get, client):
+        mock_get.side_effect = ConnectionError("refused")
+
+        assert client.fetch_market_caps_bulk(["600519"]) is None
+        assert client.sources_seen["market_cap"] == set()
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_incomplete_coverage_warns_but_returns_parsed(self, mock_get, client, caplog):
+        """条数不齐：返回已解析子集 + WARNING（缺失数/总数可审计）。"""
+        mock_get.return_value = self._gbk_response(
+            self._quote_line("sh600519", "600519", "16613.58")
+        )
+
+        with caplog.at_level("WARNING", logger="finance_agent.data.akshare_client"):
+            caps = client.fetch_market_caps_bulk(["600519", "000001"])
+
+        assert caps == {"600519": pytest.approx(16613.58e8)}
+        assert any("不齐" in record.getMessage() for record in caplog.records), "无覆盖警告"
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_empty_cap_field_skipped_as_missing(self, mock_get, client):
+        """流通市值字段为空的码（停牌/退市形）跳过，不写 0/NaN 冒充。"""
+        mock_get.return_value = self._gbk_response(
+            self._quote_line("sh600519", "600519", "")
+            + "\n"
+            + self._quote_line("sz000001", "000001", "2231.65")
+        )
+
+        caps = client.fetch_market_caps_bulk(["600519", "000001"])
+
+        assert caps == {"000001": pytest.approx(2231.65e8)}
+
+    def test_empty_codes_returns_none(self, client, caplog):
+        with caplog.at_level("WARNING", logger="finance_agent.data.akshare_client"):
+            assert client.fetch_market_caps_bulk([]) is None
 
 
 class TestQuoteSourceCaliber:

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import date, datetime, timedelta
@@ -204,6 +205,12 @@ _TENCENT_FIELD_IDX: dict[str, int] = {
 _TENCENT_YI_FIELDS = frozenset({"float_market_cap", "market_cap"})
 # 关键字段缺失即视为主源失败（触发回退）
 _TENCENT_REQUIRED = ("price", "market_cap")
+# 腾讯批量行情（市值兜底链）：≤100 码/批（URL 长度与限流折中）
+_TENCENT_BATCH_CHUNK = 100
+# 批间小睡（防限流；测试 monkeypatch 置 0）
+_TENCENT_BATCH_SLEEP_S = 0.2
+# 批量请求超时（码多、串长于单标的，放宽于单标的 10s）
+_TENCENT_BATCH_TIMEOUT_S = 20
 
 
 def _add_prefix(code: str) -> str:
@@ -371,6 +378,37 @@ def _strip_exchange_prefix(value: object) -> str | None:
             value = int(value)
     text = _SINA_CODE_PREFIX_RE.sub("", str(value).strip())
     return text or None
+
+
+def _parse_tencent_batch_caps(text: str) -> dict[str, float]:
+    """腾讯批量报价串 → ``{6 位裸码: 流通市值(元)}``（field 44，亿 → ×1e8）。
+
+    串形与单标的相同（``v_sh600519="...";`` 逐行，脚本名即交易所前缀符号）；
+    不可解析行（网关错误页/字段不足/市值空或非正）跳过，不抛——整串全部不可解析
+    由调用方按批失败处置（None 而非空 dict，MUST NOT 以空表冒充成功）。
+    """
+    caps: dict[str, float] = {}
+    cap_idx = _TENCENT_FIELD_IDX["float_market_cap"]
+    code_idx = _TENCENT_FIELD_IDX["code"]
+    for line in text.split(";"):
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        _, _, payload = line.partition("=")
+        fields = payload.strip().strip('"').split("~")
+        if len(fields) <= cap_idx:
+            continue
+        code = _strip_exchange_prefix(fields[code_idx])
+        raw = fields[cap_idx].strip()
+        if not code or not raw:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if value > 0:
+            caps[code] = value * 1e8  # 亿 → 元（口径同 _TENCENT_YI_FIELDS）
+    return caps
 
 
 def _has_usable_codes(df: object) -> TypeGuard[pd.DataFrame]:
@@ -1641,6 +1679,71 @@ class AKShareClient:
         self.sources_seen["market_spot"].add("none")
         self.last_spot_source = None
         return None
+
+    def fetch_market_caps_bulk(self, codes: Sequence[str]) -> dict[str, float] | None:
+        """腾讯批量报价取流通市值（design「市值兜底源（腾讯批量）」）：``{裸码: 元}``。
+
+        spot 无 ``流通市值`` 列（新浪回退列形）时的真实市值兜底源——按
+        「快照同源 spot 优先 → 腾讯批量兜底」链式尝试的第二源，采用时调用方
+        在指标行留痕 ``cap_source=tencent``。≤100 码/批切分、批间小睡防限流；
+        整批失败/整串不可解析 → ERROR + None（调用方 ``cap_data_missing``，
+        MUST NOT 以成交额等替代口径冒充）；个别码缺失（停牌/退市/市值字段空）→
+        WARNING 并返回已解析子集（覆盖是否够用交调用方判定）。成功记入
+        ``sources_seen["market_cap"]``。
+        """
+        bare_codes: list[str] = []
+        for raw in codes:
+            normalized = _strip_exchange_prefix(raw)
+            if normalized and normalized not in bare_codes:
+                bare_codes.append(normalized)
+        if not bare_codes:
+            logger.warning("腾讯批量市值取数：无有效代码（入参 %d 个）", len(codes))
+            return None
+
+        caps: dict[str, float] = {}
+        chunks = [
+            bare_codes[position : position + _TENCENT_BATCH_CHUNK]
+            for position in range(0, len(bare_codes), _TENCENT_BATCH_CHUNK)
+        ]
+        for batch_no, chunk in enumerate(chunks, start=1):
+            if batch_no > 1:
+                time.sleep(_TENCENT_BATCH_SLEEP_S)
+            symbols = ",".join(self._to_sina_symbol(code) for code in chunk)
+            try:
+                resp = requests.get(
+                    f"https://qt.gtimg.cn/q={symbols}", timeout=_TENCENT_BATCH_TIMEOUT_S
+                )
+                text = resp.content.decode("gbk")
+            except Exception as e:
+                logger.error(
+                    "腾讯批量市值取数失败（第 %d/%d 批，%d 码）: %s",
+                    batch_no,
+                    len(chunks),
+                    len(chunk),
+                    e,
+                )
+                return None
+            parsed = _parse_tencent_batch_caps(text)
+            if not parsed:
+                logger.error(
+                    "腾讯批量行情整批不可解析（第 %d/%d 批，%d 码）",
+                    batch_no,
+                    len(chunks),
+                    len(chunk),
+                )
+                return None
+            caps.update(parsed)
+
+        missing = [code for code in bare_codes if code not in caps]
+        if missing:
+            logger.warning(
+                "腾讯批量行情覆盖不齐：缺失 %d/%d 码（例：%s）",
+                len(missing),
+                len(bare_codes),
+                missing[:5],
+            )
+        self.sources_seen["market_cap"].add("tencent")
+        return caps
 
     def fetch_trade_calendar(self) -> list[str] | None:
         """全历史交易日历（``tool_trade_date_hist_sina``）→ 升序去重的 ``YYYY-MM-DD``。

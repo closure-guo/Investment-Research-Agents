@@ -1,12 +1,14 @@
 """拥挤度日批 job 单测（delta add-crowding-regime-positioning T2；先红后绿）。
 
-契约（计划 Task 4 Interfaces）：
+契约（计划 Task 4 Interfaces + design「市值兜底源（腾讯批量）」修订）：
 
 - ``run_regime_daily(as_of=None, *, db_path=None, snapshot_db_path=None, client=None)``；
-- 快照不可用（库为空/当日无行）→ ``{"produced": False, "skipped_reason":
-  "no_snapshot_data"}``，不产行（MUST NOT 以 0 值冒充）；
-- spot 拉取失败 / 缺 ``流通市值`` 列 / caps 对参与集覆盖不全 → ``cap_data_missing``，
-  不产行（MUST NOT 以成交额等替代口径）；
+- 顺序：``latest_snapshot_date`` → ``read_universe(as_of)``（校验新鲜度）→ 拉 spot；
+- 快照不可用（库为空/当日无行）→ ``no_snapshot_data``；``as_of > latest`` →
+  ``as_of_not_fresh``（独立原因），均不产行（MUST NOT 以 0 值冒充）；
+- 市值链：spot ``流通市值`` 列优先 → 缺失时腾讯批量兜底（``cap_source=tencent``）
+  → 两源皆无 / caps 对参与集覆盖不全 → ``cap_data_missing``，不产行
+  （MUST NOT 以成交额等替代口径）；
 - 正常：compute_indicators → percentile_rank（窗口 = 历史行 + 当日记 250 交易日）→
   upsert_regime_daily → ``{"produced": True, "trade_date": ...}``；
 - 同日重跑幂等（仍单行，值取最新一次）；分位样本 < 60 → null 如实落库。
@@ -41,15 +43,24 @@ _INDICATORS = {
 
 
 class _FakeClient:
-    """只实现 job 消费的 ``fetch_market_spot``（返回 None / 任意 DataFrame）。"""
+    """job 消费的取数面：``fetch_market_spot``（同源 spot）+ ``fetch_market_caps_bulk``
+    （腾讯批量兜底）。"""
 
-    def __init__(self, spot: pd.DataFrame | None) -> None:
+    def __init__(self, spot: pd.DataFrame | None, bulk: dict[str, float] | None = None) -> None:
         self._spot = spot
+        self._bulk = bulk
         self.calls = 0
+        self.bulk_calls = 0
+        self.bulk_codes: list[str] = []
 
     def fetch_market_spot(self) -> pd.DataFrame | None:
         self.calls += 1
         return self._spot
+
+    def fetch_market_caps_bulk(self, codes) -> dict[str, float] | None:
+        self.bulk_calls += 1
+        self.bulk_codes = list(codes)
+        return self._bulk
 
 
 def _spot(*, caps: dict[str, float], include_cap_column: bool = True) -> pd.DataFrame:
@@ -97,6 +108,30 @@ class TestHappyPath:
         assert row["small_cap_share"] == pytest.approx(10.0 / 60.0)
         assert (row["up_count"], row["down_count"], row["flat_count"]) == (3, 0, 0)
         assert row["computed_at"]  # 审计时间戳非空
+        # 同源 spot 生效 → cap_source 留痕 spot；不触发兜底源
+        assert row["cap_source"] == "spot"
+        assert client.bulk_calls == 0
+
+    def test_tencent_fallback_records_cap_source(self, tmp_path):
+        """spot 无流通市值列（新浪回退列形）+ 腾讯批量可用 → 产行 + ``cap_source=tencent``。"""
+        regime_db, snap_db = _dbs(tmp_path)
+        write_snapshot_rows(_AS_OF, _snapshot_rows(), db_path=snap_db)
+        client = _FakeClient(
+            _spot(caps={"600001": 1.0, "600002": 2.0, "600003": 3.0}, include_cap_column=False),
+            bulk={"600001": 1.0, "600002": 2.0, "600003": 3.0},
+        )
+
+        summary = run_regime_daily(db_path=regime_db, snapshot_db_path=snap_db, client=client)
+
+        assert summary == {"produced": True, "trade_date": _AS_OF}
+        row = latest_regime(db_path=regime_db)
+        assert row is not None
+        assert row["cap_source"] == "tencent"
+        # 兜底源市值口径与 spot 同（真实市值字段）→ 指标与 spot 路径一致
+        assert row["small_cap_share"] == pytest.approx(10.0 / 60.0)
+        assert row["total_amount"] == pytest.approx(60.0)
+        assert client.bulk_calls == 1
+        assert client.bulk_codes == ["600001", "600002", "600003"]  # 兜底按当日在册代码批量取
 
     def test_as_of_explicit_selects_that_date(self, tmp_path):
         regime_db, snap_db = _dbs(tmp_path)
@@ -136,27 +171,48 @@ class TestSkipPaths:
         assert latest_regime(db_path=regime_db) is None
         assert client.calls == 0  # 快照都没有，不拉行情
 
-    def test_missing_date_rows_returns_no_snapshot_data(self, tmp_path):
+    def test_missing_rows_for_date_before_latest_returns_no_snapshot_data(self, tmp_path):
+        """as_of ≤ 最新快照日但当日无行 → ``no_snapshot_data``（与不新鲜区分）。"""
         regime_db, snap_db = _dbs(tmp_path)
         write_snapshot_rows("2026-10-15", _snapshot_rows(), db_path=snap_db)
+        write_snapshot_rows("2026-10-17", _snapshot_rows(), db_path=snap_db)
+        client = _FakeClient(_spot(caps={"600001": 1.0}))
 
         summary = run_regime_daily(
-            _AS_OF,
-            db_path=regime_db,
-            snapshot_db_path=snap_db,
-            client=_FakeClient(_spot(caps={"600001": 1.0})),
+            _AS_OF, db_path=regime_db, snapshot_db_path=snap_db, client=client
         )
 
         assert summary == {"produced": False, "skipped_reason": "no_snapshot_data"}
         assert latest_regime(db_path=regime_db) is None
+        assert client.calls == 0  # 当日无快照行，不拉行情
 
-    def test_spot_fetch_failure_returns_cap_data_missing(self, tmp_path):
+    def test_as_of_after_latest_returns_as_of_not_fresh(self, tmp_path):
+        """``as_of > latest`` → 独立原因 ``as_of_not_fresh``（不冒充 no_snapshot_data）。"""
         regime_db, snap_db = _dbs(tmp_path)
-        write_snapshot_rows(_AS_OF, _snapshot_rows(), db_path=snap_db)
+        write_snapshot_rows("2026-10-15", _snapshot_rows(), db_path=snap_db)
+        client = _FakeClient(_spot(caps={"600001": 1.0}))
 
         summary = run_regime_daily(
-            db_path=regime_db, snapshot_db_path=snap_db, client=_FakeClient(None)
+            _AS_OF, db_path=regime_db, snapshot_db_path=snap_db, client=client
         )
+
+        assert summary == {
+            "produced": False,
+            "skipped_reason": "as_of_not_fresh",
+            "trade_date": _AS_OF,
+        }
+        assert latest_regime(db_path=regime_db) is None
+        # 校验顺序：快照新鲜度不过 → 不拉 spot（兜底/行情零请求）
+        assert client.calls == 0
+        assert client.bulk_calls == 0
+
+    def test_spot_fetch_failure_returns_cap_data_missing(self, tmp_path):
+        """spot 与腾讯批量双源皆不可用 → ``cap_data_missing``（不产行）。"""
+        regime_db, snap_db = _dbs(tmp_path)
+        write_snapshot_rows(_AS_OF, _snapshot_rows(), db_path=snap_db)
+        client = _FakeClient(None)
+
+        summary = run_regime_daily(db_path=regime_db, snapshot_db_path=snap_db, client=client)
 
         assert summary == {
             "produced": False,
@@ -164,9 +220,10 @@ class TestSkipPaths:
             "trade_date": _AS_OF,
         }
         assert latest_regime(db_path=regime_db) is None
+        assert client.bulk_calls == 1  # spot 缺失 → 兜底源试过一次
 
     def test_spot_without_circulating_cap_column_returns_cap_data_missing(self, tmp_path):
-        """新浪回退列形（无 流通市值）→ 不产行（MUST NOT 以成交额替代市值分组）。"""
+        """新浪回退列形（无 流通市值）且腾讯批量不可用 → 不产行（不以成交额替代市值分组）。"""
         regime_db, snap_db = _dbs(tmp_path)
         write_snapshot_rows(_AS_OF, _snapshot_rows(), db_path=snap_db)
         client = _FakeClient(
@@ -178,9 +235,10 @@ class TestSkipPaths:
         assert summary["produced"] is False
         assert summary["skipped_reason"] == "cap_data_missing"
         assert latest_regime(db_path=regime_db) is None
+        assert client.bulk_calls == 1
 
     def test_incomplete_caps_returns_cap_data_missing(self, tmp_path):
-        """caps 对参与集覆盖不全 → 不产行（不缩样本冒充）。"""
+        """caps 对参与集覆盖不全 → 不产行（不缩样本冒充；spot 在列即不触发兜底）。"""
         regime_db, snap_db = _dbs(tmp_path)
         write_snapshot_rows(_AS_OF, _snapshot_rows(), db_path=snap_db)
         client = _FakeClient(_spot(caps={"600001": 1.0, "600002": 2.0}))
@@ -189,6 +247,7 @@ class TestSkipPaths:
 
         assert summary["skipped_reason"] == "cap_data_missing"
         assert latest_regime(db_path=regime_db) is None
+        assert client.bulk_calls == 0  # 兜底链触发条件 = spot caps 缺失，不含覆盖不全
 
 
 class TestPercentiles:

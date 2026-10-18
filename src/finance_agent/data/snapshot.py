@@ -811,6 +811,10 @@ def _norm_code(value: Any) -> str:
     return code
 
 
+# 公开别名：跨模块消费方（outcome/regime 日批）走 ``norm_code``，不负下划线私有名
+norm_code = _norm_code
+
+
 def _listed_days(trade_date: str, list_date: str | None) -> int | None:
     """上市自然日数 D3；list_date 缺失/不可解析 → None。"""
     if not list_date:

@@ -46,13 +46,14 @@ def _regime_db(tmp_path, monkeypatch):
     return path
 
 
-def _seed(db: Path, trade_date: str, **overrides) -> None:
+def _seed(db: Path, trade_date: str, *, cap_source: str | None = None, **overrides) -> None:
     payload = {**_INDICATORS, **overrides}
     upsert_regime_daily(
         trade_date,
         payload,
         {"small_cap_share_pctile": 0.93, "total_amount_pctile": 0.5},
         computed_at=f"{trade_date}T15:35:00",
+        cap_source=cap_source,
         db_path=db,
     )
 
@@ -81,11 +82,21 @@ class TestPayloadWithRecord:
 
         assert indicators["small_cap_share"] == {"value": 0.0714, "pctile": 0.93}
         assert indicators["total_amount"] == {"value": 8.0e11, "pctile": 0.5}
-        # Breadth 类分位由历史窗口派生（样本 < min_history → null，如实置空）
-        for key in ("up_count", "down_count", "limit_up_count", "limit_down_count"):
+        # Breadth 类（含 平）分位由历史窗口派生（样本 < min_history → null，如实置空）
+        for key in ("up_count", "down_count", "flat_count", "limit_up_count", "limit_down_count"):
             assert set(indicators[key]) == {"value", "pctile"}
             assert indicators[key]["pctile"] is None
         assert indicators["up_count"]["value"] == 2500
+        assert indicators["flat_count"]["value"] == 200  # 平家数透出（不折算 0/省略）
+
+    def test_cap_source_passthrough(self, _regime_db):
+        """市值取数源留痕随载荷透出（spot|tencent；老行/未传 → null）。"""
+        _seed(_regime_db, date.today().isoformat(), cap_source="tencent")
+
+        assert build_regime_payload()["cap_source"] == "tencent"
+
+        _seed(_regime_db, date.today().isoformat())
+        assert build_regime_payload()["cap_source"] is None
 
     def test_breadth_pctile_derived_from_history_window(self, _regime_db):
         """≥ 60 样本时 Breadth 分位由窗口派生（``#{x≤v}/n`` 手算）。"""
@@ -179,6 +190,7 @@ class TestEndpoint:
             "small_cap_share",
             "up_count",
             "down_count",
+            "flat_count",
             "limit_up_count",
             "limit_down_count",
             "total_amount",

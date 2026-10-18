@@ -3,9 +3,10 @@
 载荷形状（端点契约）：
 
 - 有记录：``{available: True, as_of, state, multiplier, reasons, indicators,
-  history, age_days, stale}``——``indicators`` 逐指标 ``{value, pctile}``（触发指标
-  取落库分位——判定所依据的读数；Breadth 计数分位由历史窗口派生）；``history``
-  为最近 ``history_window`` 行（升序）；
+  history, age_days, stale, cap_source}``——``indicators`` 逐指标 ``{value, pctile}``
+  （触发指标取落库分位——判定所依据的读数；Breadth 计数分位由历史窗口派生）；
+  ``history`` 为最近 ``history_window`` 行（升序）；``cap_source`` = 市值取数源
+  留痕（``spot|tencent``）；
 - 无记录 → ``{available: False, reason: "missing"}``；配置/记录/读取不可解析 →
   ``{available: False, reason: "corrupt"}``（调用方翻 200，MUST NOT 500 或伪数据）。
 
@@ -24,11 +25,12 @@ from finance_agent.outcome.regime.indicators import percentile_rank
 from finance_agent.outcome.regime.judgment import judge, staleness
 from finance_agent.outcome.regime.model import latest_regime, list_regime_history
 
-# 载荷指标键顺序（= 四指标卡的展示顺序：小市值占比 / 涨跌家数 / 涨停跌停 / 全市场成交额）
+# 载荷指标键顺序（= 指标卡展示顺序：小市值占比 / 涨跌家数（含平）/ 涨停跌停 / 全市场成交额）
 _PAYLOAD_METRIC_KEYS: tuple[str, ...] = (
     "small_cap_share",
     "up_count",
     "down_count",
+    "flat_count",
     "limit_up_count",
     "limit_down_count",
     "total_amount",
@@ -99,4 +101,6 @@ def build_regime_payload(
         "history": history,
         "age_days": age_days,
         "stale": stale,
+        # 市值取数源留痕（spot|tencent；老行/未传 → null，不编造来源）
+        "cap_source": row.get("cap_source"),
     }

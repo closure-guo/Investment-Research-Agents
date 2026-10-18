@@ -34,6 +34,7 @@ from finance_agent.data.snapshot import (
     get_security_master,
     init_snapshot_db,
     latest_snapshot_date,
+    norm_code,
     read_bars,
     read_universe,
     reset_snapshot_db,
@@ -444,6 +445,12 @@ def test_norm_code_normalizes_numeric_and_string_forms():
     assert _norm_code("600519") == "600519"
     assert _norm_code(float("nan")) == ""
     assert _norm_code(None) == ""
+
+
+def test_norm_code_public_alias_for_cross_module_consumers():
+    """公开别名：跨模块消费方（outcome/regime）走 ``norm_code``，不负下划线私有名。"""
+    assert norm_code is _norm_code
+    assert norm_code("1") == "000001"
 
 
 def test_text_and_num_reject_missing_and_non_finite():

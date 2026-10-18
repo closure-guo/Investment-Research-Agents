@@ -264,6 +264,8 @@ def test_ops_registry_contains_factor_decay_monitor():
     assert "factor_decay_monitor" in JOB_IDS
     assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
     assert JOB_IDS.index("market_snapshot_daily") == 0
+    # 邻接（非仅大小）：拥挤度紧邻快照之后（15:30 → 15:35），中间不得插入他任务
+    assert JOB_IDS.index("regime_daily") == JOB_IDS.index("market_snapshot_daily") + 1
     assert (
         JOB_IDS.index("market_snapshot_daily")
         < JOB_IDS.index("regime_daily")

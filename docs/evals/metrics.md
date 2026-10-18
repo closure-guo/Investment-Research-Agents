@@ -199,8 +199,9 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 
 ### 1.14 市场拥挤度与总仓位系数（delta `add-crowding-regime-positioning`，2026-10-18 登记）
 
-**指标**：小市值组成交额占比（按流通市值升序前 30%，停牌/零成交剔除；流通市值与快照任务同源 spot 取数，
-全量覆盖缺失即当日不产行）/ 涨跌家数（pct_chg 符号）/ 涨停跌停家数（limit_up_sealed / limit_down_sealed）/
+**指标**：小市值组成交额占比（按流通市值升序前 30%，停牌/零成交剔除；流通市值取数链 = 快照同源 spot（EM 原始列）
+优先 → 腾讯行情批量兜底（真实市值字段；采用兜底源时指标行 `cap_source=tencent` 留痕），两源皆无/覆盖不全即当日不产行 + `cap_data_missing`）/
+涨跌家数（pct_chg 符号）/ 涨停跌停家数（limit_up_sealed / limit_down_sealed）/
 全市场成交额。**分位**：当日值在最近 250 交易日窗口内的百分位（`#{x≤v}/n`）；样本 < 60 → null + `insufficient_history`。
 **判定**：触发指标 = 小市值占比分位、成交额分位；任一 ≥ danger 阈值（默认 0.9）→ danger、≥ elevated（默认 0.8）→ elevated、
 否则 normal；系数映射 1.0 / 0.5 / 0.0（全部可配置）；分位不可用不触发且在 reasons 注明。**陈旧**：数据日期距判定时刻超过 7 个自然日（可配置；与 spec/design 的「>7」口径一致）。

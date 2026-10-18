@@ -38,12 +38,20 @@ def _indicators(**overrides: object) -> dict:
     return base
 
 
-def _upsert(db, trade_date: str, indicators: dict | None = None, pctiles: dict | None = None):
+def _upsert(
+    db,
+    trade_date: str,
+    indicators: dict | None = None,
+    pctiles: dict | None = None,
+    *,
+    cap_source: str | None = None,
+):
     upsert_regime_daily(
         trade_date,
         indicators if indicators is not None else _indicators(),
         pctiles if pctiles is not None else _PCTILES,
         computed_at=f"{trade_date}T15:35:00",
+        cap_source=cap_source,
         db_path=db,
     )
 
@@ -110,6 +118,42 @@ class TestUpsert:
                 computed_at="2026-10-17T15:35:00",
                 db_path=tmp_path / "regime.db",
             )
+
+
+class TestCapSource:
+    """``cap_source``（design 修订：市值取数源留痕 spot|tencent，老库无列容错）。"""
+
+    def test_cap_source_roundtrip_and_default_null(self, tmp_path):
+        db = tmp_path / "regime.db"
+        _upsert(db, "2026-10-16")  # 未传 → NULL（历史行/测试注入形）
+        _upsert(db, "2026-10-17", cap_source="tencent")
+
+        assert latest_regime(db_path=db)["cap_source"] == "tencent"
+        assert list_regime_history(db_path=db)[0]["cap_source"] is None
+
+    def test_legacy_db_without_column_is_migrated_on_read_and_write(self, tmp_path):
+        """老库（建表早于 cap_source 列）：读取/写入自动补列，不炸、旧行 NULL。"""
+        db = tmp_path / "legacy.db"
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "CREATE TABLE regime_daily ("
+            "trade_date TEXT PRIMARY KEY, small_cap_share REAL, up_count INTEGER, "
+            "down_count INTEGER, flat_count INTEGER, limit_up_count INTEGER, "
+            "limit_down_count INTEGER, total_amount REAL, small_cap_share_pctile REAL, "
+            "total_amount_pctile REAL, computed_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO regime_daily (trade_date, computed_at) VALUES ('2026-10-16', 'old')"
+        )
+        conn.commit()
+        conn.close()
+
+        _upsert(db, "2026-10-17", cap_source="spot")
+
+        rows = list_regime_history(db_path=db)
+        assert [row["trade_date"] for row in rows] == ["2026-10-16", "2026-10-17"]
+        assert rows[0]["cap_source"] is None  # 旧行如实 NULL，不编造来源
+        assert rows[1]["cap_source"] == "spot"
 
 
 class TestReads:

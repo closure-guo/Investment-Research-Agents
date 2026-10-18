@@ -4,7 +4,9 @@
 与 ``outcome/track_record/model.py`` 同款 SQLite 纪律（WAL + busy_timeout 短连接）。
 
 表 ``regime_daily``：``trade_date`` 唯一（同日重跑幂等覆盖=INSERT OR REPLACE）；
-指标与分位列取自 design.md「存储与运维」逐字（分位 null 如实落库，不折算 0）。
+指标与分位列取自 design.md「存储与运维」逐字（分位 null 如实落库，不折算 0）；
+``cap_source``（design 修订：市值取数源留痕 ``spot|tencent``）经 ``_ensure_columns``
+补列，老库无列时自动 ALTER。
 """
 
 from __future__ import annotations
@@ -29,9 +31,13 @@ CREATE TABLE IF NOT EXISTS regime_daily (
   total_amount          REAL,
   small_cap_share_pctile REAL,
   total_amount_pctile   REAL,
-  computed_at           TEXT NOT NULL
+  computed_at           TEXT NOT NULL,
+  cap_source            TEXT
 );
 """
+
+# 建表后补列（``CREATE TABLE IF NOT EXISTS`` 不改已存在老库）：名称 + 列类型
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (("cap_source", "TEXT"),)
 
 # 分位列（触发指标分位；写入映射用，跨模块契约）
 PCTILE_COLUMNS: tuple[str, ...] = ("small_cap_share_pctile", "total_amount_pctile")
@@ -56,12 +62,22 @@ def _connect(db_path: str | Path | None) -> sqlite3.Connection:
     return conn
 
 
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """老库补列（幂等）：``cap_source`` 为 design 修订新增，老库缺列时 ALTER 补上
+    （写入列名固定 → 不补会让 upsert 直接炸 ``no such column``）。"""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(regime_daily)")}
+    for name, column_type in _ADDED_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE regime_daily ADD COLUMN {name} {column_type}")  # noqa: S608
+
+
 def init_regime_db(db_path: str | Path | None = None) -> Path:
-    """幂等建表，返回实际使用的库路径。"""
+    """幂等建表（含老库补列），返回实际使用的库路径。"""
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
     try:
         conn.executescript(REGIME_DDL)
+        _ensure_columns(conn)
         conn.commit()
     finally:
         conn.close()
@@ -74,13 +90,15 @@ def upsert_regime_daily(
     pctiles: Mapping[str, Any],
     *,
     computed_at: str,
+    cap_source: str | None = None,
     db_path: str | Path | None = None,
 ) -> None:
     """落一行当日指标（``trade_date`` 唯一，同日重跑覆盖）。
 
     ``indicators`` 须覆盖 ``INDICATOR_KEYS`` 全键（缺键 → ``ValueError``，不静默写
     NULL）；``pctiles`` 缺键或值为 None → 该列 NULL（= 样本不足 ``insufficient_history``，
-    如实落库，不折算）。
+    如实落库，不折算）。``cap_source`` = 市值取数源留痕（``spot`` / ``tencent``；
+    未传 → NULL，不编造来源）。
     """
     row: dict[str, Any] = {}
     for key in INDICATOR_KEYS:
@@ -91,6 +109,7 @@ def upsert_regime_daily(
         row[key] = pctiles.get(key)
     row["trade_date"] = trade_date
     row["computed_at"] = computed_at
+    row["cap_source"] = cap_source
 
     columns = ", ".join(row)
     placeholders = ", ".join("?" * len(row))
