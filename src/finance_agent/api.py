@@ -2998,6 +2998,22 @@ async def track_record_current(source: str | None = None) -> dict[str, Any]:
     }
 
 
+# ── 策略族成绩单（delta add-strategy-family-scorecards）：只读四槽读数 ──
+#
+# 口径权威：docs/evals/metrics.md §1.13（2026-10-18 登记）。本端点为纯读层：族注册表
+# 驱动（未注册数据源不出现），四槽缺数据一律 null + 原因码（MUST NOT 折算 0）；
+# 胜率仅展示位（四槽之后），MUST NOT 进入自动处置/门禁/告警。库路径由 outcome 侧
+# 调用期读 env（SESSIONS_DB_PATH / EXECUTION_DB_PATH / SNAPSHOT_DB_PATH）。
+
+
+@app.get("/api/scorecards")
+async def get_scorecards_endpoint() -> dict[str, Any]:
+    """策略族成绩单（只读）：注册表全族四槽读数 + 口径注释；空数据族如实返回。"""
+    from finance_agent.outcome.scorecards import get_scorecards
+
+    return await asyncio.to_thread(get_scorecards)
+
+
 @app.post("/api/feedback")
 async def submit_feedback(req: FeedbackRequest) -> dict[str, Any]:
     """add-user-feedback:用户点赞/点踩落 Langfuse trace(按 session 解析最近一次运行)。
