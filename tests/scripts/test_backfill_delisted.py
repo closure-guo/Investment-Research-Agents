@@ -12,6 +12,7 @@ stub client 注入 ``fetch_symbol_history_raw_qfq``；tmp 快照库经 ``upsert_
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -19,7 +20,13 @@ import scripts.backfill_delisted as delisted_module
 import scripts.backfill_market_snapshot as backfill_module
 from scripts.backfill_delisted import main, run_backfill_delisted
 
-from finance_agent.data.snapshot import _connect, upsert_delisted_masters
+from finance_agent.data.snapshot import (
+    _connect,
+    get_meta,
+    set_meta_many,
+    upsert_delisted_masters,
+    write_snapshot_rows,
+)
 
 _DELISTED = "600001"  # 1998-01-01 上市，2020-06-30 退市
 _NO_HISTORY = "000002"  # 退市但源无历史可得
@@ -62,6 +69,25 @@ _WINDOW_DATES = [
     "2020-06-29",
     "2020-06-30",
 ]
+
+
+def _head_frame() -> pd.DataFrame:
+    """头部触窗的帧（最早行 = 窗口起点）：整窗覆盖判据的合格输入。"""
+    return _frame(["1998-01-01", *_WINDOW_DATES])
+
+
+def _row(code: str) -> dict:
+    """运行期日批形状的行（字段齐备），用于构造「部分覆盖」场景。"""
+    return {
+        "code": code,
+        "name": "退市样本",
+        "close_raw": 10.0,
+        "close_qfq": 10.0,
+        "volume": 1000.0,
+        "amount": 1_000_000.0,
+        "high": 10.1,
+        "low": 9.9,
+    }
 
 
 def _seed_master(db: Path, *, codes: tuple[str, ...] = (_DELISTED, _LIVE)) -> None:
@@ -160,10 +186,10 @@ class TestRunBackfillDelisted:
         assert summary.get("integrity") is None  # dry-run 不做收尾自检
 
     def test_resumed_window_is_skipped(self, tmp_path):
-        """窗口内已有齐备行 → 跳过（断点续跑），不重复取数。"""
+        """整窗已覆盖（最早行触及窗口起点）→ 跳过（断点续跑），不重复取数。"""
         db = tmp_path / "snap.db"
         _seed_master(db, codes=(_DELISTED,))
-        client = FakeDelistedClient()
+        client = FakeDelistedClient(frames={_DELISTED: _head_frame()})
         run_backfill_delisted(client=client, db_path=db, sleep_seconds=0)
 
         second = run_backfill_delisted(client=client, db_path=db, sleep_seconds=0)
@@ -171,6 +197,73 @@ class TestRunBackfillDelisted:
         assert client.calls == [(_DELISTED, "19980101", "20200630")]  # 只取过一次
         assert second["skipped_resumed"] == 1
         assert second["rows_written"] == 0
+        assert second["partial_overlap"] == []
+
+    def test_single_window_row_is_not_skipped(self, tmp_path):
+        """F1（先红）：窗口内仅 1 行（如运行期日批行）→ 不得算覆盖，必须重取。
+
+        旧判据（「窗口内有行且字段齐备」）会让整票被跳过、``skipped_resumed`` 谎报覆盖。
+        """
+        db = tmp_path / "snap.db"
+        _seed_master(db, codes=(_DELISTED,))
+        # 运行期日批行：字段齐备但只落在窗口尾部（1 行）
+        write_snapshot_rows("2020-06-29", [_row(_DELISTED)], db_path=db)
+        client = FakeDelistedClient()
+
+        summary = run_backfill_delisted(client=client, db_path=db, sleep_seconds=0)
+
+        assert client.calls == [(_DELISTED, "19980101", "20200630")], "部分覆盖必须重取"
+        assert summary["skipped_resumed"] == 0
+        assert summary["symbols_ok"] == 1
+        assert summary["partial_overlap"] == [_DELISTED], "部分覆盖如实标注（不谎报覆盖）"
+        # INSERT OR REPLACE 幂等：既有日批行被覆盖，窗口行补齐
+        assert _market_rows(db, _DELISTED) == _WINDOW_DATES
+
+    def test_calendar_anchor_allows_skip_when_head_is_first_trading_day(self, tmp_path):
+        """F1：窗口起点非交易日 → 锚点 = 日历中首个 ≥ 起点的交易日（头部触及即覆盖）。"""
+        db = tmp_path / "snap.db"
+        # list_date 是周六（非交易日）；首个交易日为 2020-06-22（周一）
+        upsert_delisted_masters(
+            [
+                {
+                    "code": _DELISTED,
+                    "name": "退市样本",
+                    "list_date": "2020-06-20",
+                    "delist_date": "2020-06-30",
+                }
+            ],
+            db_path=db,
+        )
+        calendar = [
+            "2020-06-19",
+            "2020-06-22",
+            "2020-06-23",
+            "2020-06-24",
+            "2020-06-29",
+            "2020-06-30",
+        ]
+        set_meta_many({"trade_calendar": json.dumps(calendar)}, db_path=db)
+        write_snapshot_rows(
+            "2020-06-22",
+            [
+                {
+                    "code": _DELISTED,
+                    "amount": 1e6,
+                    "high": 10.1,
+                    "low": 9.9,
+                    "close_raw": 10.0,
+                    "close_qfq": 10.0,
+                }
+            ],
+            db_path=db,
+        )
+        client = FakeDelistedClient()
+
+        summary = run_backfill_delisted(client=client, db_path=db, sleep_seconds=0)
+
+        assert client.calls == [], "头部触及首个交易日 → 整窗覆盖，跳过"
+        assert summary["skipped_resumed"] == 1
+        assert summary["partial_overlap"] == []
 
     def test_limit_truncates_pool(self, tmp_path):
         """``--limit`` 截断可处理清单（确定性顺序 = code 升序）。"""
@@ -193,6 +286,60 @@ class TestRunBackfillDelisted:
 
         assert summary["integrity"]["ok"] is True
         assert summary["integrity"]["duplicate_keys"] == 0
+
+
+class TestMissingSummaryPersistence:
+    """F4b：缺失明细落 ``snapshot_meta``（持久留痕，供运维与后续变更读取）。"""
+
+    def test_missing_lists_persisted_to_meta(self, tmp_path):
+        db = tmp_path / "snap.db"
+        _seed_master(db, codes=(_DELISTED, _NO_HISTORY, _WINDOW_MISSING))
+        client = FakeDelistedClient(frames={_DELISTED: _frame(_WINDOW_DATES), _NO_HISTORY: None})
+
+        run_backfill_delisted(client=client, db_path=db, sleep_seconds=0)
+
+        raw = get_meta("delist_backfill_missing", db_path=db)
+        assert raw is not None
+        payload = json.loads(raw)
+        assert payload["history_missing"] == [_NO_HISTORY]
+        assert payload["window_missing"] == [_WINDOW_MISSING]
+        assert payload["history_missing_count"] == 1
+        assert payload["updated_at"]
+
+    def test_meta_key_updated_on_next_run(self, tmp_path):
+        """重跑覆盖为最新结果（同键 upsert，不留旧明细）。"""
+        db = tmp_path / "snap.db"
+        _seed_master(db, codes=(_DELISTED, _NO_HISTORY))
+        run_backfill_delisted(
+            client=FakeDelistedClient(frames={_DELISTED: _frame(_WINDOW_DATES), _NO_HISTORY: None}),
+            db_path=db,
+            sleep_seconds=0,
+        )
+        assert json.loads(get_meta("delist_backfill_missing", db_path=db))["history_missing"] == [
+            _NO_HISTORY
+        ]
+
+        # 第二次：两票源均已有历史（600001 头部触窗）→ 明细清空
+        run_backfill_delisted(
+            client=FakeDelistedClient(
+                frames={_NO_HISTORY: _frame(_WINDOW_DATES), _DELISTED: _head_frame()}
+            ),
+            db_path=db,
+            sleep_seconds=0,
+        )
+        payload = json.loads(get_meta("delist_backfill_missing", db_path=db))
+        assert payload["history_missing"] == []
+        assert payload["history_missing_count"] == 0
+
+    def test_dry_run_does_not_write_meta(self, tmp_path):
+        """``--dry-run`` 零写入契约：不落 meta（stdout 明细照旧）。"""
+        db = tmp_path / "snap.db"
+        _seed_master(db, codes=(_DELISTED, _NO_HISTORY))
+        client = FakeDelistedClient(frames={_DELISTED: _frame(_WINDOW_DATES), _NO_HISTORY: None})
+
+        run_backfill_delisted(client=client, db_path=db, dry_run=True, sleep_seconds=0)
+
+        assert get_meta("delist_backfill_missing", db_path=db) is None
 
 
 class TestMain:

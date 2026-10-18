@@ -2,8 +2,8 @@
 
 **薄封装**：复用 ``scripts/backfill_market_snapshot.py`` 的内部件——取数包装
 ``AKShareClient.fetch_symbol_history_raw_qfq``、行映射 ``_history_rows``、落库
-``write_snapshot_rows_bulk``（每票一次事务）、断点续跑判据 ``_has_rows_in_window``、
-宿主机直跑护栏 ``_host_write_guard``、收尾完整性自检 ``verify_snapshot_integrity``。
+``write_snapshot_rows_bulk``（每票一次事务）、宿主机直跑护栏 ``_host_write_guard``、
+收尾完整性自检 ``verify_snapshot_integrity``。
 
 口径（docs/evals/metrics.md §1.16，binding）：
 
@@ -14,6 +14,14 @@
   明细（如实标注，MUST NOT 用猜测起点取数）；
 - 源无历史可得（取数返回 None / 空帧 / 日期全不可解析）→ 计数 + 代码明细
   ``history_missing``（如实标注，不伪造行）；
+- **断点续跑 = 整窗覆盖判据**（不只是「窗口内有行」）：窗口内有行、字段
+  （amount/high/low）齐备、且**最早行触及窗口起点锚**（日历中首个 ≥ ``list_date``
+  的交易日；无日历则 ``list_date`` 自身）才跳过。只判头部——退市股末日行情可能早于
+  ``delist_date``（退市整理期结束日 ≠ 退市日），中间停牌日本无行；仅尾部有行
+  （如运行期日批行）→ 判为**部分覆盖**，进摘要 ``partial_overlap`` 并重取
+  （``write_snapshot_rows_bulk`` 为 INSERT OR REPLACE，幂等）；
+- 缺失明细（``history_missing``/``window_missing``）随非 dry-run 运行落
+  ``snapshot_meta["delist_backfill_missing"]``（JSON，持久留痕供运维与后续变更读取）；
 - 回填行不含状态位/前收盘/涨跌幅（同既有回填通道），**不得**接入
   ``compute_rebase_factors``/停牌合成链；正式日频数据以 ``market_snapshot_daily`` 为准。
 
@@ -31,10 +39,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import sqlite3
 import sys
 import time
 from collections.abc import Callable
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,16 +61,18 @@ except ModuleNotFoundError:  # pragma: no cover
 from finance_agent.data.akshare_client import AKShareClient
 from finance_agent.data.snapshot import (
     SnapshotError,
+    _connect,
     _default_db_path,
     _parse_date_param,
+    get_all_meta,
     get_security_master,
     init_snapshot_db,
+    set_meta,
     write_snapshot_rows_bulk,
 )
 
 # 既有内部件的模块级引用（测试经本模块名 monkeypatch 桩替换）
 _BACKFILL_CAVEAT = backfill_module._BACKFILL_CAVEAT
-_has_rows_in_window = backfill_module._has_rows_in_window
 _history_rows = backfill_module._history_rows
 _host_write_guard = backfill_module._host_write_guard
 verify_snapshot_integrity = backfill_module.verify_snapshot_integrity
@@ -68,6 +81,9 @@ logger = logging.getLogger(__name__)
 
 # 本脚本自身的相对路径（护栏提示命令指向本脚本，不误报既有全量回填脚本）
 _SCRIPT_PATH = "scripts/backfill_delisted.py"
+
+# 缺失/覆盖明细的 snapshot_meta 键（持久留痕；规格：key 名固定供运维既有巡检复用）
+_MISSING_META_KEY = "delist_backfill_missing"
 
 
 def _delisted_windows(
@@ -100,6 +116,117 @@ def _delisted_windows(
             continue
         windows.append((code, start, end))
     return windows, window_missing
+
+
+def _snapshot_calendar(db_path: str | Path) -> list[str]:
+    """快照 meta ``trade_calendar`` → 规范交易日升序列表；缺失/坏值 → ``[]``。
+
+    与 ``screening.pipeline`` 的快照日历解析同纪律（非规范形态跳过，不参与比较）；
+    日历不可得 → 覆盖锚点退化（见 ``_first_trading_day_on_or_after``）。
+    """
+    raw = get_all_meta(db_path).get("trade_calendar")
+    if not raw:
+        return []
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    days: list[str] = []
+    for entry in decoded:
+        text = str(entry)
+        try:
+            parsed = date.fromisoformat(text)
+        except ValueError:
+            continue
+        if parsed.isoformat() == text:
+            days.append(text)
+    return sorted(set(days))
+
+
+def _first_trading_day_on_or_after(calendar: list[str], start: str) -> str:
+    """日历中 ``>= start`` 的首个交易日；日历不含该区间 → 退化为 ``start`` 自身。
+
+    覆盖锚点：退市股首个行情行应落在其上市后的首个交易日（通常即 ``list_date``，
+    为非交易日时顺延）。无日历时用 ``start`` 自身（保守：要求窗口头有行）。
+    """
+    for day in calendar:
+        if day >= start:
+            return day
+    return start
+
+
+def _window_coverage(db_path: str | Path, code: str, start: str, end: str) -> dict[str, Any] | None:
+    """窗口内该票行覆盖概况：``{"rows","min","max","complete"}``；无行/库不可读 → None。
+
+    ``complete`` = 全部行 ``amount``/``high``/``low`` 非空（与既有断点续跑判据
+    ``_has_rows_in_window`` 的字段齐备口径一致：缺列行不构成覆盖，须重取 upsert 补齐）。
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    try:
+        conn = _connect(path)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*), MIN(trade_date), MAX(trade_date), "
+            "COUNT(amount), COUNT(high), COUNT(low) FROM market_snapshot "
+            "WHERE code = ? AND trade_date >= ? AND trade_date <= ?",
+            (code, start, end),
+        ).fetchone()
+    except sqlite3.Error:  # 空文件/异库无该表 → 视为无行
+        return None
+    finally:
+        conn.close()
+    total = int(row[0] or 0) if row else 0
+    if total == 0:
+        return None
+    return {
+        "rows": total,
+        "min": str(row[1]),
+        "max": str(row[2]),
+        "complete": int(row[3]) == total and int(row[4]) == total and int(row[5]) == total,
+    }
+
+
+def _window_is_fully_covered(coverage: dict[str, Any] | None, *, anchor: str) -> bool:
+    """整窗覆盖判据（断点续跑）：窗口内有行、字段齐备、且**最早行触及起点锚**。
+
+    - 只判**头部**：退市股末日行情可能早于 ``delist_date``（退市整理期结束日 ≠ 退市日），
+      尾部不判；中间停牌日本无行，不做逐日缺口判定（否则停牌票永远重取）；
+    - 仅 1 行日批行（落在窗口尾部）→ 头部未触及 → **不算覆盖**，必须重取
+      （评审 F1：旧判据「窗口内有行且字段齐备」会让整票被跳过、谎报覆盖）。
+    """
+    if coverage is None or not coverage["complete"]:
+        return False
+    return str(coverage["min"]) <= anchor
+
+
+def _persist_missing_summary(db_path: str | Path, summary: dict[str, Any]) -> None:
+    """缺失/覆盖明细落 ``snapshot_meta["delist_backfill_missing"]``（持久留痕）。
+
+    stdout 摘要照旧；本键供运维巡检与后续变更读取（同键 upsert，重跑覆盖为最新）。
+    落库失败只 WARN——留痕不构成主流程失败（数据/汇总已由 stdout 与摘要给出）。
+    """
+    payload = {
+        "history_missing": list(summary["history_missing"]),
+        "history_missing_count": summary["history_missing_count"],
+        "window_missing": list(summary["window_missing"]),
+        "partial_overlap": list(summary["partial_overlap"]),
+        "skipped_resumed": summary["skipped_resumed"],
+        "updated_at": datetime.now().isoformat(),
+    }
+    try:
+        set_meta(
+            _MISSING_META_KEY,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            db_path=db_path,
+        )
+    except Exception as e:  # noqa: BLE001 - 留痕失败不掩盖主流程结果
+        logger.warning("缺失明细留痕落库失败（%s）: %s", _MISSING_META_KEY, e)
 
 
 def run_backfill_delisted(
@@ -147,15 +274,30 @@ def run_backfill_delisted(
         "history_missing": [],
         "history_missing_count": 0,
         "window_missing": window_missing,
+        # 部分覆盖（窗口内有行但未触及窗口头）→ 已重取（INSERT OR REPLACE 幂等）；
+        # 与 ``skipped_resumed``（整窗覆盖）如实区分，不谎报覆盖
+        "partial_overlap": [],
         "dry_run": dry_run,
     }
+    calendar = _snapshot_calendar(resolved_db)
     fetched_any = False
     total = len(windows)
     for index, (code, start, end) in enumerate(windows, start=1):
-        if _has_rows_in_window(resolved_db, code, start, end):
+        coverage = _window_coverage(resolved_db, code, start, end)
+        anchor = _first_trading_day_on_or_after(calendar, start)
+        if _window_is_fully_covered(coverage, anchor=anchor):
             summary["skipped_resumed"] += 1
-            print(f"[{index}/{total}] {code}: 跳过（窗口内已有齐备行，断点续跑）")
+            print(
+                f"[{index}/{total}] {code}: 跳过（整窗已覆盖，断点续跑；"
+                f"{coverage['rows']} 行 {coverage['min']}..{coverage['max']}）"
+            )
             continue
+        if coverage is not None:
+            summary["partial_overlap"].append(code)
+            print(
+                f"[{index}/{total}] {code}: 部分覆盖（{coverage['rows']} 行，"
+                f"最早 {coverage['min']} 未触及 {anchor}）→ 重取"
+            )
         if fetched_any and sleep_seconds > 0:  # 只在两次真实取数之间限速
             sleep_func(sleep_seconds)
         fetched_any = True
@@ -183,6 +325,7 @@ def run_backfill_delisted(
         print(f"[{index}/{total}] {code}: {flag} {written} 行（窗口 {start}..{end}）")
 
     if not dry_run:
+        _persist_missing_summary(resolved_db, summary)
         integrity = verify_snapshot_integrity(resolved_db)
         summary["integrity"] = integrity
         if integrity["ok"]:
@@ -248,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
         "退市股补采完成: "
         f"symbols_ok={summary['symbols_ok']} rows_written={summary['rows_written']} "
         f"skipped_resumed={summary['skipped_resumed']} "
+        f"partial_overlap={len(summary['partial_overlap'])} "
         f"history_missing={summary['history_missing_count']} "
         f"window_missing={len(summary['window_missing'])}" + (" [dry-run]" if args.dry_run else "")
     )
