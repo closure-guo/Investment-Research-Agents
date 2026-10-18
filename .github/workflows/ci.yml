@@ -62,13 +62,12 @@ jobs:
         run: npm ci
         working-directory: frontend
 
-      # 隔离说明（issue #331）：followup-resume-after-switch 在 CI（2 vCPU Linux）上
-      # **确定性失败**（--retry=1 两次尝试均败；本地 Windows 3/3 通过）——固定
-      # setTimeout + stub 409 session_busy 竞态，属测试时序假设问题而非断言缺陷。
-      # 修复后移除本 exclude；其余 90 文件 / 760 例纳入门禁。
+      # 时序硬化（issue #331，已修复）：followup-resume-after-switch 原用固定
+      # setTimeout 赌事件链时点，在 CI（2 vCPU Linux）偶发超时——已改为条件等待
+      # （等思考/工具/对侧会话渲染到稳定态），exclude 随之移除、全量文件入门禁。
       # --retry=1 与 Playwright 套件 retries=1 同口径：只吸收抖动，确定性回归两次都失败。
       - name: Frontend unit tests (vitest)
-        run: npm test -- --retry=1 --exclude 'src/test/followup-resume-after-switch.test.tsx'
+        run: npm test -- --retry=1
         working-directory: frontend
 
       - name: Unit tests
