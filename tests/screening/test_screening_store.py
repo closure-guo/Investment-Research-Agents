@@ -862,3 +862,146 @@ def test_exec_constraints_column_migrated_on_legacy_db(tmp_path) -> None:
         conn.close()
     assert "exec_constraints" in columns
     assert latest_screening_batch(db_path=db)["exec_constraints"] is None
+
+
+# ── 恢复规则的行数守卫（评审 round 3：防空 migrate 覆盖有行正式表） ────────────
+
+_NEW_SHAPE_BATCHES_DDL = (
+    "CREATE TABLE {name} ("
+    "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', status TEXT NOT NULL, "
+    "error TEXT, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, "
+    "l1_passed INTEGER NOT NULL DEFAULT 0, l2_top INTEGER NOT NULL DEFAULT 0, "
+    "l3_keep INTEGER NOT NULL DEFAULT 0, pool_size INTEGER NOT NULL DEFAULT 0, "
+    "selection_mode TEXT NOT NULL DEFAULT 'factor', frontier_gate TEXT, "
+    "exec_constraints TEXT, PRIMARY KEY (trade_date, pool))"
+)
+_NEW_SHAPE_POOL_DDL = (
+    "CREATE TABLE {name} ("
+    "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', symbol TEXT NOT NULL, "
+    "composite_score REAL NOT NULL, rank INTEGER NOT NULL, consecutive_days INTEGER NOT NULL, "
+    "l3_verdict TEXT NOT NULL, l3_reason TEXT NOT NULL, factor_contribs_json TEXT NOT NULL, "
+    "PRIMARY KEY (trade_date, pool, symbol))"
+)
+
+
+def _seed_two_row_old_shape_db(db) -> None:
+    """正式表 2 行批次 + 1 行池行（旧形状；复刻评审实测形态）。"""
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            "CREATE TABLE screening_batches ("
+            "trade_date TEXT PRIMARY KEY, status TEXT NOT NULL, error TEXT, "
+            "started_at TEXT NOT NULL, finished_at TEXT NOT NULL, "
+            "l1_passed INTEGER NOT NULL DEFAULT 0, l2_top INTEGER NOT NULL DEFAULT 0, "
+            "l3_keep INTEGER NOT NULL DEFAULT 0, pool_size INTEGER NOT NULL DEFAULT 0);"
+            "CREATE TABLE selection_pool ("
+            "trade_date TEXT NOT NULL, symbol TEXT NOT NULL, composite_score REAL NOT NULL, "
+            "rank INTEGER NOT NULL, consecutive_days INTEGER NOT NULL, "
+            "l3_verdict TEXT NOT NULL, l3_reason TEXT NOT NULL, "
+            "factor_contribs_json TEXT NOT NULL, PRIMARY KEY (trade_date, symbol));"
+        )
+        conn.executemany(
+            "INSERT INTO screening_batches (trade_date, status, started_at, finished_at) "
+            "VALUES (?, 'ok', 'x', 'y')",
+            [("2026-10-01",), ("2026-10-02",)],
+        )
+        conn.execute(
+            "INSERT INTO selection_pool VALUES "
+            "('2026-10-01', '600519', 1.0, 1, 3, 'keep', '无风险事件', '[]')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _create_empty_migrate_tables(db) -> None:
+    """中断形态 B：CREATE 之后、INSERT 之前中断 → migrate 为空、正式表持全部旧行。"""
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            _NEW_SHAPE_BATCHES_DDL.format(name="screening_batches__migrate")
+            + ";"
+            + _NEW_SHAPE_POOL_DDL.format(name="selection_pool__migrate")
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_recovery_guard_keeps_real_table_when_migrate_empty(tmp_path) -> None:
+    """R3（先红）：空 migrate + 有行正式表 → **不得**换入空表（否则静默丢全部历史行）。
+
+    评审实测：正式表 2 行 + 空 migrate → 旧规则恢复后 0 行。修法 = 行数守卫
+    （仅当正式表缺失或 ``rows(migrate) >= rows(real)`` 才换入）；保留正式表后，
+    同一次 init 的列补齐 + 事务化主键重建继续完成迁移（幂等）。
+    """
+    from finance_agent.screening.store import latest_screening_batch, list_selection_pool
+
+    db = tmp_path / "screening.db"
+    _seed_two_row_old_shape_db(db)
+    _create_empty_migrate_tables(db)
+
+    init_screening_db(db)
+    init_screening_db(db)  # 幂等重入
+
+    objects = _objects(db)
+    assert "screening_batches__migrate" not in objects, "空残留须被清理"
+    assert "selection_pool__migrate" not in objects
+
+    conn = sqlite3.connect(db)
+    try:
+        batch_rows = conn.execute(
+            "SELECT trade_date, pool FROM screening_batches ORDER BY trade_date"
+        ).fetchall()
+        batch_pk = [
+            row[1]
+            for row in conn.execute("PRAGMA table_info(screening_batches)").fetchall()
+            if row[5] > 0
+        ]
+        pool_pk = [
+            row[1]
+            for row in conn.execute("PRAGMA table_info(selection_pool)").fetchall()
+            if row[5] > 0
+        ]
+    finally:
+        conn.close()
+    assert batch_rows == [("2026-10-01", "main"), ("2026-10-02", "main")], "历史行不得丢失"
+    assert batch_pk == ["trade_date", "pool"], "保留正式表后仍须完成主键重建"
+    assert pool_pk == ["trade_date", "pool", "symbol"]
+    assert latest_screening_batch(db_path=db)["trade_date"] == "2026-10-02"
+    assert [r["symbol"] for r in list_selection_pool("2026-10-01", db_path=db)] == ["600519"]
+
+
+def test_recovery_guard_keeps_real_table_when_migrate_has_fewer_rows(tmp_path) -> None:
+    """R3：migrate 行数 < 正式表（部分复制等异常态）→ 同样保留正式表、清残留。"""
+    db = tmp_path / "screening.db"
+    _seed_two_row_old_shape_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            _NEW_SHAPE_BATCHES_DDL.format(name="screening_batches__migrate")
+            + ";"
+            + _NEW_SHAPE_POOL_DDL.format(name="selection_pool__migrate")
+        )
+        conn.execute(
+            "INSERT INTO screening_batches__migrate (trade_date, pool, status, started_at, "
+            "finished_at) VALUES ('2026-10-01', 'main', 'ok', 'x', 'y')"  # 只 1 行 < 正式 2 行
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_screening_db(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        dates = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT trade_date FROM screening_batches ORDER BY trade_date"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    assert dates == ["2026-10-01", "2026-10-02"]
+    assert "screening_batches__migrate" not in _objects(db)

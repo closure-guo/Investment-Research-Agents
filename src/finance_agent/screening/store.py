@@ -198,9 +198,9 @@ _POOL_TABLE_REBUILD_SQL: tuple[str, ...] = (
     # DROP TABLE 连带删掉旧索引：重建后恢复（与 SCREENING_DDL 同名同形）
     _POOL_INDEX_SQL,
 )
-# 中断恢复语句（``*__migrate`` 留存 = 上次重建在 DROP 之后、RENAME 之前中断）：
-# 数据以 migrate 表为准 —— 现存正式表要么缺失、要么是其后 ``CREATE IF NOT EXISTS``
-# 补出的空壳（或在 DROP 前中断时同数据的旧原表），一律 DROP 后改名换入。
+# 中断恢复语句（``*__migrate`` 留存 = 上次重建中断）：换入前先过**行数守卫**
+# （见 ``_recover_interrupted_rebuild``）——仅 migrate 行数 >= 正式表（或正式表缺失）
+# 才视为权威副本并 DROP 正式表后改名换入；否则清理残留、保留正式表。
 _RECOVERY_SQL: dict[str, tuple[str, ...]] = {
     "screening_batches": (
         "DROP TABLE IF EXISTS screening_batches",
@@ -243,14 +243,34 @@ def _run_statements_in_transaction(conn: sqlite3.Connection, statements: tuple[s
         conn.isolation_level = restore
 
 
-def _recover_interrupted_rebuild(conn: sqlite3.Connection, table: str) -> bool:
-    """残留 ``<table>__migrate`` → 恢复为正式表（数据以 migrate 表为准）；无残留 → False。
+def _table_row_count(conn: sqlite3.Connection, table: str) -> int:
+    """表行数（表名来自模块常量/固定后缀，非外部输入）。"""
+    row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608
+    return int(row[0]) if row else 0
 
-    不得因为「正式表已存在」跳过：中断后的下一次 ``CREATE TABLE IF NOT EXISTS`` 会补出
-    空壳正式表，跳过即静默丢旧行（评审 F3）。
+
+def _recover_interrupted_rebuild(conn: sqlite3.Connection, table: str) -> bool:
+    """残留 ``<table>__migrate`` → 按**行数守卫**恢复/清理；返回是否换入了 migrate 表。
+
+    换入条件（round 3 评审）：正式表缺失 **或** ``rows(migrate) >= rows(real)``。
+
+    - 「INSERT 完整、DROP 后 RENAME 前中断」→ migrate 持权威数据（且正式表缺失或为空壳）
+      → 换入；
+    - 「CREATE 之后、INSERT 之前中断」→ migrate 为空/更少、正式表仍持全部旧行 →
+      **MUST NOT 换入**（否则静默丢历史行），改为 DROP 残留 migrate、保留正式表，
+      交由同一次 init 的 ② 列补齐 + ③ 事务化主键重建继续完成迁移（幂等，不二次损坏）。
+
+    不得因为「正式表已存在」一律跳过：中断后的下一次 ``CREATE TABLE IF NOT EXISTS``
+    会补出空壳正式表，跳过即静默丢旧行（评审 F3）——故判据是行数而非存在性。
     """
     migrate_table = f"{table}__migrate"
     if not _table_exists(conn, migrate_table):
+        return False
+    if _table_exists(conn, table) and _table_row_count(conn, migrate_table) < _table_row_count(
+        conn, table
+    ):
+        # 中断早于 INSERT：migrate 不权威 → 清理残留，保留正式表（后续步骤完成迁移）
+        _run_statements_in_transaction(conn, (f"DROP TABLE {migrate_table}",))
         return False
     _run_statements_in_transaction(conn, _RECOVERY_SQL[table])
     return True
@@ -297,8 +317,9 @@ def init_screening_db(db_path: str | Path | None = None) -> Path:
     """幂等建表 + 索引 + 增量迁移，返回实际使用的库路径。
 
     迁移（顺序固定，三者互相依赖）：
-    ① 残留 ``*__migrate``（上次重建中断）→ **先恢复数据**（正式表缺失或为空壳时
-       以 migrate 表换入，见 ``_recover_interrupted_rebuild``）；
+    ① 残留 ``*__migrate``（上次重建中断）→ 按**行数守卫**恢复/清理
+       （migrate 权威才换入；migrate 为空/更少则保留正式表并清理残留，
+       见 ``_recover_interrupted_rebuild``）；
     ② 批次表缺列 → 幂等 ALTER 补齐（``selection_mode`` / ``frontier_gate`` /
        ``exec_constraints``，见 ``_BATCH_COLUMN_MIGRATIONS``）；
     ③ 旧库主键为单列 ``trade_date`` → 重建为含 ``pool`` 的复合主键
