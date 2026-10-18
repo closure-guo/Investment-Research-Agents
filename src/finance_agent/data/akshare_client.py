@@ -1222,7 +1222,15 @@ class AKShareClient:
 
     @staticmethod
     def _to_sina_symbol(stock_code: str) -> str:
-        """A 股代码转新浪格式：600519 → sh600519, 000001 → sz000001。"""
+        """A 股代码转新浪/腾讯格式：600519 → sh600519, 000001 → sz000001。
+
+        北交所 92 新号段（920xxx）与 4/8 号段同走 ``bj``——腾讯行情域对
+        ``sh920002`` / ``sz920002`` 返回 ``v_pv_none_match``（实测），只有
+        ``bj920002`` 可用；错判会让兜底批量对 92 码全缺（→ 参与集覆盖不全）。
+        **沪 B（900xxx）必须保持 sh**，故 92 判定先于 9 号段。
+        """
+        if stock_code.startswith("92"):
+            return f"bj{stock_code}"
         if stock_code.startswith(("6", "9")):
             return f"sh{stock_code}"
         elif stock_code.startswith(("0", "2", "3")):

@@ -1244,6 +1244,8 @@ class TestFetchTencentQuote:
     def test_symbol_prefix(self, client):
         """深市代码走 sz 前缀（_to_sina_symbol 复用）。"""
         assert client._to_sina_symbol("002371") == "sz002371"
+        assert client._to_sina_symbol("920002") == "bj920002"  # 北交所 92 新号段
+        assert client._to_sina_symbol("900901") == "sh900901"  # 沪 B 保持 sh
 
 
 class TestFetchMarketCapsBulk:
@@ -1302,6 +1304,49 @@ class TestFetchMarketCapsBulk:
         caps = client.fetch_market_caps_bulk(["sh600519"])
 
         assert caps == {"600519": pytest.approx(16613.58e8)}
+
+    def test_bj_920_segment_uses_bj_prefix(self, client):
+        """北交所 92 新号段 → bj（腾讯仅认 bj；sh/sz 空响应）；沪 B 900xxx 保持 sh。
+
+        覆盖修复：新浪 spot 含 ~351 个 92xxxx 码，若错走 sh 前缀，兜底批量对它们
+        全缺 → 参与集覆盖不全 → 每日 cap_data_missing 永不产行。
+        """
+        assert client._to_sina_symbol("920002") == "bj920002"
+        assert client._to_sina_symbol("920008") == "bj920008"
+        assert client._to_sina_symbol("900901") == "sh900901"  # 沪 B 不得一刀切进 bj
+        assert client._to_sina_symbol("430047") == "bj430047"  # 既有北交所号段行为不变
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_batch_url_uses_bj_for_920_segment(self, mock_get, client):
+        """批量请求 URL：92 码走 bj，900 沪 B 仍走 sh（请求与解析两侧同时验证）。"""
+        mock_get.return_value = self._gbk_response(
+            self._quote_line("bj920002", "920002", "20.65")
+            + "\n"
+            + self._quote_line("sh900901", "900901", "12.34")
+        )
+
+        caps = client.fetch_market_caps_bulk(["920002", "900901"])
+
+        assert caps == {
+            "920002": pytest.approx(20.65e8),
+            "900901": pytest.approx(12.34e8),
+        }
+        url = mock_get.call_args.args[0]
+        assert "bj920002" in url and "sh900901" in url
+        assert "sh920002" not in url
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_real_batch_sample_includes_bj_920_segment(self, mock_get, client):
+        """金样本含北交所 92 新号段行（bj920002 万达轴承 / bj920008 成电光信，实抓）。"""
+        mock_get.return_value = self._gbk_response(self.FIXTURE.read_bytes())
+
+        caps = client.fetch_market_caps_bulk(["920002", "920008"])
+
+        assert caps is not None
+        assert caps["920002"] == pytest.approx(20.65e8)
+        assert caps["920008"] == pytest.approx(6.98e8)
+        url = mock_get.call_args.args[0]
+        assert "bj920002" in url and "bj920008" in url
 
     @patch("finance_agent.data.akshare_client.requests.get")
     def test_splits_into_chunks_of_100(self, mock_get, client, monkeypatch):
