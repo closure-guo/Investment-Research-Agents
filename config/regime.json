@@ -1,0 +1,8 @@
+{
+  "thresholds": {"elevated": 0.8, "danger": 0.9},
+  "multipliers": {"normal": 1.0, "elevated": 0.5, "danger": 0.0},
+  "small_cap_quantile": 0.3,
+  "history_window": 250,
+  "min_history": 60,
+  "stale_days": 7
+}
