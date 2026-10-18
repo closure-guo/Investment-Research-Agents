@@ -262,12 +262,11 @@ describe('EventWatchlistCard 清单渲染', () => {
     expect(within(row).getByTestId('event-evidence-1').textContent).not.toContain('=')
   })
 
-  it('条款事件（source=cbb）→ 现价/转股溢价率/强赎倒计时要素；未来字段缺失时显示 —', async () => {
+  it('条款事件（source=cbb）→ 现价/转股溢价率/剩余规模/强赎倒计时要素', async () => {
     mockFetch({
       watchlist: {
         items: [
-          cbbItem({ price: 108.2, premium_rate: 12.4, call_countdown_days: 3 }),
-          cbbItem({ id: 10, price: null, premium_rate: null, call_countdown_days: null }),
+          cbbItem({ price: 108.2, premium_rate: 12.4, remaining_size: 23.5, call_countdown_days: 3 }),
         ],
       },
     })
@@ -277,12 +276,50 @@ describe('EventWatchlistCard 清单渲染', () => {
     expect(within(row).getByTestId('event-source-badge-9').textContent).toContain('条款事件')
     expect(within(row).getByTestId('event-element-9-price').textContent).toContain('108.20')
     expect(within(row).getByTestId('event-element-9-premium_rate').textContent).toContain('12.4%')
+    expect(within(row).getByTestId('event-element-9-remaining_size').textContent).toContain('23.50 亿元')
     expect(within(row).getByTestId('event-element-9-countdown').textContent).toContain('3 个交易日')
-    // 要素缺失：如实 —，不折算也不隐藏（未来增量字段）
-    const bare = screen.getByTestId('event-watchlist-row-10')
-    expect(within(bare).getByTestId('event-element-10-price').textContent).toContain('—')
-    expect(within(bare).getByTestId('event-element-10-premium_rate').textContent).toContain('—')
-    expect(within(bare).getByTestId('event-element-10-countdown').textContent).toContain('—')
+  })
+
+  it('条款事件要素缺失 → 四格均如实 —（显式 null 与键缺位两条路径都不折算、不隐藏）', async () => {
+    // cbbItem 缺省即不带四要素键（真实缺位路径）；第二条例显式 null（未来后端置空路径）
+    const missingKeys = cbbItem({ id: 10 })
+    expect('price' in missingKeys).toBe(false)
+    expect('remaining_size' in missingKeys).toBe(false)
+    mockFetch({
+      watchlist: {
+        items: [
+          missingKeys,
+          cbbItem({
+            id: 11,
+            price: null,
+            premium_rate: null,
+            remaining_size: null,
+            call_countdown_days: null,
+          }),
+        ],
+      },
+    })
+    render(<EventWatchlistCard />)
+
+    for (const [id, testId] of [
+      [10, 'event-watchlist-row-10'],
+      [11, 'event-watchlist-row-11'],
+    ] as const) {
+      const row = await screen.findByTestId(testId)
+      for (const key of ['price', 'premium_rate', 'remaining_size', 'countdown']) {
+        expect(within(row).getByTestId(`event-element-${id}-${key}`).textContent).toContain('—')
+      }
+    }
+  })
+
+  it('未知 verdict（原型链键）→ 不误取语义色，按原值中性展示', async () => {
+    mockFetch({ watchlist: { items: [item({ verdict: 'constructor' })] } })
+    render(<EventWatchlistCard />)
+
+    const badge = await screen.findByTestId('event-verdict-badge-1')
+    expect(badge.getAttribute('data-verdict')).toBe('constructor')
+    expect(badge.textContent).toContain('constructor')
+    expect(badge.getAttribute('style')).toContain('--text-tertiary')
   })
 })
 

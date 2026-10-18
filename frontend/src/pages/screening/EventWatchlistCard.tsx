@@ -122,12 +122,13 @@ interface ElementCard {
   value: string
 }
 
-/** 来源相关要素（按条目来源渲染；条款事件要素为预留读取位，缺失显示 —） */
+/** 来源相关要素（按条目来源渲染；条款事件四要素键名已冻结，缺位/显式 null 均显示 —） */
 function elementCards(item: EventWatchlistItem): ElementCard[] {
   if (item.source === 'cbb') {
     return [
       { key: 'price', label: '现价', value: fmtNumber(item.price, 2) },
       { key: 'premium_rate', label: '转股溢价率', value: fmtNumber(item.premium_rate, 1, '%') },
+      { key: 'remaining_size', label: '剩余规模', value: fmtNumber(item.remaining_size, 2, ' 亿元') },
       { key: 'countdown', label: '强赎倒计时', value: fmtDays(item.call_countdown_days) },
     ]
   }
@@ -304,7 +305,8 @@ export function EventWatchlistCard({ queue = NO_QUEUE, onAnalysisStarted }: Even
               null
             const queueLabel = queueState !== null ? QUEUE_STATE_LABEL[queueState] ?? queueState : null
             const verdictMeta =
-              item.verdict !== null && item.verdict in VERDICT_META
+              item.verdict !== null &&
+              Object.prototype.hasOwnProperty.call(VERDICT_META, item.verdict)
                 ? VERDICT_META[item.verdict as EventVerdict]
                 : { label: fmtText(item.verdict), color: 'var(--text-tertiary)' }
             const analyzeMessage = analyzeError[item.id]

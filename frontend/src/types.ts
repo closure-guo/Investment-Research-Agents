@@ -981,9 +981,11 @@ export interface EventWatchlistItem {
   prompt_fingerprint: string | null
   triaged_at: string | null
   // 条款事件（source=cbb）风险要素：后端载荷扩展时可选携带；缺失一律显示 —。
-  // 键名以 add-convertible-bond-coverage 实现期载荷为准（此处为预留读取位）。
+  // 键名已冻结（对齐 add-convertible-bond-coverage spec 的四要素：现价 / 转股溢价率 /
+  // 剩余规模（亿元口径）/ 强赎倒计时）；缺位与显式 null 同款退化。
   price?: number | null
   premium_rate?: number | null
+  remaining_size?: number | null
   call_countdown_days?: number | null
 }
 
