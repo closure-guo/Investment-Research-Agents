@@ -108,8 +108,10 @@ export default defineConfig({
       // data/factor_research/status.json（采集器运行时产物）
       // REGIME_DB_PATH 同理（delta add-crowding-regime-positioning T8）：市场温度计 E2E 的
       // seed/regime_reset 会清 regime_daily 全表，绝不能落到开发库 data/regime.db
+      // EVENTS_DB_PATH 同理（delta add-event-driven-lane T8）：事件观察区块 E2E 的
+      // seed/events_reset 会清事件线四表，绝不能落到开发库 data/events.db
       command: 'uv run uvicorn finance_agent.api:app --port 8000',
-      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', REGIME_DB_PATH: 'data/test-e2e-regime.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
+      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', REGIME_DB_PATH: 'data/test-e2e-regime.db', EVENTS_DB_PATH: 'data/test-e2e-events.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
       url: 'http://localhost:8000/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
