@@ -225,6 +225,12 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          # Judge 链路（tests/evals/test_eval_live.py 真实裁判调用）需完整 JUDGE_* 三件套：
+          # 只给 key 属"半套配置"→ judge_config_error（2026-10-18 首次真跑实证）；与本地
+          # .env 同值（judge=glm-5.3-flash@opencode）。
+          JUDGE_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          JUDGE_BASE_URL: https://opencode.ai/zen/go/v1
+          JUDGE_MODEL: openai/glm-5.3-flash
           # @live 为显式 opt-in（#158）：本地全量跑批即使凭据泄漏进环境也不触发
           # live 用例；nightly 跑批在此显式开启。
           RUN_LIVE: "1"
