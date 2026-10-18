@@ -569,3 +569,103 @@ def test_host_guard_detects_container_env(monkeypatch):
     monkeypatch.delenv("BACKFILL_IN_CONTAINER")
     monkeypatch.setattr(backfill_module, "_DOCKERENV", Path("__missing__.dockerenv"))
     assert backfill_module._running_in_container() is False
+
+
+# ── 回填收尾自检（incident 043 防护：quick_check + 重复键扫描，fail loud） ──
+
+
+def _make_db_without_pk(path, rows):
+    """构造无主键约束的同名表（模拟索引损坏后重复键可存在的历史态）。"""
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE market_snapshot (trade_date TEXT, code TEXT, name TEXT)")
+    conn.executemany("INSERT INTO market_snapshot VALUES (?,?,?)", rows)
+    conn.commit()
+    conn.close()
+
+
+def test_verify_integrity_ok_on_healthy_db(tmp_path):
+    from finance_agent.data.snapshot import init_snapshot_db
+
+    db = tmp_path / "snap.db"
+    init_snapshot_db(db)
+    result = backfill_module.verify_snapshot_integrity(db)
+    assert result["ok"] is True
+    assert result["quick_check"] == "ok"
+    assert result["duplicate_keys"] == 0
+
+
+def test_verify_integrity_detects_duplicate_keys(tmp_path):
+    db = tmp_path / "dup.db"
+    _make_db_without_pk(
+        db,
+        [
+            ("2026-10-09", "600519", "a"),
+            ("2026-10-09", "600519", "b"),
+            ("2026-10-09", "000001", "c"),
+        ],
+    )
+    result = backfill_module.verify_snapshot_integrity(db)
+    assert result["ok"] is False
+    assert result["duplicate_keys"] == 1
+
+
+def test_verify_integrity_detects_page_corruption(tmp_path):
+    """页级损坏 → quick_check 抛 DatabaseError 被捕获为 ok=False（本地实验实证路径）。"""
+    from finance_agent.data.snapshot import init_snapshot_db
+
+    db = tmp_path / "corrupt.db"
+    init_snapshot_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO snapshot_meta (key, value) VALUES ('k', ?)", ("v" * 100_000,))
+    conn.commit()
+    conn.close()
+    with open(db, "r+b") as f:  # 覆写第 2 页（4096..8192）为零 → b-tree 页损坏
+        f.seek(4096)
+        f.write(b"\x00" * 4096)
+    result = backfill_module.verify_snapshot_integrity(db)
+    assert result["ok"] is False
+    assert result["quick_check"] != "ok"
+
+
+def test_verify_integrity_missing_db_is_skipped(tmp_path):
+    result = backfill_module.verify_snapshot_integrity(tmp_path / "nope.db")
+    assert result["ok"] is True and result["skipped"] is True
+
+
+def test_main_verify_only_mode_exit_codes(tmp_path, capsys):
+    from finance_agent.data.snapshot import init_snapshot_db
+
+    db = tmp_path / "snap.db"
+    init_snapshot_db(db)
+    assert main(["--verify-only", "--db", str(db)]) == 0
+    assert "完整性" in capsys.readouterr().out
+
+    bad = tmp_path / "dup.db"
+    _make_db_without_pk(bad, [("2026-10-09", "600519", "a"), ("2026-10-09", "600519", "b")])
+    assert main(["--verify-only", "--db", str(bad)]) == 1
+    out = capsys.readouterr().out
+    assert "完整性" in out and "1" in out
+
+
+def test_main_backfill_runs_selfcheck_and_fails_loud(tmp_path, capsys, monkeypatch):
+    """回填收尾自动自检；不通过 → 退 1（fail loud），摘要带 integrity。"""
+    from finance_agent.data.snapshot import init_snapshot_db
+
+    db = tmp_path / "snap.db"
+    init_snapshot_db(db)
+    monkeypatch.setattr(
+        backfill_module,
+        "AKShareClient",
+        lambda: FakeHistoryClient(data={}),
+    )
+    monkeypatch.setattr(
+        backfill_module,
+        "verify_snapshot_integrity",
+        lambda db_path=None: {"ok": False, "quick_check": "malformed", "duplicate_keys": 3},
+    )
+    code = main(
+        ["--start", _START, "--end", _END, "--symbols", "600519", "--db", str(db), "--sleep", "0"]
+    )
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "完整性" in out and "malformed" in out
