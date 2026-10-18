@@ -283,7 +283,11 @@ def run_factor_harvest(
 
     if payload:
         import_summary = run_factor_external_import(
-            payload, panel=panel, db_path=db_path, snapshot_db_path=snapshot_db_path
+            payload,
+            panel=panel,
+            db_path=db_path,
+            snapshot_db_path=snapshot_db_path,
+            ledger_source="harvest",
         )
         summary["admitted"] = import_summary["admitted"]
         summary["rejected"] = import_summary["rejected"]

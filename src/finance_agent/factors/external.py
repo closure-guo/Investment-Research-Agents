@@ -52,8 +52,11 @@ def run_factor_external_import(
     seed: int = DEFAULT_IMPORT_SEED,
     db_path: str | Path | None = None,
     snapshot_db_path: str | Path | None = None,
+    ledger_source: str = "external",
 ) -> dict[str, Any]:
     """外部候选导入入口：DSL 表达式候选 → 预检 → 同一五道闸 → 摘要。
+
+    ``ledger_source`` 透传到候选检验账本（harvest 桥传 "harvest"；默认 "external"）。
 
     空输入 → 零摘要（无可导入候选，非错误）。预检失败与闸口拒收均计入
     ``rejections``；面板不可得/深度不足 → ``ValueError`` 上抛（fail loud）。
@@ -83,7 +86,13 @@ def run_factor_external_import(
     admitted = 0
     if admissible:
         resolved_panel = panel if panel is not None else _panel_from_snapshot(snapshot_db_path)
-        results = admit_candidates(admissible, resolved_panel, seed=seed, db_path=db_path)
+        results = admit_candidates(
+            admissible,
+            resolved_panel,
+            seed=seed,
+            db_path=db_path,
+            ledger_source=ledger_source,
+        )
         for position, result in zip(positions, results, strict=True):
             if result.factor_id is not None:
                 admitted += 1

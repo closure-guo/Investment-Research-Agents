@@ -59,9 +59,12 @@ T5 替换闸④⑤（池级增量 + 样本外）——占位桩已全部删除�
 from __future__ import annotations
 
 import enum
+import logging
 import math
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +99,8 @@ from finance_agent.factors.library import (
     set_pool_increment,
     set_status,
 )
+
+logger = logging.getLogger(__name__)
 
 # 闸编号（编排契约；0 = 结构查重前置闸，1–5 = 五道闸）
 GATE_DEDUP = 0
@@ -324,6 +329,84 @@ def check_significance(ic_series_map: dict[str, pd.Series], *, seed: int) -> dic
             detail={**details[key], "p_value": p_values[key], "p_adj": p_adj, "q": BH_FDR_Q},
         )
     return results
+
+
+def _record_ledger(
+    candidates: list[dict],
+    outcomes: dict[int, AdmissionResult],
+    *,
+    source: str,
+    db_path: str | Path | None,
+) -> None:
+    """候选检验账本单点写入（add-fdr-candidate-ledger / issue #355 使能层）。
+
+    - 所有入口（月批/收割/builtin/外部导入）经本函数统一记账，杜绝逐入口接线遗漏；
+    - 闸③ 读数（p_value/p_adj/q/n_hypotheses）从该候选实际执行过的闸③结果 detail
+      提取；闸①②拒收（未做置换检验）p 值记 NULL，不计入跨批 FDR 家族；
+    - 记账失败只记日志不上抛：账本属观测面，不得改变准入结论（与闸口 fail-open 同纪律）。
+    """
+    from finance_agent.factors.library import record_admission_ledger
+
+    batch_id = f"{datetime.now().strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    entries: list[dict[str, Any]] = []
+    for position in range(len(candidates)):
+        result = outcomes.get(position)
+        if result is None:
+            continue
+        gate3_detail: dict[str, Any] = {}
+        for gate in result.gates:
+            if str(gate.gate) == str(GATE_SIGNIFICANCE):
+                gate3_detail = dict(gate.detail or {})
+                break
+        entries.append(
+            {
+                "batch_id": batch_id,
+                "source": source,
+                "expression": str(candidates[position].get("expression") or ""),
+                "p_value": gate3_detail.get("p_value"),
+                "p_adj": gate3_detail.get("p_adj"),
+                "q": gate3_detail.get("q"),
+                "n_hypotheses": gate3_detail.get("n_hypotheses"),
+                "admitted": result.factor_id is not None,
+                "factor_id": result.factor_id,
+                "rejected_gate": result.rejected_gate,
+            }
+        )
+    try:
+        record_admission_ledger(entries, db_path=db_path)
+    except Exception:  # noqa: BLE001 - 观测面失败不得改变准入结论
+        logger.exception("候选检验账本写入失败（忽略，不影响准入结论）")
+
+
+def cumulative_fdr_preview(entries: list[dict[str, Any]], *, q: float = BH_FDR_Q) -> dict[str, Any]:
+    """全局 BH 反事实预览（纯函数，issue #355 读数；MUST NOT 改变任何准入结论）。
+
+    把账本内全部非空 p 值作为一个**跨批次**家族做一次 BH 校正，回答「若执行全局
+    账本，今日读数会怎样」：family_size / significant_count / significant（行清单，
+    含 batch/source/expression/factor_id）。空家族 → 全零结果。
+    """
+    tested = [e for e in entries if isinstance(e.get("p_value"), (int, float))]
+    if not tested:
+        return {"q": q, "family_size": 0, "significant_count": 0, "significant": []}
+    keyed = {str(e["id"]): float(e["p_value"]) for e in tested}
+    adjusted = benjamini_hochberg_adjust(keyed)
+    significant = [e for e in tested if adjusted[str(e["id"])] <= q]
+    return {
+        "q": q,
+        "family_size": len(tested),
+        "significant_count": len(significant),
+        "significant": [
+            {
+                "batch_id": e.get("batch_id"),
+                "source": e.get("source"),
+                "expression": e.get("expression"),
+                "p_value": e.get("p_value"),
+                "p_adj": adjusted[str(e["id"])],
+                "factor_id": e.get("factor_id"),
+            }
+            for e in significant
+        ],
+    }
 
 
 # ── 训验切分（闸④/闸⑤ 共用） ───────────────────────────────────────────────
@@ -625,6 +708,7 @@ def admit_candidates(
     *,
     seed: int,
     db_path: str | Path | None = None,
+    ledger_source: str = "unknown",
 ) -> list[AdmissionResult]:
     """批量准入编排：结构查重 → 闸①② → 闸③ → 闸④ → 闸⑤ → 入库(active) → 保种。
 
@@ -738,4 +822,5 @@ def admit_candidates(
     if len(outcomes) != len(candidates):
         missing = len(candidates) - len(outcomes)
         raise RuntimeError(f"编排缺陷：{missing} 条候选未产出准入结论")
+    _record_ledger(candidates, outcomes, source=ledger_source, db_path=db_path)
     return [outcomes[position] for position in range(len(candidates))]

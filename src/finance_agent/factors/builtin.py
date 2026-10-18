@@ -132,7 +132,7 @@ def register_builtins(
         }
         for item in items
     ]
-    return admit_candidates(candidates, panel, seed=seed, db_path=db_path)
+    return admit_candidates(candidates, panel, seed=seed, db_path=db_path, ledger_source="builtin")
 
 
 def missing_builtins(*, db_path: str | Path | None = None) -> list[BuiltinFactor]:
