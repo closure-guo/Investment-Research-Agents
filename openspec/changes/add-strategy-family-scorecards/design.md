@@ -4,20 +4,22 @@
 
 | family_id | 名称 | 数据源 | 收益口径 | 费后处理 |
 |---|---|---|---|---|
-| decision | 观点线 | `decision_log` 已结算行（`status != 'open'`） | 虚拟结算（`decision_return`） | 净 = 毛 − 往返成本估算率（见下） |
-| execution | 执行线 | `orders` 已成交流水 + `paper_equity` 净值序列 | 仿真成交（已含费） | 已含费，无二次扣减 |
+| predictions | 观点线 | `predictions` 已判定行（`status ∈ {resolved_win, resolved_loss, resolved_neutral}`，与既有 `prediction_stats` 分母一致；`avoidance`/`unresolvable`/`duplicate_of_day` 排除） | 虚拟结算（`raw_return`） | 净 = 毛 − 往返成本估算率（见下） |
+| execution | 执行线 | `paper_equity` 净值序列 + `positions` 当前持仓 | 组合级日收益（净值曲线派生） | 已含费（撮合费用模型），无二次扣减 |
+
+> 注：`decision_log`（`outcome/store.py`）为存量/测试链——生产写入已迁移至 `predictions`（`api.py::_persist_decision_log` 委托 `persist_prediction_from_accumulated`），故 v1 不纳入 `decision_log`，避免口径混淆。
 
 ## 口径细则（先登记 `docs/evals/metrics.md` §1，与本节一致）
 
-- **成本估算率（decision 族）**：复用 `config/matching_engine.json` 参数 + 名义仓位常量 `SCORECARD_NOTIONAL=100_000`：
+- **成本估算率（predictions 族）**：复用 `config/matching_engine.json` 参数 + 名义仓位常量 `SCORECARD_NOTIONAL=100_000`：
   - 佣金 `max(commission_rate × 名义仓位, min_commission)` × 2（双边）；
   - 印花税 `stamp_tax_rate`（卖出单边）；
   - 滑点取中档 `slippage_rate`（0.001）× 2；
   - 合计 ≈ 0.30%（0.0005 + 0.0005 + 0.002），参数同源撮合配置，禁止复制。
-- **最大回撤（族级）**：按结算日聚合当日样本等权收益 → 日度收益序列 → 复利累计净值 → `MDD = max(1 − nav/峰值)`；结算日样本 < 20 → null + `insufficient_history`。
-- **容量提示**：最近 20 个样本标的，各取近 20 交易日日均成交额（快照 `amount` 均值；缺失时回填表回退），取最小值 × 参与率上限 1% → 建议资金上限；缺数据标的排除并在槽位留痕，全部缺失 → null + `no_liquidity_data`。
-- **极端样本**：`decision_return ≤ EXTREME_LOSS_THRESHOLD`（默认 −0.15，可配置）；清单含 ticker / 结算日 / 收益 / 口径标注。
-- **胜率定位**：输出保留 `win_rate` 等字段但置于四槽之后；静态核查无自动处置/门禁/告警引用。
+- **最大回撤（族级）**：按日期（`resolved_at` 前 10 字符）聚合当日样本等权收益 → 日度收益序列 → 复利累计净值 → `MDD = max(1 − nav/峰值)`；结算日样本 < 20 → null + `insufficient_history`。执行族回撤直接用 `paper_equity` 净值序列（同一 MDD 函数）。
+- **容量提示**：最近 20 个样本标的（predictions：最近判定样本的 symbol；execution：当前持仓 symbol），各取近 20 交易日日均成交额（快照 `amount` 均值，经 `read_bars`），取最小值 × 参与率上限 1% → 建议资金上限；缺数据标的排除并在槽位留痕，全部缺失 → null + `no_liquidity_data`。
+- **极端样本**：按族阈值（predictions 默认 −0.15、execution 组合级默认 −0.05，具名常量可配置）；清单含 ticker / 日期 / 收益 / 口径标注。
+- **胜率定位**：输出保留 `win_rate`（predictions：`resolved_win` 占比）但置于四槽之后；静态核查无自动处置/门禁/告警引用。
 
 ## 端点载荷（GET /api/scorecards，只读）
 

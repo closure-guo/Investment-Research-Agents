@@ -18,6 +18,6 @@
 
 - 口径：`docs/evals/metrics.md` §1 新增小节；非实验轮，不加时间线行。
 - 代码：`src/finance_agent/outcome/scorecards.py`（新增，纯函数 + 只读查询）+ `api.py`（新端点）+ `frontend`（战绩页区块 + types）。
-- 数据：无新表——只读既有 `decision_log` / paper 台账 / 组合净值曲线 / 快照成交额。
+- 数据：无新表——只读既有 `predictions` / `paper_equity` / `positions` / 快照成交额。
 - E2E：战绩页成绩单区块入默认套件（stub 数据，不 mock 业务接口）。
 - 非目标：不做选股族与事件族（注册表可扩展，事件族由后续变更登记）；不做任何自动处置；不改既有战绩统计的输出行为（纯增量）。
