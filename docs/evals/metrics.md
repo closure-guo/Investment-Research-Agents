@@ -245,6 +245,47 @@ horizon 默认 **5 个交易日**（可配置）；结算日 = 入场日之后�
 horizon 默认 T+5 独立于观点线 T+20，MUST NOT 混入观点统计（predictions 族样本只取 `predictions` 表已判定行，两者互不包含对方样本）。
 事件线 v1 为纯观察/研究通道：不接 regime 系数、不进执行链目标（避免与 paper 台账双重记账）。
 
+### 1.16 含退市股池与小票通道（delta `add-microcap-lane-guardrails`，2026-10-18 登记）
+
+**退市清单口径（来源与字段映射）**：两所清单合并 —— 沪 `ak.stock_info_sh_delist()`
+（实测列 `公司代码 / 公司简称 / 上市日期 / 暂停上市日期`，2026-10-18 本机 159 行）+
+深 `ak.stock_info_sz_delist()`（实测列 `证券代码 / 证券简称 / 上市日期 / 终止上市日期`，本机 209 行）；
+统一字段 `code / name / list_date / delist_date / source`。
+**语义注明（不得误读）**：沪清单的日期列是「**暂停上市日期**」而非交易所正式退市日，本口径将其映射为
+`delist_date` 并保留 `source="sh_suspend"` 供审计（深市源列名「终止上市日期」→ `source="sz_delist"`）；
+消费方以 `source` 区分两类日期语义，MUST NOT 把沪源 `delist_date` 读作交易所退市日。
+抓取失败/空 → 空列表 + ERROR 留痕（明细类约定），MUST NOT 以空表冒充成功。
+落库：`security_master` 扩展列 `delist_date`（ALTER 增量迁移，先例 `selection_mode`）；退市清单经
+`upsert_delisted_masters` 幂等 upsert（`COALESCE` 保值，不因部分拉取失败清空已知字段）；
+**生产触发点** = 快照日批主表刷新分支（名单为空或每周一），与上市清单同频，失败只 WARN 不失败整批。
+
+**池可见性（防幸存者偏差）**：对时点 t，标的可见当且仅当 `上市日 ≤ t ≤ 退市日`（含边界）。
+`delist_date` 缺失按「未退市」处理（`list_date` 缺失时下界不约束——不因缺数据静默剔除，
+与「无价格历史的退市标的如实标注缺失」同纪律，MUST NOT 静默剔除）；
+退市标的价格历史经 `scripts/backfill_delisted.py` 按 `list_date..delist_date` 窗口补采
+（复用既有回填通道，回填行不含状态位/前收盘，勿接 rebase/停牌合成链）；
+源无历史 → `history_missing` 计数 + 代码明细如实标注，不伪造。
+`security_master` 的既有**隐式**退市口径（快照 D2：不在 master 名单 → 不补行）保留不动；
+两口径关系：显式 `delist_date` 供池可见性判定，隐式「不在名单」仅用于停牌合成（见 `snapshot.py` 注释）。
+
+**小票通道档位（microcap，单一来源 `screening/constraints.py`）**：`MICROCAP_THRESHOLDS`
+= `min_avg_amount_20d` **1000 万元**（`MICROCAP_MIN_AVG_AMOUNT_20D = 1e7`）、
+`min_trading_days` / `min_liquidity_history_days` 同主档；建议执行约束（**记录字段**，v1 不下单）：
+单票上限默认 **5%**（`MICROCAP_SUGGESTED_SINGLE_CAP = 0.05`）、滑点档位提升一档
+（`MICROCAP_SLIPPAGE_TIER_BUMP = 1`）。主档（main）逐字不变（`DEFAULT_THRESHOLDS` 与既有调用路径）。
+通道批次与主档批次并存于 `screening_batches`（列 `pool='microcap'`，主键 `(trade_date, pool)`；
+读侧默认 `pool='main'`，既有页面/接口口径零变化）。
+
+**前置门禁（两判据，纯代码检查）**：
+- **退市池就绪** `delist_ready` = `security_master` 含 ≥1 条 `delist_date` 非空记录；
+- **拥挤度数据就绪** `regime_ready` = `regime_daily` 最新行日期距判定日 ≤ **7 个自然日**
+  （复用 `outcome/regime/model.py::latest_regime`；陈旧阈值同 §1.14）。
+
+两判据齐备 → 批次记录 `frontier_gate="ready"`（**可执行候选**，仍不自动产生订单）；
+缺任一 → `frontier_gate="observation_only:missing=<要点列表>"`（要点 ∈ `delist_pool` / `regime_data`，
+逗号分隔）并披露缺失前置，MUST NOT 静默按可执行对待。
+**v1 MUST NOT 向执行链产生订单**（不接 `execution/`、不进目标权重；执行接通属后续立项）。
+
 ---
 
 ## 2. 时间线（每轮一行，收口时追加）
