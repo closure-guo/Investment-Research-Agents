@@ -41,6 +41,10 @@ services:
     volumes:
       - ./reports:/app/reports
       - ./data:/app/data
+      # 运维脚本只读挂载（issue #344）：快照回填等 ops 脚本改在容器内执行——
+      # 宿主机写 WAL 与容器读跨 bind mount 争用会令容器侧读库全不可用；容器内
+      # 读写同侧（`docker compose exec -T backend python scripts/...`）。
+      - ./scripts:/app/scripts:ro
     depends_on:
       langfuse-web:
         condition: service_started
