@@ -284,6 +284,10 @@ data/factor_research/
 data/test-e2e-factor-research-status.json*
 data/test-e2e-factor-research-control.json*
 data/execution.db*
+# 业绩预告事件线库（delta add-event-driven-lane：本地运行时数据 + E2E 隔离库，
+# 同 data/screening.db / data/regime.db 处置；env EVENTS_DB_PATH 可覆盖）
+data/events.db*
+data/test-e2e-events.db*
 data/test-repro.db*
 data/*.corrupt-backup
 

@@ -97,6 +97,10 @@ def _isolate_runtime_dbs(request, tmp_path):
     # 调用期读 env；省略 regime_db_path 的用例同样不得读/写开发库 data/regime.db）
     old_regime_env = os.environ.get("REGIME_DB_PATH")
     os.environ["REGIME_DB_PATH"] = str(tmp_path / "runtime-regime.db")
+    # ⑥ EVENTS_DB_PATH：add-event-driven-lane（outcome/events/model.py 同款调用期读
+    # env；省略 db_path 的用例同样不得读/写开发库 data/events.db）
+    old_events_env = os.environ.get("EVENTS_DB_PATH")
+    os.environ["EVENTS_DB_PATH"] = str(tmp_path / "runtime-events.db")
     try:
         yield tmp_db
     finally:
@@ -117,6 +121,10 @@ def _isolate_runtime_dbs(request, tmp_path):
             os.environ.pop("REGIME_DB_PATH", None)
         else:
             os.environ["REGIME_DB_PATH"] = old_regime_env
+        if old_events_env is None:
+            os.environ.pop("EVENTS_DB_PATH", None)
+        else:
+            os.environ["EVENTS_DB_PATH"] = old_events_env
 
 
 @pytest.fixture
