@@ -892,6 +892,59 @@ export interface ScreeningAnalyzeResponse {
   removed: ScreeningRemoval[]
 }
 
+// 选股页市场温度计（delta add-crowding-regime-positioning T5；GET /api/regime）。
+// 键名权威源 `src/finance_agent/outcome/regime/payload.py`；history 行为
+// `regime_daily` 原始行（升序，含分位列）。available=false 时仅携带原因码。
+export type RegimeState = 'normal' | 'elevated' | 'danger'
+export type RegimeUnavailableReason = 'missing' | 'corrupt'
+
+export interface RegimeIndicatorValue {
+  value: number | null
+  pctile: number | null
+}
+
+export interface RegimeIndicators {
+  small_cap_share: RegimeIndicatorValue
+  up_count: RegimeIndicatorValue
+  down_count: RegimeIndicatorValue
+  limit_up_count: RegimeIndicatorValue
+  limit_down_count: RegimeIndicatorValue
+  total_amount: RegimeIndicatorValue
+}
+
+export interface RegimeHistoryRow {
+  trade_date: string
+  small_cap_share: number | null
+  up_count: number | null
+  down_count: number | null
+  flat_count: number | null
+  limit_up_count: number | null
+  limit_down_count: number | null
+  total_amount: number | null
+  small_cap_share_pctile: number | null
+  total_amount_pctile: number | null
+  computed_at: string
+}
+
+export interface RegimeAvailablePayload {
+  available: true
+  as_of: string
+  state: RegimeState
+  multiplier: number
+  reasons: string[]
+  indicators: RegimeIndicators
+  history: RegimeHistoryRow[]
+  age_days: number
+  stale: boolean
+}
+
+export interface RegimeUnavailablePayload {
+  available: false
+  reason: RegimeUnavailableReason
+}
+
+export type RegimePayload = RegimeAvailablePayload | RegimeUnavailablePayload
+
 // 选股批次历史（delta add-daily-ops-page：GET /api/screening/batches 载荷行）。
 // 字段名逐字对齐 `src/finance_agent/screening/store.py::list_batches`（不猜测）。
 export interface ScreeningBatch {
