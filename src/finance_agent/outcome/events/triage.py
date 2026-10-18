@@ -327,7 +327,5 @@ def triage_forecasts(
         "prompt_fingerprint": prompt_fingerprint,
         "warnings": warnings,
     }
-    _emit_trace_metadata(
-        {k: v for k, v in result.items() if k != "warnings"} | {"warnings": warnings}
-    )
+    _emit_trace_metadata(result)
     return result

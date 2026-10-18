@@ -80,6 +80,19 @@ def _code(symbol: str) -> str:
     return str(symbol).split(".")[0]
 
 
+def _symbol_for(code: str) -> str:
+    """6 位裸码 → 库内 symbol 后缀（交易所映射与 ``AKShareClient._to_sina_symbol`` 同源）。
+
+    92/4/8 号段（北交所）→ ``.BJ``，6/9 → ``.SH``，其余 → ``.SZ``（与 predictions
+    的 6→SH 简化口径相比更准；北交所预告不再被误标 ``.SZ``）。
+    """
+    if code.startswith("92") or code.startswith(("4", "8")):
+        return f"{code}.BJ"
+    if code.startswith(("6", "9")):
+        return f"{code}.SH"
+    return f"{code}.SZ"
+
+
 def _norm_kline(frame: pd.DataFrame | None) -> pd.DataFrame | None:
     """kline 日期列归一 ``YYYY-MM-DD`` 字符串并升序排列；空/None → None。"""
     if frame is None or frame.empty:
@@ -146,7 +159,7 @@ def _tradable_on(
     close = _positive(kline_row.get("收盘"))
     high = _positive(kline_row.get("最高"))
     low = _positive(kline_row.get("最低"))
-    if None in (open_, close, high, low):
+    if open_ is None or close is None or high is None or low is None:
         logger.warning("kline OHLC 不完整（%s/%s），按不可成交顺延（fail-closed）", code, day)
         return False, "ohlc_missing"
     up_sealed, _down_sealed = sealed_flags_from_ohlc(open_, high, low, close, prev_close)
@@ -244,7 +257,7 @@ def _enter_one(
         note = f"{_DEFERRED_PREFIX}{','.join(deferrals)}" if deferrals else None
         insert_journal(
             forecast_key=forecast_key(forecast),
-            symbol=f"{code}.SH" if code.startswith("6") else f"{code}.SZ",
+            symbol=_symbol_for(code),
             entry_date=day,
             entry_price=open_price,
             horizon_days=horizon_days,

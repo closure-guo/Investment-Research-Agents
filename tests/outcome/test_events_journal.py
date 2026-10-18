@@ -381,3 +381,14 @@ class TestSettleDue:
         summary = settle_due(as_of="2025-04-24", kline_client=client, calendar=None, db_path=db)
         assert summary["settled"] == 1
         assert list_settled_journal(db_path=db)[0]["settle_date"] == "2025-04-23"
+
+
+def test_symbol_suffix_mapping_covers_bse_and_sz() -> None:
+    """代码 → 库内 symbol 后缀：北交所 92/4/8 → .BJ（不误标 .SZ），6/9 → .SH。"""
+    from finance_agent.outcome.events.journal import _symbol_for
+
+    assert _symbol_for("600519") == "600519.SH"
+    assert _symbol_for("920188") == "920188.BJ"
+    assert _symbol_for("830799") == "830799.BJ"
+    assert _symbol_for("000001") == "000001.SZ"
+    assert _symbol_for("300750") == "300750.SZ"
