@@ -382,12 +382,12 @@ class TestCitationCoverage:
         )
         assert "不写来源 ID" in block
 
-    def test_source_id_digits_trip_echo_check(self, db: Path):
-        """已知交互（E2E 实测，如实钉死）：interpretation 写来源 ID 且 ID 数字无法按
-        缩放集匹配 stated_value → citation 回声校验判 internal_inconsistency；
-        块内「不写来源 ID」指令即此交互的缓解；校验器侧（ID token 识别）列为后续项。
+    def test_source_id_digits_excluded_from_echo(self, db: Path):
+        """issue #327-2 收口：interpretation 写来源 ID（p_<hex>/c_<hex>）时，
+        ID 内数字不得被回声校验读作数值候选——修复前判 internal_inconsistency
+        误报（已由块内「不写来源 ID」指令缓解，本修复在校验器侧根治）。
         """
-        _insert_settled(db, "p_own_2", "300750.SZ", "2026-09-01T09:00:00", raw_return=0.181)
+        _insert_settled(db, "p_2f2d5230155c", "300750.SZ", "2026-09-01T09:00:00", raw_return=0.181)
         out = render_memory_state({"stock_code": "300750"}, db_path=db, as_of=AS_OF)
         state = {"stock_code": "300750", **out}
 
@@ -402,8 +402,18 @@ class TestCitationCoverage:
                 metric_name="raw_return",
             )
 
-        (with_id,) = verify_claims([_claim("历史决策 p_own_2 结算收益为正")], state)
-        (without_id,) = verify_claims([_claim("历史决策结算收益为正")], state)
+        # 来源 ID 在场：ID 内数字（此处 hex 中的数字）不构成回声候选 → PASS
+        (with_id,) = verify_claims([_claim("历史决策 p_2f2d5230155c 结算收益为正")], state)
+        assert with_id.status == "PASS", with_id
 
-        assert with_id.bucket == "internal_inconsistency"
+        # 条款 ID（c_<hex>）同族：同样豁免
+        (with_clause_id,) = verify_claims([_claim("依据条款 c_9a1b2c3d4e5f 判定为正")], state)
+        assert with_clause_id.status == "PASS", with_clause_id
+
+        # 反掩蔽控制：ID 之外的独立数值仍照常参与回声（2.5% ≠ 0.181 → FAIL）
+        (control,) = verify_claims([_claim("历史决策 p_2f2d5230155c 结算收益 2.5% 为正")], state)
+        assert control.bucket == "internal_inconsistency"
+
+        # 对照：不写 ID 时行为不变
+        (without_id,) = verify_claims([_claim("历史决策结算收益为正")], state)
         assert without_id.status == "PASS"
