@@ -18,7 +18,7 @@ import copy
 
 import pytest
 
-from finance_agent.outcome.events.cb_status import derive_redeem_status
+from finance_agent.outcome.events.cb_status import derive_redeem_status, parse_count_text
 
 # 2026-10-16 为周五；日历跨周末（10-17/18 非交易日）
 _CALENDAR = [
@@ -68,6 +68,38 @@ class TestDayCountParsing:
         )
         assert result["days_done"] is None and result["days_needed"] is None
 
+    def test_slash_date_is_not_read_as_day_count(self):
+        """斜杠日期不得被当成天计数（评审 F1 复现：`2026/10/27` 旧正则读出 2026/10 → 误判 triggered）。"""
+        result = derive_redeem_status(
+            _event(
+                count_text="临近到期 2026/10/27 最后交易",
+                redeem_status="",
+                last_trade_date="2026-10-27",
+            ),
+            as_of="2026-10-16",
+            calendar=_CALENDAR,
+        )
+        assert result["days_done"] is None and result["days_needed"] is None
+        assert result["state"] == "undetermined", "日期串不得推出 triggered（MUST NOT 猜测）"
+
+    def test_pipe_structure_is_required(self):
+        """天计数按「已触发/所需 | 上限」结构锚定：无竖线的裸 `N/M` 不解析。"""
+        assert parse_count_text("12/15 | 30") == (12, 15)
+        assert parse_count_text("  3/15 ｜ 30 ") == (3, 15)
+        assert parse_count_text("10/27") == (None, None)
+        assert parse_count_text("临近到期 2026/10/27 最后交易") == (None, None)
+
+    def test_out_of_range_counts_are_unparseable(self):
+        """越界值（超出「已触发 ≤ 所需」结构）一律不可判定，不判 triggered。"""
+        for text in ("16/15 | 30", "5/0 | 30", "2026/27 | 30"):
+            result = derive_redeem_status(
+                _event(count_text=text, redeem_status=""),
+                as_of="2026-10-16",
+                calendar=_CALENDAR,
+            )
+            assert result["state"] == "undetermined", text
+            assert result["days_done"] is None and result["days_needed"] is None, text
+
 
 class TestStateDecisions:
     def test_announced_takes_precedence(self):
@@ -96,6 +128,17 @@ class TestStateDecisions:
             calendar=_CALENDAR,
         )
         assert result["state"] == "counting"
+
+    def test_counting_without_last_trade_date_notes_the_gap(self):
+        """counting/triggered 且缺 last_trade_date → 倒计时 null 且 note 指明缺字段（§1.17 字面一致）。"""
+        result = derive_redeem_status(
+            _event(count_text="7/15 | 30", redeem_status="", last_trade_date=None),
+            as_of="2026-10-16",
+            calendar=_CALENDAR,
+        )
+        assert result["state"] == "counting"
+        assert result["trading_days_to_last"] is None
+        assert "last_trade_date" in str(result["note"])
 
     def test_counting_when_as_of_before_announce(self):
         """公告日之后的判断才计状态：as_of < announce_date 时不得判触发。"""

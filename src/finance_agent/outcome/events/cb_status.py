@@ -28,8 +28,14 @@ from datetime import date
 from typing import Any
 
 # 天计数文本「已触发天数/所需天数 | 上限天数」（样本 ``"12/15 | 30"``；兼容半/全角竖线、
-# 任意空白与前后缀文案——源里同列混有「临近到期 <span>…」等到期提醒）
-_COUNT_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+# 任意空白与前后缀文案——源里同列混有「临近到期 <span>…」等到期提醒）。
+#
+# 结构锚定（评审 F1）：**必须带 ``| 上限天数`` 段**，且数字两侧不得再粘数字/斜杠——
+# 源同列混入的日期文案（实探 6 条 ``"临近到期 …2026-10-27 最后交易"``；斜杠变体
+# ``2026/10/27`` 亦可出现）否则会被裸 ``N/M`` 正则读成 ``2026/10`` / ``10/27``，
+# 进而推出 ``triggered``（违反「要素缺失 → 不可判定，MUST NOT 猜测」）。
+# 实测 317 行强赎表中 311 条天计数全部满足本结构，6 条到期文案如实不解析。
+_COUNT_RE = re.compile(r"(?<![\d/])(\d{1,3})\s*/\s*(\d{1,3})\s*[|｜]\s*(\d{1,3})(?!\d)")
 
 # 源状态取值（集思录 ``强赎状态``；空串 = 未见公告）
 _STATUS_ANNOUNCED = "已公告强赎"
@@ -42,13 +48,20 @@ STATE_UNDETERMINED = "undetermined"
 
 
 def parse_count_text(count_text: Any) -> tuple[int | None, int | None]:
-    """天计数文本 → ``(已触发天数, 所需天数)``；不可解析 → ``(None, None)``。"""
+    """天计数文本 → ``(已触发天数, 所需天数)``；不可解析/越界 → ``(None, None)``。
+
+    合理性校验：``所需天数 ≥ 1`` 且 ``已触发天数 ≤ 所需天数``（越界值一律不可判定——
+    宁可如实缺值，也不由可疑文本推出 ``triggered``）。
+    """
     if count_text is None:
         return None, None
     match = _COUNT_RE.search(str(count_text))
     if match is None:
         return None, None
-    return int(match.group(1)), int(match.group(2))
+    days_done, days_needed = int(match.group(1)), int(match.group(2))
+    if days_needed < 1 or days_done > days_needed:
+        return None, None
+    return days_done, days_needed
 
 
 def _iso_or_none(value: Any) -> str | None:
@@ -133,6 +146,10 @@ def derive_redeem_status(
         state = STATE_TRIGGERED
     else:
         state = STATE_COUNTING
+
+    if state in (STATE_COUNTING, STATE_TRIGGERED) and last_trade_date is None:
+        # 未公告（尚在计数/刚触发）时源本无最后交易日：倒计时如实 null，note 指明缺字段
+        notes.append("缺 last_trade_date（无最后交易日，倒计时不可得）")
 
     return {
         "state": state,
