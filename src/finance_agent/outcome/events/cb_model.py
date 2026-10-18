@@ -132,6 +132,8 @@ def upsert_cb_masters(
     """幂等写入标的（``ON CONFLICT(code) DO UPDATE`` 覆盖为最新值）；返回写入行数。
 
     空输入 → 0 且不建库（与 ``upsert_forecasts`` 同款）。``updated_at`` 缺省取当前时刻。
+    **``remain_scale`` 用 ``COALESCE`` 保值**：日常同步的源（``bond_zh_cov``）无剩余规模
+    列、恒写 NULL，不得因此清空日后另行回填的值（评审 F6；有值则照常覆盖）。
     """
     payload = [dict(row) for row in rows]
     if not payload:
@@ -142,7 +144,15 @@ def upsert_cb_masters(
     try:
         columns = ", ".join(_CB_MASTER_COLUMNS)
         placeholders = ", ".join("?" * len(_CB_MASTER_COLUMNS))
-        updates = ", ".join(f"{col}=excluded.{col}" for col in _CB_MASTER_COLUMNS if col != "code")
+        updates = ", ".join(
+            (
+                "remain_scale=COALESCE(excluded.remain_scale, cb_master.remain_scale)"
+                if col == "remain_scale"
+                else f"{col}=excluded.{col}"
+            )
+            for col in _CB_MASTER_COLUMNS
+            if col != "code"
+        )
         sql = (
             f"INSERT INTO cb_master ({columns}) VALUES ({placeholders}) "  # noqa: S608
             f"ON CONFLICT(code) DO UPDATE SET {updates}"
@@ -202,19 +212,19 @@ def upsert_cb_events(
 ) -> int:
     """幂等写入条款事件（``ON CONFLICT(event_key)`` 刷新为最新观测）；返回写入行数。
 
-    ``event_key`` 缺省由 ``(code, event_type, announce_date)`` 合成（调用方亦可显式传）。
+    ``event_key`` 缺省由 ``(code, event_type, announce_date)`` 合成（调用方亦可显式传）；
+    **显式 ``None``/空串视同缺省**——SQLite 的 TEXT PRIMARY KEY 允许 NULL，空键会绕过
+    唯一约束产生重复行（评审 F6）。
     """
     payload: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        item.setdefault(
-            "event_key",
-            cb_event_key(
+        if not item.get("event_key"):
+            item["event_key"] = cb_event_key(
                 str(item.get("code") or ""),
                 str(item.get("event_type") or ""),
                 str(item.get("announce_date") or ""),
-            ),
-        )
+            )
         payload.append(item)
     if not payload:
         return 0

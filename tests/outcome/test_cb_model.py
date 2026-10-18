@@ -155,6 +155,17 @@ class TestMasterUpsert:
         upsert_cb_masters([_master()], db_path=db)
         assert list_cb_masters(db_path=db)[0]["remain_scale"] is None
 
+    def test_master_upsert_coalesces_remain_scale(self, tmp_path):
+        """剩余规模回填不被日常同步清空（COALESCE 保值；源缺列只写 NULL 的日行不动既有值）。"""
+        db = tmp_path / "events.db"
+        upsert_cb_masters([_master(remain_scale=5.0)], db_path=db)
+        upsert_cb_masters([_master(remain_scale=None, premium_rate=2.5)], db_path=db)
+        row = list_cb_masters(db_path=db)[0]
+        assert row["remain_scale"] == 5.0, "缺值日行不得清空已回填的剩余规模"
+        assert row["premium_rate"] == 2.5, "其余字段照常刷新"
+        upsert_cb_masters([_master(remain_scale=4.2)], db_path=db)
+        assert list_cb_masters(db_path=db)[0]["remain_scale"] == 4.2, "有值则覆盖"
+
 
 class TestQuoteUpsert:
     def test_unique_per_trade_date_and_code(self, tmp_path):
@@ -191,6 +202,17 @@ class TestEventUpsert:
         db = tmp_path / "events.db"
         upsert_cb_events([_event(announce="2026-10-15"), _event(announce="2026-10-16")], db_path=db)
         assert len(list_cb_events(db_path=db)) == 2
+
+    def test_explicit_none_event_key_is_synthesized(self, tmp_path):
+        """显式 ``event_key=None`` 不得绕过合成（否则 NULL 主键在 SQLite 下不唯一 → 重复行）。"""
+        db = tmp_path / "events.db"
+        row = _event()
+        row["event_key"] = None
+        upsert_cb_events([row], db_path=db)
+        rows = list_cb_events(db_path=db)
+        assert [r["event_key"] for r in rows] == ["113046|强赎|2026-10-15"]
+        assert upsert_cb_events([{**_event(), "event_key": None}], db_path=db) == 1
+        assert len(list_cb_events(db_path=db)) == 1, "空键重写仍为同一行"
 
     def test_find_cb_event_looks_up_without_announce_date(self, tmp_path):
         """首次观测日语义：重跑按 (代码, 类型) 找既有行复用其 announce_date。"""

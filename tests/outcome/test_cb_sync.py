@@ -205,11 +205,16 @@ class TestSyncQuotes:
         assert client.sources_seen["cb_quotes"] == set()
         assert not db.exists()
 
-    def test_calendar_unavailable_falls_back_to_as_of(self, tmp_path):
+    def test_calendar_unavailable_skips_quotes(self, tmp_path):
+        """日历不可得 → 跳过落行（不得把上一交易日价位写成当日行情；评审 F4 口径）。"""
         db = tmp_path / "events.db"
         client = _FakeClient(quotes=[{"code": "113046", "close": 101.0, "amount": 1.0}])
         summary = sync_cb_quotes(db_path=db, client=client, trade_date="2026-10-18", calendar=None)
-        assert summary["upserted"] == 1 and summary["skipped_reason"] is None
+        assert summary["upserted"] == 0
+        assert summary["skipped_reason"] == "calendar_unavailable"
+        assert summary["fetched"] == 0, "跳过时不得发起抓取"
+        assert client.sources_seen["cb_quotes"] == set()
+        assert not db.exists()
 
     def test_failure_writes_nothing(self, tmp_path):
         db = tmp_path / "events.db"

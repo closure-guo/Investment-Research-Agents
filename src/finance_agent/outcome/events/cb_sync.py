@@ -136,11 +136,24 @@ def sync_cb_quotes(
     """日行情同步：``bond_zh_hs_cov_spot`` → ``cb_quotes``（``交易日+代码`` 唯一）。
 
     ``calendar`` 给定时做交易日校验：非交易日 → 跳过落库（``skipped_reason=
-    non_trading_day``，且不发起抓取）；``calendar=None``（日历不可得）→ 退化为按
-    ``trade_date`` 落库并 WARN（缺日历不阻断日批）。
+    non_trading_day``，且不发起抓取）；``calendar=None``（日历不可得）→ **同样跳过**
+    （``skipped_reason=calendar_unavailable``，且不发起抓取）——缺日历无法确认当日是
+    交易日，MUST NOT 把上一交易日价位写成当日行情（评审 F4；口径见 §1.17）。
     """
     trade_date = trade_date or date.today().isoformat()
-    if calendar is not None and trade_date not in set(calendar):
+    if calendar is None:
+        logger.warning(
+            "可转债行情跳过：快照交易日历不可得（无法确认 %s 是交易日，不落行）", trade_date
+        )
+        return {
+            "fetched": 0,
+            "upserted": 0,
+            "trade_date": trade_date,
+            "skipped_reason": "calendar_unavailable",
+            "source_failed": False,
+            "sources": [],
+        }
+    if trade_date not in set(calendar):
         logger.warning(
             "可转债行情跳过：%s 不在快照交易日历内（非交易日，不用过期价冒充当日）", trade_date
         )
@@ -152,8 +165,6 @@ def sync_cb_quotes(
             "source_failed": False,
             "sources": [],
         }
-    if calendar is None:
-        logger.warning("快照交易日历不可得：可转债行情按 %s 落库（缺日历不阻断日批）", trade_date)
     client = client or AKShareClient()
     before = _source_snapshot(client, _SOURCE_QUOTES)
     rows = client.fetch_cb_quotes() or []

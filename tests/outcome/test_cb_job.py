@@ -226,3 +226,14 @@ class TestCbDailyFailures:
         assert summary["quotes"]["skipped_reason"] == "non_trading_day"
         assert summary["quotes"]["upserted"] == 0
         assert summary["master"]["upserted"] == 1, "标的/事件不受非交易日影响"
+
+    def test_missing_calendar_skips_quotes_with_reason(self, tmp_path, monkeypatch):
+        """日历不可得 → 行情跳过（不猜测交易日），摘要在案（评审 F4）。"""
+        monkeypatch.setattr(events_job, "read_snapshot_calendar", lambda *a, **k: None)
+        db = tmp_path / "events.db"
+        summary = run_cb_daily(db_path=db, client=_FakeClient(), as_of="2026-10-16")
+        assert summary["calendar_available"] is False
+        assert summary["quotes"]["skipped_reason"] == "calendar_unavailable"
+        assert summary["quotes"]["upserted"] == 0
+        assert summary["master"]["upserted"] == 1 and summary["events"]["upserted"] == 1
+        assert summary["watchlist_added"] == 1, "缺日历不阻断清单（倒计时如实 null）"
