@@ -12,6 +12,7 @@
 | docs/evals/2026-09-13-round8-维护者代裁报告.md | ![active](badge:active) | — |
 | docs/evals/2026-09-14-round9-v8审计.md | ![active](badge:active) | — |
 | docs/evals/2026-09-21-决策层全watch取证.md | ![active](badge:active) | — |
+| docs/evals/2026-10-18-add-decision-memory-n10消融报告.md | ![active](badge:active) | — |
 | evals/ablation/results/pilot.md | ![superseded](badge:superseded) → docs/evals/2026-09-03-消融n10权威结果.md | docs/evals/2026-09-03-消融n10权威结果.md |
 | evals/backtest/results/formal-2026q3.md | ![active](badge:active) | — |
 | evals/backtest/results/pilot-2023-shock.md | ![active](badge:active) | — |
