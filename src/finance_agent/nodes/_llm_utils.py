@@ -65,13 +65,20 @@ _DEBATER_ROLES: dict[str, str] = {
 }
 
 # 交易决策 stub answer（Trader / Risk Judge 共用 TradeDecision schema）
+# action=watch + 结构化触发位（add-watch-trigger-tracking E2E 覆盖）：
+# 触发位随决策进 chart_data.price.decision_levels → K 线触发参考线渲染；
+# 报告「交易决策」节渲染「上破/下破触发位」行（watch 专属申报参数）。
+# 触发位取值须过价位门禁方向校验（trigger_high > 最新收盘 > trigger_low；
+# stub K 线最新收盘 = 180.0，见 fetch._make_stub_kline），181/178 附有裕度。
 _STUB_TRADE_DECISION: dict = {
-    "action": "hold",
+    "action": "watch",
     "confidence": 0.6,
-    "reasoning": "STUB 交易决策：多因素均衡，建议持有观察（测试数据）",
+    "reasoning": "STUB 交易决策：多因素均衡，建议观察触发条件（测试数据）",
     # require-watch-hold-rationale：非执行动作结构化理由（同契约，E2E 报告结构化渲染）
     "inaction_reason": "STUB 不行动原因：多因素均衡（测试数据）",
     "reeval_triggers": ["STUB 触发条件：关键指标显著变化（测试数据）"],
+    "trigger_high": 181.0,
+    "trigger_low": 178.0,
     "evidence_refs": [],
 }
 
