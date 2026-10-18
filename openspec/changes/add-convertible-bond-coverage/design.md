@@ -15,7 +15,7 @@
 ## 清单接线
 
 - 清单条目 `source ∈ {earnings, cbb}`；cbb 条目为规则化标注（无 LLM），风险要素随行。
-- **载荷键名冻结（跨变更契约，2026-10-18 裁决）**：`price` / `premium_rate` / `remaining_size` / `call_countdown_days`；前端（事件观察区块）已预留四个读取位，缺值一律 `—`（MUST NOT 折算）。本变更实现 MUST 按此命名输出。
+- **载荷键名冻结（跨变更契约，2026-10-18 裁决）**：`price` / `premium_rate` / `remaining_size` / `call_countdown_days`（`remaining_size` 单位 = **亿元**，`premium_rate` 单位 = %）；前端（事件观察区块）已预留四个读取位，缺值一律 `—`（MUST NOT 折算）。本变更实现 MUST 按此命名与单位输出。
 - 复用变更 3 的清单端点与选股页区块（需求已含来源标识字段）；本变不新增页面。
 
 ## 边界与非目标
