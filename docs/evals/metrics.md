@@ -209,6 +209,9 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
    × 参与率 1% 的最小值 → 建议资金上限；缺数据标的剔除计数，全缺 → null + `no_liquidity_data`。
 4. **极端样本**：观点线 `raw_return ≤ -0.15`、执行线组合日收益 ≤ -0.05（具名常量）；清单含 ticker/日期/收益。
 
+**原因码全集**：`no_samples`（族零样本）／`insufficient_sample`（样本 < 门槛）／`insufficient_history`（回撤结算日 < 20）／
+`no_liquidity_data`（容量输入全缺）／`no_loader`（注册族的数据源未接入）；任一族任一槽缺数据一律 null + 原因码，MUST NOT 折算 0。
+
 **胜率定位**：`win_rate` 保留为展示字段（四槽之后）；MUST NOT 作为任何自动处置/门禁/告警输入。
 口径：观点线 `win_rate` = `resolved_win` 占比（分母沿用 `prediction_stats` 既有口径，仅 long/short 已判定，
 `neutral`/`avoidance`/`duplicate_of_day` 等既有排除项不进分母）；执行线 `win_rate = null`（不适用——执行线无胜率口径）。
@@ -221,7 +224,9 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 全市场成交额。**分位**：当日值在最近 250 交易日窗口内的百分位（`#{x≤v}/n`）；样本 < 60 → null + `insufficient_history`。
 **判定**：触发指标 = 小市值占比分位、成交额分位；任一 ≥ danger 阈值（默认 0.9）→ danger、≥ elevated（默认 0.8）→ elevated、
 否则 normal；系数映射 1.0 / 0.5 / 0.0（全部可配置）；分位不可用不触发且在 reasons 注明。**陈旧**：数据日期距判定时刻超过 7 个自然日（可配置；与 spec/design 的「>7」口径一致）。
-**执行链**：目标权重 × 系数；系数 ≠ 1.0 逐票 `REGIME_SCALE`，摘要记状态与系数；缺失/陈旧 → 1.0 + `no_regime_data`。
+**执行链（v1 精确语义）**：目标权重 × 系数；系数只约束**新增敞口**——执行链按「目标 − 当前持仓」只补不缩（`delta ≤ 0` 跳过），
+**存量持仓不因系数被卖出**，系数 0 的实际效果 = 停止建仓（非清仓）；真实减仓/清仓语义如需另立 delta（含减仓门禁）。
+系数 ≠ 1.0 逐票 `REGIME_SCALE`，摘要记状态与系数；缺失/陈旧 → 1.0 + `no_regime_data`。
 
 ### 1.15 业绩预告事件线（delta `add-event-driven-lane`，2026-10-18 登记）
 
@@ -309,6 +314,7 @@ MUST NOT 谎报覆盖。缺失/覆盖明细随非 dry-run 运行落 `snapshot_me
 缺任一 → `frontier_gate="observation_only:missing=<要点列表>"`（要点 ∈ `delist_pool` / `regime_data`，
 逗号分隔）并披露缺失前置，MUST NOT 静默按可执行对待。
 **v1 MUST NOT 向执行链产生订单**（不接 `execution/`、不进目标权重；执行接通属后续立项）。
+**消费接线说明**：`data/universe.py` 的可见性能力 + 回归在案属**能力层交付**；主档/通道的池构建消费接线（以「含退市宇宙」驱动回测/统计）属后续立项——勿读作已接线。
 
 ### 1.17 可转债覆盖与条款事件（delta `add-convertible-bond-coverage`，2026-10-18 登记）
 
