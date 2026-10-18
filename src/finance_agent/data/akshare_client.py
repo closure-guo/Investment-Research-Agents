@@ -318,6 +318,70 @@ def _norm_date_iso(value) -> str | None:
         return None
 
 
+# ── add-event-driven-lane：业绩预告（东财 stock_yjyg_em，按报告期）─────────────
+# 列名映射（本机 akshare 1.18.94 实测）：股票代码→code / 股票简称→name /
+# 预测指标→口径过滤（只取归母净利润行）/ 业绩变动→幅度区间文本 /
+# 业绩变动幅度→单值兜底 / 预告类型→forecast_type（源取值原样）/ 公告日期→announce_date。
+_FORECAST_CODE_COL = "股票代码"
+_FORECAST_NAME_COL = "股票简称"
+_FORECAST_INDICATOR_COL = "预测指标"
+_FORECAST_TYPE_COL = "预告类型"
+_FORECAST_TEXT_COL = "业绩变动"
+_FORECAST_MAGNITUDE_COL = "业绩变动幅度"
+_FORECAST_ANNOUNCE_COL = "公告日期"
+# 取数口径：归母净利润行（源含营业收入/每股收益/扣非等多指标行；与全库报表归母口径一致）
+_FORECAST_INDICATOR = "归属于上市公司股东的净利润"
+_FORECAST_SOURCE = "eastmoney"
+# 幅度区间解析：「同比上年 增长|变动|下降|减少 A[%] 至|到|- B[%]」；方向词定符号
+_FORECAST_RANGE_RE = re.compile(
+    r"同比上年(增长|变动|下降|减少)[:：]?\s*([-+]?\d+(?:\.\d+)?)\s*%"
+    r"\s*(?:至|到|~|-)\s*([-+]?\d+(?:\.\d+)?)\s*%"
+)
+_FORECAST_SINGLE_RE = re.compile(r"同比上年(增长|变动|下降|减少)[:：]?\s*([-+]?\d+(?:\.\d+)?)\s*%")
+# 方向词 → 符号：下降/减少 取负（源文本的百分数为正数，符号由方向词承载）
+_FORECAST_NEGATIVE_DIRECTIONS = ("下降", "减少")
+# 季度报告期（月, 日）
+_QUARTER_ENDS: tuple[tuple[int, int], ...] = ((3, 31), (6, 30), (9, 30), (12, 31))
+
+
+def _norm_report_period(value) -> str | None:
+    """报告期归一 ``YYYY-MM-DD``（接受 8 位串/ISO 串/date）；不可解析 → None。"""
+    return _norm_date_iso(value)
+
+
+def _default_report_period(today: date | None = None) -> str:
+    """缺省报告期 = **今日之前最近的季度末**（日批按报告期拉取的默认口径）。"""
+    current = today or date.today()
+    candidates = [
+        date(year, month, day)
+        for year in (current.year - 1, current.year)
+        for month, day in _QUARTER_ENDS
+    ]
+    return max(period for period in candidates if period <= current).isoformat()
+
+
+def _parse_change_range(text: str, fallback: float | None) -> tuple[float | None, float | None]:
+    """幅度上下限：优先文本区间（方向词定符号，输出恒 low ≤ high）→ 单值 → 源单值兜底。
+
+    源 ``业绩变动幅度`` 为区间中点单值（实测）；两处均缺 → ``(None, None)``（不折算 0）。
+    """
+    match = _FORECAST_RANGE_RE.search(text)
+    if match:
+        direction, low, high = match.group(1), float(match.group(2)), float(match.group(3))
+        if direction in _FORECAST_NEGATIVE_DIRECTIONS:
+            low, high = -low, -high
+        return (min(low, high), max(low, high))
+    match = _FORECAST_SINGLE_RE.search(text)
+    if match:
+        direction, value = match.group(1), float(match.group(2))
+        if direction in _FORECAST_NEGATIVE_DIRECTIONS:
+            value = -value
+        return (value, value)
+    if fallback is None:
+        return (None, None)
+    return (fallback, fallback)
+
+
 def _listing_rows(df: pd.DataFrame) -> list[dict]:
     """上市清单 DataFrame → ``[{"code","name","list_date"}]``；缺代码列 → []（不可用）。"""
     code_col = _pick_col(df, _LISTING_CODE_COLS)
@@ -470,6 +534,8 @@ class AKShareClient:
             "market_cap": set(),
             # add-market-data-fallback：全市场 spot 实际生效源（eastmoney|sina|none）
             "market_spot": set(),
+            # add-event-driven-lane：业绩预告实际生效源（eastmoney|none）
+            "earnings_forecast": set(),
         }
         # 全市场 spot 最近一次实际生效源（日批成功摘要 spot_source 消费；未尝试/双源失败 → None）
         self.last_spot_source: str | None = None
@@ -1497,6 +1563,77 @@ class AKShareClient:
                     "url": str(row.get("网址") or ""),
                 }
             )
+        return rows
+
+    def fetch_earnings_forecasts(self, report_period: str | None = None) -> list[dict]:
+        """拉取业绩预告（东财 ``stock_yjyg_em``，按报告期）。
+
+        ``report_period`` 接受 8 位串（``20250331``）/ ISO 串 / date；缺省 = 今日之前
+        最近的季度末（``_default_report_period``）。返回 list[dict]（字段口径见
+        docs/evals/metrics.md §1.15）：``code``（6 位归一）/ ``name`` /
+        ``report_period``（ISO）/ ``forecast_type``（源取值原样）/ ``change_low`` /
+        ``change_high``（文本区间解析，缺则源单值兜底，再缺 None 不折算 0）/
+        ``announce_date`` / ``available_at``（= 公告日，时点截断依据）/
+        ``source``（``eastmoney``）/ ``source_record_id``（``预测指标|公告日期`` 稳定键）。
+
+        取数口径 = 归母净利润行（源多指标行只取该口径）；代码/公告日缺失行跳过
+        （无稳定键或无可得时点，不落库）并记 WARNING。
+
+        失败/空 → ``[]`` + ``logger.error``（逐股明细类既有约定），失败时
+        ``sources_seen["earnings_forecast"]`` 记 ``none``、源可达但空记 ``eastmoney``
+        ——日批据此区分「请求失败」与「该报告期无记录」，MUST NOT 以零条新增冒充成功。
+        """
+        period = _norm_report_period(report_period) or _default_report_period()
+        df = _call_ak(ak.stock_yjyg_em, date=period.replace("-", ""))
+        if df is None:
+            logger.error("业绩预告拉取失败（信源缺失）: report_period=%s", period)
+            self.sources_seen["earnings_forecast"].add("none")
+            return []
+        if df.empty:
+            logger.error("业绩预告返回空（该报告期无记录）: report_period=%s", period)
+            self.sources_seen["earnings_forecast"].add(_FORECAST_SOURCE)
+            return []
+        rows: list[dict] = []
+        skipped = 0
+        for _, raw in df.iterrows():
+            indicator = raw.get(_FORECAST_INDICATOR_COL)
+            if indicator is None or pd.isna(indicator) or str(indicator) != _FORECAST_INDICATOR:
+                continue  # 非归母净利润口径行：不取
+            code = _norm_six_digit_code(raw.get(_FORECAST_CODE_COL))
+            announce = _norm_date_iso(raw.get(_FORECAST_ANNOUNCE_COL))
+            if not code or not announce:
+                skipped += 1
+                continue
+            text = str(raw.get(_FORECAST_TEXT_COL) or "")
+            low, high = _parse_change_range(text, _safe_float(raw.get(_FORECAST_MAGNITUDE_COL)))
+            name = raw.get(_FORECAST_NAME_COL)
+            name_text = None if name is None or pd.isna(name) else str(name).strip() or None
+            forecast_type = raw.get(_FORECAST_TYPE_COL)
+            rows.append(
+                {
+                    "code": code,
+                    "name": name_text,
+                    "report_period": period,
+                    "forecast_type": (
+                        None
+                        if forecast_type is None or pd.isna(forecast_type)
+                        else str(forecast_type).strip() or None
+                    ),
+                    "change_low": low,
+                    "change_high": high,
+                    "announce_date": announce,
+                    "available_at": announce,
+                    "source": _FORECAST_SOURCE,
+                    "source_record_id": f"{_FORECAST_INDICATOR}|{announce}",
+                }
+            )
+        if skipped:
+            logger.warning(
+                "业绩预告跳过代码/公告日缺失行 %d 条（不可落库）: report_period=%s",
+                skipped,
+                period,
+            )
+        self.sources_seen["earnings_forecast"].add(_FORECAST_SOURCE)
         return rows
 
     def fetch_research_reports(self, stock_code: str) -> list[dict]:
