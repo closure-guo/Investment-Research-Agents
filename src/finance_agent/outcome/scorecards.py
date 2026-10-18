@@ -423,6 +423,10 @@ def load_event_samples(*, db_path: str | Path | None = None) -> list[Sample]:
 
     与观点线样本正交（家族隔离）：只读事件库，不触 ``predictions``；空库/库不存在 →
     空样本如实返回（缺数据由槽位 null + 原因码呈现，不抛错）。
+
+    **排序契约**：SQL 侧降序截断 = 取「近期」集合（超读取上限丢最旧），返回前按
+    ``settle_date`` 升序恢复下游约定——``_recent_symbols`` 依赖升序样本取最近标的
+    （容量槽「最近 N 个样本标的」口径），降序直传会让容量槽取到**最旧**标的。
     """
     from finance_agent.outcome.events.model import _default_db_path as events_default_path
     from finance_agent.outcome.events.model import list_settled_journal
@@ -437,6 +441,7 @@ def load_event_samples(*, db_path: str | Path | None = None) -> list[Sample]:
         if ret is None or not settle_date:
             continue  # 未结算/读数缺失行不进样本（不折算 0）
         samples.append(Sample(str(row.get("symbol") or ""), settle_date[:10], ret))
+    samples.sort(key=lambda sample: sample.date)
     return samples
 
 

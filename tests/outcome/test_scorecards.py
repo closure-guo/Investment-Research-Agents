@@ -559,3 +559,59 @@ class TestEventFamilyScorecards:
 
         # 观点线样本装载器只读 predictions 表（事件行不可见）
         assert load_prediction_samples(db_path=sessions) == []
+
+    def test_event_capacity_picks_recent_symbols_when_over_limit(self, tmp_path, monkeypatch):
+        """容量槽「最近 20 个样本标的」（caliber_note）：>20 标的时取样 = **最近**样本。
+
+        回归：``list_settled_journal`` 降序截断（取近期集合）后，装载器必须恢复下游
+        「升序样本」契约，否则 ``_recent_symbols`` 反转到最旧 20 个标的。用金额分组
+        的临时库对照：最近 20 标的 1 亿 / 最旧 5 标的 500 万。
+        """
+        from finance_agent.outcome.events.model import (
+            init_events_db,
+            insert_journal,
+            settle_journal,
+        )
+
+        events_db = tmp_path / "events.db"
+        snapshot = tmp_path / "snap.db"
+        init_events_db(events_db)
+        for index in range(1, 26):  # 25 个标的，settle_date 升序 = 时间序
+            symbol = f"6005{index:02d}.SH"
+            row_id = insert_journal(
+                forecast_key=f"{symbol}|2026-03-31|ind|2026-04-01",
+                symbol=symbol,
+                entry_date="2026-04-01",
+                entry_price=100.0,
+                horizon_days=5,
+                db_path=events_db,
+            )
+            assert settle_journal(
+                row_id,
+                settle_date=f"2026-05-{index:02d}",
+                settle_price=101.0,
+                raw_return=0.01,
+                db_path=events_db,
+            )
+        recent = [f"6005{index:02d}" for index in range(6, 26)]  # 最近 20 个标的
+        oldest = [f"6005{index:02d}" for index in range(1, 6)]
+        for offset in range(21):
+            day = (date(2026, 5, 26) + timedelta(days=offset)).isoformat()
+            write_snapshot_rows(
+                day,
+                [{"code": code, "amount": 100_000_000.0} for code in recent]
+                + [{"code": code, "amount": 5_000_000.0} for code in oldest],
+                db_path=snapshot,
+            )
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "missing-s.db"))
+        monkeypatch.setenv("EXECUTION_DB_PATH", str(tmp_path / "missing-e.db"))
+        monkeypatch.setenv("SNAPSHOT_DB_PATH", str(snapshot))
+        monkeypatch.setenv("EVENTS_DB_PATH", str(events_db))
+
+        event = _family(get_scorecards(), "event")
+
+        assert "最近 20 个样本标的" in event["caliber_note"]  # 对照组内口径注释
+        assert event["capacity"]["excluded"] == 0
+        assert event["capacity"]["min_adv20"] == pytest.approx(
+            100_000_000.0
+        )  # 取样来自最近 20 个标的
