@@ -52,6 +52,13 @@ def test_plain_text_not_flagged():
         assert not _matches_any(text), f"误报：{text!r}"
 
 
+def test_placeholder_variants_not_failing():
+    """占位符变体（含连字符形态）必须在放行名单——历史扫描 CI 首跑实证：
+    注释里的 tvly-dev-xxxx-yyyy 被当成新泄露（当前树自跳过本文件、历史看 diff）。"""
+    assert check_secrets._is_known_or_placeholder("tvly-dev-xxxx-yyyy")
+    assert check_secrets._is_known_or_placeholder("tvly-xxxxxxxxxxxx")
+
+
 def test_repo_scan_passes():
     """当前仓库树整体扫描必须通过（扫描器自身的端到端回归）。"""
     assert check_secrets.main() == 0
