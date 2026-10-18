@@ -14,9 +14,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import date, datetime, timedelta
@@ -204,6 +206,12 @@ _TENCENT_FIELD_IDX: dict[str, int] = {
 _TENCENT_YI_FIELDS = frozenset({"float_market_cap", "market_cap"})
 # 关键字段缺失即视为主源失败（触发回退）
 _TENCENT_REQUIRED = ("price", "market_cap")
+# 腾讯批量行情（市值兜底链）：≤100 码/批（URL 长度与限流折中）
+_TENCENT_BATCH_CHUNK = 100
+# 批间小睡（防限流；测试 monkeypatch 置 0）
+_TENCENT_BATCH_SLEEP_S = 0.2
+# 批量请求超时（码多、串长于单标的，放宽于单标的 10s）
+_TENCENT_BATCH_TIMEOUT_S = 20
 
 
 def _add_prefix(code: str) -> str:
@@ -311,6 +319,135 @@ def _norm_date_iso(value) -> str | None:
         return None
 
 
+# ── add-event-driven-lane：业绩预告（东财 stock_yjyg_em，按报告期）─────────────
+# 列名映射（本机 akshare 1.18.94 实测）：股票代码→code / 股票简称→name /
+# 预测指标→口径过滤（只取归母净利润行）/ 业绩变动→幅度区间文本 /
+# 业绩变动幅度→单值兜底 / 预告类型→forecast_type（源取值原样）/ 公告日期→announce_date。
+_FORECAST_CODE_COL = "股票代码"
+_FORECAST_NAME_COL = "股票简称"
+_FORECAST_INDICATOR_COL = "预测指标"
+_FORECAST_TYPE_COL = "预告类型"
+_FORECAST_TEXT_COL = "业绩变动"
+_FORECAST_MAGNITUDE_COL = "业绩变动幅度"
+_FORECAST_ANNOUNCE_COL = "公告日期"
+# 取数口径：归母净利润行（源含营业收入/每股收益/扣非等多指标行；与全库报表归母口径一致）
+_FORECAST_INDICATOR = "归属于上市公司股东的净利润"
+_FORECAST_SOURCE = "eastmoney"
+# 幅度区间解析：「同比上年 增长|变动|下降|减少 A[%] 至|到|- B[%]」；方向词定符号
+_FORECAST_RANGE_RE = re.compile(
+    r"同比上年(增长|变动|下降|减少)[:：]?\s*([-+]?\d+(?:\.\d+)?)\s*%"
+    r"\s*(?:至|到|~|-)\s*([-+]?\d+(?:\.\d+)?)\s*%"
+)
+_FORECAST_SINGLE_RE = re.compile(r"同比上年(增长|变动|下降|减少)[:：]?\s*([-+]?\d+(?:\.\d+)?)\s*%")
+# 方向词 → 符号：下降/减少 取负（源文本的百分数为正数，符号由方向词承载）
+_FORECAST_NEGATIVE_DIRECTIONS = ("下降", "减少")
+# 季度报告期（月, 日）
+_QUARTER_ENDS: tuple[tuple[int, int], ...] = ((3, 31), (6, 30), (9, 30), (12, 31))
+
+# ── add-convertible-bond-coverage：可转债标的/行情/条款事件 ──────────────────────
+# 列名映射（本机 akshare 1.18.94 实测，2026-10-18；口径见 docs/evals/metrics.md §1.17）：
+# bond_zh_cov：债券代码→code / 债券简称→name / 正股代码→stock_code / 转股价→convert_price
+#   （元）/ 转股溢价率→premium_rate（**%**，原样不除 100）；**该源无剩余规模列** →
+#   master 的 remain_scale 恒 None（MUST NOT 以发行规模冒充剩余规模）；
+# bond_cb_redeem_jsl：强赎触发价→trigger_price / 强赎触发比→trigger_ratio（%原样）/
+#   强赎天计数→count_text（原样文本，解析归状态推导层）/ 最后交易日→last_trade_date /
+#   剩余规模→remain_scale（**亿元**，与设计冻结的 remaining_size 同口径直落）/ 强赎状态→
+#   redeem_status（供状态推导；源行逐字入 raw_json 审计）；
+# bond_zh_hs_cov_spot（新浪）：trade→close（元）/ amount→amount（元，源单位原样）；trade
+#   缺失或 ≤0（停牌/零成交）→ 跳过该行（MUST NOT 折算 0）；
+# bond_cb_adj_logs_jsl（逐代码，下修历史）：股东大会日→meeting_date / 下修前转股价→
+#   convert_price_before / 下修后转股价→convert_price_after / 新转股价生效日期→effective_date。
+_CB_MASTER_SOURCE = "eastmoney"
+_CB_QUOTES_SOURCE = "sina"
+_CB_REDEEM_SOURCE = "jisilu"
+_CB_ADJ_SOURCE = "jisilu"
+_CB_MASTER_CODE_COL = "债券代码"
+_CB_MASTER_NAME_COL = "债券简称"
+_CB_MASTER_STOCK_COL = "正股代码"
+_CB_MASTER_CONVERT_COL = "转股价"
+_CB_MASTER_PREMIUM_COL = "转股溢价率"
+_CB_MASTER_RATING_COL = "信用评级"
+_CB_REDEEM_CODE_COL = "代码"
+_CB_REDEEM_NAME_COL = "名称"
+_CB_REDEEM_TRIGGER_PRICE_COL = "强赎触发价"
+_CB_REDEEM_TRIGGER_RATIO_COL = "强赎触发比"
+_CB_REDEEM_COUNT_COL = "强赎天计数"
+_CB_REDEEM_LAST_TRADE_COL = "最后交易日"
+_CB_REDEEM_REMAIN_COL = "剩余规模"
+_CB_REDEEM_STATUS_COL = "强赎状态"
+_CB_ADJ_NAME_COL = "转债名称"
+_CB_ADJ_MEETING_COL = "股东大会日"
+_CB_ADJ_BEFORE_COL = "下修前转股价"
+_CB_ADJ_AFTER_COL = "下修后转股价"
+_CB_ADJ_EFFECTIVE_COL = "新转股价生效日期"
+
+
+def _raw_json(payload: dict) -> str:
+    """源行 → JSON 文本留痕（NaN/日期等不可序列化值统一转字符串）。"""
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _jsonable(value):
+    """源单元格 → 可 JSON 序列化值（NaN/NaT → None，其余原样）。"""
+    try:
+        if value is None or pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _text_or_none(value) -> str | None:
+    """文本单元格 → 去空白字符串；缺失/空串 → None（如实缺值，不折算空串）。"""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return text or None
+
+
+def _norm_report_period(value) -> str | None:
+    """报告期归一 ``YYYY-MM-DD``（接受 8 位串/ISO 串/date）；不可解析 → None。"""
+    return _norm_date_iso(value)
+
+
+def _default_report_period(today: date | None = None) -> str:
+    """缺省报告期 = **今日之前最近的季度末**（日批按报告期拉取的默认口径）。"""
+    current = today or date.today()
+    candidates = [
+        date(year, month, day)
+        for year in (current.year - 1, current.year)
+        for month, day in _QUARTER_ENDS
+    ]
+    return max(period for period in candidates if period <= current).isoformat()
+
+
+def _parse_change_range(text: str, fallback: float | None) -> tuple[float | None, float | None]:
+    """幅度上下限：优先文本区间（方向词定符号，输出恒 low ≤ high）→ 单值 → 源单值兜底。
+
+    源 ``业绩变动幅度`` 为区间中点单值（实测）；两处均缺 → ``(None, None)``（不折算 0）。
+    """
+    match = _FORECAST_RANGE_RE.search(text)
+    if match:
+        direction, low, high = match.group(1), float(match.group(2)), float(match.group(3))
+        if direction in _FORECAST_NEGATIVE_DIRECTIONS:
+            low, high = -low, -high
+        return (min(low, high), max(low, high))
+    match = _FORECAST_SINGLE_RE.search(text)
+    if match:
+        direction, value = match.group(1), float(match.group(2))
+        if direction in _FORECAST_NEGATIVE_DIRECTIONS:
+            value = -value
+        return (value, value)
+    if fallback is None:
+        return (None, None)
+    return (fallback, fallback)
+
+
 def _listing_rows(df: pd.DataFrame) -> list[dict]:
     """上市清单 DataFrame → ``[{"code","name","list_date"}]``；缺代码列 → []（不可用）。"""
     code_col = _pick_col(df, _LISTING_CODE_COLS)
@@ -333,6 +470,83 @@ def _listing_rows(df: pd.DataFrame) -> list[dict]:
                 "code": code,
                 "name": name,
                 "list_date": _norm_date_iso(raw.get(date_col)) if date_col else None,
+            }
+        )
+    return rows
+
+
+# ── add-microcap-lane-guardrails：退市清单（两所，口径见 metrics.md §1.16） ──────
+# 沪清单日期列实测名为「暂停上市日期」（非交易所正式退市日）→ 映射 delist_date 并保留
+# source="sh_suspend" 供审计；深清单为「终止上市日期」→ source="sz_delist"。
+_DELIST_SOURCE_SPECS: tuple[dict[str, object], ...] = (
+    {
+        "label": "沪",
+        "func_name": "stock_info_sh_delist",
+        "source": "sh_suspend",
+        "code_cols": ("公司代码", "证券代码", "A股代码", "代码"),
+        "name_cols": ("公司简称", "证券简称", "A股简称", "简称", "名称"),
+        "list_cols": ("上市日期", "上市时间"),
+        # 沪清单日期列 = 暂停上市日期（口径注明：不得读作交易所退市日）
+        "delist_cols": ("暂停上市日期", "终止上市日期", "退市日期"),
+    },
+    {
+        "label": "深",
+        "func_name": "stock_info_sz_delist",
+        "source": "sz_delist",
+        "code_cols": ("证券代码", "公司代码", "A股代码", "代码"),
+        "name_cols": ("证券简称", "公司简称", "A股简称", "简称", "名称"),
+        "list_cols": ("上市日期", "上市时间"),
+        "delist_cols": ("终止上市日期", "暂停上市日期", "退市日期"),
+    },
+)
+
+
+def _delist_rows(df: pd.DataFrame, *, source: str, spec: dict[str, object]) -> list[dict]:
+    """单所退市清单 DataFrame → ``[{"code","name","list_date","delist_date","source"}]``。
+
+    - 缺**代码列**或**退市日列**（列名漂移）→ ``[]``：该源不可用（明细类约定：
+      不产「一批全 None 日期」的半口径行冒充成功；调用方按失败记 ERROR）；
+    - 缺**上市日期列** → 降级：保留行、``list_date=None`` + WARNING（退市日才是本
+      清单的核心字段；缺上市日由调用方如实标注，不丢整源）；
+    - 行级日期值缺失/不可解析 → 对应字段 None（不编造）；
+    - ``source`` 标明日期语义来源（审计用：``sh_suspend`` = 沪「暂停上市日期」）。
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+    code_col = _pick_col(df, spec["code_cols"])  # type: ignore[arg-type]
+    if code_col is None:
+        return []
+    delist_col = _pick_col(df, spec["delist_cols"])  # type: ignore[arg-type]
+    if delist_col is None:
+        return []
+    name_col = _pick_col(df, spec["name_cols"])  # type: ignore[arg-type]
+    list_col = _pick_col(df, spec["list_cols"])  # type: ignore[arg-type]
+    if list_col is None:
+        logger.warning("退市清单 %s 缺上市日期列：list_date 置空降级（如实标注）", source)
+
+    def _text(value) -> str | None:
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip()
+        return text or None
+
+    rows: list[dict] = []
+    for _, raw in df.iterrows():
+        code = _norm_six_digit_code(raw.get(code_col))
+        if not code:
+            continue
+        rows.append(
+            {
+                "code": code,
+                "name": _text(raw.get(name_col)) if name_col is not None else None,
+                "list_date": _norm_date_iso(raw.get(list_col)) if list_col is not None else None,
+                "delist_date": _norm_date_iso(raw.get(delist_col)),
+                "source": source,
             }
         )
     return rows
@@ -371,6 +585,37 @@ def _strip_exchange_prefix(value: object) -> str | None:
             value = int(value)
     text = _SINA_CODE_PREFIX_RE.sub("", str(value).strip())
     return text or None
+
+
+def _parse_tencent_batch_caps(text: str) -> dict[str, float]:
+    """腾讯批量报价串 → ``{6 位裸码: 流通市值(元)}``（field 44，亿 → ×1e8）。
+
+    串形与单标的相同（``v_sh600519="...";`` 逐行，脚本名即交易所前缀符号）；
+    不可解析行（网关错误页/字段不足/市值空或非正）跳过，不抛——整串全部不可解析
+    由调用方按批失败处置（None 而非空 dict，MUST NOT 以空表冒充成功）。
+    """
+    caps: dict[str, float] = {}
+    cap_idx = _TENCENT_FIELD_IDX["float_market_cap"]
+    code_idx = _TENCENT_FIELD_IDX["code"]
+    for line in text.split(";"):
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        _, _, payload = line.partition("=")
+        fields = payload.strip().strip('"').split("~")
+        if len(fields) <= cap_idx:
+            continue
+        code = _strip_exchange_prefix(fields[code_idx])
+        raw = fields[cap_idx].strip()
+        if not code or not raw:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if value > 0:
+            caps[code] = value * 1e8  # 亿 → 元（口径同 _TENCENT_YI_FIELDS）
+    return caps
 
 
 def _has_usable_codes(df: object) -> TypeGuard[pd.DataFrame]:
@@ -432,9 +677,21 @@ class AKShareClient:
             "market_cap": set(),
             # add-market-data-fallback：全市场 spot 实际生效源（eastmoney|sina|none）
             "market_spot": set(),
+            # add-event-driven-lane：业绩预告实际生效源（eastmoney|none）
+            "earnings_forecast": set(),
+            # add-microcap-lane-guardrails：退市清单实际生效源（sh_suspend|sz_delist|none）
+            "delist": set(),
+            # add-convertible-bond-coverage：转债标的/行情/强赎/下修实际生效源
+            # （eastmoney|sina|jisilu|none；none = 请求失败，日批据此上抛留痕）
+            "cb_master": set(),
+            "cb_quotes": set(),
+            "cb_redeem": set(),
+            "cb_adj": set(),
         }
         # 全市场 spot 最近一次实际生效源（日批成功摘要 spot_source 消费；未尝试/双源失败 → None）
         self.last_spot_source: str | None = None
+        # 逐代码下修抓取最近一次调用成败（逐代码循环的失败判据；未调用 → None）
+        self.last_cb_adj_failed: bool | None = None
 
     def _filter_annual(self, df: pd.DataFrame) -> pd.DataFrame:
         """只保留年报（报告日以 1231 结尾），并按报告日降序（最新在前）对齐契约。"""
@@ -1184,7 +1441,15 @@ class AKShareClient:
 
     @staticmethod
     def _to_sina_symbol(stock_code: str) -> str:
-        """A 股代码转新浪格式：600519 → sh600519, 000001 → sz000001。"""
+        """A 股代码转新浪/腾讯格式：600519 → sh600519, 000001 → sz000001。
+
+        北交所 92 新号段（920xxx）与 4/8 号段同走 ``bj``——腾讯行情域对
+        ``sh920002`` / ``sz920002`` 返回 ``v_pv_none_match``（实测），只有
+        ``bj920002`` 可用；错判会让兜底批量对 92 码全缺（→ 参与集覆盖不全）。
+        **沪 B（900xxx）必须保持 sh**，故 92 判定先于 9 号段。
+        """
+        if stock_code.startswith("92"):
+            return f"bj{stock_code}"
         if stock_code.startswith(("6", "9")):
             return f"sh{stock_code}"
         elif stock_code.startswith(("0", "2", "3")):
@@ -1453,6 +1718,232 @@ class AKShareClient:
             )
         return rows
 
+    def fetch_earnings_forecasts(self, report_period: str | None = None) -> list[dict]:
+        """拉取业绩预告（东财 ``stock_yjyg_em``，按报告期）。
+
+        ``report_period`` 接受 8 位串（``20250331``）/ ISO 串 / date；缺省 = 今日之前
+        最近的季度末（``_default_report_period``）。返回 list[dict]（字段口径见
+        docs/evals/metrics.md §1.15）：``code``（6 位归一）/ ``name`` /
+        ``report_period``（ISO）/ ``forecast_type``（源取值原样）/ ``change_low`` /
+        ``change_high``（文本区间解析，缺则源单值兜底，再缺 None 不折算 0）/
+        ``announce_date`` / ``available_at``（= 公告日，时点截断依据）/
+        ``source``（``eastmoney``）/ ``source_record_id``（``预测指标|公告日期`` 稳定键）。
+
+        取数口径 = 归母净利润行（源多指标行只取该口径）；代码/公告日缺失行跳过
+        （无稳定键或无可得时点，不落库）并记 WARNING。
+
+        失败/空 → ``[]`` + ``logger.error``（逐股明细类既有约定），失败时
+        ``sources_seen["earnings_forecast"]`` 记 ``none``、源可达但空记 ``eastmoney``
+        ——日批据此区分「请求失败」与「该报告期无记录」，MUST NOT 以零条新增冒充成功。
+        """
+        period = _norm_report_period(report_period) or _default_report_period()
+        df = _call_ak(ak.stock_yjyg_em, date=period.replace("-", ""))
+        if df is None:
+            logger.error("业绩预告拉取失败（信源缺失）: report_period=%s", period)
+            self.sources_seen["earnings_forecast"].add("none")
+            return []
+        if df.empty:
+            logger.error("业绩预告返回空（该报告期无记录）: report_period=%s", period)
+            self.sources_seen["earnings_forecast"].add(_FORECAST_SOURCE)
+            return []
+        rows: list[dict] = []
+        skipped = 0
+        for _, raw in df.iterrows():
+            indicator = raw.get(_FORECAST_INDICATOR_COL)
+            if indicator is None or pd.isna(indicator) or str(indicator) != _FORECAST_INDICATOR:
+                continue  # 非归母净利润口径行：不取
+            code = _norm_six_digit_code(raw.get(_FORECAST_CODE_COL))
+            announce = _norm_date_iso(raw.get(_FORECAST_ANNOUNCE_COL))
+            if not code or not announce:
+                skipped += 1
+                continue
+            text = str(raw.get(_FORECAST_TEXT_COL) or "")
+            low, high = _parse_change_range(text, _safe_float(raw.get(_FORECAST_MAGNITUDE_COL)))
+            name = raw.get(_FORECAST_NAME_COL)
+            name_text = None if name is None or pd.isna(name) else str(name).strip() or None
+            forecast_type = raw.get(_FORECAST_TYPE_COL)
+            rows.append(
+                {
+                    "code": code,
+                    "name": name_text,
+                    "report_period": period,
+                    "forecast_type": (
+                        None
+                        if forecast_type is None or pd.isna(forecast_type)
+                        else str(forecast_type).strip() or None
+                    ),
+                    "change_low": low,
+                    "change_high": high,
+                    "announce_date": announce,
+                    "available_at": announce,
+                    "source": _FORECAST_SOURCE,
+                    "source_record_id": f"{_FORECAST_INDICATOR}|{announce}",
+                }
+            )
+        if skipped:
+            logger.warning(
+                "业绩预告跳过代码/公告日缺失行 %d 条（不可落库）: report_period=%s",
+                skipped,
+                period,
+            )
+        self.sources_seen["earnings_forecast"].add(_FORECAST_SOURCE)
+        return rows
+
+    # ── add-convertible-bond-coverage：转债标的 / 行情 / 条款事件（详见模块常量注释）──
+
+    def fetch_cb_master(self) -> list[dict]:
+        """拉取可转债标的主表（东财 ``bond_zh_cov``，全市场）。
+
+        返回 list[dict]：``code``（6 位归一）/ ``name`` / ``stock_code``（正股代码）/
+        ``convert_price``（转股价，元）/ ``premium_rate``（转股溢价率，**%** 原样）/
+        ``remain_scale``（**恒 None**：该源无剩余规模列，MUST NOT 以发行规模冒充）/
+        ``rating``（信用评级；空串 → None）。
+
+        代码缺失行跳过（无主键不可落库）并记 WARNING；未上市/缺要素行照落、字段如实
+        None（不估算不剔除）。失败/空 → ``[]`` + ERROR（明细类约定），失败时
+        ``sources_seen["cb_master"]`` 记 ``none``、可达记 ``eastmoney``。
+        """
+        df = _call_ak(ak.bond_zh_cov)
+        if df is None or df.empty:
+            logger.error("可转债标的拉取失败/返回空（信源缺失）: bond_zh_cov")
+            self.sources_seen["cb_master"].add("none")
+            return []
+        rows: list[dict] = []
+        skipped = 0
+        for _, raw in df.iterrows():
+            code = _norm_six_digit_code(raw.get(_CB_MASTER_CODE_COL))
+            if not code:
+                skipped += 1
+                continue
+            rows.append(
+                {
+                    "code": code,
+                    "name": _text_or_none(raw.get(_CB_MASTER_NAME_COL)),
+                    "stock_code": _norm_six_digit_code(raw.get(_CB_MASTER_STOCK_COL)),
+                    "convert_price": _safe_float(raw.get(_CB_MASTER_CONVERT_COL)),
+                    "premium_rate": _safe_float(raw.get(_CB_MASTER_PREMIUM_COL)),
+                    "remain_scale": None,  # 源无剩余规模列（不拿发行规模冒充）
+                    "rating": _text_or_none(raw.get(_CB_MASTER_RATING_COL)),
+                }
+            )
+        rows.sort(key=lambda row: str(row["code"]))
+        if skipped:
+            logger.warning("可转债标的跳过代码缺失行 %d 条（无主键不可落库）", skipped)
+        self.sources_seen["cb_master"].add(_CB_MASTER_SOURCE)
+        return rows
+
+    def fetch_cb_quotes(self) -> list[dict]:
+        """拉取沪深可转债实时行情快照（新浪 ``bond_zh_hs_cov_spot``）。
+
+        返回 list[dict]：``code``（6 位归一）/ ``close``（``trade``，元）/
+        ``amount``（``amount``，元，源单位原样不换算）。``trade`` 缺失或 ≤ 0
+        （停牌/零成交）→ 跳过该行并计数（WARNING），MUST NOT 折算 0 冒充价格。
+
+        失败/空 → ``[]`` + ERROR；``sources_seen["cb_quotes"]`` 记 ``sina`` / ``none``。
+        """
+        df = _call_ak(ak.bond_zh_hs_cov_spot)
+        if df is None or df.empty:
+            logger.error("可转债行情拉取失败/返回空（信源缺失）: bond_zh_hs_cov_spot")
+            self.sources_seen["cb_quotes"].add("none")
+            return []
+        rows: list[dict] = []
+        skipped = 0
+        for _, raw in df.iterrows():
+            code = _norm_six_digit_code(raw.get("code"))
+            close = _safe_float(raw.get("trade"))
+            if not code or close is None or close <= 0:
+                skipped += 1
+                continue
+            rows.append({"code": code, "close": close, "amount": _safe_float(raw.get("amount"))})
+        rows.sort(key=lambda row: str(row["code"]))
+        if skipped:
+            logger.warning("可转债行情跳过无有效价行 %d 条（停牌/零成交，不折算 0）", skipped)
+        self.sources_seen["cb_quotes"].add(_CB_QUOTES_SOURCE)
+        return rows
+
+    def fetch_cb_redeem_events(self) -> list[dict]:
+        """拉取强赎条款事件（集思录 ``bond_cb_redeem_jsl``，全市场）。
+
+        返回 list[dict]：``code`` / ``name`` / ``trigger_price``（强赎触发价）/
+        ``trigger_ratio``（强赎触发比，% 原样）/ ``count_text``（强赎天计数**原样文本**，
+        形如 ``"12/15 | 30"``；解析归状态推导层）/ ``last_trade_date``（归一 ISO）/
+        ``remain_scale``（剩余规模，**亿元**，源单位原样）/ ``redeem_status``（强赎状态，
+        供状态推导）/ ``raw_json``（源行逐字留痕，审计可辨）。
+
+        代码缺失行跳过并记 WARNING；失败/空 → ``[]`` + ERROR（明细类约定），失败时
+        ``sources_seen["cb_redeem"]`` 记 ``none``、可达记 ``jisilu``。
+        """
+        df = _call_ak(ak.bond_cb_redeem_jsl)
+        if df is None or df.empty:
+            logger.error("强赎事件拉取失败/返回空（信源缺失）: bond_cb_redeem_jsl")
+            self.sources_seen["cb_redeem"].add("none")
+            return []
+        rows: list[dict] = []
+        skipped = 0
+        for _, raw in df.iterrows():
+            code = _norm_six_digit_code(raw.get(_CB_REDEEM_CODE_COL))
+            if not code:
+                skipped += 1
+                continue
+            rows.append(
+                {
+                    "code": code,
+                    "name": _text_or_none(raw.get(_CB_REDEEM_NAME_COL)),
+                    "trigger_price": _safe_float(raw.get(_CB_REDEEM_TRIGGER_PRICE_COL)),
+                    "trigger_ratio": _safe_float(raw.get(_CB_REDEEM_TRIGGER_RATIO_COL)),
+                    "count_text": _text_or_none(raw.get(_CB_REDEEM_COUNT_COL)),
+                    "last_trade_date": _norm_date_iso(raw.get(_CB_REDEEM_LAST_TRADE_COL)),
+                    "remain_scale": _safe_float(raw.get(_CB_REDEEM_REMAIN_COL)),
+                    "redeem_status": _text_or_none(raw.get(_CB_REDEEM_STATUS_COL)),
+                    "raw_json": _raw_json(
+                        {str(key): _jsonable(value) for key, value in raw.items()}
+                    ),
+                }
+            )
+        rows.sort(key=lambda row: str(row["code"]))
+        if skipped:
+            logger.warning("强赎事件跳过代码缺失行 %d 条（无主键不可落库）", skipped)
+        self.sources_seen["cb_redeem"].add(_CB_REDEEM_SOURCE)
+        return rows
+
+    def fetch_cb_adj_logs(self, code: str) -> list[dict]:
+        """拉取单只转债的转股价调整（下修）历史（集思录 ``bond_cb_adj_logs_jsl``）。
+
+        **逐代码接口**（无全市场批量模式）——调用方按「转股价变化触发」的有界集合取数
+        （见 ``outcome/events/cb_sync.py``）。返回 list[dict]：``code`` / ``name`` /
+        ``meeting_date``（股东大会日，归一 ISO）/ ``convert_price_before`` /
+        ``convert_price_after`` / ``effective_date``（新转股价生效日期）/ ``raw_json``。
+
+        无下修记录 → ``[]``（源可达、空表，**非失败**：``sources_seen["cb_adj"]`` 记
+        ``jisilu``）；请求失败 → ``[]`` + ERROR + 记 ``none``。单次调用成败另经
+        ``last_cb_adj_failed`` 留痕（逐代码循环里 ``sources_seen`` 差集无法区分
+        「重复失败」与「本次无记录」，先例 ``last_spot_source``）。
+        """
+        df = _call_ak(ak.bond_cb_adj_logs_jsl, symbol=code)
+        if df is None:
+            logger.error("下修历史拉取失败（信源缺失）: code=%s", code)
+            self.sources_seen["cb_adj"].add("none")
+            self.last_cb_adj_failed = True
+            return []
+        self.last_cb_adj_failed = False
+        rows: list[dict] = []
+        for _, raw in df.iterrows():
+            rows.append(
+                {
+                    "code": code,
+                    "name": _text_or_none(raw.get(_CB_ADJ_NAME_COL)),
+                    "meeting_date": _norm_date_iso(raw.get(_CB_ADJ_MEETING_COL)),
+                    "convert_price_before": _safe_float(raw.get(_CB_ADJ_BEFORE_COL)),
+                    "convert_price_after": _safe_float(raw.get(_CB_ADJ_AFTER_COL)),
+                    "effective_date": _norm_date_iso(raw.get(_CB_ADJ_EFFECTIVE_COL)),
+                    "raw_json": _raw_json(
+                        {str(key): _jsonable(value) for key, value in raw.items()}
+                    ),
+                }
+            )
+        self.sources_seen["cb_adj"].add(_CB_ADJ_SOURCE)
+        return rows
+
     def fetch_research_reports(self, stock_code: str) -> list[dict]:
         """拉取个股券商研报列表（东财）。
 
@@ -1642,6 +2133,71 @@ class AKShareClient:
         self.last_spot_source = None
         return None
 
+    def fetch_market_caps_bulk(self, codes: Sequence[str]) -> dict[str, float] | None:
+        """腾讯批量报价取流通市值（design「市值兜底源（腾讯批量）」）：``{裸码: 元}``。
+
+        spot 无 ``流通市值`` 列（新浪回退列形）时的真实市值兜底源——按
+        「快照同源 spot 优先 → 腾讯批量兜底」链式尝试的第二源，采用时调用方
+        在指标行留痕 ``cap_source=tencent``。≤100 码/批切分、批间小睡防限流；
+        整批失败/整串不可解析 → ERROR + None（调用方 ``cap_data_missing``，
+        MUST NOT 以成交额等替代口径冒充）；个别码缺失（停牌/退市/市值字段空）→
+        WARNING 并返回已解析子集（覆盖是否够用交调用方判定）。成功记入
+        ``sources_seen["market_cap"]``。
+        """
+        bare_codes: list[str] = []
+        for raw in codes:
+            normalized = _strip_exchange_prefix(raw)
+            if normalized and normalized not in bare_codes:
+                bare_codes.append(normalized)
+        if not bare_codes:
+            logger.warning("腾讯批量市值取数：无有效代码（入参 %d 个）", len(codes))
+            return None
+
+        caps: dict[str, float] = {}
+        chunks = [
+            bare_codes[position : position + _TENCENT_BATCH_CHUNK]
+            for position in range(0, len(bare_codes), _TENCENT_BATCH_CHUNK)
+        ]
+        for batch_no, chunk in enumerate(chunks, start=1):
+            if batch_no > 1:
+                time.sleep(_TENCENT_BATCH_SLEEP_S)
+            symbols = ",".join(self._to_sina_symbol(code) for code in chunk)
+            try:
+                resp = requests.get(
+                    f"https://qt.gtimg.cn/q={symbols}", timeout=_TENCENT_BATCH_TIMEOUT_S
+                )
+                text = resp.content.decode("gbk")
+            except Exception as e:
+                logger.error(
+                    "腾讯批量市值取数失败（第 %d/%d 批，%d 码）: %s",
+                    batch_no,
+                    len(chunks),
+                    len(chunk),
+                    e,
+                )
+                return None
+            parsed = _parse_tencent_batch_caps(text)
+            if not parsed:
+                logger.error(
+                    "腾讯批量行情整批不可解析（第 %d/%d 批，%d 码）",
+                    batch_no,
+                    len(chunks),
+                    len(chunk),
+                )
+                return None
+            caps.update(parsed)
+
+        missing = [code for code in bare_codes if code not in caps]
+        if missing:
+            logger.warning(
+                "腾讯批量行情覆盖不齐：缺失 %d/%d 码（例：%s）",
+                len(missing),
+                len(bare_codes),
+                missing[:5],
+            )
+        self.sources_seen["market_cap"].add("tencent")
+        return caps
+
     def fetch_trade_calendar(self) -> list[str] | None:
         """全历史交易日历（``tool_trade_date_hist_sina``）→ 升序去重的 ``YYYY-MM-DD``。
 
@@ -1698,6 +2254,47 @@ class AKShareClient:
         if not rows:
             logger.warning("上市清单全源失败/不可用（返回 None）")
             return None
+        return rows
+
+    def fetch_delist_lists(self) -> list[dict]:
+        """沪 + 深退市清单合并 → ``[{"code","name","list_date","delist_date","source"}]``。
+
+        口径（docs/evals/metrics.md §1.16，实施者不得自行改）：
+
+        - 沪 ``stock_info_sh_delist`` 实测列 ``公司代码/公司简称/上市日期/暂停上市日期``：
+          日期列是「**暂停上市日期**」而非交易所正式退市日 → 映射 ``delist_date`` 并保留
+          ``source="sh_suspend"`` 供审计（消费方不得读作交易所退市日）；
+        - 深 ``stock_info_sz_delist`` 实测列 ``证券代码/证券简称/上市日期/终止上市日期``
+          → ``source="sz_delist"``；
+        - 每源独立取数：单源失败/空（含列名漂移）只记 ERROR 并继续另一源——明细类
+          约定；两源皆失败/空 → ``[]`` + ``logger.error``（不以空表冒充成功）；
+        - ``list_date``/``delist_date`` 不可解析或缺失 → ``None``（不编造）。
+
+        实际生效源记入 ``sources_seen["delist"]``（``sh_suspend`` / ``sz_delist`` /
+        全失败记 ``none``）。抓取端点无参数（两接口均为全量清单）。
+        """
+        rows: list[dict] = []
+        for spec in _DELIST_SOURCE_SPECS:
+            label = str(spec["label"])
+            source = str(spec["source"])
+            func = getattr(ak, str(spec["func_name"]), None)
+            if func is None:
+                logger.error("退市清单 %s所接口不可用（akshare 缺 %s）", label, spec["func_name"])
+                continue
+            try:
+                df = _call_ak(func)
+            except Exception as e:  # noqa: BLE001 - 单源失败不拖垮另一源（明细类约定）
+                logger.error("退市清单 %s所拉取异常，跳过: %s", label, e)
+                continue
+            parsed = _delist_rows(df, source=source, spec=spec)
+            if parsed:
+                rows.extend(parsed)
+                self.sources_seen["delist"].add(source)
+            else:
+                logger.error("退市清单 %s所失败/空（返回/列名漂移）", label)
+        if not rows:
+            logger.error("退市清单全源失败/空（返回空列表）")
+            self.sources_seen["delist"].add("none")
         return rows
 
     def fetch_symbol_history_raw_qfq(self, code: str, start: str, end: str) -> pd.DataFrame | None:

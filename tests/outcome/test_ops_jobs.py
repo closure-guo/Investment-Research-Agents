@@ -16,6 +16,7 @@ from finance_agent.execution.driver import run_execution_daily
 from finance_agent.factors.builtin import run_factor_builtin_register
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
+from finance_agent.outcome.events.job import run_cb_daily
 from finance_agent.outcome.ops.jobs import (
     JOB_FUNCS,
     JOB_IDS,
@@ -32,19 +33,57 @@ from finance_agent.outcome.ops.model import (
     list_job_runs,
     set_config,
 )
+from finance_agent.outcome.regime.job import run_regime_daily
+from finance_agent.screening.pipeline import run_microcap_lane
 
 
 class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 14
+            len(JOB_IDS) == 20
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线，add-execution-chain-driver）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
         # 12→13：+factor_builtin_register（内置因子注册接线，wire-builtin-factor-registration）；
-        # 13→14：+factor_harvest_daily（因子收割，add-factor-harvest-bridge）
+        # 13→14：+factor_harvest_daily（因子收割，add-factor-harvest-bridge）；
+        # 14→15：+regime_daily（拥挤度日批，add-crowding-regime-positioning，15:35 日批链内插入）；
+        # 15→18：+earnings_fetch_daily/earnings_triage_daily/event_settle_daily
+        # 18→19：+microcap_screening_daily（小票通道，add-microcap-lane-guardrails，16:45）
+        # 19→20：+cb_daily（转债日批，add-convertible-bond-coverage，16:50）
+        # （业绩预告事件线，add-event-driven-lane，按时刻序插入 16:05/16:15/16:25）
         assert all(JOB_LABELS[jid] for jid in JOB_IDS)
+
+
+class TestRegimeDailyRegistration:
+    """add-crowding-regime-positioning：拥挤度日批接线（15:35，快照之后、选股之前）。"""
+
+    def test_registered_aligned_and_ordered(self):
+        assert "regime_daily" in JOB_IDS
+        assert JOB_LABELS["regime_daily"] == "市场拥挤度"
+        assert JOB_FUNCS["regime_daily"] is run_regime_daily
+        assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
+        assert (
+            len(JOB_IDS) == 20
+        )  # 14→15：+regime_daily；15→18：+事件线三件；18→19：+microcap_screening_daily（小票通道）；10→12：+月批；12→13：+内置注册；13→14：+因子收割；19→20：+cb_daily（转债日批）
+        assert (
+            JOB_IDS.index("market_snapshot_daily")
+            < JOB_IDS.index("regime_daily")
+            < JOB_IDS.index("screening_daily")
+        ), "展示顺序 = 时刻顺序（快照 15:30 → 拥挤度 15:35 → 选股 15:40）"
+
+    def test_schedule_spec_is_1535_monfri(self):
+        """拥挤度日批 15:35（mon-fri，Asia/Shanghai）逐字钉死；快照后、选股前。"""
+        assert SCHEDULES["regime_daily"] == {
+            "day_of_week": "mon-fri",
+            "hour": 15,
+            "minute": 35,
+            "timezone": "Asia/Shanghai",
+        }
+        snapshot = SCHEDULES["market_snapshot_daily"]
+        screening = SCHEDULES["screening_daily"]
+        assert (snapshot["hour"], snapshot["minute"]) == (15, 30)
+        assert (screening["hour"], screening["minute"]) == (15, 40)
 
 
 class TestPaperExecuteDailyRegistration:
@@ -56,13 +95,22 @@ class TestPaperExecuteDailyRegistration:
         assert JOB_FUNCS["paper_execute_daily"] is run_execution_daily
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 14
-        )  # 9→10：+paper_execute_daily；10→12：+月批两任务；12→13：+内置注册；13→14：+因子收割
+            len(JOB_IDS) == 20
+        )  # 9→10：+paper_execute_daily；10→12：+月批两任务；12→13：+内置注册；
+        # 13→14：+因子收割；14→15：+regime_daily（拥挤度）；15→18：+事件线三件；18→19：+小票通道；
+        # 19→20：+cb_daily（转债日批，16:50）
         assert (
             JOB_IDS.index("decision_settle_daily")
+            < JOB_IDS.index("earnings_fetch_daily")
             < JOB_IDS.index("paper_execute_daily")
+            < JOB_IDS.index("earnings_triage_daily")
             < JOB_IDS.index("paper_settle_daily")
-        ), "展示顺序 = 时刻顺序（判定 16:00 → 仿真执行 16:10 → paper 结算 16:20）"
+            < JOB_IDS.index("event_settle_daily")
+            < JOB_IDS.index("daily_marking")
+        ), (
+            "展示顺序 = 时刻顺序（判定 16:00 → 预告抓取 16:05 → 仿真执行 16:10 → 预告分诊 16:15"
+            " → paper 结算 16:20 → 事件结算 16:25 → 盯市 16:30）"
+        )
 
     def test_schedule_spec_is_1610_monfri(self):
         """执行链日批 16:10（mon-fri，Asia/Shanghai）逐字钉死；先于 paper 结算 16:20。"""
@@ -86,13 +134,15 @@ class TestScreeningDailyRegistration:
         assert JOB_LABELS["screening_daily"] == "选股"
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 14
-        )  # 8→9：+screening_daily；9→10：+paper_execute_daily；10→12：+月批；12→13：+内置注册；13→14：+收割
+            len(JOB_IDS) == 20
+        )  # 8→9：+screening_daily；9→10：+paper_execute_daily；10→12：+月批；12→13：+内置注册；
+        # 13→14：+收割；14→15：+regime_daily；15→18：+事件线三件；19→20：+cb_daily（转债日批）
         assert (
             JOB_IDS.index("market_snapshot_daily")
+            < JOB_IDS.index("regime_daily")
             < JOB_IDS.index("screening_daily")
             < JOB_IDS.index("factor_decay_monitor")
-        ), "展示顺序 = 时刻顺序（快照 15:30 → 选股 15:40 → 因子衰减 15:45）"
+        ), "展示顺序 = 时刻顺序（快照 15:30 → 拥挤度 15:35 → 选股 15:40 → 因子衰减 15:45）"
 
     def test_schedule_spec_is_1540_monfri(self):
         assert SCHEDULES["screening_daily"] == {
@@ -203,12 +253,17 @@ class TestMonthlyBatchRegistration:
         assert JOB_FUNCS["memory_extract_monthly"] is run_memory_extract_monthly
         assert JOB_FUNCS["factor_proposal_monthly"] is run_factor_proposal_monthly
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 14  # 12→13：+内置注册；13→14：+factor_harvest_daily（日批链内插入）
-        # 月批附于末尾：月批两任务下标不动；cohort 因 15:50 日批链内插入后移一位
+        assert len(JOB_IDS) == 20  # 12→13：+内置注册；13→14：+因子收割；18→19：+小票通道；
+        # 19→20：+cb_daily（转债日批，16:50 插于小票通道与 cohort 之间）
+        # 14→15：+regime_daily（拥挤度，15:35 日批链内插入）；15→18：+事件线三件
+        # 月批附于末尾：月批两任务下标不动；cohort 因日批链内插入后移
         assert JOB_IDS[-2:] == ("memory_extract_monthly", "factor_proposal_monthly")
         assert (
-            JOB_IDS.index("cohort_batch") == 11
-        )  # 9→10：+内置注册；13→14：+factor_harvest_daily（15:55 插入其前）
+            JOB_IDS.index("cohort_batch") == 17
+        )  # 9→10：+内置注册；13→14：+因子收割（15:55 插入其前）；18→19：+小票通道（16:45 插入其前）；
+        # 14→15：+regime_daily（15:35 插入其前）；
+        # 15→18：+事件线三件（16:05/16:15/16:25 插入其前）；
+        # 19→20：+cb_daily（16:50 插入其前）
 
     def test_monthly_schedule_specs_verbatim(self):
         """月粒度以 ``day_of_month=1`` 表达（09:00 / 10:00，Asia/Shanghai）。"""
@@ -251,6 +306,76 @@ class TestMonthlyBatchRegistration:
         assert row["run_id"] == out["run_id"]
         assert row["kind"] == "manual" and row["source"] == "manual"
         assert row["status"] == "ok" and row["finished_at"] is not None
+
+
+class TestCbDailyRegistration:
+    """add-convertible-bond-coverage：转债日批接线（16:50，小票通道之后、cohort 之前）。"""
+
+    def test_registered_aligned_and_ordered(self):
+        assert "cb_daily" in JOB_IDS
+        assert JOB_LABELS["cb_daily"] == "转债日批"
+        assert JOB_FUNCS["cb_daily"] is run_cb_daily
+        assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
+        assert (
+            JOB_IDS.index("microcap_screening_daily")
+            < JOB_IDS.index("cb_daily")
+            < JOB_IDS.index("cohort_batch")
+        ), "展示顺序 = 时刻顺序（小票通道 16:45 → 转债日批 16:50 → cohort 18:00）"
+
+    def test_schedule_spec_is_1650_monfri(self):
+        """转债日批 16:50（mon-fri，Asia/Shanghai）逐字钉死；小票通道之后、cohort 之前。"""
+        assert SCHEDULES["cb_daily"] == {
+            "day_of_week": "mon-fri",
+            "hour": 16,
+            "minute": 50,
+            "timezone": "Asia/Shanghai",
+        }
+        microcap = SCHEDULES["microcap_screening_daily"]
+        assert (microcap["hour"], microcap["minute"]) == (16, 45)
+
+
+class TestMicrocapLaneRegistration:
+    """add-microcap-lane-guardrails：小票通道日批接线（16:45，完整性校验之后、cohort 之前）。"""
+
+    def test_registered_aligned_and_ordered(self):
+        assert "microcap_screening_daily" in JOB_IDS
+        assert JOB_LABELS["microcap_screening_daily"] == "小票通道"
+        assert JOB_FUNCS["microcap_screening_daily"] is run_microcap_lane
+        assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
+        assert (
+            JOB_IDS.index("integrity_check")
+            < JOB_IDS.index("microcap_screening_daily")
+            < JOB_IDS.index("cohort_batch")
+        ), "展示顺序 = 时刻顺序（完整性校验 16:40 → 小票通道 16:45 → cohort 18:00）"
+
+    def test_schedule_spec_is_1645_monfri(self):
+        """小票通道日批 16:45（mon-fri，Asia/Shanghai）逐字钉死；integrity 之后、cohort 之前。"""
+        assert SCHEDULES["microcap_screening_daily"] == {
+            "day_of_week": "mon-fri",
+            "hour": 16,
+            "minute": 45,
+            "timezone": "Asia/Shanghai",
+        }
+        integrity = SCHEDULES["integrity_check"]
+        assert (integrity["hour"], integrity["minute"]) == (16, 40)
+        cohort = SCHEDULES["cohort_batch"]
+        assert (cohort["hour"], cohort["minute"]) == (18, 0)
+
+    def test_daily_wrapper_raises_on_failed_lane(self, monkeypatch):
+        """批次 failed → 任务上抛：run_job 记 failed，运维界面可见（与主档同纪律）。"""
+        import finance_agent.screening.pipeline as pipeline_mod
+
+        monkeypatch.setattr(
+            pipeline_mod,
+            "run_microcap_lane_daily",
+            lambda *args, **kwargs: {
+                "trade_date": "2026-10-13",
+                "status": "failed",
+                "error": "快照过期",
+            },
+        )
+        with pytest.raises(RuntimeError, match="快照过期"):
+            pipeline_mod.run_microcap_lane()
 
 
 class TestRunJobLifecycle:
@@ -464,3 +589,84 @@ class TestActiveOwnershipScope:
         # 收尾即注销；他库视角始终为空
         assert active_run_ids(db_path=db_a) == frozenset()
         assert active_run_ids(db_path=db_b) == frozenset()
+
+
+class TestEarningsEventLaneRegistration:
+    """add-event-driven-lane：业绩预告事件线三件（16:05 抓取 / 16:15 分诊 / 16:25 结算）。"""
+
+    def test_registered_aligned_and_time_ordered(self):
+        from finance_agent.outcome.events.job import (
+            run_earnings_fetch_daily,
+            run_earnings_triage_daily,
+            run_event_settle_daily,
+        )
+
+        assert JOB_LABELS["earnings_fetch_daily"] == "业绩预告抓取"
+        assert JOB_LABELS["earnings_triage_daily"] == "预告分诊"
+        assert JOB_LABELS["event_settle_daily"] == "事件结算"
+        assert JOB_FUNCS["earnings_fetch_daily"] is run_earnings_fetch_daily
+        assert JOB_FUNCS["earnings_triage_daily"] is run_earnings_triage_daily
+        assert JOB_FUNCS["event_settle_daily"] is run_event_settle_daily
+        assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
+        assert (
+            JOB_IDS.index("decision_settle_daily")
+            < JOB_IDS.index("earnings_fetch_daily")
+            < JOB_IDS.index("paper_execute_daily")
+            < JOB_IDS.index("earnings_triage_daily")
+            < JOB_IDS.index("paper_settle_daily")
+            < JOB_IDS.index("event_settle_daily")
+            < JOB_IDS.index("daily_marking")
+        ), (
+            "展示顺序 = 时刻顺序（16:00 判定 → 16:05 抓取 → 16:10 执行 → 16:15 分诊 → 16:20 → 16:25 结算）"
+        )
+
+    @pytest.mark.parametrize(
+        ("job_id", "hour", "minute"),
+        [
+            ("earnings_fetch_daily", 16, 5),
+            ("earnings_triage_daily", 16, 15),
+            ("event_settle_daily", 16, 25),
+        ],
+    )
+    def test_schedule_specs_verbatim(self, job_id, hour, minute):
+        assert SCHEDULES[job_id] == {
+            "day_of_week": "mon-fri",
+            "hour": hour,
+            "minute": minute,
+            "timezone": "Asia/Shanghai",
+        }
+
+    def test_fetch_job_failure_lands_failed_run(self, tmp_path, monkeypatch):
+        """抓取失败 → run_job 记 failed + 原因（失败留痕，不静默零新增冒充成功）。"""
+        from finance_agent.outcome.events import job as events_job
+
+        db = tmp_path / "ops.db"
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(db))
+        monkeypatch.setenv("EVENTS_DB_PATH", str(tmp_path / "events.db"))
+        monkeypatch.setenv("EVENTS_FETCH_PERIODS", "1")
+
+        def _boom():
+            raise RuntimeError("业绩预告抓取失败（信源缺失）")
+
+        monkeypatch.setattr(events_job, "run_earnings_fetch_daily", _boom)
+        outcome = run_job("earnings_fetch_daily", func=_boom)
+        assert outcome["status"] == "failed"
+        assert "业绩预告抓取失败" in outcome["error"]
+        row = last_job_run("earnings_fetch_daily", db)
+        assert row["status"] == "failed" and "业绩预告抓取失败" in row["error"]
+
+    def test_settle_job_runs_both_steps(self, tmp_path, monkeypatch):
+        """结算 job：先记账后结算（同一编排），摘要含两步计数。"""
+        from finance_agent.outcome.events import job as events_job
+
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "ops.db"))
+        monkeypatch.setenv("EVENTS_DB_PATH", str(tmp_path / "events.db"))
+        monkeypatch.setattr(
+            events_job, "entry_candidates", lambda **kwargs: {"entered": 2, "deferred": 0}
+        )
+        monkeypatch.setattr(events_job, "settle_due", lambda **kwargs: {"settled": 1, "not_due": 1})
+        monkeypatch.setattr(events_job, "read_snapshot_calendar", lambda *a, **k: ["2025-04-16"])
+        outcome = run_job("event_settle_daily", func=events_job.run_event_settle_daily)
+        assert outcome["status"] == "ok"
+        assert outcome["summary"]["entry"] == {"entered": 2, "deferred": 0}
+        assert outcome["summary"]["settle"] == {"settled": 1, "not_due": 1}

@@ -264,13 +264,19 @@ data/test-e2e-factor-library.db*
 # 执行台账页 E2E 独立执行库（playwright.config.ts / playwright.isolated.config.ts 注入
 # EXECUTION_DB_PATH；seed/broker_reset 会清 orders/positions/cash 三表）
 data/test-e2e-execution.db*
+# 市场温度计 E2E 独立测试库（playwright.config.ts / playwright.isolated.config.ts 注入
+# REGIME_DB_PATH；seed/regime_reset 会清 regime_daily 全表）
+data/test-e2e-regime.db*
 # unify-ui-design-system T1：页面视觉基线专属套件测试库（playwright.ui-baseline.config.ts
-# 注入 SESSIONS_DB_PATH / SNAPSHOT_DB_PATH / SCREENING_DB_PATH / EXECUTION_DB_PATH / CACHE_DB_PATH）
+# 注入 SESSIONS_DB_PATH / SNAPSHOT_DB_PATH / SCREENING_DB_PATH / EXECUTION_DB_PATH /
+# CACHE_DB_PATH / REGIME_DB_PATH）
 data/test-e2e-ui-baseline*.db*
 # 行情快照库（本地运行时数据，同 **/sessions.db 处置）；非 live 测试经默认路径
 # 读取会创建空库（analyze 端点时效性校验取数），不得误提交
 data/market_snapshot.db*
 data/screening.db*
+# 市场温度计库（本地运行时数据；拥挤度日批产行，同 data/screening.db 处置）
+data/regime.db*
 data/factor_library.db*
 # 因子研发监控快照（distro 采集器经 /mnt/d 桥写入的运行时产物）+ E2E fixture 文件
 # （delta add-factor-research-monitor：spec 直接写隔离 fixture，生产快照不得入库）
@@ -278,6 +284,10 @@ data/factor_research/
 data/test-e2e-factor-research-status.json*
 data/test-e2e-factor-research-control.json*
 data/execution.db*
+# 业绩预告事件线库（delta add-event-driven-lane：本地运行时数据 + E2E 隔离库，
+# 同 data/screening.db / data/regime.db 处置；env EVENTS_DB_PATH 可覆盖）
+data/events.db*
+data/test-e2e-events.db*
 data/test-repro.db*
 data/*.corrupt-backup
 

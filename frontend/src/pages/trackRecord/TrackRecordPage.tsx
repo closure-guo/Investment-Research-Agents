@@ -9,6 +9,7 @@ import { loadTrackPrefs, type TrackTimeSpan } from '../../lib/trackPrefs'
 import { PREDICTION_STATUS_CLS as STATUS_CLS, PREDICTION_STATUS_LABEL as STATUS_LABEL } from './predictionStatus'
 import { DIRECTION_LABEL } from './predictionDisplay'
 import { IndexCompareCard } from './IndexCompareCard'
+import { StrategyScorecardCard } from './StrategyScorecardCard'
 
 // 可排序列（add-track-record-sort-filter）：与后端 _SORT_WHITELIST 对齐；
 // sortable: false 为纯展示列（不渲染排序按钮）。
@@ -615,6 +616,10 @@ export function TrackRecordPage({ onBack }: { onBack: () => void }) {
           {/* 跑赢指数对比（add-index-performance-compare）：组合区间收益 vs 主要指数同期收益；
               span 与净值图窗口同源（页面战绩展示偏好 prefs.timeSpan） */}
           <IndexCompareCard span={prefs.timeSpan} />
+
+          {/* 策略族成绩单（add-strategy-family-scorecards）：观点线/执行线四槽读数与
+              极端样本明细；与跑赢指数对比相邻（同为只读、独立取数、失败互不影响） */}
+          <StrategyScorecardCard />
 
           {/* 当前观点区（add-current-stance-view）：每股最新一条 open 的立场视图。
               纯展示收敛：台账不受影响，统计口径零改动（delta spec 战绩页面 MODIFIED） */}

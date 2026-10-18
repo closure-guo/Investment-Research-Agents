@@ -178,11 +178,10 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 | ⑥ 参考价护栏 | 落库：quote 价与最近 K 线收盘偏离 > `TRACK_ENTRY_PRICE_MAX_DEVIATION`（默认 0.30，覆盖各板块涨跌幅限制）→ 拒绝采信 quote、降级 K 线收盘 + WARN；盯市：entry_price 与 created 后首个交易日收盘偏离 > 阈值 → skipped + WARN 不写 marks（append-only 冻结语义下不修存量 entry_price，供人工甄别） |
 | ⑦ as_of | 总览 `portfolio.as_of` = equity_curve 最新数据日期，SHALL NOT 用快照写入日期（metric_date）冒充数据日期 |
 
+### 1.13 策略族 scorecard 口径（2026-10-19 登记；裁决自 2026-10-18 调研 §4.2 P0；实施 delta `add-strategy-family-scorecards`）
 
-### 1.13 策略族 scorecard 口径（2026-10-19 登记；裁决自 2026-10-18 调研 §4.2 P0；实施 delta `add-strategy-family-scorecards` 未立项）
-
-**先口径后代码**：本节为口径冻结登记——指标定义在此钉死后才立项实施；实施 delta 落地前，
-本节各指标**无代码读数**，战绩页现行口径（§1.9/§1.12）不受影响。度量对象 = **策略族**
+**先口径后代码**：本节为口径登记——指标定义在此钉死后才实施；实施 delta `add-strategy-family-scorecards`
+落地后，四槽读数见下方实现口径，战绩页其余口径（§1.9/§1.12）不受影响。度量对象 = **策略族**
 （同一信号机制 + 同一执行形态的策略集合；当前在产族仅 T+20 cohort 观点线一条，
 事件 lane / 转债条款等族增设时并入本框架）。
 
@@ -197,6 +196,201 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 **判读纪律**：任何 scorecard 读数进入处置（调仓/下线/扩容）前，仍走分桶归因 + 逐条人工终裁
 （incident 026 纪律不变）；族间比较 SHALL 同口径同成本假设。基线切点 = 实施 delta 合并日冻结，
 此后跨切点绝对值不可直接比较（同 §1 切点惯例）。
+**族定义**：观点线 `predictions`（`status ∈ {resolved_win, resolved_loss, resolved_neutral}`，与既有 prediction_stats 分母一致）
+／执行线 `execution`（`paper_equity` 净值派生，已含撮合费模型）。
+
+**四槽口径**：
+1. **期望值**：毛 = 样本收益均值（观点线 = `raw_return`；执行线 = 组合级日收益均值）；净 = 毛 − 往返成本估算率
+   （= `max(commission_rate × 100_000, min_commission)/100_000 × 2 + stamp_tax_rate + 中档 slippage_rate × 2`，
+   参数同源 `config/matching_engine.json`，默认 ≈ 0.30%）；执行线毛=净（已含费）。样本 < 10 → null + `insufficient_sample`。
+2. **最大回撤**：按日期聚合样本等权收益（`resolved_at` 前 10 字符）→ 复利净值 → `MDD = 1 − min(nav/峰值)`（输出 ≤ 0）；
+   执行线直接用净值序列。结算日样本 < 20 → null + `insufficient_history`。
+3. **容量提示**：最近 20 个样本标的（观点线 = 最近判定 symbol；执行线 = 当前持仓）近 20 交易日日均成交额（快照 `amount`）
+   × 参与率 1% 的最小值 → 建议资金上限；缺数据标的剔除计数，全缺 → null + `no_liquidity_data`。
+4. **极端样本**：观点线 `raw_return ≤ -0.15`、执行线组合日收益 ≤ -0.05（具名常量）；清单含 ticker/日期/收益。
+
+**胜率定位**：`win_rate` 保留为展示字段（四槽之后）；MUST NOT 作为任何自动处置/门禁/告警输入。
+口径：观点线 `win_rate` = `resolved_win` 占比（分母沿用 `prediction_stats` 既有口径，仅 long/short 已判定，
+`neutral`/`avoidance`/`duplicate_of_day` 等既有排除项不进分母）；执行线 `win_rate = null`（不适用——执行线无胜率口径）。
+
+### 1.14 市场拥挤度与总仓位系数（delta `add-crowding-regime-positioning`，2026-10-18 登记）
+
+**指标**：小市值组成交额占比（按流通市值升序前 30%，停牌/零成交剔除；流通市值取数链 = 快照同源 spot（EM 原始列）
+优先 → 腾讯行情批量兜底（真实市值字段；采用兜底源时指标行 `cap_source=tencent` 留痕），两源皆无/覆盖不全即当日不产行 + `cap_data_missing`）/
+涨跌家数（pct_chg 符号）/ 涨停跌停家数（limit_up_sealed / limit_down_sealed）/
+全市场成交额。**分位**：当日值在最近 250 交易日窗口内的百分位（`#{x≤v}/n`）；样本 < 60 → null + `insufficient_history`。
+**判定**：触发指标 = 小市值占比分位、成交额分位；任一 ≥ danger 阈值（默认 0.9）→ danger、≥ elevated（默认 0.8）→ elevated、
+否则 normal；系数映射 1.0 / 0.5 / 0.0（全部可配置）；分位不可用不触发且在 reasons 注明。**陈旧**：数据日期距判定时刻超过 7 个自然日（可配置；与 spec/design 的「>7」口径一致）。
+**执行链**：目标权重 × 系数；系数 ≠ 1.0 逐票 `REGIME_SCALE`，摘要记状态与系数；缺失/陈旧 → 1.0 + `no_regime_data`。
+
+### 1.15 业绩预告事件线（delta `add-event-driven-lane`，2026-10-18 登记）
+
+**数据源与字段口径**：akshare `stock_yjyg_em`（东方财富业绩预告，按报告期拉取；本机实测 1.18.94 可用，列名见实现映射表）；
+取数口径 = `预测指标` 为「归属于上市公司股东的净利润」的行（归母口径，与全库报表口径一致；源多指标行只取净利润行）。
+字段：代码 / 名称 / 报告期（`report_period` 归一 `YYYY-MM-DD`）/ 预告类型（源取值原样落库，不做二次归类）/
+**变动幅度下限与上限**（优先解析 `业绩变动` 文本「同比上年 增长|变动|下降 A% 至 B%」区间，方向词定符号——`下降`/`减少` 取负、
+`增长`/`变动` 原样；无区间 → 下限 = 上限 = 源 `业绩变动幅度` 单值；均缺 → NULL，不折算 0）/ 公告日期 / 来源标识（`source="eastmoney"`）。
+**可得时点**：`available_at` = 公告日期（`announce_date`）——下游判断、分诊输入与回填一律 `available_at ≤ 判断日`（时点截断，MUST NOT 前视）。
+唯一键 `(代码, 报告期, source_record_id)`；`source_record_id` = `预测指标|公告日期`（稳定复合键，重抓幂等覆盖为最新值）。
+抓取失败/空 → 返回空列表 + ERROR 留痕，MUST NOT 以零新增冒充成功。
+
+**分诊合同与降级**：LLM 输出 `{verdict ∈ {outperform, in_line, risk}, reason ≤ 50 字, evidence: [{field, value}]}`；
+非法 verdict / 超长 reason / 缺证据 = 拒收；单条调用失败（typed LLM error）或拒收 → 降级 `in_line` + trace warning，
+不阻断本批其余记录；分诊结果落库含模型标识与 prompt 版本指纹（`load_prompt_with_meta`）。
+prompt 权威源 `src/finance_agent/prompts/event_triage.md`，发布走 `scripts/deploy_prompts.py`（prompt-deploy-consistency 门禁适用）。
+分诊输入预算 ≤ 12 字段（预告要素全量 + 快照表**实际可得键** `close`/`pct_chg`/`amount`，常量集中定义）；快照要素**逐行时点化**注入——
+每行取「≤ 该行 `available_at` 的最近快照日」的该股快照字段，该日无覆盖（老公告/空库）→ 该行不注入快照字段（仅预告要素）并在日批摘要
+计数留痕 `snapshot_ctx_missing`（MUST NOT 对回填批次共用单一快照日/前视）。
+
+**入场 / horizon / 结算口径**：入场 = 可得时点（`available_at`，缺省回落 `announce_date`）**次一交易日开盘价**
+（`fetch_kline(adjust=SETTLEMENT_ADJUST)` 后复权 hfq，与执行链同口径）；记账人口 = `verdict='outperform'` 且未入场者
+（`in_line`/`risk` 不记账；全候选反事实读数为非目标，如需另立 delta）。
+不可成交判定读入场候选日快照 `read_universe(as_of=entry_date)`——`is_suspended=1` 或 `limit_up_sealed=1` 挡买顺延
+（**买入侧门禁语义**，与执行链 `risk_gate`/`matching` 一致；跌停板可买，不挡）；停牌真实形态（该交易日无 kline 行）由交易日历识别
+`available_at → 入场日` 间缺失交易日 = 停牌日，并入 `note=deferred:suspended@<日期>`（多日逗号合并）；
+快照行缺失/快照库不可读 → 退化为 **kline OHLC 判板**降级（一字板口径 = 开=高=低=收 且 `收盘 / 前一交易日收盘 − 1 ≥ 4.8%`
+（含边界，`sealed_flags_from_ohlc` 与快照 D3 同源；前收取该标的上一交易日收盘，缺失不判板；OHLC 不完整 → fail-closed 顺延），并日志注明口径降级。
+horizon 默认 **5 个交易日**（可配置）；结算日 = 入场日之后第 horizon 个交易日，结算价 = **该日收盘价**，
+`raw_return = 结算价 / 入场价 − 1`（round 6）；结算日无 K 线行（停牌）→ **递延至复牌首日收盘结算**并留痕
+`note=deferred:<复牌日>@<原结算日>`（与「取数失败」区分）；kline 取数失败/窗口未覆盖（参考价缺失）→ 保持 `open` +
+留痕 `note=settle_pending:<原因>` 重试，MUST NOT 以 0 或估算值结算；结算留痕与入场顺延注记**拼接不覆盖**
+（`;` 分隔，重试不叠写同款 pending 段）；已结算读数按 `settle_date` **降序**保留近期（超读取上限丢最旧，不静默丢最新）。
+
+**家族隔离声明**：事件读数注册为策略族成绩单 `family_id=event`（`data_source="events"`、`cost_bearing=True`、`min_samples=10`、
+`extreme_threshold=-0.15`），样本 = 已结算 `event_journal` 行（ticker=`symbol`、日期=`settle_date`、收益=`raw_return`）；
+horizon 默认 T+5 独立于观点线 T+20，MUST NOT 混入观点统计（predictions 族样本只取 `predictions` 表已判定行，两者互不包含对方样本）。
+事件线 v1 为纯观察/研究通道：不接 regime 系数、不进执行链目标（避免与 paper 台账双重记账）。
+
+### 1.16 含退市股池与小票通道（delta `add-microcap-lane-guardrails`，2026-10-18 登记）
+
+**退市清单口径（来源与字段映射）**：两所清单合并 —— 沪 `ak.stock_info_sh_delist()`
+（实测列 `公司代码 / 公司简称 / 上市日期 / 暂停上市日期`，2026-10-18 本机 159 行）+
+深 `ak.stock_info_sz_delist()`（实测列 `证券代码 / 证券简称 / 上市日期 / 终止上市日期`，本机 209 行）；
+统一字段 `code / name / list_date / delist_date / source`。
+**语义注明（不得误读）**：沪清单的日期列是「**暂停上市日期**」而非交易所正式退市日，本口径将其映射为
+`delist_date` 并保留 `source="sh_suspend"` 供审计（深市源列名「终止上市日期」→ `source="sz_delist"`）；
+消费方以 `source` 区分两类日期语义，MUST NOT 把沪源 `delist_date` 读作交易所退市日。
+抓取失败/空 → 空列表 + ERROR 留痕（明细类约定），MUST NOT 以空表冒充成功；
+**列漂移**：缺**代码列**或缺**退市日列** → 该源判不可用（`[]` + ERROR，不产「一批全 None 日期」的
+半口径行冒充成功）；缺**上市日期列** → 降级保留行（`list_date=None` + WARN，如实标注）。
+落库：`security_master` 扩展列 `delist_date` 与 `delist_source`（ALTER 增量迁移，先例 `selection_mode`；
+`delist_source` = 日期语义来源的**持久审计留痕**，消费方据库内值即可区分沪/深语义）；退市清单经
+`upsert_delisted_masters` 幂等 upsert（`COALESCE` 保值，不因部分拉取失败清空已知字段）；
+**生产触发点** = 快照日批主表刷新分支（名单为空或每周一），与上市清单同频，失败只 WARN 不失败整批。
+
+**池可见性（防幸存者偏差）**：对时点 t，标的可见当且仅当 `上市日 ≤ t ≤ 退市日`（含边界）。
+`delist_date` 缺失按「未退市」处理（`list_date` 缺失时下界不约束——不因缺数据静默剔除，
+与「无价格历史的退市标的如实标注缺失」同纪律，MUST NOT 静默剔除）；
+退市标的价格历史经 `scripts/backfill_delisted.py` 按 `list_date..delist_date` 窗口补采
+（复用既有回填通道，回填行不含状态位/前收盘，勿接 rebase/停牌合成链）；
+源无历史 → `history_missing` 计数 + 代码明细如实标注，不伪造。
+**断点续跑 = 整窗覆盖判据**（不只是「窗口内有行」）：窗口内有行、字段齐备、且最早行触及窗口起点锚
+（日历中首个 ≥ `list_date` 的交易日）才跳过；只判头部（退市整理期结束日 ≠ 退市日，尾部不判；停牌日本无行）；
+仅尾部有行（如运行期日批行）→ 部分覆盖，进 `partial_overlap` 明细并重取（INSERT OR REPLACE 幂等），
+MUST NOT 谎报覆盖。缺失/覆盖明细随非 dry-run 运行落 `snapshot_meta["delist_backfill_missing"]`（持久留痕）。
+`security_master` 的既有**隐式**退市口径（快照 D2：不在 master 名单 → 不补行）保留不动；
+两口径关系：显式 `delist_date` 供池可见性判定，隐式「不在名单」仅用于停牌合成（见 `snapshot.py` 注释）。
+
+**小票通道档位（microcap，单一来源 `screening/constraints.py`）**：`MICROCAP_THRESHOLDS`
+= `min_avg_amount_20d` **1000 万元**（`MICROCAP_MIN_AVG_AMOUNT_20D = 1e7`）、
+`min_trading_days` / `min_liquidity_history_days` 同主档；建议执行约束（**记录字段**，v1 不下单）：
+单票上限默认 **5%**（`MICROCAP_SUGGESTED_SINGLE_CAP = 0.05`）、滑点档位提升一档
+（`MICROCAP_SLIPPAGE_TIER_BUMP = 1`），随批次落 `screening_batches.exec_constraints`
+（JSON 对象 `{"suggested_single_cap":0.05,"slippage_tier_bump":1}`；读侧解析为 dict，主档恒 NULL）。主档（main）逐字不变（`DEFAULT_THRESHOLDS` 与既有调用路径）。
+通道批次与主档批次并存于 `screening_batches`（列 `pool='microcap'`，主键 `(trade_date, pool)`；
+读侧默认 `pool='main'`，既有页面/接口口径零变化）。
+
+**前置门禁（两判据，纯代码检查）**：
+- **退市池就绪** `delist_ready` = `security_master` 含 ≥1 条 `delist_date` 非空记录；
+- **拥挤度数据就绪** `regime_ready` = `regime_daily` 最新行日期距判定日 ≤ **7 个自然日**
+  （复用 `outcome/regime/model.py::latest_regime`；陈旧阈值同 §1.14）。
+
+两判据齐备 → 批次记录 `frontier_gate="ready"`（**可执行候选**，仍不自动产生订单）；
+缺任一 → `frontier_gate="observation_only:missing=<要点列表>"`（要点 ∈ `delist_pool` / `regime_data`，
+逗号分隔）并披露缺失前置，MUST NOT 静默按可执行对待。
+**v1 MUST NOT 向执行链产生订单**（不接 `execution/`、不进目标权重；执行接通属后续立项）。
+
+### 1.17 可转债覆盖与条款事件（delta `add-convertible-bond-coverage`，2026-10-18 登记）
+
+**数据源与字段口径**（2026-10-18 本机 akshare 1.18.94 实探；docs 口径以本小节 + 实现映射表为准）：
+
+- **标的要素**：`ak.bond_zh_cov()`（东方财富可转债数据；本机 1063 行）。列 `债券代码 / 债券简称 / 正股代码 /
+  转股价 / 转股溢价率 / 债现价 / 发行规模 / 上市时间 / 信用评级`。落 `cb_master(code PK, name, stock_code,
+  convert_price, premium_rate, remain_scale, rating, updated_at)`（`updated_at` = 落库时刻）。
+  **单位**：`转股溢价率` = **%**（原样落 `premium_rate`，不除 100）；`发行规模` 单位 亿元（本表不落，
+  仅口径核对用）；价格类字段单位 元。**该源无「剩余规模」列 → `remain_scale` 置 NULL**，
+  MUST NOT 以发行规模冒充剩余规模（缺值如实缺，§design「缺值一律 —」）。
+  未上市标的（`上市时间` 缺失、转股价 NaN）照落主表，字段缺失如实 NULL、不估算、不剔除。
+- **日行情**：`ak.bond_zh_hs_cov_spot()`（新浪财经沪深可转债实时行情；本机 320 行）→ `cb_quotes(trade_date,
+  code)` 唯一。`close` ← `trade`（元）、`amount` ← `amount`（元，源单位原样落库，不换算万元/亿元）。
+  `trade` 缺失或 ≤ 0（停牌/零成交）→ 跳过该行并计数（WARNING），MUST NOT 折算 0 冒充价格。
+  **交易日注记**：`trade_date` = 日批 `as_of`，且必须落在快照库交易日历内；**两种跳过**：日历判非交易日 →
+  当次跳过行情落库（摘要留痕 `skipped_reason=non_trading_day`）、**日历不可得（缺/空）→ 同样跳过**
+  （`skipped_reason=calendar_unavailable`，且不发起抓取）——缺日历无法确认当日是交易日，
+  MUST NOT 拿前一交易日价位冒充当日（评审 F4 口径对齐）。
+- **条款事件（强赎）**：`ak.bond_cb_redeem_jsl()`（集思录强赎；本机 317 行）→ `cb_events`，
+  `event_type='强赎'`。列映射 `强赎触发价→trigger_price` / `强赎触发比→trigger_ratio`（%口径原样，样本 130）/
+  `强赎天计数→count_text`（原样文本）/ `最后交易日→last_trade_date`（归一 `YYYY-MM-DD`）/
+  `剩余规模→remain_scale`（**亿元**，实探交叉核验：与 `bond_zh_cov.发行规模` 同口径同数量级——样本
+  金田转债 规模 15.000 / 剩余规模 9.905；设计冻结 `remaining_size` 单位 = 亿元，本表同口径直落）/
+  `强赎状态` 与其余源列入 `raw_json`（专用列不含状态；状态经 raw_json 提取供状态推导）。
+- **公告日口径（可得时点）**：源**无公告日字段**（实探确认）→ `announce_date` = **首次观测日**，即日批首次
+  见到该 `(code, event_type)` 的 `as_of`；重跑复用既有行的 `announce_date`（键稳定、幂等零重复）。
+  语义 = 可得时点上界（真实公告日 ≤ 本值），保守不前视；MUST NOT 以「最后交易日」等倒推公告日。
+  唯一键 `event_key = code|event_type|announce_date`。
+- **条款事件（下修）**：`ak.bond_cb_adj_logs_jsl(symbol=…)`（集思录转股价调整记录；**逐代码**接口，
+  无全市场批量模式，空 symbol 返回 0 行——本机实探）→ `cb_events`，`event_type='下修'`。
+  `announce_date` = **股东大会日**（源真实日期，归一 ISO）；关键要素（下修前/后转股价、新转股价生效日期、
+  下修底价）入 `raw_json`，专用列留空（不硬塞语义不符的列）。**接入方式 = 转股价变化触发**
+  （日调用量有界，避免逐代码扫全市场的分钟级/封 IP 风险）：`sync_cb_master` 检出 `convert_price`
+  相对上次落库发生变化的代码（每日 0~10 个量级；下修必致转股价变化），仅对这些代码逐代码查询，
+  且只收 `股东大会日 ≥ as_of − 30 天` 的记录（历史条目一次性重放不入清单）。
+  **首跑不回填历史下修**（无变化基线）；分派/送股等非下修引起的转股价变化由查询结果自然排除（空日志 → 不落事件）。
+- **条款事件（回售）**：akshare **无回售公告接口**（本机实探：`dir(ak)` 无回售类接口、接口 docstring 无
+  「回售」命中；仅 `bond_zh_cov_info` 逐代码详情含回售条款文本与回售触发价）→ **v1 事件类型 = 强赎 + 下修**。
+  spec 事件类型清单含回售，是否修订待 owner 决策（回售公告源缺失，非本变实现缺口）。
+
+**状态推导规则**（读时纯函数 `outcome/events/cb_status.py::derive_redeem_status`，零 LLM，同输入同输出）：
+
+- 输入：事件行（`count_text` / `announce_date` / `last_trade_date` / 状态文本，状态取自 `raw_json` 的
+  `强赎状态`）+ `as_of` + 交易日历。输出 `{state, days_done, days_needed, trading_days_to_last, note}`。
+- `count_text` 解析：`已触发天数/所需天数 | 上限天数`（形如 `12/15 | 30`，兼容空格/全角竖线变体）→
+  `days_done=12`、`days_needed=15`；**结构锚定**（评审 F1）：必须带 `| 上限天数` 段且数字两侧不粘数字/斜杠，
+  另有合理性校验（`days_needed ≥ 1` 且 `days_done ≤ days_needed`）——越界/无结构文本一律不可解析
+  （防把斜杠日期 `2026/10/27` 读成天计数而误判 triggered）；不可解析（如到期类文案「临近到期 …」）→
+  两者 None，MUST NOT 猜测。
+- 状态判定（生命周期序 counting → triggered → announced，故 announced 优先级最高）：
+  - `强赎状态 == "已公告强赎"` → **announced**；**此状态要求 `last_trade_date` 存在且可解析，缺失 → undetermined**
+    （spec 场景「缺少最后交易日的强赎公告 → 不可判定」）；`公告不强赎` 无专用状态位，沿用天计数判定
+    （不强赎事实保留于 raw_json），口径写明不误读为「已公告强赎」。
+  - 否则 `days_done >= days_needed` 且 `as_of >= announce_date` → **triggered**；天计数可解析但未达标 → **counting**。
+  - 天计数不可解析且非「已公告强赎」→ **undetermined** + note 指明缺失/不可解析字段；`announce_date` 缺失/
+    不可解析 → **undetermined**（任一路径）；MUST NOT 猜测数值。
+  - 边界：`days_done == days_needed` 判 triggered（含边界）；差一天判 counting。
+- **倒计时**：`trading_days_to_last` = 交易日历中 `as_of < d ≤ last_trade_date` 的交易日个数
+  （`last_trade_date ≤ as_of` → 0，含边界不含当日）；跨周末/节假日由日历自然扣除。
+  日历缺失（空/不可得）/ 日历未覆盖 `last_trade_date` / `last_trade_date` 缺失 → `None` + note
+  （如实缺值，不估算自然日；counting/triggered 未公告态本无最后交易日，note 亦指明缺字段）。
+- `as_of` 非规范 ISO 日期 → 上抛 `ValueError`（调用方缺陷，不静默降级）。
+
+**清单接线（规则化准入，零 LLM）**：`cb_events` 全部条目进入既有观察清单（`source="cbb"`，
+复用 `event_watchlist` 表与只读端点，键 = `event_key`）；条目**载荷四键冻结**（跨变更契约，2026-10-18 裁决）：
+`price`（元，取 `cb_quotes` 该代码最新交易日 `close`）/ `premium_rate`（%，取 `cb_master`）/
+`remaining_size`（**亿元**，取事件行 `remain_scale`）/ `call_countdown_days`（交易日个数，构建时按日历推导后落
+清单注记）——缺值一律 null（前端 `—`），MUST NOT 折算/估算/换单位。清单构建**零 LLM 调用**（MUST NOT 依赖
+LLM 分诊）；`reason` = 规则化标注文本（状态标签 + 天计数 + 距最后交易日 + 不可判定 note）。
+清单条目不因状态为 undetermined 而被剔除（如实入清单，倒计时 null + note）。
+注记刷新纪律：**交易日历可得时**刷新既有 cbb 条目的注记（倒计时随交易日递减），
+**日历不可得时只插不覆盖**（如业绩预告分诊日批经本函数顺带构建的路径——MUST NOT 把既有倒计时降级为
+null + 「日历不可用」文案冒充刷新，评审 F2）；两种情形均**不动** `status`/`session_id`/`created_at`。
+**深度分析入口 v1 禁用**（评审 F3 控制器裁决）：条款事件条目 MUST NOT 经
+`POST /api/events/watchlist/{id}/analyze` 发起深度分析（后端 409「条款事件暂不支持发起深度分析（v1）」，
+前端不渲染该入口）——cbb 条目标的在 `cb_code`（业绩预告侧 `code` 为 NULL），放行会以空标的建会话入队。
+
+**家族隔离声明**：本变不注册策略族成绩单、不建记账（`event_journal` 仅事件线业绩预告写入），
+**不进 T+20 观点统计**（`predictions` 族样本不含转债样本）；转债观察清单为纯观察/研究通道，
+不接 regime 仓位系数、不进执行链目标、**不产生订单**（与 §1.16 小票通道同纪律）。
+转债行情/事件的日批 job 为 `cb_daily`（16:50，见 `outcome/scheduler.py`）。
 
 ---
 

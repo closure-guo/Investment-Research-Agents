@@ -28,7 +28,9 @@ import { defineConfig } from '@playwright/test'
  */
 export default defineConfig({
   testDir: './tests',
-  testMatch: ['track-record-*.spec.ts', 'paper-broker.spec.ts'],
+  // strategy-scorecard.spec.ts（add-strategy-family-scorecards 的 track-record 门禁）
+  // 文件名不带 track-record- 前缀，故在此显式收录（默认 config 同步显式排除）
+  testMatch: ['track-record-*.spec.ts', 'paper-broker.spec.ts', 'strategy-scorecard.spec.ts'],
   timeout: 60_000,
   expect: { timeout: 5_000 },
   fullyParallel: false,

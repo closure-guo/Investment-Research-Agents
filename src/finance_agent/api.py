@@ -187,6 +187,16 @@ def resolve_reports_path(file_name: str) -> Path:
 # 决策日志表(幂等建表,decision_log 与 sessions 同库;decision-outcome-tracking)
 # cohort 跑批记账表(delta add-forward-paper-trading-cohort;独立于 predictions)
 from finance_agent.outcome.cohort.model import init_cohort_runs  # noqa: E402
+from finance_agent.outcome.events.model import (  # noqa: E402
+    get_watchlist_item,
+    init_events_db,
+    list_watchlist,
+    mark_watchlist_analyzing,
+)
+from finance_agent.outcome.events.watchlist import (  # noqa: E402
+    WATCHLIST_SOURCE_CBB,
+)
+from finance_agent.outcome.regime.payload import build_regime_payload  # noqa: E402
 from finance_agent.outcome.store import (  # noqa: E402
     DECISION_STATUSES,
     decision_stats,
@@ -235,6 +245,7 @@ def _init_stores() -> None:
         ("predictions", init_predictions),
         ("track_record", init_track_record_tables),
         ("cohort_runs", init_cohort_runs),
+        ("events", init_events_db),
     ):
         try:
             init_fn()
@@ -846,10 +857,21 @@ if TESTING:
         PaperBroker.order_id_for 同源派生））与 broker_reset（bool：清账户三表
         orders/positions/cash）造执行台账页确定性状态（delta add-broker-console
         T1.2）；库路径于调用期读 EXECUTION_DB_PATH（E2E 指向独立测试库）。
+        顶层可选 regime（list：逐行按 ``regime_daily`` DDL 列名造数（含
+        ``cap_source``，缺省字段如实落 NULL），经 upsert_regime_daily 写入）与
+        regime_reset（bool：清 ``regime_daily``）造选股页市场温度计三态/空态
+        （delta add-crowding-regime-positioning T8）；库路径于调用期读
+        REGIME_DB_PATH（E2E 指向独立测试库 data/test-e2e-regime.db，绝不落到
+        开发库 data/regime.db）。
+        顶层可选 events（dict：``forecasts``/``triage``/``watchlist``/``journal``
+        逐条经既有落库入口写入：预告 upsert（幂等）/分诊/清单（去重）/记账）与
+        events_reset（bool：清事件线四表）造选股页事件观察区块三态/空态
+        （delta add-event-driven-lane）；库路径于调用期读 EVENTS_DB_PATH
+        （E2E 指向独立测试库 data/test-e2e-events.db，绝不落到开发库 data/events.db）。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
-        # track_record / snapshot / screening / memory / factors / broker 造数块不受
-        # chat_history 前置约束
+        # track_record / snapshot / screening / memory / factors / broker / regime
+        # 造数块不受 chat_history 前置约束
         if (
             "chat_history" not in req
             and not isinstance(req.get("track_record"), dict)
@@ -864,6 +886,10 @@ if TESTING:
             and not req.get("factors_reset")
             and not isinstance(req.get("broker"), dict)
             and not req.get("broker_reset")
+            and not isinstance(req.get("regime"), list)
+            and not req.get("regime_reset")
+            and not isinstance(req.get("events"), dict)
+            and not req.get("events_reset")
         ):
             return {"status": "ok", "mode": "testing"}
         # add-paper-broker：战绩造数复位（清 equity_curve + paper_equity 两表）。双曲线
@@ -1148,6 +1174,101 @@ if TESTING:
         broker_seed = req.get("broker")
         if isinstance(broker_seed, dict):
             _seed_broker_account(broker_seed)
+        # 市场温度计造数（delta add-crowding-regime-positioning T8）：可选先 reset
+        # （清 regime_daily 全表）再写行——行字段与 regime_daily DDL 列名逐字一致
+        # （含 cap_source），经 upsert_regime_daily（生产同源写入口；trade_date 唯一
+        # → 同日覆盖）落库；缺省字段如实落 NULL（不编造）。库路径调用期读
+        # REGIME_DB_PATH（model._default_db_path env 口径，E2E 指向独立测试库
+        # data/test-e2e-regime.db，绝不落到开发库 data/regime.db）。
+        if req.get("regime_reset"):
+            from finance_agent.outcome.regime.model import reset_regime_db
+
+            reset_regime_db()
+        regime_seed = req.get("regime")
+        if isinstance(regime_seed, list):
+            from finance_agent.outcome.regime.indicators import (
+                INDICATOR_KEYS as _REGIME_INDICATOR_KEYS,
+            )
+            from finance_agent.outcome.regime.model import (
+                PCTILE_COLUMNS as _REGIME_PCTILE_COLUMNS,
+            )
+            from finance_agent.outcome.regime.model import (
+                upsert_regime_daily as _seed_regime_daily,
+            )
+
+            for regime_row in regime_seed:
+                _seed_regime_daily(
+                    str(regime_row["trade_date"]),
+                    {key: regime_row.get(key) for key in _REGIME_INDICATOR_KEYS},
+                    {key: regime_row.get(key) for key in _REGIME_PCTILE_COLUMNS},
+                    computed_at=str(regime_row.get("computed_at") or _now()),
+                    cap_source=regime_row.get("cap_source"),
+                )
+        # delta add-event-driven-lane：事件线造数（四表经既有落库入口写入：预告
+        # upsert 幂等、分诊覆盖、清单去重、记账唯一）。库路径调用期读 EVENTS_DB_PATH
+        # （model._default_db_path env 口径，E2E 指向独立测试库 data/test-e2e-events.db，
+        # 绝不落到开发库 data/events.db）。events_reset 先清四表，供同套件多 spec 复位。
+        if req.get("events_reset"):
+            from finance_agent.outcome.events.model import delete_all_events_state
+
+            delete_all_events_state()
+        events_seed = req.get("events")
+        if isinstance(events_seed, dict):
+            from finance_agent.outcome.events.model import (
+                insert_journal as _seed_event_journal,
+            )
+            from finance_agent.outcome.events.model import (
+                insert_watchlist as _seed_event_watchlist,
+            )
+            from finance_agent.outcome.events.model import (
+                record_triage as _seed_event_triage,
+            )
+            from finance_agent.outcome.events.model import (
+                settle_journal as _seed_event_settle,
+            )
+            from finance_agent.outcome.events.model import (
+                upsert_forecasts as _seed_forecasts,
+            )
+
+            forecasts = events_seed.get("forecasts") or []
+            if forecasts:
+                _seed_forecasts([dict(row) for row in forecasts])
+            for triage_row in events_seed.get("triage") or []:
+                _seed_event_triage(
+                    str(triage_row["forecast_key"]),
+                    verdict=str(triage_row["verdict"]),
+                    reason=str(triage_row.get("reason") or ""),
+                    evidence=triage_row.get("evidence") or [],
+                    model=triage_row.get("model"),
+                    prompt_fingerprint=triage_row.get("prompt_fingerprint"),
+                    triaged_at=triage_row.get("triaged_at"),
+                )
+            for item in events_seed.get("watchlist") or []:
+                _seed_event_watchlist(
+                    str(item["forecast_key"]),
+                    source=str(item.get("source") or "earnings"),
+                    status=str(item.get("status") or "pending"),
+                    session_id=item.get("session_id"),
+                    created_at=item.get("created_at"),
+                )
+            for row in events_seed.get("journal") or []:
+                row_id = _seed_event_journal(
+                    forecast_key=str(row["forecast_key"]),
+                    source=str(row.get("source") or "earnings"),
+                    symbol=str(row["symbol"]),
+                    entry_date=str(row["entry_date"]),
+                    entry_price=float(row["entry_price"]),
+                    horizon_days=int(row.get("horizon_days") or 5),
+                    note=row.get("note"),
+                )
+                if str(row.get("status") or "open") == "settled":
+                    _seed_event_settle(
+                        row_id,
+                        settle_date=str(row["settle_date"]),
+                        settle_price=float(row["settle_price"]),
+                        raw_return=float(row["raw_return"]),
+                        note=row.get("note"),
+                    )
         # track_record-only（含 {} 空 dict）造数后即返回占位响应，不落会话
         if "chat_history" not in req:
             return {"status": "ok", "mode": "testing"}
@@ -3002,6 +3123,22 @@ async def track_record_current(source: str | None = None) -> dict[str, Any]:
     }
 
 
+# ── 策略族成绩单（delta add-strategy-family-scorecards）：只读四槽读数 ──
+#
+# 口径权威：docs/evals/metrics.md §1.13（2026-10-18 登记）。本端点为纯读层：族注册表
+# 驱动（未注册数据源不出现），四槽缺数据一律 null + 原因码（MUST NOT 折算 0）；
+# 胜率仅展示位（四槽之后），MUST NOT 进入自动处置/门禁/告警。库路径由 outcome 侧
+# 调用期读 env（SESSIONS_DB_PATH / EXECUTION_DB_PATH / SNAPSHOT_DB_PATH）。
+
+
+@app.get("/api/scorecards")
+async def get_scorecards_endpoint() -> dict[str, Any]:
+    """策略族成绩单（只读）：注册表全族四槽读数 + 口径注释；空数据族如实返回。"""
+    from finance_agent.outcome.scorecards import get_scorecards
+
+    return await asyncio.to_thread(get_scorecards)
+
+
 @app.post("/api/feedback")
 async def submit_feedback(req: FeedbackRequest) -> dict[str, Any]:
     """add-user-feedback:用户点赞/点踩落 Langfuse trace(按 session 解析最近一次运行)。
@@ -3178,6 +3315,19 @@ async def snapshot_status() -> dict:
             "last_error": "status_unavailable",
             "last_error_date": None,
         }
+
+
+@app.get("/api/regime")
+async def regime_status() -> dict:
+    """市场拥挤度 regime 只读端点（add-crowding-regime-positioning）。
+
+    返回最新判定（``state`` / ``multiplier`` / ``reasons``）+ 四指标（当日值 +
+    历史分位）+ 近 250 交易日历史序列 + ``as_of`` / ``age_days`` / ``stale``；
+    无记录或不可解析 → 200 + ``available=false`` + 原因码（``missing`` /
+    ``corrupt``），MUST NOT 500 或以伪数据冒充。只读：不写/不改任何状态
+    （阻塞 IO 走线程池，不占事件循环）。
+    """
+    return await asyncio.to_thread(build_regime_payload)
 
 
 # ── 选股（add-screening-pipeline T3；S3/S4：池 / 状态 / 批量深度分析） ──
@@ -3479,6 +3629,171 @@ async def screening_analyze() -> Any:
         "started": [item for item in snapshot if item["state"] == "running"],
         "queued": [item for item in snapshot if item["state"] == "queued"],
         "removed": removals,
+    }
+
+
+# ── 事件观察清单（delta add-event-driven-lane T5：只读清单 + 深度分析接线） ──
+
+
+def _watchlist_evidence(raw: Any) -> Any:
+    """证据 JSON 文本 → 解析后的列表；损坏如实返回 ``None``（不伪装成 []、不编造）。"""
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(str(raw))
+    except ValueError:
+        _logger.warning("观察清单证据 JSON 损坏，按 null 返回: %.80s", raw)
+        return None
+    return parsed
+
+
+def _cbb_note_payload(raw: Any) -> dict[str, Any] | None:
+    """条款事件条目的规则化注记（``event_watchlist.note`` JSON）→ dict。
+
+    损坏/非对象 → ``None`` + WARNING（四键中倒计时如实 null，不伪装成 0 或编造理由）。
+    """
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(str(raw))
+    except ValueError:
+        _logger.warning("条款事件注记 JSON 损坏，按 null 返回: %.80s", raw)
+        return None
+    if not isinstance(parsed, dict):
+        _logger.warning("条款事件注记非对象，按 null 返回: %.80s", raw)
+        return None
+    return parsed
+
+
+def _event_watchlist_payload(row: dict[str, Any]) -> dict[str, Any]:
+    """清单行（库列名）→ API 载荷（前端契约字段名）。
+
+    条款事件条目（``source=cbb``）额外携带**冻结四键**（跨变更契约，2026-10-18 裁决）：
+    ``price``（元，最新交易日行情）/ ``premium_rate``（%，标的表）/ ``remaining_size``
+    （亿元，事件行剩余规模）/ ``call_countdown_days``（交易日个数，构建时按日历推导后落注记）
+    ——缺值一律 null（前端 ``—``），MUST NOT 折算；``reason`` = 规则化理由文本。
+    """
+    payload = {
+        "id": row.get("id"),
+        "forecast_key": row.get("forecast_key"),
+        "source": row.get("source"),
+        "status": row.get("status"),
+        "session_id": row.get("session_id"),
+        "created_at": row.get("created_at"),
+        "code": row.get("code"),
+        "name": row.get("name"),
+        "report_period": row.get("report_period"),
+        "forecast_type": row.get("forecast_type"),
+        "change_low": row.get("change_low"),
+        "change_high": row.get("change_high"),
+        "announce_date": row.get("announce_date"),
+        "available_at": row.get("available_at"),
+        "verdict": row.get("verdict"),
+        "reason": row.get("reason"),
+        "evidence": _watchlist_evidence(row.get("evidence_json")),
+        "model": row.get("model"),
+        "prompt_fingerprint": row.get("prompt_fingerprint"),
+        "triaged_at": row.get("triaged_at"),
+    }
+    if row.get("source") == WATCHLIST_SOURCE_CBB:
+        note = _cbb_note_payload(row.get("note")) or {}
+        payload["code"] = row.get("cb_code")
+        payload["name"] = row.get("cb_name")
+        payload["announce_date"] = row.get("cb_announce_date")
+        payload["price"] = row.get("cb_close")
+        payload["premium_rate"] = row.get("cb_premium_rate")
+        payload["remaining_size"] = row.get("cb_remain_scale")
+        payload["call_countdown_days"] = note.get("call_countdown_days")
+        payload["reason"] = note.get("reason")
+    return payload
+
+
+@app.get("/api/events/watchlist")
+async def events_watchlist(source: str | None = None) -> dict[str, Any]:
+    """事件观察清单（只读）：预告要素 / 分诊结论与理由 / 证据引用 / 公告日 / 状态 / session。
+
+    ``?source=`` 过滤清单来源（缺省全量）；空库 → 200 + 空列表（不 500）。
+    **零写入**：本端点不创建/修改任何业务状态（分诊与清单落库只在日批通道）。
+    """
+    rows = await asyncio.to_thread(list_watchlist, source=source)
+    return {"items": [_event_watchlist_payload(row) for row in rows]}
+
+
+@app.post("/api/events/watchlist/{item_id}/analyze")
+async def events_watchlist_analyze(item_id: int) -> Any:
+    """发起深度分析（复用既有筛选队列，`source=event` 语义）：
+
+    - 建会话段与 ``/api/screening/analyze`` **逐字同款**（create_session +
+      append_chat + set_pipeline_anchor + update_session_for_clarify +
+      append_session_event + ``queue.enqueue``）——复用 ``_get_analyze_queue()``
+      单例，同并发上限，MUST NOT 另建分析/并发通道；
+    - 重复点击（条已有 ``session_id``）→ 幂等返回既有状态（``already_started=true``），
+      MUST NOT 重复入队；
+    - **条款事件条目（``source=cbb``）v1 禁用本入口 → 409**（评审 F3 控制器裁决）：
+      cbb 行的标的代码在 ``cb_code``（业绩预告侧 ``code`` 为 NULL），若放行会以空标的
+      建会话并入队（``symbol=""``）——空标的分析无意义且污染队列，故 v1 明拒；
+    - 未知 id → 404；成功后条目置 ``analyzing`` 并关联 session。
+    """
+    item = await asyncio.to_thread(get_watchlist_item, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"未知观察清单条目: {item_id}")
+    if item.get("source") == WATCHLIST_SOURCE_CBB:
+        raise HTTPException(status_code=409, detail="条款事件暂不支持发起深度分析（v1）")
+    queue = _get_analyze_queue()
+    existing_session = item.get("session_id")
+    if existing_session:
+        # 幂等：重复点击不重复建会话、不重复入队，返回既有状态
+        snapshot = queue.snapshot()
+        queue_state = next(
+            (e["state"] for e in snapshot if e["session_id"] == existing_session), None
+        )
+        return {
+            "id": item_id,
+            "session_id": existing_session,
+            "status": item.get("status"),
+            "queue_state": queue_state,
+            "already_started": True,
+        }
+
+    symbol = str(item.get("code") or "")
+    display_name = f"{symbol} 事件分析"
+    session_id = await asyncio.to_thread(
+        create_session,
+        stock_code="",
+        stock_name="",
+        display_name=display_name,
+        status="clarifying",
+        session_type="analysis",
+    )
+    await asyncio.to_thread(append_chat, session_id, "user", f"对 {symbol} 进行深度分析")
+    await asyncio.to_thread(set_pipeline_anchor, session_id)
+    await asyncio.to_thread(
+        update_session_for_clarify,
+        session_id,
+        stock_code=symbol,
+        stock_name="",
+        status="running",
+    )
+    append_session_event(
+        session_id,
+        {
+            "type": "session_created",
+            "session_id": session_id,
+            "display_name": display_name,
+            "source": "event",  # 来源标记（spec：事件线发起复用既有队列，标记 event）
+            "timestamp": _now(),
+        },
+    )
+    queue.enqueue(symbol, session_id)
+    await asyncio.to_thread(mark_watchlist_analyzing, item_id, session_id=session_id)
+    snapshot = queue.snapshot()
+    queue_state = next((e["state"] for e in snapshot if e["session_id"] == session_id), None)
+    return {
+        "id": item_id,
+        "session_id": session_id,
+        "status": "analyzing",
+        "queue_state": queue_state,
+        "already_started": False,
     }
 
 

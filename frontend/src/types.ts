@@ -604,6 +604,60 @@ export interface IndexCompareResponse {
   disclaimer: string
 }
 
+// 策略族成绩单（delta add-strategy-family-scorecards：GET /api/scorecards）。
+// 键名权威源 src/finance_agent/outcome/scorecards.py::build_family_payload；
+// 槽位缺数据 = null + 随行 *_reason 原因码（MUST NOT 折算 0），有值时原因码字段缺省。
+export type ScorecardReason =
+  | 'insufficient_sample'
+  | 'insufficient_history'
+  | 'no_liquidity_data'
+  | 'no_samples'
+  | 'no_loader'
+
+export interface ScorecardExpectancy {
+  gross: number
+  net: number
+  n: number
+  insufficient: boolean
+}
+
+export interface ScorecardDrawdown {
+  value: number
+  n_days: number
+}
+
+export interface ScorecardCapacity {
+  suggested_capital: number
+  min_adv20: number
+  excluded: number
+}
+
+export interface ScorecardExtremeSample {
+  ticker: string
+  date: string
+  ret: number
+}
+
+export interface ScorecardFamily {
+  family_id: string
+  name: string
+  as_of: string | null
+  expectancy: ScorecardExpectancy | null
+  expectancy_reason?: ScorecardReason | null
+  max_drawdown: ScorecardDrawdown | null
+  max_drawdown_reason?: ScorecardReason | null
+  capacity: ScorecardCapacity | null
+  capacity_reason?: ScorecardReason | null
+  extreme_samples: ScorecardExtremeSample[]
+  /** 展示位（四槽之后）；执行线无胜率口径 → null */
+  win_rate: number | null
+  caliber_note: string
+}
+
+export interface ScorecardsResponse {
+  families: ScorecardFamily[]
+}
+
 // 校准分桶（add-track-record-stage-c）
 export interface CalibrationBucket {
   bucket: string
@@ -836,6 +890,117 @@ export interface ScreeningAnalyzeResponse {
   started: ScreeningQueueEntry[]
   queued: ScreeningQueueEntry[]
   removed: ScreeningRemoval[]
+}
+
+// 选股页市场温度计（delta add-crowding-regime-positioning T5；GET /api/regime）。
+// 键名权威源 `src/finance_agent/outcome/regime/payload.py`；history 行为
+// `regime_daily` 原始行（升序，含分位列）。available=false 时仅携带原因码。
+export type RegimeState = 'normal' | 'elevated' | 'danger'
+export type RegimeUnavailableReason = 'missing' | 'corrupt'
+
+export interface RegimeIndicatorValue {
+  value: number | null
+  pctile: number | null
+}
+
+export interface RegimeIndicators {
+  small_cap_share: RegimeIndicatorValue
+  up_count: RegimeIndicatorValue
+  down_count: RegimeIndicatorValue
+  limit_up_count: RegimeIndicatorValue
+  limit_down_count: RegimeIndicatorValue
+  total_amount: RegimeIndicatorValue
+}
+
+export interface RegimeHistoryRow {
+  trade_date: string
+  small_cap_share: number | null
+  up_count: number | null
+  down_count: number | null
+  flat_count: number | null
+  limit_up_count: number | null
+  limit_down_count: number | null
+  total_amount: number | null
+  small_cap_share_pctile: number | null
+  total_amount_pctile: number | null
+  computed_at: string
+}
+
+export interface RegimeAvailablePayload {
+  available: true
+  as_of: string
+  state: RegimeState
+  multiplier: number
+  reasons: string[]
+  indicators: RegimeIndicators
+  history: RegimeHistoryRow[]
+  age_days: number
+  stale: boolean
+}
+
+export interface RegimeUnavailablePayload {
+  available: false
+  reason: RegimeUnavailableReason
+}
+
+export type RegimePayload = RegimeAvailablePayload | RegimeUnavailablePayload
+
+// 事件观察清单（delta add-event-driven-lane T7；GET /api/events/watchlist）。
+// 字段名权威源 `src/finance_agent/api.py::_event_watchlist_payload`（逐字对齐，不猜测）；
+// 清单列 + 预告要素 + 分诊理由/证据同源于该载荷，缺项后端给 null（前端一律显示 —）。
+export type EventVerdict = 'outperform' | 'in_line' | 'risk'
+
+export interface EventEvidenceRef {
+  field: string
+  value: unknown
+}
+
+export interface EventWatchlistItem {
+  id: number
+  forecast_key: string | null
+  /** 清单来源：earnings（业绩预告，v1）／cbb（条款事件，未来增量，同表同端点） */
+  source: string | null
+  /** 清单状态：pending（待分析）／analyzing（已发起深度分析并关联 session） */
+  status: string | null
+  session_id: string | null
+  created_at: string | null
+  code: string | null
+  name: string | null
+  report_period: string | null
+  forecast_type: string | null
+  /** 净利润变动幅度区间（% 口径，与预告源同单位；不折算） */
+  change_low: number | null
+  change_high: number | null
+  announce_date: string | null
+  available_at: string | null
+  verdict: string | null
+  reason: string | null
+  /** 证据引用；JSON 损坏时后端给 null（前端显示 —，不当空数组） */
+  evidence: EventEvidenceRef[] | null
+  model: string | null
+  prompt_fingerprint: string | null
+  triaged_at: string | null
+  // 条款事件（source=cbb）风险要素：后端载荷扩展时可选携带；缺失一律显示 —。
+  // 键名已冻结（对齐 add-convertible-bond-coverage spec 的四要素：现价 / 转股溢价率 /
+  // 剩余规模（亿元口径）/ 强赎倒计时）；缺位与显式 null 同款退化。
+  price?: number | null
+  premium_rate?: number | null
+  remaining_size?: number | null
+  call_countdown_days?: number | null
+}
+
+export interface EventWatchlistResponse {
+  items: EventWatchlistItem[]
+}
+
+// POST /api/events/watchlist/{id}/analyze 响应（重复发起为幂等返回：already_started=true）
+export interface EventAnalyzeResponse {
+  id: number
+  session_id: string | null
+  status: string | null
+  /** 既有队列快照中的状态（queued/running/done/failed）；不在快照 → null */
+  queue_state: string | null
+  already_started: boolean
 }
 
 // 选股批次历史（delta add-daily-ops-page：GET /api/screening/batches 载荷行）。

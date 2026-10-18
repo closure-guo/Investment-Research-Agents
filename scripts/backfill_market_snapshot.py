@@ -118,12 +118,15 @@ def _host_write_guard(
     container_running: Callable[[], bool] | None = None,
     repo_root: Path | None = None,
     argv: Sequence[str] = (),
+    script_name: str = "scripts/backfill_market_snapshot.py",
 ) -> str | None:
     """宿主机直跑护栏：返回拒绝原因；None = 放行（issue #344）。
 
     风险面三条件同时成立才拒绝：①非容器内直跑；②目标库落在主检出 ``data/``
     （bind mount 面）；③容器读方在跑（backend 服务）。``--dry-run`` 零写入、
     ``--allow-host-write`` 显式绕过、库在别处、无容器读方 → 一律放行。
+    ``script_name`` = 提示命令里的脚本路径（复用本护栏的脚本——如
+    ``backfill_delisted.py``——传入自身路径，命令可直接复制，默认不变）。
     """
     if dry_run or allow_host_write:
         return None
@@ -141,7 +144,7 @@ def _host_write_guard(
     if not check():
         return None
     in_cmd = (
-        "docker compose exec -T backend python scripts/backfill_market_snapshot.py "
+        f"docker compose exec -T backend python {script_name} "
         + " ".join(shlex.quote(str(a)) for a in argv)
     ).strip()
     return (

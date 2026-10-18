@@ -41,16 +41,23 @@ from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.cohort.runner import run_cohort_batch
+from finance_agent.outcome.events.job import (
+    run_cb_daily,
+    run_earnings_fetch_daily,
+    run_earnings_triage_daily,
+    run_event_settle_daily,
+)
 from finance_agent.outcome.ops.model import (
     _default_db_path,
     finish_job_run,
     get_cohort_settings,
     insert_job_run,
 )
+from finance_agent.outcome.regime.job import run_regime_daily
 from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
-from finance_agent.screening.pipeline import run_screening_daily
+from finance_agent.screening.pipeline import run_microcap_lane, run_screening_daily
 
 logger = logging.getLogger(__name__)
 
@@ -59,16 +66,29 @@ logger = logging.getLogger(__name__)
 # 不落在日批升序链上,附尾不移动既有任务下标(既有展示顺序断言不变))
 JOB_IDS: tuple[str, ...] = (
     "market_snapshot_daily",
+    "regime_daily",
     "screening_daily",
     "factor_decay_monitor",
     "factor_builtin_register",
     "factor_harvest_daily",
     "decision_settle_daily",
+    # 业绩预告事件线（add-event-driven-lane）：16:05 抓取插在判定（16:00）之后
+    "earnings_fetch_daily",
     "paper_execute_daily",
+    # 16:15 分诊插在仿真执行（16:10）之后
+    "earnings_triage_daily",
     "paper_settle_daily",
+    # 16:25 事件结算插在 paper 结算（16:20）之后
+    "event_settle_daily",
     "daily_marking",
     "metrics_snapshot",
     "integrity_check",
+    # 小票通道（add-microcap-lane-guardrails）：16:45——完整性校验（16:40）之后、
+    # cohort（18:00）之前；独立档位 + 前置门禁记录，observation_only（不下单）
+    "microcap_screening_daily",
+    # 转债日批（add-convertible-bond-coverage）：16:50——小票通道（16:45）之后、
+    # cohort（18:00）之前；仅观察通道（零 LLM 准入、不接执行链、不产生订单）
+    "cb_daily",
     "cohort_batch",
     "memory_extract_monthly",
     "factor_proposal_monthly",
@@ -76,16 +96,24 @@ JOB_IDS: tuple[str, ...] = (
 
 JOB_LABELS: dict[str, str] = {
     "market_snapshot_daily": "行情快照",
+    "regime_daily": "市场拥挤度",
     "screening_daily": "选股",
     "factor_decay_monitor": "因子衰减监控",
     "factor_builtin_register": "内置因子注册",
     "factor_harvest_daily": "因子收割",
     "decision_settle_daily": "判定",
+    "earnings_fetch_daily": "业绩预告抓取",
     "paper_execute_daily": "仿真执行",
+    "earnings_triage_daily": "预告分诊",
+    "event_settle_daily": "事件结算",
     "paper_settle_daily": "paper 结算",
     "daily_marking": "盯市",
     "metrics_snapshot": "指标快照",
     "integrity_check": "完整性校验",
+    # add-microcap-lane-guardrails：小票通道日批（独立档位；observation_only，不下单）
+    "microcap_screening_daily": "小票通道",
+    # add-convertible-bond-coverage：转债日批（规则化标注、零 LLM；仅观察通道）
+    "cb_daily": "转债日批",
     "cohort_batch": "cohort 跑批",
     "memory_extract_monthly": "记忆提炼",
     "factor_proposal_monthly": "因子提案",
@@ -94,16 +122,22 @@ JOB_LABELS: dict[str, str] = {
 # 默认注册表。值都是无参调用(任务函数签名全为可选关键字参数)。
 JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "market_snapshot_daily": run_market_snapshot_batch,
+    "regime_daily": run_regime_daily,
     "screening_daily": run_screening_daily,
     "factor_decay_monitor": run_factor_decay_monitor,
     "factor_builtin_register": run_factor_builtin_register,
     "factor_harvest_daily": run_factor_harvest,
     "decision_settle_daily": settle_open_predictions,
+    "earnings_fetch_daily": run_earnings_fetch_daily,
     "paper_execute_daily": run_execution_daily,
+    "earnings_triage_daily": run_earnings_triage_daily,
+    "event_settle_daily": run_event_settle_daily,
     "paper_settle_daily": run_paper_settle_daily,
     "daily_marking": run_daily_marking,
     "metrics_snapshot": persist_metrics_snapshot,
     "integrity_check": integrity_check,
+    "microcap_screening_daily": run_microcap_lane,
+    "cb_daily": run_cb_daily,
     "cohort_batch": run_cohort_batch,
     "memory_extract_monthly": run_memory_extract_monthly,
     "factor_proposal_monthly": run_factor_proposal_monthly,
@@ -113,6 +147,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
 # paper 仿真执行 16:10(decision settle 之后、paper 结算之前,add-execution-chain-driver)
 # → 当日成交当日入结算;paper 仿真结算 16:20(decision settle 之后、daily marking 之前,
 # add-paper-broker);行情快照日批 15:30(收盘后,add-market-snapshot);
+# 拥挤度日批 15:35(快照之后、选股之前,add-crowding-regime-positioning);
 # 选股日批 15:40(快照之后、因子监控之前,add-screening-batch-scheduling);
 # 因子衰减监控 15:45(快照之后、结算链之前,add-factor-library-and-monitor);
 # 月批任务(add-monthly-batch-scheduling)以 ``day_of_month=1`` 表达月度粒度
@@ -123,6 +158,14 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
 # 状态接口共用的时刻快照。
 SCHEDULES: dict[str, dict[str, Any]] = {
     "market_snapshot_daily": MARKET_SNAPSHOT_SCHEDULE,
+    # 拥挤度日批（add-crowding-regime-positioning）：15:35——快照（15:30）之后、
+    # 选股（15:40）之前；读快照库 + 一次 spot 抓取（流通市值），零 LLM 调用
+    "regime_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 15,
+        "minute": 35,
+        "timezone": "Asia/Shanghai",
+    },
     "screening_daily": {
         "day_of_week": "mon-fri",
         "hour": 15,
@@ -155,16 +198,40 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "minute": 0,
         "timezone": "Asia/Shanghai",
     },
+    # 业绩预告抓取（add-event-driven-lane）：16:05——判定（16:00）之后、仿真执行
+    # （16:10）之前；东财业绩预告按报告期幂等落库（失败上抛，run_job 记 failed）
+    "earnings_fetch_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 5,
+        "timezone": "Asia/Shanghai",
+    },
     "paper_execute_daily": {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 10,
         "timezone": "Asia/Shanghai",
     },
+    # 预告分诊（add-event-driven-lane）：16:15——抓取之后、paper 结算之前；
+    # 扫未分诊（available_at <= 当日）→ LLM 分诊 → 观察清单
+    "earnings_triage_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 15,
+        "timezone": "Asia/Shanghai",
+    },
     "paper_settle_daily": {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 20,
+        "timezone": "Asia/Shanghai",
+    },
+    # 事件结算（add-event-driven-lane）：16:25——paper 结算之后、盯市（16:30）之前；
+    # 记账入场（T+1 开盘）+ 到期结算（参考价缺失保持 open + 留痕）
+    "event_settle_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 25,
         "timezone": "Asia/Shanghai",
     },
     "daily_marking": {
@@ -183,6 +250,23 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 40,
+        "timezone": "Asia/Shanghai",
+    },
+    # 小票通道日批（add-microcap-lane-guardrails）：16:45——完整性校验（16:40）之后、
+    # cohort（18:00）之前；独立档位（流动性 1000 万）+ 前置门禁记录；observation_only
+    # （不产生订单，不接执行链）
+    "microcap_screening_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 45,
+        "timezone": "Asia/Shanghai",
+    },
+    # 转债日批（add-convertible-bond-coverage）：16:50——小票通道（16:45）之后、
+    # cohort（18:00）之前；标的/行情/强赎/下修落库 + 条款事件入观察清单（零 LLM）
+    "cb_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 50,
         "timezone": "Asia/Shanghai",
     },
     "cohort_batch": {

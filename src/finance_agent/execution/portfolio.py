@@ -7,6 +7,9 @@
 - 两档可配置：``equal`` = 1/n；``strength`` = ``strength/Σstrength``；
 - 先单票 clip：> 单票上限 → 上限，记 ``SINGLE_CAP_CLIP``；
 - 再总仓缩减：Σ > 总上限 → 全体按 ``total_cap/Σ`` 等比缩，记 ``TOTAL_CAP_SCALE_DOWN``；
+- 最后市场状态总仓位系数（add-crowding-regime-positioning）：全体乘
+  ``regime_multiplier``（默认 1.0），系数 ≠ 1.0 时逐票记 ``REGIME_SCALE``；
+  系数 0 → 全 0 权重（flat 目标）；默认 1.0 行为逐字节不变（含不追加调整码）；
 - 上限默认值从 ``screening/constraints.py`` 单一来源引入（调用方可显式覆盖）；
 - 输出按权重降序、symbol 升序 tie-break；权重和恒满足 Σ ≤ total_cap + 1e-9
   （勾稽容差，浮点尘埃不触发缩减/调整记录）。
@@ -24,6 +27,8 @@ from finance_agent.screening import constraints
 # 聚合调整原因码（逐字，跨模块契约；spec「超限部分按比例缩减并记录调整原因」）
 ADJUSTMENT_SINGLE_CAP_CLIP = "SINGLE_CAP_CLIP"
 ADJUSTMENT_TOTAL_CAP_SCALE_DOWN = "TOTAL_CAP_SCALE_DOWN"
+# 市场状态总仓位系数调整码（delta spec trade-execution：系数 ≠ 1.0 逐票留痕）
+ADJUSTMENT_REGIME_SCALE = "REGIME_SCALE"
 
 # 权重勾稽容差：Σ ≤ total_cap + SUM_TOLERANCE（计划 G3 明文 1e-9）；单票 clip 同容差，
 # 浮点尘埃（≤1e-9）不产生 clip 调整记录
@@ -45,10 +50,18 @@ def aggregate_targets(
     method: Literal["equal", "strength"] = "equal",
     single_cap: float = constraints.MAX_SINGLE_POSITION,
     total_cap: float = constraints.MAX_TOTAL_POSITION,
+    regime_multiplier: float = 1.0,
 ) -> list[TargetPosition]:
-    """聚合为单票上限/总仓上限约束内的目标持仓（权重降序、symbol 升序）。"""
+    """聚合为单票上限/总仓上限约束内的目标持仓（权重降序、symbol 升序）。
+
+    ``regime_multiplier`` 为市场状态总仓位系数（[0, 1]，默认 1.0）：在总仓缩减
+    **之后**对全部权重乘系数；≠ 1.0 时逐票追加 ``REGIME_SCALE``；默认 1.0 时
+    输出与不传该参数逐项一致。
+    """
     if method not in ("equal", "strength"):
         raise ValueError(f"method 非法值: {method!r}（须 equal/strength）")
+    if not 0.0 <= regime_multiplier <= 1.0:
+        raise ValueError(f"regime_multiplier 越界（须在 [0, 1]）: {regime_multiplier!r}")
     longs = [signal for signal in signals if signal.direction == "long"]
     if not longs:
         return []
@@ -78,6 +91,12 @@ def aggregate_targets(
         for symbol in weights:
             weights[symbol] *= scale
             adjustments.setdefault(symbol, []).append(ADJUSTMENT_TOTAL_CAP_SCALE_DOWN)
+
+    # ③ 市场状态总仓位系数（总仓缩减之后应用；系数 ≠ 1.0 逐票留痕）
+    if regime_multiplier != 1.0:
+        for symbol in weights:
+            weights[symbol] *= regime_multiplier
+            adjustments.setdefault(symbol, []).append(ADJUSTMENT_REGIME_SCALE)
 
     positions = [
         TargetPosition(symbol=symbol, weight=weight, adjustments=tuple(adjustments.get(symbol, ())))

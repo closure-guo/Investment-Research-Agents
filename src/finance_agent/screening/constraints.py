@@ -25,6 +25,12 @@
 因此修改上方常量（或测试中 monkeypatch ``DEFAULT_THRESHOLDS`` /
 ``MIN_LIQUIDITY_HISTORY_DAYS``）即改变过滤行为，无需改任何其他文件。后续交易执行层的
 风控门禁 SHALL import 本模块复用约束定义，禁止复制常量到执行层代码。
+
+小票通道档位（add-microcap-lane-guardrails）同样单源在本模块：``MICROCAP_THRESHOLDS``
+（流动性下限 1000 万）由 ``pipeline.run_microcap_lane_daily`` 显式传入
+``filter_universe`` / ``build_candidate_record`` 的 ``thresholds=``；主档默认路径
+（``DEFAULT_THRESHOLDS`` / 各常量）逐字不变。``MICROCAP_SUGGESTED_SINGLE_CAP`` 与
+``MICROCAP_SLIPPAGE_TIER_BUMP`` 是通道批次的**记录字段**（v1 观察通道不下单）。
 """
 
 from __future__ import annotations
@@ -45,6 +51,15 @@ MAX_TOTAL_POSITION: float = 0.8
 # execution/risk_gate.py，两处判定语义一致、常量同源）
 LOT_SIZE: int = 100
 
+# ── 小票通道档位（delta add-microcap-lane-guardrails；口径 metrics.md §1.16） ──
+# 第二档流动性下限（元）：1000 万——容量租金区（低流动性小市值段）观察通道；
+# 主档 5000 万（``MIN_AVG_AMOUNT_20D``）不动，两档参数同源本模块。
+MICROCAP_MIN_AVG_AMOUNT_20D: float = 10_000_000.0
+# 小票通道建议单票上限（**记录字段**：v1 观察通道记录，不接入执行链/不下单）
+MICROCAP_SUGGESTED_SINGLE_CAP: float = 0.05
+# 小票通道滑点档位提升量（记录字段：执行接通时按此提升一档滑点假设）
+MICROCAP_SLIPPAGE_TIER_BUMP: int = 1
+
 
 @dataclass(frozen=True)
 class FilterThresholds:
@@ -57,3 +72,8 @@ class FilterThresholds:
 
 # 默认阈值单例；过滤层调用期读本模块属性（monkeypatch 本属性即改变行为）
 DEFAULT_THRESHOLDS: FilterThresholds = FilterThresholds()
+
+# 小票通道档位（其余字段沿用上列主档常量；记录/编排层显式传入，不改默认路径）
+MICROCAP_THRESHOLDS: FilterThresholds = FilterThresholds(
+    min_avg_amount_20d=MICROCAP_MIN_AVG_AMOUNT_20D
+)

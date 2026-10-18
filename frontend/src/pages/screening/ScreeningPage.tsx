@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '../../components/ui/button'
+import { EventWatchlistCard } from './EventWatchlistCard'
+import { MarketRegimeCard } from './MarketRegimeCard'
 import type {
   ScreeningAnalyzeResponse,
   ScreeningFactorContrib,
@@ -210,6 +212,13 @@ export function ScreeningPage({
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
+        {/* 市场温度计为全局市场状态，优先级最高：滚动容器首子节点 */}
+        <MarketRegimeCard />
+
+        {/* 事件观察（研究通道）：紧随温度计之后；队列徽标复用本页队列快照与
+            pollIntervalMs 轮询（事件入队后由 onAnalysisStarted 启动） */}
+        <EventWatchlistCard queue={queue} onAnalysisStarted={startPolling} />
+
         {data?.stale && (
           // spec：当日批次失败 → 页面展示最近成功批次并标注其日期
           <div
