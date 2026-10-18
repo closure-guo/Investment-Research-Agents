@@ -21,6 +21,10 @@ else
   echo "代理: NOT RUNNING（控制通道失联——start 脚本会重新拉起）"
 fi
 
+if [ -f "$WORKDIR/factor_status_collector.pid" ] && kill -0 "$(cat "$WORKDIR/factor_status_collector.pid")" 2>/dev/null; then
+  echo "遗留采集器: RUNNING（旧守护未清理——stop 脚本会收掉）"
+fi
+
 echo "--- 控制文件（期望态）---"
 cat "$CONTROL" 2>/dev/null || echo "(无控制文件——代理不干预看护启停)"
 

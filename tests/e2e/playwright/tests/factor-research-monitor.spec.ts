@@ -190,9 +190,20 @@ test('5. 入口：侧边栏收起态图标与命令面板动作均进入 /factor
 // ── 看护启停开关（delta add-factor-research-control T4）──
 
 test('6. 看护开关：停止需确认 → 控制文件真写入 → 「切换中」→ 快照推进后翻转', async ({ page }) => {
-  writeSnapshot(snapshotBody()) // running=true，新鲜
+  const fixture = snapshotBody()
+  writeSnapshot(fixture) // running=true，新鲜
   removeControl()
   await page.goto('/factor-research')
+
+  // 前置守卫（防复用生产栈把 PUT 落到真控制文件）：后端必须读的是本 spec 的隔离 fixture。
+  // 快照的 collected_at 唯一，其余来源（生产默认路径/陈旧数据）不可能逐字一致。
+  const probe = (await (
+    await page.request.get('/api/factor-research/status')
+  ).json()) as { collected_at?: string; available?: boolean }
+  expect(
+    probe.available === true && probe.collected_at === fixture.collected_at,
+    '后端未读取隔离 fixture（疑似复用了生产栈）——拒绝继续，防控制文件写入生产'
+  ).toBe(true)
 
   const sw = page.getByTestId('factor-research-control-switch')
   await expect(sw).toBeVisible()

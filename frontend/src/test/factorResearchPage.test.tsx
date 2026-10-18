@@ -437,6 +437,88 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
     expect(screen.getByTestId('factor-research-control-state').textContent).toContain('控制通道未接入')
   })
 
+  it('409：开关立即禁用（禁用至下一轮刷新），成功刷新后解封并清除提示', async () => {
+    // 闸门控制下一轮轮询的返回时机（全量并发下 30ms 轮询会与点击流竞态 → 确定性设计）
+    let statusCalls = 0
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    let putCalls = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/factor-research/status') {
+        statusCalls += 1
+        if (statusCalls >= 2) await gate
+        return respond(snapshotBody())
+      }
+      if (url === '/api/factor-research/control' && init?.method === 'PUT') {
+        putCalls += 1
+        return respond({ detail: 'control_unavailable' }, 409)
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={30} />)
+
+    fireEvent.click(await screen.findByTestId('factor-research-control-switch'))
+    fireEvent.click(await screen.findByTestId('factor-research-control-confirm'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('factor-research-control-error').textContent).toContain('控制通道不可用')
+    )
+    // 409 后立即禁用（spec：端点返回 409 时开关 SHALL 禁用并明示理由）
+    expect(
+      (screen.getByTestId('factor-research-control-switch') as HTMLButtonElement).disabled
+    ).toBe(true)
+    expect(putCalls).toBe(1)
+    expect(screen.getByTestId('factor-research-control-switch').getAttribute('aria-checked')).toBe('true')
+
+    // 放行下一轮成功刷新 → 解封 + 提示清除
+    release()
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('factor-research-control-switch') as HTMLButtonElement).disabled
+      ).toBe(false)
+    )
+    expect(screen.queryByTestId('factor-research-control-error')).toBeNull()
+  })
+
+  it('损坏快照：开关禁用 + 「控制通道未接入（快照损坏）」', async () => {
+    mockControlFetch([{ available: false, reason: 'corrupt' }])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-empty-corrupt')
+    const sw = screen.getByTestId('factor-research-control-switch')
+    expect((sw as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByTestId('factor-research-control-state').textContent).toContain('快照损坏')
+  })
+
+  it('网络失败：如实提示且开关位置保持实态', async () => {
+    let statusCalls = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/factor-research/status') {
+        statusCalls += 1
+        return respond(snapshotBody())
+      }
+      if (url === '/api/factor-research/control' && init?.method === 'PUT') {
+        return Promise.reject(new Error('network down'))
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    fireEvent.click(await screen.findByTestId('factor-research-control-switch'))
+    fireEvent.click(await screen.findByTestId('factor-research-control-confirm'))
+    await waitFor(() =>
+      expect(screen.getByTestId('factor-research-control-error').textContent).toContain('网络错误')
+    )
+    expect(statusCalls).toBe(1) // 失败不触发刷新
+    expect(screen.getByTestId('factor-research-control-switch').getAttribute('aria-checked')).toBe('true')
+  })
+
   it('409：如实提示且开关位置保持实态（不翻转冒充成功）', async () => {
     const { putCalls } = mockControlFetch([snapshotBody()], {
       status: 409,

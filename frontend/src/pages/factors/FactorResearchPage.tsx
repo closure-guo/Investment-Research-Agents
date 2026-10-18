@@ -98,6 +98,8 @@ export function FactorResearchPage({
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [controlError, setControlError] = useState<string | null>(null)
+  // 409 control_unavailable 后的通道封禁（快照刷新成功即恢复；spec「409 时开关禁用」）
+  const [channelBlocked, setChannelBlocked] = useState(false)
   const timerRef = useRef<number | null>(null)
 
   const load = useCallback(async () => {
@@ -106,6 +108,9 @@ export function FactorResearchPage({
       if (!resp.ok) throw new Error(String(resp.status))
       setData((await resp.json()) as FactorResearchStatusResponse)
       setError(false)
+      // 通道恢复证据：成功刷新即解封并清掉一次性失败提示（如实反映当前态）
+      setChannelBlocked(false)
+      setControlError(null)
     } catch {
       // 首屏失败 → 错误态（可重试）；轮询失败静默（保留旧数据，下一轮自愈）
       setError(true)
@@ -141,11 +146,12 @@ export function FactorResearchPage({
           } catch {
             // 非 JSON 响应：按状态码如实提示
           }
-          setControlError(
-            resp.status === 409 && detail === 'control_unavailable'
-              ? '控制通道不可用（快照未更新，请求未受理）'
-              : `请求失败（HTTP ${resp.status}）`
-          )
+          if (resp.status === 409 && detail === 'control_unavailable') {
+            setChannelBlocked(true) // 禁用至下一轮刷新给出通道恢复证据
+            setControlError('控制通道不可用（快照未更新，请求未受理）')
+          } else {
+            setControlError(`请求失败（HTTP ${resp.status}）`)
+          }
           return
         }
         await load() // 刷新 → control.pending 决定「切换中」
@@ -170,7 +176,7 @@ export function FactorResearchPage({
   const running = supervisor?.running === true
   const pending = control?.pending === true
   const channelReady = data !== null && data.available === true && !stale
-  const switchDisabled = submitting || pending || !channelReady
+  const switchDisabled = submitting || pending || channelBlocked || !channelReady
 
   let controlStateText: string
   if (data === null) {
@@ -283,14 +289,15 @@ export function FactorResearchPage({
           </DialogHeader>
           <DialogFooter>
             <Button
-              variant="ghost"
+              variant="secondary"
+              size="sm"
               data-testid="factor-research-control-cancel"
               onClick={() => setConfirmOpen(false)}
             >
               取消
             </Button>
             <Button
-              variant="outline"
+              size="sm"
               data-testid="factor-research-control-confirm"
               onClick={() => {
                 setConfirmOpen(false)

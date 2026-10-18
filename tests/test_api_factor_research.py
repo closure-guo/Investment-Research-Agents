@@ -228,6 +228,8 @@ def test_status_control_block_invalid_control_file_null(_status_path, _control_p
     assert TestClient(app).get(_ENDPOINT).json()["control"] == _NO_CONTROL
     _control_path.write_text(json.dumps({"desired_running": "true"}), encoding="utf-8")
     assert TestClient(app).get(_ENDPOINT).json()["control"] == _NO_CONTROL
+    _control_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")  # 合法 JSON 但非对象
+    assert TestClient(app).get(_ENDPOINT).json()["control"] == _NO_CONTROL
 
 
 # ── PUT /api/factor-research/control（spec「控制请求端点」）──

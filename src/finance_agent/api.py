@@ -3801,7 +3801,8 @@ def _factor_research_control_update(desired_running: bool) -> dict[str, Any]:
     }
     path = Path(os.environ.get("FACTOR_RESEARCH_CONTROL_PATH", "data/factor_research/control.json"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    # 唯一 tmp 名（宿主容器与 distro 侧脚本可能并发写同一控制文件：固定名会交叉落残缺 JSON）
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
     return {"control": _factor_research_control_block(_factor_research_snapshot_payload())}

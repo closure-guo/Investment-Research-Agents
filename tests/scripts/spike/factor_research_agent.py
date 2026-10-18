@@ -53,7 +53,16 @@ LAUNCH_SCRIPT = "/root/launch-fin-factor.sh"
 PIDFILE_NAME = "factor_research.pid"
 AGENT_PIDFILE_NAME = "factor_research_agent.pid"
 LOCK_NAME = "factor_research_agent.lock"
+SINGLETON_LOCK_NAME = "factor_research_agent.singleton.lock"
+RESIDUAL_MARKER_NAME = "factor_research_stop_residual"
 SUPERVISOR_SCRIPT_NAME = ".factor_research_supervisor.sh"
+# 手动 reconcile-once 等锁上限（应急通道不被守护的长采集无限阻塞；超时降级继续并告警）
+RECONCILE_LOCK_TIMEOUT_S = 8.0
+
+
+class SingletonBusy(RuntimeError):  # noqa: N818 - 「单例被占」判定，与既有命名风格一致
+    """已有代理守护持单例锁（不得再起第二个守护）。"""
+
 
 # 看护脚本（旧 start 脚本 heredoc 逐字迁移；单来源在代理，脚本不再另写一份）。
 # 占位符用 {{...}} 显式替换（bash 的 ${DUR} 等花括号与 str.format 冲突）。
@@ -143,13 +152,25 @@ def supervisor_pid(workdir: str | Path) -> int | None:
     return pid if _alive(pid) else None
 
 
+def _pid_is_agent(pid: int) -> bool:
+    """pid 是否确为本代理进程（``/proc/<pid>/cmdline`` 校验，防 PID 复用假命中）。
+
+    非 Linux（测试环境）无 /proc → 退回存活判定（信任 pidfile）。
+    """
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return True
+    return "factor_research_agent" in cmdline
+
+
 def agent_pid(workdir: str | Path) -> int | None:
-    """代理守护 pid（pidfile 存在且进程存活）；无 → None。"""
+    """代理守护 pid（pidfile 存在、进程存活且身份吻合）；无 → None。"""
     try:
         pid = int((Path(workdir) / AGENT_PIDFILE_NAME).read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
-    return pid if _alive(pid) else None
+    return pid if (_alive(pid) and _pid_is_agent(pid)) else None
 
 
 def start_supervisor(workdir: str | Path) -> bool:
@@ -203,12 +224,18 @@ def _fin_factor_present() -> bool:
     return result.returncode == 0
 
 
+def _residual_marker(workdir: str | Path) -> Path:
+    """停止残留标记文件（上次停止未清干净时落盘，驱动后续周期继续清扫）。"""
+    return Path(workdir) / RESIDUAL_MARKER_NAME
+
+
 def stop_supervisor(workdir: str | Path) -> bool:
     """停止看护（含当前会话）：kill 序列 + pidfile 清理 + 兜底校验。
 
-    ``True`` = 收尾干净（无残留 fin_factor 进程）；``False`` = 有残留（记录 WARN，
-    与旧脚本「WARN: fin_factor process still present」同语义）。MUST NOT 触碰
-    workspace / 候选文件 / 会话日志。
+    ``True`` = 收尾干净；``False`` = 有残留（记 WARN + 落残留标记——下次调和会继续
+    清扫，避免「页面显示已关闭、进程还在烧 key」的假象；与旧脚本「WARN: fin_factor
+    process still present」同语义并补上收敛路径）。MUST NOT 触碰 workspace / 候选
+    文件 / 会话日志。
     """
     workdir = Path(workdir)
     pid = supervisor_pid(workdir)
@@ -219,7 +246,12 @@ def stop_supervisor(workdir: str | Path) -> bool:
         _run_quiet(["pkill", "-f", "fin_factor"])  # 兜底：残留会话（旧脚本同款）
     (workdir / PIDFILE_NAME).unlink(missing_ok=True)
     time.sleep(1)
-    return not _fin_factor_present()
+    if _fin_factor_present():
+        _residual_marker(workdir).write_text(str(int(time.time())), encoding="utf-8")
+        logger.warning("停止后仍有 fin_factor 残留进程 → 落残留标记，后续周期继续清扫")
+        return False
+    _residual_marker(workdir).unlink(missing_ok=True)
+    return True
 
 
 # ── 调和与周期 ────────────────────────────────────────────────────────────
@@ -237,6 +269,11 @@ def reconcile_once(workdir: str | Path, control_path: str | Path) -> str:
         return "no_intent"
     running = supervisor_pid(workdir) is not None
     if desired == running:
+        # 残留自愈：既往停止未清干净（有标记）→ 继续清扫。标记只在「停止动作验证失败」
+        # 时落盘，故不会对操作者手动起的 fin_factor 会话盲杀。
+        if desired is False and _residual_marker(workdir).exists():
+            logger.info("检测到停止残留标记 → 继续清扫")
+            return "stopped" if stop_supervisor(workdir) else "stop-failed"
         return "noop"
     logger.info(
         "调和：desired_running=%s 实态=%s（request_id=%s requested_at=%s）",
@@ -251,19 +288,62 @@ def reconcile_once(workdir: str | Path, control_path: str | Path) -> str:
 
 
 @contextmanager
-def tick_lock(workdir: str | Path) -> Iterator[None]:
-    """进程锁：守护轮询与手动 reconcile-once 串行（无 fcntl 环境降级放行，仅测试用）。"""
+def tick_lock(workdir: str | Path, *, timeout_s: float | None = None) -> Iterator[None]:
+    """进程锁：守护轮询与手动 reconcile-once 串行（无 fcntl 环境降级放行，仅测试用）。
+
+    ``timeout_s`` 非空 → 限时抢锁，超时记告警后**继续执行**（应急停止通道不被守护的
+    长采集无限阻塞；守护自身轮询用默认无限等）。
+    """
     if fcntl is None:  # pragma: no cover - 仅测试环境（distro 恒有 fcntl）
         yield
         return
     lock_path = Path(workdir) / LOCK_NAME
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w", encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        if timeout_s is None:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout_s
+            while True:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        logger.warning(
+                            "等锁超时 %.0fs（守护可能卡在采集）→ 继续执行以保应急通道", timeout_s
+                        )
+                        break
+                    time.sleep(0.5)
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+@contextmanager
+def singleton_lock(workdir: str | Path) -> Iterator[None]:
+    """守护单例锁：进程生命周期持有（重复拉起 → ``SingletonBusy``）。
+
+    与 ``tick_lock`` 分属不同锁文件（同文件二次 flock 会与自身互斥）；无 fcntl
+    （测试环境）降级放行。
+    """
+    if fcntl is None:  # pragma: no cover - 仅测试环境
+        yield
+        return
+    lock_path = Path(workdir) / SINGLETON_LOCK_NAME
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w", encoding="utf-8") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise SingletonBusy(f"单例锁被占：{lock_path}") from exc
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def run_tick(
@@ -324,8 +404,16 @@ def main(argv: list[str] | None = None) -> int:
         description="因子研发代理（观测 + 控制；delta add-factor-research-control）"
     )
     parser.add_argument("--workdir", default=DEFAULT_WORKDIR)
-    parser.add_argument("--control", default=DEFAULT_CONTROL)
-    parser.add_argument("--out", default=cfs.DEFAULT_OUT)
+    parser.add_argument(
+        "--control",
+        default=os.environ.get("FACTOR_RESEARCH_CONTROL_PATH") or DEFAULT_CONTROL,
+        help="控制文件路径（默认取 env FACTOR_RESEARCH_CONTROL_PATH 或标准宿主桥路径）",
+    )
+    parser.add_argument(
+        "--out",
+        default=os.environ.get("FACTOR_RESEARCH_STATUS_PATH") or cfs.DEFAULT_OUT,
+        help="状态快照路径（默认取 env FACTOR_RESEARCH_STATUS_PATH 或标准宿主桥路径）",
+    )
     parser.add_argument(
         "--state",
         default=None,
@@ -368,28 +456,33 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.reconcile_once:
-        with tick_lock(workdir):
+        with tick_lock(workdir, timeout_s=RECONCILE_LOCK_TIMEOUT_S):
             action = reconcile_once(workdir, control_path)
         print(f"reconcile: {action}")
         return 1 if action in ("start-failed", "stop-failed") else 0
 
-    # 守护循环（--loop 或缺省）
+    # 守护循环（--loop 或缺省）：单例锁须持到进程结束（重复拉起 → SingletonBusy 拒绝）
     pidfile = Path(args.pidfile) if args.pidfile else workdir / AGENT_PIDFILE_NAME
     pidfile.parent.mkdir(parents=True, exist_ok=True)
-    pidfile.write_text(str(os.getpid()), encoding="utf-8")
-    logger.info("agent daemon started pid %s（interval=%ss）", os.getpid(), args.interval)
-    while True:
-        try:
-            action, snapshot = run_tick(workdir, control_path, out_path, state_path)
-            print(
-                f"[agent] {snapshot['collected_at']} "
-                f"running={snapshot['supervisor']['running']} "
-                f"action={action} candidates={snapshot['totals']['candidates']}",
-                flush=True,
-            )
-        except Exception as exc:  # noqa: BLE001 - 守护循环永不因单轮异常退出（采集器同先例）
-            print(f"[agent] tick failed: {exc!r}", file=sys.stderr, flush=True)
-        time.sleep(args.interval)
+    try:
+        with singleton_lock(workdir):
+            pidfile.write_text(str(os.getpid()), encoding="utf-8")
+            logger.info("agent daemon started pid %s（interval=%ss）", os.getpid(), args.interval)
+            while True:
+                try:
+                    action, snapshot = run_tick(workdir, control_path, out_path, state_path)
+                    print(
+                        f"[agent] {snapshot['collected_at']} "
+                        f"running={snapshot['supervisor']['running']} "
+                        f"action={action} candidates={snapshot['totals']['candidates']}",
+                        flush=True,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 守护循环永不因单轮异常退出（采集器同先例）
+                    print(f"[agent] tick failed: {exc!r}", file=sys.stderr, flush=True)
+                time.sleep(args.interval)
+    except SingletonBusy as exc:
+        print(f"FAILED: 已有代理守护在跑（{exc}）", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

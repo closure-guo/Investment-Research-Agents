@@ -12,7 +12,16 @@ PIDFILE="$WORKDIR/factor_research.pid"
 
 if [ -f "$AGENT" ]; then
   python3 "$AGENT" --workdir "$WORKDIR" --control "$CONTROL" --set-intent stopped
-  python3 "$AGENT" --workdir "$WORKDIR" --control "$CONTROL" --reconcile-once || true
+  # timeout 兜底：应急停止不被守护的长采集/等锁无限阻塞（超时后走下方 bash 硬停）
+  timeout 20 python3 "$AGENT" --workdir "$WORKDIR" --control "$CONTROL" --reconcile-once || true
+fi
+
+# 遗留采集守护幂等清理（半迁移期：旧 factor_status_collector 仍在跑会与代理双写快照）
+LEGACY_PIDFILE="$WORKDIR/factor_status_collector.pid"
+if [ -f "$LEGACY_PIDFILE" ]; then
+  kill "$(cat "$LEGACY_PIDFILE")" 2>/dev/null || true
+  rm -f "$LEGACY_PIDFILE"
+  echo "stopped legacy collector"
 fi
 
 # 兜底硬停（代理不可用 / 调和未清干净时保持旧脚本逐字行为）
