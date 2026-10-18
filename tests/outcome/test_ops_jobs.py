@@ -32,19 +32,52 @@ from finance_agent.outcome.ops.model import (
     list_job_runs,
     set_config,
 )
+from finance_agent.outcome.regime.job import run_regime_daily
 
 
 class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 14
+            len(JOB_IDS) == 15
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线，add-execution-chain-driver）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
         # 12→13：+factor_builtin_register（内置因子注册接线，wire-builtin-factor-registration）；
-        # 13→14：+factor_harvest_daily（因子收割，add-factor-harvest-bridge）
+        # 13→14：+factor_harvest_daily（因子收割，add-factor-harvest-bridge）；
+        # 14→15：+regime_daily（拥挤度日批，add-crowding-regime-positioning，15:35 日批链内插入）
         assert all(JOB_LABELS[jid] for jid in JOB_IDS)
+
+
+class TestRegimeDailyRegistration:
+    """add-crowding-regime-positioning：拥挤度日批接线（15:35，快照之后、选股之前）。"""
+
+    def test_registered_aligned_and_ordered(self):
+        assert "regime_daily" in JOB_IDS
+        assert JOB_LABELS["regime_daily"] == "市场拥挤度"
+        assert JOB_FUNCS["regime_daily"] is run_regime_daily
+        assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
+        assert (
+            len(JOB_IDS) == 15
+        )  # 14→15：+regime_daily；10→12：+月批；12→13：+内置注册；13→14：+因子收割
+        assert (
+            JOB_IDS.index("market_snapshot_daily")
+            < JOB_IDS.index("regime_daily")
+            < JOB_IDS.index("screening_daily")
+        ), "展示顺序 = 时刻顺序（快照 15:30 → 拥挤度 15:35 → 选股 15:40）"
+
+    def test_schedule_spec_is_1535_monfri(self):
+        """拥挤度日批 15:35（mon-fri，Asia/Shanghai）逐字钉死；快照后、选股前。"""
+        assert SCHEDULES["regime_daily"] == {
+            "day_of_week": "mon-fri",
+            "hour": 15,
+            "minute": 35,
+            "timezone": "Asia/Shanghai",
+        }
+        snapshot = SCHEDULES["market_snapshot_daily"]
+        screening = SCHEDULES["screening_daily"]
+        assert (snapshot["hour"], snapshot["minute"]) == (15, 30)
+        assert (screening["hour"], screening["minute"]) == (15, 40)
 
 
 class TestPaperExecuteDailyRegistration:
@@ -56,8 +89,9 @@ class TestPaperExecuteDailyRegistration:
         assert JOB_FUNCS["paper_execute_daily"] is run_execution_daily
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 14
-        )  # 9→10：+paper_execute_daily；10→12：+月批两任务；12→13：+内置注册；13→14：+因子收割
+            len(JOB_IDS) == 15
+        )  # 9→10：+paper_execute_daily；10→12：+月批两任务；12→13：+内置注册；
+        # 13→14：+因子收割；14→15：+regime_daily（拥挤度）
         assert (
             JOB_IDS.index("decision_settle_daily")
             < JOB_IDS.index("paper_execute_daily")
@@ -86,13 +120,15 @@ class TestScreeningDailyRegistration:
         assert JOB_LABELS["screening_daily"] == "选股"
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 14
-        )  # 8→9：+screening_daily；9→10：+paper_execute_daily；10→12：+月批；12→13：+内置注册；13→14：+收割
+            len(JOB_IDS) == 15
+        )  # 8→9：+screening_daily；9→10：+paper_execute_daily；10→12：+月批；12→13：+内置注册；
+        # 13→14：+收割；14→15：+regime_daily
         assert (
             JOB_IDS.index("market_snapshot_daily")
+            < JOB_IDS.index("regime_daily")
             < JOB_IDS.index("screening_daily")
             < JOB_IDS.index("factor_decay_monitor")
-        ), "展示顺序 = 时刻顺序（快照 15:30 → 选股 15:40 → 因子衰减 15:45）"
+        ), "展示顺序 = 时刻顺序（快照 15:30 → 拥挤度 15:35 → 选股 15:40 → 因子衰减 15:45）"
 
     def test_schedule_spec_is_1540_monfri(self):
         assert SCHEDULES["screening_daily"] == {
@@ -203,12 +239,14 @@ class TestMonthlyBatchRegistration:
         assert JOB_FUNCS["memory_extract_monthly"] is run_memory_extract_monthly
         assert JOB_FUNCS["factor_proposal_monthly"] is run_factor_proposal_monthly
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 14  # 12→13：+内置注册；13→14：+factor_harvest_daily（日批链内插入）
+        assert len(JOB_IDS) == 15  # 12→13：+内置注册；13→14：+因子收割；
+        # 14→15：+regime_daily（拥挤度，15:35 日批链内插入）
         # 月批附于末尾：月批两任务下标不动；cohort 因 15:50 日批链内插入后移一位
         assert JOB_IDS[-2:] == ("memory_extract_monthly", "factor_proposal_monthly")
         assert (
-            JOB_IDS.index("cohort_batch") == 11
-        )  # 9→10：+内置注册；13→14：+factor_harvest_daily（15:55 插入其前）
+            JOB_IDS.index("cohort_batch") == 12
+        )  # 9→10：+内置注册；13→14：+因子收割（15:55 插入其前）；
+        # 14→15：+regime_daily（15:35 插入其前）
 
     def test_monthly_schedule_specs_verbatim(self):
         """月粒度以 ``day_of_month=1`` 表达（09:00 / 10:00，Asia/Shanghai）。"""

@@ -47,6 +47,7 @@ from finance_agent.outcome.ops.model import (
     get_cohort_settings,
     insert_job_run,
 )
+from finance_agent.outcome.regime.job import run_regime_daily
 from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
@@ -59,6 +60,7 @@ logger = logging.getLogger(__name__)
 # 不落在日批升序链上,附尾不移动既有任务下标(既有展示顺序断言不变))
 JOB_IDS: tuple[str, ...] = (
     "market_snapshot_daily",
+    "regime_daily",
     "screening_daily",
     "factor_decay_monitor",
     "factor_builtin_register",
@@ -76,6 +78,7 @@ JOB_IDS: tuple[str, ...] = (
 
 JOB_LABELS: dict[str, str] = {
     "market_snapshot_daily": "行情快照",
+    "regime_daily": "市场拥挤度",
     "screening_daily": "选股",
     "factor_decay_monitor": "因子衰减监控",
     "factor_builtin_register": "内置因子注册",
@@ -94,6 +97,7 @@ JOB_LABELS: dict[str, str] = {
 # 默认注册表。值都是无参调用(任务函数签名全为可选关键字参数)。
 JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "market_snapshot_daily": run_market_snapshot_batch,
+    "regime_daily": run_regime_daily,
     "screening_daily": run_screening_daily,
     "factor_decay_monitor": run_factor_decay_monitor,
     "factor_builtin_register": run_factor_builtin_register,
@@ -113,6 +117,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
 # paper 仿真执行 16:10(decision settle 之后、paper 结算之前,add-execution-chain-driver)
 # → 当日成交当日入结算;paper 仿真结算 16:20(decision settle 之后、daily marking 之前,
 # add-paper-broker);行情快照日批 15:30(收盘后,add-market-snapshot);
+# 拥挤度日批 15:35(快照之后、选股之前,add-crowding-regime-positioning);
 # 选股日批 15:40(快照之后、因子监控之前,add-screening-batch-scheduling);
 # 因子衰减监控 15:45(快照之后、结算链之前,add-factor-library-and-monitor);
 # 月批任务(add-monthly-batch-scheduling)以 ``day_of_month=1`` 表达月度粒度
@@ -123,6 +128,14 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
 # 状态接口共用的时刻快照。
 SCHEDULES: dict[str, dict[str, Any]] = {
     "market_snapshot_daily": MARKET_SNAPSHOT_SCHEDULE,
+    # 拥挤度日批（add-crowding-regime-positioning）：15:35——快照（15:30）之后、
+    # 选股（15:40）之前；读快照库 + 一次 spot 抓取（流通市值），零 LLM 调用
+    "regime_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 15,
+        "minute": 35,
+        "timezone": "Asia/Shanghai",
+    },
     "screening_daily": {
         "day_of_week": "mon-fri",
         "hour": 15,

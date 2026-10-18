@@ -30,6 +30,11 @@ paper 仿真执行(add-execution-chain-driver):工作日 16:10 触发 ``run_exec
 排在 paper 结算(16:20)之前保证当日成交当日入账;快照不可用时返回跳过摘要
 (job 记 ok),经同一 ``_with_retry`` 入口。
 
+拥挤度日批(add-crowding-regime-positioning):工作日 15:35 触发 ``run_regime_daily``
+(快照 15:30 之后、选股 15:40 之前;读快照库 + 一次 spot 抓取建流通市值 caps →
+四指标 + 历史分位落 ``data/regime.db``,同日重跑幂等),经同一 ``_with_retry``
+入口;快照/caps 不可用时返回跳过摘要(job 记 ok)不产伪行,执行链据此降级。
+
 月批(add-monthly-batch-scheduling):每月 1 日 09:00 触发 ``run_memory_extract_monthly``
 (已结算决策近窗口 → 候选条款落 pending),10:00 触发 ``run_factor_proposal_monthly``
 (快照面板 → LLM 提案批 → 五道闸准入);粒度经 ``SCHEDULES`` 的 ``day_of_month`` 键
@@ -66,6 +71,7 @@ from finance_agent.outcome.ops.jobs import (
     run_job,
 )
 from finance_agent.outcome.ops.model import finish_job_run, get_cohort_settings
+from finance_agent.outcome.regime.job import run_regime_daily
 from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
@@ -147,6 +153,15 @@ def _mark_retries(outcome: dict[str, Any] | None) -> None:
 def _snapshot_job() -> None:
     """add-market-snapshot：全市场行情快照日批（15:30，收盘后；次日开盘前可读）。"""
     _with_retry("market_snapshot_daily", "market snapshot", run_market_snapshot_batch)
+
+
+def _regime_daily_job() -> None:
+    """add-crowding-regime-positioning：拥挤度指标日批（15:35，快照之后、选股之前）。
+
+    读快照库 + 一次 spot 抓取（流通市值）→ 四指标 + 历史分位落 ``regime.db``；
+    快照不可用/caps 缺失 → 返回跳过摘要（job 记 ok，原因码入摘要），不产伪行。
+    """
+    _with_retry("regime_daily", "regime daily", run_regime_daily)
 
 
 def _screening_job() -> None:
@@ -302,6 +317,16 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-crowding-regime-positioning：拥挤度日批（15:35）——快照（15:30）之后、
+    # 选股（15:40）之前；读快照库 + 一次 spot 抓取（流通市值），零 LLM 调用；
+    # 快照/caps 不可用返回跳过摘要（job 记 ok），不产伪行。
+    scheduler.add_job(
+        _regime_daily_job,
+        _cron_for("regime_daily"),
+        id="regime_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     # add-screening-batch-scheduling：选股日批（15:40）——快照（15:30）之后、
     # 因子监控（15:45）与结算链（16:00 起）之前；读快照库，L3 走 quick LLM。
     scheduler.add_job(
@@ -417,7 +442,8 @@ def start_scheduler() -> BackgroundScheduler | None:
     scheduler.start()
     _scheduler = scheduler
     logger.info(
-        "decision settle scheduler 已启动(market snapshot 15:30;factor decay monitor 15:45;"
+        "decision settle scheduler 已启动(market snapshot 15:30;regime 15:35;"
+        "factor decay monitor 15:45;"
         "factor builtin register 15:50;factor harvest 15:55;"
         "decision settle 16:00;paper execute 16:10;paper settle 16:20);"
         "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"

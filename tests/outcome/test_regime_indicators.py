@@ -123,6 +123,22 @@ class TestSmallCapGroupAndShare:
         # 前 3 小市值（cap 1..3）成交额 3 ÷ 总成交额 10 = 0.3
         assert out["small_cap_share"] == pytest.approx(0.3)
 
+    def test_quantile_kwarg_overrides_group_boundary(self):
+        """``quantile`` 可覆盖（日批经配置传入）：0.5 → n=3 组 2 只（ceil(1.5)=2）。"""
+        universe = [
+            _row("A", amount=10.0, pct_chg=1.0),
+            _row("B", amount=30.0, pct_chg=1.0),
+            _row("C", amount=60.0, pct_chg=1.0),
+        ]
+        out = compute_indicators(universe, {"A": 1.0, "B": 2.0, "C": 3.0}, quantile=0.5)
+        assert out is not None
+        assert out["small_cap_share"] == pytest.approx((10.0 + 30.0) / 100.0)
+
+    @pytest.mark.parametrize("quantile", [0.0, 1.5])
+    def test_quantile_out_of_range_rejected(self, quantile):
+        with pytest.raises(ValueError, match="quantile"):
+            compute_indicators([_row("A", amount=10.0, pct_chg=1.0)], {"A": 1.0}, quantile=quantile)
+
     def test_group_tie_break_by_code_ascending(self):
         """流通市值并列 → code 升序 tie-break（确定性：同输入同输出）。
 

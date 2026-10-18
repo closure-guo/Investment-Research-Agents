@@ -33,9 +33,11 @@ test.describe.configure({ timeout: 120_000 })
 // （9→10：仿真执行 16:10）、add-monthly-batch-scheduling（10→12：记忆提炼/因子提案，
 // 月批附于注册表末尾）与 wire-builtin-factor-registration（12→13：内置因子注册 15:50）
 // 后同步更新——断言强度不变（仍逐 id 断言存在与顺序）；
-// add-factor-harvest-bridge（13→14：因子收割 15:55）。
+// add-factor-harvest-bridge（13→14：因子收割 15:55）；
+// add-crowding-regime-positioning（14→15：拥挤度 15:35，插于快照之后）。
 const JOB_IDS = [
   'market_snapshot_daily',
+  'regime_daily',
   'screening_daily',
   'factor_decay_monitor',
   'factor_builtin_register',

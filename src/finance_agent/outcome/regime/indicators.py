@@ -61,13 +61,20 @@ def _flag(value: Any) -> bool:
 
 
 def compute_indicators(
-    universe: Sequence[Mapping[str, Any]], caps_by_code: Mapping[str, float]
+    universe: Sequence[Mapping[str, Any]],
+    caps_by_code: Mapping[str, float],
+    *,
+    quantile: float = SMALL_CAP_QUANTILE,
 ) -> dict[str, float] | None:
     """四指标计算；口径见模块 docstring，不可计算 → None（不产伪值）。
 
     ``caps_by_code``：``{6 位裸码: 流通市值}``（与快照 ``code`` 同口径）；
-    参与集任一标的缺失（含 NaN/非正）→ None。返回键覆盖 ``INDICATOR_KEYS``。
+    参与集任一标的缺失（含 NaN/非正）→ None。``quantile`` 为小市值分组分位
+    （默认 ``SMALL_CAP_QUANTILE``；日批经 ``RegimeConfig.small_cap_quantile``
+    传入），越界 ``(0, 1]`` → ``ValueError``。返回键覆盖 ``INDICATOR_KEYS``。
     """
+    if not 0.0 < quantile <= 1.0:
+        raise ValueError(f"quantile 越界（须在 (0, 1]）: {quantile!r}")
     active: list[tuple[str, float, float, Mapping[str, Any]]] = []  # (code, amount, pct_chg, row)
     for row in universe:
         if _flag(row.get("is_suspended")):
@@ -91,7 +98,7 @@ def compute_indicators(
             return None  # caps 覆盖不全：不缩样本冒充
         caps[code] = cap
 
-    group_size = math.ceil(len(active) * SMALL_CAP_QUANTILE)
+    group_size = math.ceil(len(active) * quantile)
     ordered = sorted(active, key=lambda item: (caps[item[0]], item[0]))
     small_amount = sum(item[1] for item in ordered[:group_size])
     total_amount = sum(item[1] for item in active)
