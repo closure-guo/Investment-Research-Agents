@@ -54,4 +54,4 @@
 - [x] 人工验证（真实栈）：界面点停止 → 看护真停（agent.log `action=stopped`、pidfile 消失、
       快照 `running=false`）；点启动 → 看护真起（新 pid + 新会话）；恢复原运行状态；
       报告落 `tests/validation/2026-10-18-add-factor-research-control-validation.md`
-- [ ] sync + archive + PR（PR 描述含实跑读数）
+- [x] sync + archive + PR（PR 描述含实跑读数）
