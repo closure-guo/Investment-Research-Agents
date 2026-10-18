@@ -643,3 +643,222 @@ def test_pool_rows_are_namespaced_by_pool(tmp_path) -> None:
     assert [row["symbol"] for row in list_selection_pool(_D1, db_path=db, pool="microcap")] == [
         "300750"
     ]
+
+
+# ── 迁移原子性与中断恢复（评审 F3，add-microcap-lane-guardrails） ─────────────
+
+
+def _old_shape_db(db) -> None:
+    """预造旧库：单列主键批次表 + 池表（各 1 行），无 selection_mode/pool 列。"""
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            "CREATE TABLE screening_batches ("
+            "trade_date TEXT PRIMARY KEY, status TEXT NOT NULL, error TEXT, "
+            "started_at TEXT NOT NULL, finished_at TEXT NOT NULL, "
+            "l1_passed INTEGER NOT NULL DEFAULT 0, l2_top INTEGER NOT NULL DEFAULT 0, "
+            "l3_keep INTEGER NOT NULL DEFAULT 0, pool_size INTEGER NOT NULL DEFAULT 0);"
+            "CREATE TABLE selection_pool ("
+            "trade_date TEXT NOT NULL, symbol TEXT NOT NULL, composite_score REAL NOT NULL, "
+            "rank INTEGER NOT NULL, consecutive_days INTEGER NOT NULL, "
+            "l3_verdict TEXT NOT NULL, l3_reason TEXT NOT NULL, "
+            "factor_contribs_json TEXT NOT NULL, PRIMARY KEY (trade_date, symbol));"
+        )
+        conn.execute(
+            "INSERT INTO screening_batches (trade_date, status, started_at, finished_at) "
+            "VALUES ('2026-10-01', 'ok', 'x', 'y')"
+        )
+        conn.execute(
+            "INSERT INTO selection_pool VALUES "
+            "('2026-10-01', '600519', 1.0, 1, 3, 'keep', '无风险事件', '[]')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _objects(db) -> set[str]:
+    conn = sqlite3.connect(db)
+    try:
+        return {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master").fetchall()}
+    finally:
+        conn.close()
+
+
+def test_init_recovers_interrupted_batch_rebuild(tmp_path) -> None:
+    """F3（先红）：中断形态（DROP 已生效、RENAME 未执行）→ 重入 init 恢复旧行。
+
+    真实形态：崩溃后 ``screening_batches__migrate`` 留存旧行、正式表缺失；下一次 init 的
+    ``CREATE TABLE IF NOT EXISTS`` 会补出**空壳**正式表——不得因「正式表已存在」跳过恢复，
+    否则旧行静默丢失。
+    """
+    db = tmp_path / "screening.db"
+    _old_shape_db(db)
+    # 模拟中断后状态：旧行已复制进 __migrate，原表已被 DROP
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            "CREATE TABLE screening_batches__migrate ("
+            "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', status TEXT NOT NULL, "
+            "error TEXT, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, "
+            "l1_passed INTEGER NOT NULL DEFAULT 0, l2_top INTEGER NOT NULL DEFAULT 0, "
+            "l3_keep INTEGER NOT NULL DEFAULT 0, pool_size INTEGER NOT NULL DEFAULT 0, "
+            "selection_mode TEXT NOT NULL DEFAULT 'factor', frontier_gate TEXT, "
+            "PRIMARY KEY (trade_date, pool));"
+            "INSERT INTO screening_batches__migrate (trade_date, pool, status, started_at, "
+            "finished_at, selection_mode) VALUES ('2026-10-01', 'main', 'ok', 'x', 'y', 'factor');"
+            "DROP TABLE screening_batches;"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_screening_db(db)
+    init_screening_db(db)  # 恢复后再跑一次仍幂等
+
+    from finance_agent.screening.store import latest_screening_batch
+
+    row = latest_screening_batch(db_path=db)
+    assert row is not None, "中断残留的旧行必须被恢复（MUST NOT 静默丢行）"
+    assert row["trade_date"] == "2026-10-01" and row["pool"] == "main"
+    assert "screening_batches__migrate" not in _objects(db), "恢复后不得留残留表"
+
+
+def test_init_recovers_interrupted_pool_rebuild(tmp_path) -> None:
+    """F3：池表同款中断形态 → 旧行恢复、索引恢复、无残留。"""
+    db = tmp_path / "screening.db"
+    _old_shape_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            "CREATE TABLE selection_pool__migrate ("
+            "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', symbol TEXT NOT NULL, "
+            "composite_score REAL NOT NULL, rank INTEGER NOT NULL, consecutive_days INTEGER NOT NULL, "
+            "l3_verdict TEXT NOT NULL, l3_reason TEXT NOT NULL, factor_contribs_json TEXT NOT NULL, "
+            "PRIMARY KEY (trade_date, pool, symbol));"
+            "INSERT INTO selection_pool__migrate VALUES "
+            "('2026-10-01', 'main', '600519', 1.0, 1, 3, 'keep', '无风险事件', '[]');"
+            "DROP TABLE selection_pool;"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_screening_db(db)
+
+    from finance_agent.screening.store import list_selection_pool
+
+    rows = list_selection_pool("2026-10-01", db_path=db)
+    assert [row["symbol"] for row in rows] == ["600519"]
+    assert rows[0]["pool"] == "main"
+    objects = _objects(db)
+    assert "selection_pool__migrate" not in objects
+    assert "idx_selection_pool_date_rank" in objects  # 重建/恢复后索引在位
+
+
+def test_rebuild_failure_rolls_back_without_data_loss(tmp_path, monkeypatch) -> None:
+    """F3：重建中途失败 → 整体回滚（原表与旧行在位、无残留 migrate 表）。"""
+    import finance_agent.screening.store as store_module
+
+    db = tmp_path / "screening.db"
+    _old_shape_db(db)
+    # 注入失败语句（在 DROP 之后）→ 若无显式事务，DROP 已生效即丢表
+    monkeypatch.setattr(
+        store_module,
+        "_BATCH_TABLE_REBUILD_SQL",
+        (*store_module._BATCH_TABLE_REBUILD_SQL, "SELECT * FROM table_does_not_exist"),
+    )
+
+    with pytest.raises(sqlite3.Error):
+        init_screening_db(db)
+
+    objects = _objects(db)
+    assert "screening_batches" in objects, "失败必须回滚（原表仍在）"
+    assert "screening_batches__migrate" not in objects, "失败必须回滚（无残留）"
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT trade_date, status FROM screening_batches").fetchall()
+    finally:
+        conn.close()
+    assert rows == [("2026-10-01", "ok")], "旧行不得丢失"
+
+
+def test_successful_rebuild_leaves_no_migrate_tables(tmp_path) -> None:
+    """成功迁移后不得残留 ``*__migrate`` 表（幂等重入的基线形态）。"""
+    db = tmp_path / "screening.db"
+    _old_shape_db(db)
+
+    init_screening_db(db)
+    init_screening_db(db)
+
+    objects = _objects(db)
+    assert "screening_batches__migrate" not in objects
+    assert "selection_pool__migrate" not in objects
+
+
+# ── 执行约束记录字段（评审 F5，add-microcap-lane-guardrails） ─────────────────
+
+
+def test_exec_constraints_round_trip(tmp_path) -> None:
+    """F5（先红）：批次记录含建议执行约束（JSON 记录字段）；三处读侧一致解析为 dict。"""
+    from finance_agent.screening.store import (
+        latest_screening_batch,
+        latest_successful_batch,
+        list_batches,
+        record_screening_batch,
+    )
+
+    db = tmp_path / "screening.db"
+    constraints = {"suggested_single_cap": 0.05, "slippage_tier_bump": 1}
+    record_screening_batch(
+        _D1,
+        status="ok",
+        started_at="t0",
+        finished_at="t1",
+        pool="microcap",
+        frontier_gate="ready",
+        exec_constraints=constraints,
+        db_path=db,
+    )
+
+    micro = latest_screening_batch(db_path=db, pool="microcap")
+    assert micro is not None and micro["exec_constraints"] == constraints
+    assert latest_successful_batch(db_path=db, pool="microcap")["exec_constraints"] == constraints
+    assert list_batches(db_path=db, pool="microcap")[0]["exec_constraints"] == constraints
+
+    # 主档缺省：无执行约束记录（NULL → None）
+    record_screening_batch(_D2, status="ok", started_at="t2", finished_at="t3", db_path=db)
+    assert latest_screening_batch(db_path=db)["exec_constraints"] is None
+
+
+def test_exec_constraints_rejects_bad_values(tmp_path) -> None:
+    from finance_agent.screening.store import record_screening_batch
+
+    for bad in ("", [], 0.0):
+        with pytest.raises(ValueError, match="exec_constraints"):
+            record_screening_batch(
+                _D1,
+                status="ok",
+                started_at="t0",
+                finished_at="t1",
+                exec_constraints=bad,  # type: ignore[arg-type]
+                db_path=tmp_path / "screening.db",
+            )
+
+
+def test_exec_constraints_column_migrated_on_legacy_db(tmp_path) -> None:
+    """F5：老库（无该列）→ init 幂等补列；旧行读出 None。"""
+    from finance_agent.screening.store import latest_screening_batch
+
+    db = tmp_path / "screening.db"
+    _old_shape_db(db)
+
+    init_screening_db(db)
+
+    conn = sqlite3.connect(db)
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_batches)")}
+    finally:
+        conn.close()
+    assert "exec_constraints" in columns
+    assert latest_screening_batch(db_path=db)["exec_constraints"] is None

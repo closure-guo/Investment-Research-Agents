@@ -279,7 +279,8 @@ MUST NOT 谎报覆盖。缺失/覆盖明细随非 dry-run 运行落 `snapshot_me
 = `min_avg_amount_20d` **1000 万元**（`MICROCAP_MIN_AVG_AMOUNT_20D = 1e7`）、
 `min_trading_days` / `min_liquidity_history_days` 同主档；建议执行约束（**记录字段**，v1 不下单）：
 单票上限默认 **5%**（`MICROCAP_SUGGESTED_SINGLE_CAP = 0.05`）、滑点档位提升一档
-（`MICROCAP_SLIPPAGE_TIER_BUMP = 1`）。主档（main）逐字不变（`DEFAULT_THRESHOLDS` 与既有调用路径）。
+（`MICROCAP_SLIPPAGE_TIER_BUMP = 1`），随批次落 `screening_batches.exec_constraints`
+（JSON 对象 `{"suggested_single_cap":0.05,"slippage_tier_bump":1}`；读侧解析为 dict，主档恒 NULL）。主档（main）逐字不变（`DEFAULT_THRESHOLDS` 与既有调用路径）。
 通道批次与主档批次并存于 `screening_batches`（列 `pool='microcap'`，主键 `(trade_date, pool)`；
 读侧默认 `pool='main'`，既有页面/接口口径零变化）。
 

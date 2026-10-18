@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS screening_batches (
   pool_size   INTEGER NOT NULL DEFAULT 0,
   selection_mode TEXT NOT NULL DEFAULT 'factor',
   frontier_gate  TEXT,
+  exec_constraints TEXT,
   PRIMARY KEY (trade_date, pool)
 );
 CREATE TABLE IF NOT EXISTS selection_pool (
@@ -158,75 +159,160 @@ def _table_pk_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [name for pk, name in sorted(columns) if pk > 0]
 
 
-# 批次/池表重建（加 pool 进主键）的 SQL：列集合与 SCREENING_DDL 逐字一致
-_BATCH_TABLE_REBUILD_SQL = (
+# 批次/池表重建（加 pool 进主键）的语句序列：列集合与 SCREENING_DDL 逐字一致。
+# 逐条执行（不用 executescript——它不隐式包事务）并经 ``_rebuild_in_transaction``
+# 显式 BEGIN IMMEDIATE/COMMIT，使 DROP 也可回滚（评审 F3）。
+_BATCH_MIGRATE_TABLE = "screening_batches__migrate"
+_POOL_MIGRATE_TABLE = "selection_pool__migrate"
+_POOL_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_selection_pool_date_rank ON selection_pool (trade_date, rank)"
+)
+_BATCH_TABLE_REBUILD_SQL: tuple[str, ...] = (
     "CREATE TABLE screening_batches__migrate ("
     "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', status TEXT NOT NULL, "
     "error TEXT, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, "
     "l1_passed INTEGER NOT NULL DEFAULT 0, l2_top INTEGER NOT NULL DEFAULT 0, "
     "l3_keep INTEGER NOT NULL DEFAULT 0, pool_size INTEGER NOT NULL DEFAULT 0, "
     "selection_mode TEXT NOT NULL DEFAULT 'factor', frontier_gate TEXT, "
-    "PRIMARY KEY (trade_date, pool));"
+    "exec_constraints TEXT, PRIMARY KEY (trade_date, pool))",
     "INSERT INTO screening_batches__migrate (trade_date, pool, status, error, started_at, "
-    "finished_at, l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate) "
+    "finished_at, l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate, "
+    "exec_constraints) "
     "SELECT trade_date, 'main', status, error, started_at, finished_at, l1_passed, l2_top, "
-    "l3_keep, pool_size, selection_mode, NULL FROM screening_batches;"
-    "DROP TABLE screening_batches;"
-    "ALTER TABLE screening_batches__migrate RENAME TO screening_batches;"
+    "l3_keep, pool_size, selection_mode, frontier_gate, exec_constraints FROM screening_batches",
+    "DROP TABLE screening_batches",
+    "ALTER TABLE screening_batches__migrate RENAME TO screening_batches",
 )
-_POOL_TABLE_REBUILD_SQL = (
+_POOL_TABLE_REBUILD_SQL: tuple[str, ...] = (
     "CREATE TABLE selection_pool__migrate ("
     "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', symbol TEXT NOT NULL, "
     "composite_score REAL NOT NULL, rank INTEGER NOT NULL, consecutive_days INTEGER NOT NULL, "
     "l3_verdict TEXT NOT NULL, l3_reason TEXT NOT NULL, factor_contribs_json TEXT NOT NULL, "
-    "PRIMARY KEY (trade_date, pool, symbol));"
+    "PRIMARY KEY (trade_date, pool, symbol))",
     "INSERT INTO selection_pool__migrate (trade_date, pool, symbol, composite_score, rank, "
     "consecutive_days, l3_verdict, l3_reason, factor_contribs_json) "
     "SELECT trade_date, 'main', symbol, composite_score, rank, consecutive_days, l3_verdict, "
-    "l3_reason, factor_contribs_json FROM selection_pool;"
-    "DROP TABLE selection_pool;"
-    "ALTER TABLE selection_pool__migrate RENAME TO selection_pool;"
+    "l3_reason, factor_contribs_json FROM selection_pool",
+    "DROP TABLE selection_pool",
+    "ALTER TABLE selection_pool__migrate RENAME TO selection_pool",
     # DROP TABLE 连带删掉旧索引：重建后恢复（与 SCREENING_DDL 同名同形）
-    "CREATE INDEX IF NOT EXISTS idx_selection_pool_date_rank ON selection_pool (trade_date, rank);"
+    _POOL_INDEX_SQL,
+)
+# 中断恢复语句（``*__migrate`` 留存 = 上次重建在 DROP 之后、RENAME 之前中断）：
+# 数据以 migrate 表为准 —— 现存正式表要么缺失、要么是其后 ``CREATE IF NOT EXISTS``
+# 补出的空壳（或在 DROP 前中断时同数据的旧原表），一律 DROP 后改名换入。
+_RECOVERY_SQL: dict[str, tuple[str, ...]] = {
+    "screening_batches": (
+        "DROP TABLE IF EXISTS screening_batches",
+        "ALTER TABLE screening_batches__migrate RENAME TO screening_batches",
+    ),
+    "selection_pool": (
+        "DROP TABLE IF EXISTS selection_pool",
+        "ALTER TABLE selection_pool__migrate RENAME TO selection_pool",
+        _POOL_INDEX_SQL,
+    ),
+}
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    return row is not None
+
+
+def _run_statements_in_transaction(conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:
+    """显式事务内逐条执行（``BEGIN IMMEDIATE`` … ``COMMIT``）；任一条失败整体 ``ROLLBACK``。
+
+    必须关掉 sqlite3 的 legacy 隐式事务控制（``isolation_level = None``）：默认模式下
+    Python 会在 DDL 前隐式提交挂起事务、且 ``executescript`` 不包事务——那样 DROP 之后
+    失败会留下「原表已删、migrate 表残留」的半态（评审 F3 复现）。
+    """
+    restore = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for statement in statements:
+                conn.execute(statement)
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+    finally:
+        conn.isolation_level = restore
+
+
+def _recover_interrupted_rebuild(conn: sqlite3.Connection, table: str) -> bool:
+    """残留 ``<table>__migrate`` → 恢复为正式表（数据以 migrate 表为准）；无残留 → False。
+
+    不得因为「正式表已存在」跳过：中断后的下一次 ``CREATE TABLE IF NOT EXISTS`` 会补出
+    空壳正式表，跳过即静默丢旧行（评审 F3）。
+    """
+    migrate_table = f"{table}__migrate"
+    if not _table_exists(conn, migrate_table):
+        return False
+    _run_statements_in_transaction(conn, _RECOVERY_SQL[table])
+    return True
+
+
+# 批次表增量列（ALTER 补齐；键 = 列名，值 = ADD COLUMN DDL）。重建 SQL 引用这些列，
+# 故 init 顺序固定为「恢复 → 列补齐 → 主键重建」。
+_BATCH_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    (
+        "selection_mode",
+        "ALTER TABLE screening_batches ADD COLUMN selection_mode TEXT NOT NULL DEFAULT 'factor'",
+    ),
+    ("frontier_gate", "ALTER TABLE screening_batches ADD COLUMN frontier_gate TEXT"),
+    ("exec_constraints", "ALTER TABLE screening_batches ADD COLUMN exec_constraints TEXT"),
 )
 
 
-def _migrate_pool_columns(conn: sqlite3.Connection) -> None:
+def _ensure_batch_columns(conn: sqlite3.Connection) -> None:
+    """旧库缺失的批次表列 → 幂等 ALTER 补齐（新增列只在此声明，迁移单点）。"""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_batches)")}
+    for name, ddl in _BATCH_COLUMN_MIGRATIONS:
+        if name not in columns:
+            conn.execute(ddl)
+
+
+def _rebuild_pool_pk_if_needed(conn: sqlite3.Connection) -> None:
     """旧库主键（单列 ``trade_date``）→ 重建为含 ``pool`` 的复合主键（幂等）。
 
     ``add-microcap-lane-guardrails``：小票通道与主档同一交易日各写一行批次 →
     旧主键会互相覆盖（且 upsert 会连带清掉对方当日池行）。重建把旧行一律落
     ``pool='main'``（既有批次全是主档产物）；列集合与新建库 DDL 一致。
-    已含 ``pool`` 主键（新库/已迁移）→ 无操作。全程单连接单事务：中途失败回滚后
-    仍是旧表（不会留下「已 DROP 未 RENAME」的半态）。
+    已含 ``pool`` 主键（新库/已迁移）→ 无操作。重建为**显式事务**（见
+    ``_run_statements_in_transaction``）：中途失败整体回滚，不留「已 DROP 未 RENAME」半态。
     """
     if "pool" not in _table_pk_columns(conn, "screening_batches"):
-        conn.executescript(_BATCH_TABLE_REBUILD_SQL)
+        _run_statements_in_transaction(conn, _BATCH_TABLE_REBUILD_SQL)
     if "pool" not in _table_pk_columns(conn, "selection_pool"):
-        conn.executescript(_POOL_TABLE_REBUILD_SQL)
+        _run_statements_in_transaction(conn, _POOL_TABLE_REBUILD_SQL)
+    # 恢复路径可能重建过池表：索引兜底恢复（幂等）
+    conn.execute(_POOL_INDEX_SQL)
 
 
 def init_screening_db(db_path: str | Path | None = None) -> Path:
     """幂等建表 + 索引 + 增量迁移，返回实际使用的库路径。
 
-    迁移（按序）：
-    ① 旧库 ``screening_batches`` 缺 ``selection_mode`` 列 → ALTER 补列
-       （默认 ``'factor'``——旧行语义 = 因子路径批次）；
-    ② 旧库 ``screening_batches`` / ``selection_pool`` 主键为单列 ``trade_date``
-       → 重建为含 ``pool`` 的复合主键（add-microcap-lane-guardrails，旧行落
-       ``pool='main'``）。
+    迁移（顺序固定，三者互相依赖）：
+    ① 残留 ``*__migrate``（上次重建中断）→ **先恢复数据**（正式表缺失或为空壳时
+       以 migrate 表换入，见 ``_recover_interrupted_rebuild``）；
+    ② 批次表缺列 → 幂等 ALTER 补齐（``selection_mode`` / ``frontier_gate`` /
+       ``exec_constraints``，见 ``_BATCH_COLUMN_MIGRATIONS``）；
+    ③ 旧库主键为单列 ``trade_date`` → 重建为含 ``pool`` 的复合主键
+       （add-microcap-lane-guardrails，旧行落 ``pool='main'``；显式事务，失败整体回滚）。
+    ②在①之后：恢复可能换入旧版形状的表，列补齐必须在恢复之后重新判定。
     """
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
     try:
         conn.executescript(SCREENING_DDL)
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_batches)")}
-        if "selection_mode" not in columns:
-            conn.execute(
-                "ALTER TABLE screening_batches ADD COLUMN selection_mode TEXT NOT NULL "
-                "DEFAULT 'factor'"
-            )
-        _migrate_pool_columns(conn)
+        _recover_interrupted_rebuild(conn, "screening_batches")  # ① 数据优先
+        _recover_interrupted_rebuild(conn, "selection_pool")
+        _ensure_batch_columns(conn)  # ② 列补齐（重建 SQL 引用这些列）
+        _rebuild_pool_pk_if_needed(conn)  # ③ 主键重建（幂等）
         conn.commit()
     finally:
         conn.close()
@@ -509,6 +595,36 @@ def list_triage_decisions(
 # ── 日批批次与精选池（add-screening-pipeline T1；S1 落库口径） ──────────────
 
 
+def _parse_json_object(raw: Any) -> dict[str, Any] | None:
+    """JSON 文本 → dict；缺失/坏 JSON/非对象 → None（防御性读取，不抛）。"""
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _exec_constraints_json(value: Any) -> str | None:
+    """建议执行约束 dict → JSON 文本（None 透传；非空 dict 之外 → ``ValueError``）。"""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"exec_constraints 必须是 None 或非空 dict: {value!r}")
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"exec_constraints 不可 JSON 序列化: {exc}") from exc
+
+
+def _batch_row(row: sqlite3.Row) -> dict[str, Any]:
+    """批次行 → dict（``exec_constraints`` JSON 解析回 dict/None）。"""
+    entry = dict(row)
+    entry["exec_constraints"] = _parse_json_object(entry.get("exec_constraints"))
+    return entry
+
+
 def _non_negative_int(value: Any, field_name: str) -> int:
     """计数入参：非负整数（bool 除外）→ int；否则 fail loud。"""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -578,6 +694,7 @@ def record_screening_batch(
     selection_mode: str = "factor",
     pool: str = POOL_MAIN,
     frontier_gate: str | None = None,
+    exec_constraints: dict[str, Any] | None = None,
     db_path: str | Path | None = None,
 ) -> int:
     """批次行 + 当日精选池**单事务**写入（S1 落库口径；fail-closed 不变量）。
@@ -590,6 +707,9 @@ def record_screening_batch(
       同 ``(trade_date, pool)`` upsert 覆盖（幂等重跑）；
     - ``frontier_gate`` = 前置门禁记录字段（``None`` = 未评估；主档恒 None）；
       非空字符串（``ready`` / ``observation_only:missing=<要点>``），空串 → ``ValueError``；
+      ``exec_constraints`` = 建议执行约束的**记录字段**（JSON 对象，如
+      ``{"suggested_single_cap": 0.05, "slippage_tier_bump": 1}``；主档恒 None），
+      非 None 且非空 dict → 序列化落库；
     - **失败批次传 ``pool_rows=()`` → 该档当日池行先清空**：失败日零池行是不变量，不被
       同日旧行/部分写入破坏；批次行与池行同一事务提交（ok 与池同生共死）。
       清空**按 pool 收窄**——小票通道批次不得动主档当日池行；
@@ -608,6 +728,7 @@ def record_screening_batch(
         not isinstance(frontier_gate, str) or not frontier_gate.strip()
     ):
         raise ValueError(f"frontier_gate 必须是 None 或非空字符串: {frontier_gate!r}")
+    constraints_json = _exec_constraints_json(exec_constraints)
     if not isinstance(started_at, str) or not started_at:
         raise ValueError(f"started_at 不能为空: {started_at!r}")
     if not isinstance(finished_at, str) or not finished_at:
@@ -635,15 +756,16 @@ def record_screening_batch(
         conn.execute(
             "INSERT INTO screening_batches "
             "(trade_date, pool, status, error, started_at, finished_at, l1_passed, l2_top, "
-            "l3_keep, pool_size, selection_mode, frontier_gate) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "l3_keep, pool_size, selection_mode, frontier_gate, exec_constraints) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(trade_date, pool) DO UPDATE SET "
             "status = excluded.status, error = excluded.error, "
             "started_at = excluded.started_at, finished_at = excluded.finished_at, "
             "l1_passed = excluded.l1_passed, l2_top = excluded.l2_top, "
             "l3_keep = excluded.l3_keep, pool_size = excluded.pool_size, "
             "selection_mode = excluded.selection_mode, "
-            "frontier_gate = excluded.frontier_gate",
+            "frontier_gate = excluded.frontier_gate, "
+            "exec_constraints = excluded.exec_constraints",
             (
                 normalized,
                 pool,
@@ -655,6 +777,7 @@ def record_screening_batch(
                 len(payload),
                 selection_mode,
                 frontier_gate,
+                constraints_json,
             ),
         )
         if payload:
@@ -694,7 +817,7 @@ def list_selection_pool(
         ).fetchall()
     finally:
         conn.close()
-    pool: list[dict[str, Any]] = []
+    rows_out: list[dict[str, Any]] = []
     for row in rows:
         entry = dict(row)
         raw = entry.pop("factor_contribs_json", None)
@@ -703,8 +826,8 @@ def list_selection_pool(
         except (TypeError, ValueError):
             parsed = []
         entry["factor_contribs"] = parsed if isinstance(parsed, list) else []
-        pool.append(entry)
-    return pool
+        rows_out.append(entry)
+    return rows_out
 
 
 def latest_screening_batch(
@@ -722,12 +845,12 @@ def latest_screening_batch(
     try:
         row = conn.execute(
             "SELECT trade_date, pool, status, error, started_at, finished_at, "
-            "l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate "
-            "FROM screening_batches WHERE pool = ? "
+            "l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate, "
+            "exec_constraints FROM screening_batches WHERE pool = ? "
             "ORDER BY trade_date DESC LIMIT 1",
             (pool,),
         ).fetchone()
-        return dict(row) if row is not None else None
+        return _batch_row(row) if row is not None else None
     finally:
         conn.close()
 
@@ -743,12 +866,12 @@ def latest_successful_batch(
     try:
         row = conn.execute(
             "SELECT trade_date, pool, status, error, started_at, finished_at, "
-            "l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate "
-            "FROM screening_batches WHERE pool = ? AND status = 'ok' "
+            "l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate, "
+            "exec_constraints FROM screening_batches WHERE pool = ? AND status = 'ok' "
             "ORDER BY trade_date DESC LIMIT 1",
             (pool,),
         ).fetchone()
-        return dict(row) if row is not None else None
+        return _batch_row(row) if row is not None else None
     finally:
         conn.close()
 
@@ -777,12 +900,12 @@ def list_batches(
     try:
         rows = conn.execute(
             "SELECT trade_date, pool, status, error, started_at, finished_at, "
-            "l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate "
-            "FROM screening_batches WHERE pool = ? "
+            "l1_passed, l2_top, l3_keep, pool_size, selection_mode, frontier_gate, "
+            "exec_constraints FROM screening_batches WHERE pool = ? "
             "ORDER BY trade_date DESC LIMIT ?",
             (pool, limit),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_batch_row(row) for row in rows]
     finally:
         conn.close()
 

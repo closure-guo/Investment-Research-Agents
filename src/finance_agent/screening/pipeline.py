@@ -47,7 +47,6 @@ from finance_agent.data.snapshot import (
 from finance_agent.factors.eval_engine import PANEL_FIELDS as _PANEL_FIELDS
 from finance_agent.factors.eval_engine import MarketPanel, build_panel_from_rows
 from finance_agent.factors.library import list_active_factors
-from finance_agent.outcome.regime.model import latest_regime
 from finance_agent.screening import constraints
 from finance_agent.screening.candidate_llm import (
     GatewayTriageClient,
@@ -96,6 +95,16 @@ FRONTIER_MISSING_DELIST_POOL = "delist_pool"
 FRONTIER_MISSING_REGIME_DATA = "regime_data"
 # 拥挤度数据新鲜度阈值（自然日；同 metrics.md §1.14 陈旧口径「>7 日」）
 REGIME_MAX_AGE_DAYS = 7
+# 小票通道建议执行约束（批次**记录字段**；v1 观察通道不接执行链，见 spec）
+MICROCAP_EXEC_CONSTRAINTS: dict[str, float | int] = {
+    "suggested_single_cap": constraints.MICROCAP_SUGGESTED_SINGLE_CAP,
+    "slippage_tier_bump": constraints.MICROCAP_SLIPPAGE_TIER_BUMP,
+}
+
+
+def microcap_exec_constraints() -> dict[str, float | int]:
+    """建议执行约束记录字段（每次调用返回副本，调用方改动不污染常量单源）。"""
+    return dict(MICROCAP_EXEC_CONSTRAINTS)
 
 
 # ── 小工具 ──────────────────────────────────────────────────────────────────
@@ -242,6 +251,7 @@ def run_screening_batch(
     thresholds: FilterThresholds | None = None,
     pool: str = POOL_MAIN,
     frontier_gate: str | None = None,
+    exec_constraints: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """日批入口（S1）：快照确认 → L1 → L2 → L3 → 精选池，fail-closed 落库。
 
@@ -255,7 +265,8 @@ def run_screening_batch(
     ``thresholds`` 显式传入时用于 L1 两个消费点（``build_candidate_record`` /
     ``filter_universe``），``None`` → 各函数调用期读 ``DEFAULT_THRESHOLDS``（同变更前）；
     ``pool`` 标注批次档位（``main``/``microcap``，读写按 ``(trade_date, pool)`` 隔离）；
-    ``frontier_gate`` 门禁记录字段（仅小票通道非空，由 ``run_microcap_lane_daily`` 传入）。
+    ``frontier_gate`` 门禁记录字段与 ``exec_constraints`` 建议执行约束记录字段
+    （仅小票通道非空，由 ``run_microcap_lane_daily`` 传入；主档恒 None）。
 
     批次内部失败**不抛出**：批次行记 failed + error 文案并返回结果 dict（调用方
     据 ``status`` 判定）；仅「快照库为空且 as_of 未指定」（无 trade_date 可落批
@@ -289,6 +300,7 @@ def run_screening_batch(
             selection_mode="factor",  # 快照新鲜度未过：选择路径未判定，按默认标注
             pool=pool,
             frontier_gate=frontier_gate,
+            exec_constraints=exec_constraints,
             db_path=db_path,
         )
         return {
@@ -302,6 +314,7 @@ def run_screening_batch(
             "selection_mode": "factor",
             "pool": pool,
             "frontier_gate": frontier_gate,
+            "exec_constraints": exec_constraints,
         }
 
     l1_passed = 0
@@ -430,6 +443,7 @@ def run_screening_batch(
             selection_mode=selection_mode,
             pool=pool,
             frontier_gate=frontier_gate,
+            exec_constraints=exec_constraints,
             db_path=db_path,
         )
         return {
@@ -443,6 +457,7 @@ def run_screening_batch(
             "selection_mode": selection_mode,
             "pool": pool,
             "frontier_gate": frontier_gate,
+            "exec_constraints": exec_constraints,
         }
     except Exception as exc:  # noqa: BLE001 -- fail-closed：任一步失败 → 批次 failed + 零池
         error = f"{type(exc).__name__}: {exc}"
@@ -459,6 +474,7 @@ def run_screening_batch(
             selection_mode=selection_mode,
             pool=pool,
             frontier_gate=frontier_gate,
+            exec_constraints=exec_constraints,
             db_path=db_path,
         )
         return {
@@ -472,6 +488,7 @@ def run_screening_batch(
             "selection_mode": selection_mode,
             "pool": pool,
             "frontier_gate": frontier_gate,
+            "exec_constraints": exec_constraints,
         }
 
 
@@ -512,6 +529,10 @@ def evaluate_frontier_gate(
 
     返回 ``{"frontier_gate", "missing", "delist_ready", "regime_ready", "regime_date"}``。
     """
+    # 延迟 import（评审 F6）：screening 不得模块级依赖 outcome（层次反向）；
+    # 本函数是 screening 侧唯一消费 regime 的点，import 只在此发生。
+    from finance_agent.outcome.regime.model import latest_regime
+
     gate_today = _canonical_date(today or date.today().isoformat(), "today")
     missing: list[str] = []
 
@@ -582,6 +603,7 @@ def run_microcap_lane_daily(
         thresholds=constraints.MICROCAP_THRESHOLDS,
         pool=POOL_MICROCAP,
         frontier_gate=gate["frontier_gate"],
+        exec_constraints=microcap_exec_constraints(),
     )
     result.update(
         {
@@ -591,6 +613,7 @@ def run_microcap_lane_daily(
             # 记录字段（建议执行约束）：v1 仅记录，不接执行链
             "suggested_single_cap": constraints.MICROCAP_SUGGESTED_SINGLE_CAP,
             "slippage_tier_bump": constraints.MICROCAP_SLIPPAGE_TIER_BUMP,
+            "exec_constraints": microcap_exec_constraints(),
             "orders_placed": 0,
         }
     )

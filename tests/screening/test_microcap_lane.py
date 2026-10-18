@@ -357,6 +357,14 @@ class TestRunMicrocapLaneDaily:
         assert result["orders_placed"] == 0
         assert result["suggested_single_cap"] == constraints.MICROCAP_SUGGESTED_SINGLE_CAP
         assert result["slippage_tier_bump"] == constraints.MICROCAP_SLIPPAGE_TIER_BUMP
+        # F5：建议执行约束随批次落库（记录字段，spec「含建议执行约束」）
+        row = latest_screening_batch(db_path=ws.screening_db, pool="microcap")
+        assert row is not None and row["exec_constraints"] == {
+            "suggested_single_cap": constraints.MICROCAP_SUGGESTED_SINGLE_CAP,
+            "slippage_tier_bump": constraints.MICROCAP_SLIPPAGE_TIER_BUMP,
+        }
+        # 主档读侧不受影响（本用例只跑了通道：主档无行）
+        assert latest_screening_batch(db_path=ws.screening_db) is None
 
     def test_lane_gate_ready_when_prerequisites_present(self, ws):
         """前置齐备 → ``frontier_gate="ready"``（可执行候选，仍不下单）。"""
@@ -431,6 +439,11 @@ def test_ops_wrapper_raises_on_failed_lane(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="快照过期"):
         pipeline.run_microcap_lane()
+
+
+def test_pipeline_has_no_module_level_regime_dependency():
+    """F6：screening → outcome.regime 的反向依赖为函数内延迟 import（不得模块级导入）。"""
+    assert not hasattr(pipeline, "latest_regime")
 
 
 def test_gate_today_defaults_to_today(tmp_path):
