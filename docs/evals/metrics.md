@@ -222,6 +222,8 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 
 ---
 
+**记忆注入消融批次（2026-10-18，delta `add-decision-memory` 闭环；n=10 配对）**：`--suite memory`（tech_no_memory → tech_memory，分析师层直出、单变量=analysts_entry 是否召回），10 标的 × 2 臂 × 1 重复 = 20 run；判分维按 #112 口径过滤为 report_relevance（K=3 均值）。**读数：Δ = −0.0333，95% CI [−0.2333, 0.1665] → 无显著差异**（配对单元=ticker bootstrap；CI 含 0 按纪律只写无显著差异，不得引申为对记忆价值的否定）。健康检查：20/20 run 完整、judge 失败 0、**10/10 标的记忆臂召回非空**（1–3 条已结算情景记忆；语义条款 0——该通路未被本批检验）。原始读数 `reports/ablation/ablation-20261018-142257.json`（本地）；报告 [2026-10-18-add-decision-memory-n10消融报告.md](2026-10-18-add-decision-memory-n10消融报告.md)。边界：仅测分析师层上下文注入面（该 delta 变体设计），不测辩论/决策层消费；有效 n=10。
+
 ## 2.1 round7 预登记分析计划（标注前锁定，防事后口径漂移）
 
 - 数据：`judge-sample-round7-blind.xlsx`（人工 human_score + confidence）× `judge-sample-round7-judge.jsonl`（judge 分，r3 运行时落库，已冻结）
