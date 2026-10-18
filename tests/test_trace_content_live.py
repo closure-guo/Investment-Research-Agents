@@ -69,21 +69,22 @@ async def test_live_reasoning_streamed_in_thinking_mode():
 
 
 def test_live_tool_calls_returned(monkeypatch):
-    """真实 GLM tool calling：complete_with_tools 返回结构含 tool_calls。
+    """真实 tool calling：complete_with_tools 返回结构含 tool_calls。
 
     对应 spec「LLM Generation 工具调用决策可观测」：complete_with_tools 走
     非流式 litellm.completion，返回完整 response，tool_calls 在
     choices[0].message.tool_calls（migrate-off-legacy-llm-shim Task 3：
     原 call_llm_with_tools 直调 gateway.complete_with_tools）。
 
-    #52 护栏：
-    - tool_choice=required（registry ark-glm capability 实测支持，生产 ReAct
-      force_tool 轮同款）——auto 下模型可直接回答不调工具，行为波动会被误报
-      成协议漂移。**走 env 解析而非请求级 llm_config**：resolver 请求分支恒用
-      openai-compatible 通用能力（tool_choice_required=False），env 分支才按
-      模型名推断 ark-glm 能力——本用例 monkeypatch 三个 LLM_* 变量、不传
-      llm_config，与生产 deep 路径（env profile）同形（请求分支能力推断缺口
-      另立 issue 挂账）。
+    #52 护栏（2026-10-18 随 provider 迁移修订）：
+    - tool_choice=auto + 强工具诱导 prompt。旧版用 required（ark-glm 实测支持、
+      生产 ReAct force_tool 轮同款）；2026-10-13 分析档迁 opencode
+      deepseek-v4.1-flash 后，端点对 required 明确拒绝（实测 400
+      "Thinking mode does not support this tool_choice"）→ capability 表如实
+      记 tool_choice_required=False、生产走既有 action 文本协议降级。本用例
+      与生产同栈（env profile，不传 llm_config），改断言"诱导 prompt 下模型
+      确实下发 tool_calls"——防漂移目标不变（协议/工具链断了即红），不再依赖
+      端点不支持的 required 形态。
     - 同步调用超时护栏：raw_completion 未显式传 timeout 时注入
       LLM_TIMEOUT_SECONDS（默认 300，incident 016/017 卡死防护）——本用例
       收紧为 120s，夜挂 10 分钟的场景不再可能。
@@ -113,13 +114,18 @@ def test_live_tool_calls_returned(monkeypatch):
         }
     ]
 
-    # env 解析（不传 llm_config）：resolver 环境分支按模型名推断 ark-glm 能力
-    # （tool_choice_required=True），请求分支恒用 openai-compatible 通用能力
-    # 会把 required 拒在守卫——详见本用例 docstring 与 #52 挂账 issue。
+    # env 解析（不传 llm_config）：与生产 deep 路径同形（env profile）。
+    # tool_choice=auto：当前 provider（opencode deepseek-v4.1-flash，thinking 模式）
+    # 不支持 required（端点实测 400），强工具诱导 prompt 下 auto 即稳定下发 tool_calls。
     resp = complete_with_tools(
-        [{"role": "user", "content": "贵州茅台（600519）现在多少钱？请调用工具查询。"}],
+        [
+            {
+                "role": "user",
+                "content": "贵州茅台（600519）现在多少钱？必须调用 get_stock_price 工具查询。",
+            }
+        ],
         tools=tools,
-        tool_choice="required",
+        tool_choice="auto",
     )
 
     message = resp.choices[0].message
