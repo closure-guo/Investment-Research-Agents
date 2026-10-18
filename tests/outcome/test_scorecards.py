@@ -7,9 +7,16 @@
 from __future__ import annotations
 
 import math
+from datetime import date, timedelta
 
 import pytest
 
+from finance_agent.data.snapshot import write_snapshot_rows
+from finance_agent.execution.store import (
+    execution_conn,
+    upsert_paper_equity,
+    write_position,
+)
 from finance_agent.outcome.scorecards import (
     FAMILY_REGISTRY,
     FamilyContract,
@@ -17,7 +24,15 @@ from finance_agent.outcome.scorecards import (
     aggregate_daily_returns,
     build_family_payload,
     estimate_round_trip_cost_rate,
+    get_scorecards,
+    load_execution_samples,
+    load_prediction_samples,
     max_drawdown_from_returns,
+)
+from finance_agent.outcome.track_record.model import (
+    init_track_record_tables,
+    insert_prediction,
+    update_prediction_status,
 )
 
 
@@ -134,3 +149,205 @@ def test_capacity_slot_all_missing_is_null() -> None:
     )
     assert payload["capacity"] is None
     assert payload["capacity_reason"] == "no_liquidity_data"
+
+
+# ── 族数据读取与组装（Task 3）──
+
+_PREDICTION_DAYS = [f"2026-10-{d:02d}" for d in range(1, 23)]  # 22 个结算日（≥ 回撤门槛 20）
+
+
+def _add_prediction(
+    db, *, symbol: str, resolved_at: str, raw_return: float | None, status: str
+) -> None:
+    prediction_id = insert_prediction(
+        {
+            "source_type": "live",
+            "symbol": symbol,
+            "direction": "long",
+            "horizon_days": 20,
+            "rationale_snapshot": {"action": "buy"},
+            "created_at": "2026-09-01T09:30:00",
+        },
+        db_path=db,
+    )
+    update_prediction_status(
+        prediction_id,
+        {"status": status, "resolved_at": resolved_at, "raw_return": raw_return},
+        db_path=db,
+    )
+
+
+def _seed_predictions(db) -> None:
+    """22 条已判定样本：20 胜（+5%）+ 2 负（−2%、−20%），逐日排布（600519 含极端样本）。"""
+    for index, day in enumerate(_PREDICTION_DAYS, start=1):
+        symbol = "600519" if index % 2 else "000001"
+        if index == 2:
+            ret, status = -0.02, "resolved_loss"
+        elif index == 20:
+            symbol, ret, status = "600519", -0.20, "resolved_loss"
+        else:
+            ret, status = 0.05, "resolved_win"
+        _add_prediction(
+            db, symbol=symbol, resolved_at=f"{day}T09:30:00", raw_return=ret, status=status
+        )
+
+
+def _seed_execution(db) -> None:
+    """22 个净值点（1 交易日 1 点）：21 个日收益，末日 −6%（组合级极端样本）。"""
+    equity = 1_000_000.0
+    upsert_paper_equity(_PREDICTION_DAYS[0], equity, 0.0, equity, db_path=db)
+    for index, day in enumerate(_PREDICTION_DAYS[1:], start=1):
+        equity = equity * 0.94 if index == 21 else equity * 1.002
+        upsert_paper_equity(day, equity, 0.0, equity, db_path=db)
+
+
+def _seed_snapshot(db, codes: dict[str, float] | None = None) -> None:
+    """21 个交易日的成交额行；缺省两标的（600519 = 1 亿、000001 = 5000 万）。"""
+    amounts = codes if codes is not None else {"600519": 100_000_000.0, "000001": 50_000_000.0}
+    for offset in range(21):
+        day = (date(2026, 9, 25) + timedelta(days=offset)).isoformat()
+        write_snapshot_rows(
+            day,
+            [{"code": code, "amount": amount} for code, amount in amounts.items()],
+            db_path=db,
+        )
+
+
+def _three_db_env(monkeypatch, tmp_path):
+    sessions = tmp_path / "s.db"
+    execution = tmp_path / "e.db"
+    snapshot = tmp_path / "snap.db"
+    init_track_record_tables(sessions)
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(sessions))
+    monkeypatch.setenv("EXECUTION_DB_PATH", str(execution))
+    monkeypatch.setenv("SNAPSHOT_DB_PATH", str(snapshot))
+    return sessions, execution, snapshot
+
+
+def _family(result: dict, family_id: str) -> dict:
+    return {family["family_id"]: family for family in result["families"]}[family_id]
+
+
+def test_load_prediction_samples_filters_open_and_null_return(tmp_path) -> None:
+    """已判定且 raw_return 非空才入样本；open/回避/NULL 收益排除，日期取前 10 字符。"""
+    db = tmp_path / "s.db"
+    init_track_record_tables(db)
+    _add_prediction(
+        db,
+        symbol="600519",
+        resolved_at="2026-09-30T15:00:00",
+        raw_return=0.12,
+        status="resolved_win",
+    )
+    _add_prediction(
+        db,
+        symbol="000001",
+        resolved_at="2026-09-29",
+        raw_return=None,
+        status="resolved_neutral",
+    )
+    _add_prediction(
+        db, symbol="600000", resolved_at="2026-09-28", raw_return=0.03, status="avoidance"
+    )
+    insert_prediction(
+        {
+            "source_type": "live",
+            "symbol": "600036",
+            "direction": "long",
+            "rationale_snapshot": {"action": "buy"},
+            "created_at": "2026-09-01T09:30:00",
+        },
+        db_path=db,
+    )
+    assert load_prediction_samples(db_path=db) == [Sample("600519", "2026-09-30", 0.12)]
+
+
+def test_load_execution_samples_skips_non_positive_equity(tmp_path) -> None:
+    """净值 ≤ 0 的行跳过并重设基准（不跨缺口连乘），跳过日不作为后续收益分母。"""
+    db = tmp_path / "e.db"
+    upsert_paper_equity("2026-10-01", 100.0, 0.0, 1_000_000.0, db_path=db)
+    upsert_paper_equity("2026-10-02", 0.0, 0.0, 0.0, db_path=db)
+    upsert_paper_equity("2026-10-03", 0.0, 0.0, 1_100_000.0, db_path=db)
+    upsert_paper_equity("2026-10-04", 0.0, 0.0, 1_111_000.0, db_path=db)
+    samples = load_execution_samples(db_path=db)
+    assert [sample.ticker for sample in samples] == ["<portfolio>"]
+    assert samples[0].date == "2026-10-04"
+    assert samples[0].ret == pytest.approx(1_111_000.0 / 1_100_000.0 - 1)
+
+
+def test_get_scorecards_end_to_end(tmp_path, monkeypatch) -> None:
+    sessions, execution, snapshot = _three_db_env(monkeypatch, tmp_path)
+    _seed_predictions(sessions)
+    _seed_execution(execution)
+    _seed_snapshot(snapshot)
+    with execution_conn(execution) as conn:
+        write_position(conn, "600519.SH", 100, 1500.0, "2026-10-22T15:00:00")
+
+    result = get_scorecards()
+    families = {family["family_id"]: family for family in result["families"]}
+    assert list(families) == ["predictions", "execution"]  # 注册表序；未注册族不出现
+
+    pred = families["predictions"]
+    assert pred["name"] == "观点线"
+    assert pred["as_of"] == "2026-10-22"
+    assert pred["expectancy"]["n"] == 22
+    assert pred["expectancy"]["gross"] == pytest.approx(0.0355, abs=1e-4)
+    assert pred["expectancy"]["net"] < pred["expectancy"]["gross"]  # 净 = 毛 − 0.003
+    assert pred["max_drawdown"]["value"] < 0
+    assert pred["max_drawdown"]["n_days"] == 22
+    assert pred["capacity"]["min_adv20"] == pytest.approx(50_000_000.0)
+    assert pred["capacity"]["suggested_capital"] == pytest.approx(500_000.0)
+    assert pred["capacity"]["excluded"] == 0
+    assert [row["ticker"] for row in pred["extreme_samples"]] == ["600519"]
+    assert pred["win_rate"] == pytest.approx(20 / 22, abs=1e-4)
+    assert "往返成本" in pred["caliber_note"]
+    keys = list(pred.keys())
+    assert keys.index("expectancy") < keys.index("max_drawdown") < keys.index("capacity")
+    assert keys.index("extreme_samples") < keys.index("win_rate")
+
+    exe = families["execution"]
+    assert exe["name"] == "执行线"
+    assert exe["expectancy"]["n"] == 21
+    assert exe["expectancy"]["gross"] == exe["expectancy"]["net"]  # 已含费，无二次扣减
+    assert exe["max_drawdown"]["value"] < 0
+    assert len(exe["extreme_samples"]) == 1
+    assert exe["extreme_samples"][0]["ret"] <= -0.05  # 组合级阈值
+    assert exe["capacity"]["min_adv20"] == pytest.approx(100_000_000.0)  # 持仓去后缀命中快照
+    assert exe["win_rate"] is None  # 执行线无胜率口径（仅观点线展示）
+
+
+def test_capacity_slot_excludes_symbols_missing_from_snapshot(tmp_path, monkeypatch) -> None:
+    """快照只覆盖部分标的：缺数据标的剔除计数，容量按可得标的给出（不折算 0）。"""
+    sessions, _execution, snapshot = _three_db_env(monkeypatch, tmp_path)
+    _seed_predictions(sessions)
+    _seed_snapshot(snapshot, {"600519": 100_000_000.0})
+
+    pred = _family(get_scorecards(), "predictions")
+    assert pred["capacity"]["excluded"] == 1
+    assert pred["capacity"]["min_adv20"] == pytest.approx(100_000_000.0)
+
+
+def test_capacity_slot_null_when_snapshot_empty(tmp_path, monkeypatch) -> None:
+    """快照库为空：容量槽 null + no_liquidity_data，异常不上抛给调用方。"""
+    sessions, _execution, _snapshot = _three_db_env(monkeypatch, tmp_path)
+    _seed_predictions(sessions)
+
+    pred = _family(get_scorecards(), "predictions")
+    assert pred["capacity"] is None
+    assert pred["capacity_reason"] == "no_liquidity_data"
+    assert pred["expectancy"]["n"] == 22  # 其余槽位不受快照缺失影响
+
+
+def test_get_scorecards_empty_databases(tmp_path, monkeypatch) -> None:
+    """三库皆空（文件不存在）：两族均以 null + 原因码如实返回，MUST NOT 报错。"""
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "missing-s.db"))
+    monkeypatch.setenv("EXECUTION_DB_PATH", str(tmp_path / "missing-e.db"))
+    monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "missing-snap.db"))
+
+    result = get_scorecards()
+    for family in result["families"]:
+        assert family["expectancy"] is None
+        assert family["expectancy_reason"] == "no_samples"
+        assert family["max_drawdown_reason"] == "insufficient_history"
+        assert family["capacity_reason"] == "no_liquidity_data"
+        assert family["as_of"] is None
