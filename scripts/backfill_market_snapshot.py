@@ -26,13 +26,17 @@ incident 043 同族；2026-10-15 实证：宿主机 16 进程回填期间容器�
 - 落库经 ``write_snapshot_rows_bulk``——一票一次事务整批 upsert（~190 日/票；
   逐日提交在 16 进程并行下提交放大严重，unify-quant-research-architecture P0-1
   运维修复）；进程中断在票间。
+- **收尾自检（incident 043 防护）**：非 dry-run 跑完自动 ``PRAGMA quick_check`` + 主键
+  重复键扫描，未通过即 fail loud（退出码 1）；``--verify-only`` 可随时单跑同款自检
+  （运维巡检路径：``docker compose exec -T backend python scripts/backfill_market_snapshot.py --verify-only``）。
 - 运维纪律（incident 043 + 准入面板深度回填实证）：分片并发 ≤8；运行期间不硬杀
   进程（要停等自然结束或逐进程 SIGTERM 后等待）；收尾后查 ``/api/snapshot/status``。
 - ⚠ 回填行不含停牌合成/前收盘/状态位（``is_suspended`` 等显式为 0，
   ``prev_close``/涨跌幅为 NULL）：**不得**把回填区间接入
   ``compute_rebase_factors`` 链（停牌合成依赖状态链，会把缺行误判）；正式日频
   数据以 ``market_snapshot_daily`` 日批为准。
-- ``--dry-run`` 只取数并计数、不写库；退出码 0（正常）/ 2（参数、标的池或环境护栏错误）。
+- ``--dry-run`` 只取数并计数、不写库；退出码 0（正常）/ 1（收尾完整性自检未通过）/
+  2（参数、标的池或环境护栏错误）。
 """
 
 from __future__ import annotations
@@ -147,6 +151,50 @@ def _host_write_guard(
         f"    {in_cmd}\n"
         "如确认栈已停/无容器读的时段，可加 --allow-host-write 显式绕过。"
     )
+
+
+def verify_snapshot_integrity(db_path: str | Path | None = None) -> dict[str, Any]:
+    """快照库完整性自检（incident 043 防护）：quick_check + 主键重复扫描。
+
+    - ``PRAGMA quick_check``：检出 b-tree/页级损坏（incident 043 的索引损坏即此族；
+      损坏时 SQLite 直接抛 ``DatabaseError``，捕获为 ok=False 而非炸脚本）；
+    - 重复键扫描 ``(trade_date, code)``：约束完好时应为 0；>0 即唯一索引失效的
+      伴生形态（incident 043 表重建时实收 17 个重复键）；
+    - 库不存在 → ``{"ok": True, "skipped": True}``（dry-run / 首跑未建库：无物可查）。
+
+    返回 ``{"ok", "quick_check", "duplicate_keys", "skipped"?}``；调用侧据此 fail loud。
+    """
+    path = Path(db_path) if db_path else _default_db_path()
+    if not path.exists():
+        return {"ok": True, "skipped": True, "quick_check": "skipped", "duplicate_keys": 0}
+    conn = _connect(path)
+    try:
+        try:
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+        except sqlite3.DatabaseError as exc:
+            return {"ok": False, "quick_check": f"error: {exc}", "duplicate_keys": None}
+        checks = [str(row[0]) for row in rows] or ["ok"]
+        quick_ok = checks == ["ok"]
+        try:
+            dup = conn.execute(
+                "SELECT COUNT(*) FROM (SELECT trade_date, code FROM market_snapshot "
+                "GROUP BY trade_date, code HAVING COUNT(*) > 1)"
+            ).fetchone()[0]
+        except sqlite3.Error as exc:  # 空文件/异库无该表 → 按未检出处理但如实标记
+            return {
+                "ok": quick_ok,
+                "quick_check": "; ".join(checks),
+                "duplicate_keys": None,
+                "duplicate_scan_error": str(exc),
+            }
+        duplicates = int(dup or 0)
+        return {
+            "ok": quick_ok and duplicates == 0,
+            "quick_check": "; ".join(checks),
+            "duplicate_keys": duplicates,
+        }
+    finally:
+        conn.close()
 
 
 def _split_csv(value: str) -> list[str]:
@@ -328,6 +376,23 @@ def run_backfill(
         flag = "[dry-run] 可取" if dry_run else "写入"
         print(f"[{index}/{total}] {code}: {flag} {written} 行")
 
+    # 收尾自检（incident 043 防护）：quick_check + 重复键扫描，异常 fail loud
+    # （分片并发下每片结尾各查一次；quick_check 为页级快检，成本秒级）
+    if not dry_run:
+        integrity = verify_snapshot_integrity(resolved_db)
+        summary["integrity"] = integrity
+        if integrity["ok"]:
+            print(
+                f"完整性自检通过: quick_check={integrity['quick_check']}"
+                f" · duplicate_keys={integrity['duplicate_keys']}"
+            )
+        else:
+            print(
+                f"✗ 完整性自检未通过: quick_check={integrity['quick_check']}"
+                f" · duplicate_keys={integrity['duplicate_keys']}；"
+                "请人工排查（incident 043 族：先备份、retry 侧停写、REINDEX/重建表）"
+            )
+
     return summary
 
 
@@ -347,8 +412,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="历史回填 market_snapshot（双复权口径，限速 + 断点续跑；运维脚本）"
     )
-    parser.add_argument("--start", required=True, help="起始日期 YYYY-MM-DD（含）")
-    parser.add_argument("--end", required=True, help="结束日期 YYYY-MM-DD（含）")
+    parser.add_argument(
+        "--start", default=None, help="起始日期 YYYY-MM-DD（含）；--verify-only 时不需"
+    )
+    parser.add_argument(
+        "--end", default=None, help="结束日期 YYYY-MM-DD（含）；--verify-only 时不需"
+    )
     parser.add_argument("--symbols", default=None, help="逗号分隔代码列表；缺省取证券主表全量")
     parser.add_argument(
         "--symbols-file", default=None, help="每行一个代码的文件（# 注释/空行跳过）"
@@ -362,19 +431,38 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="显式绕过宿主机直跑护栏（仅限确认无容器读方的时段；见 issue #344）",
     )
+    parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="只做快照库完整性自检（quick_check + 重复键扫描），不回填；退出码 0 通过 / 1 未通过",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    # 宿主机直跑护栏（issue #344）：先于一切库操作（含只读打开）
+    # 宿主机直跑护栏（issue #344）：先于一切库操作（含只读打开）；
+    # --verify-only 只读、零写入 → 与 --dry-run 同档豁免
     guard_reason = _host_write_guard(
         db_path=args.db,
         allow_host_write=args.allow_host_write,
-        dry_run=args.dry_run,
+        dry_run=args.dry_run or args.verify_only,
         argv=sys.argv[1:] if argv is None else list(argv),
     )
     if guard_reason:
         print(guard_reason, file=sys.stderr)
+        return 2
+
+    if args.verify_only:
+        result = verify_snapshot_integrity(args.db)
+        status = "通过" if result["ok"] else "未通过"
+        print(
+            f"快照库完整性自检{status}: quick_check={result['quick_check']}"
+            f" · duplicate_keys={result['duplicate_keys']}"
+        )
+        return 0 if result["ok"] else 1
+
+    if not args.start or not args.end:
+        print("错误：--start/--end 必填（除非 --verify-only）", file=sys.stderr)
         return 2
 
     try:
@@ -423,6 +511,10 @@ def main(argv: list[str] | None = None) -> int:
         f"rows_written={summary['rows_written']} skipped_resumed={summary['skipped_resumed']}"
         + (" [dry-run]" if args.dry_run else "")
     )
+    integrity = summary.get("integrity")
+    if integrity is not None and not integrity["ok"]:
+        print("回填收尾完整性自检未通过——退出码 1（fail loud）", file=sys.stderr)
+        return 1
     return 0
 
 
