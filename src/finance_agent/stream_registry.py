@@ -19,6 +19,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import time
+from collections import deque
 from collections.abc import AsyncGenerator, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +33,16 @@ _logger = logging.getLogger("finance_agent.stream_registry")
 # 订阅者队列容量：满队列的慢订阅者被断开（design.md D2）
 _SUBSCRIBER_QUEUE_MAX = 256
 
+# ── 投递时延埋点（issue #328）──
+# publish（事件进入 fan-out）→ deliver（订阅者生成器 yield 交给 HTTP 层）的时延
+# 分布：深析阶段 UI 冻结族（#328）需要区分「事件没有产出」与「事件产出后投递
+# 停滞」——本埋点量化后者。快照经 backlog_stats → `GET /api/v1/ops/stream-backlog`；
+# 超阈单条打 WARNING（速率受限），使停滞在日志侧可见。
+DELIVERY_LATENCY_WARN_MS = float(os.environ.get("STREAM_DELIVERY_WARN_MS", "3000"))
+DELIVERY_WARN_MIN_INTERVAL_S = 10.0  # 每会话告警限流间隔
+_LATENCY_SAMPLES_MAX = 256  # 每流保留最近样本数（滚动分位）
+_PUB_TS_MAX = 512  # publish 时点表上限（seq → monotonic，插序裁剪）
+
 
 @dataclass
 class SessionStream:
@@ -39,6 +52,12 @@ class SessionStream:
     subscribers: list[asyncio.Queue[dict | None]] = field(default_factory=list)
     lastSeq: int = 0  # noqa: N815 - camelCase 符合项目命名规范（N806 已全局 ignore）
     terminalPublished: bool = False  # noqa: N815 - per-run 终态 CAS 标志，start() 时天然重置
+    # 投递时延埋点（#328）：publish 时点表 + 最近投递时延样本（ms）+ 告警限流时点
+    pubTs: dict[int, float] = field(default_factory=dict)  # noqa: N815 - 同 lastSeq 命名规范
+    deliveryLatencyMs: deque[float] = field(  # noqa: N815 - 同 lastSeq 命名规范
+        default_factory=lambda: deque(maxlen=_LATENCY_SAMPLES_MAX)
+    )
+    lastLatencyWarnAt: float = 0.0  # noqa: N815 - 同 lastSeq 命名规范
 
 
 class StreamRegistry:
@@ -131,6 +150,7 @@ class StreamRegistry:
         stream = self._streams.get(session_id)
         if stream:
             stream.lastSeq = seq
+            self._stamp_pub_ts(stream, seq)
             self._fanout(session_id, stream, event)
         return seq
 
@@ -172,6 +192,7 @@ class StreamRegistry:
         stream = self._streams.get(session_id)
         if stream:
             stream.lastSeq = seq
+            self._stamp_pub_ts(stream, seq)
             self._fanout(session_id, stream, event)
         return seq
 
@@ -197,6 +218,7 @@ class StreamRegistry:
             out.append(seq)
             if stream:
                 stream.lastSeq = seq
+                self._stamp_pub_ts(stream, seq)
                 self._fanout(session_id, stream, ev)
         return out
 
@@ -211,6 +233,54 @@ class StreamRegistry:
                 stream.subscribers.remove(q)
                 with contextlib.suppress(asyncio.QueueFull):
                     q.put_nowait(None)
+
+    @staticmethod
+    def _stamp_pub_ts(stream: SessionStream, seq: int) -> None:
+        """记录事件进入 fan-out 的时刻（seq → monotonic；插序裁剪保内存有界）。"""
+        stream.pubTs[seq] = time.monotonic()
+        while len(stream.pubTs) > _PUB_TS_MAX:
+            stream.pubTs.pop(next(iter(stream.pubTs)))
+
+    def _record_delivery_latency(self, session_id: str, stream: SessionStream, event: dict) -> None:
+        """投递时延 = 订阅者生成器 yield 时刻 − publish 时刻（#328）。
+
+        仅对经 `_stamp_pub_ts` 记录过时点的事件生效（本进程实时发布；重放历史
+        事件无时点，天然跳过）。超阈单条打 WARNING（每会话限流
+        `DELIVERY_WARN_MIN_INTERVAL_S` 秒；低负载下不产生任何日志）。
+        """
+        seq = event.get("seq")
+        if not isinstance(seq, int):
+            return
+        pub = stream.pubTs.get(seq)
+        if pub is None:
+            return
+        latency_ms = (time.monotonic() - pub) * 1000.0
+        stream.deliveryLatencyMs.append(latency_ms)
+        if latency_ms >= DELIVERY_LATENCY_WARN_MS:
+            now = time.monotonic()
+            if now - stream.lastLatencyWarnAt >= DELIVERY_WARN_MIN_INTERVAL_S:
+                stream.lastLatencyWarnAt = now
+                _logger.warning(
+                    "投递延迟超阈 session=%s seq=%s latency_ms=%.0f threshold_ms=%.0f",
+                    session_id,
+                    seq,
+                    latency_ms,
+                    DELIVERY_LATENCY_WARN_MS,
+                )
+
+    @staticmethod
+    def _latency_stats(stream: SessionStream) -> dict[str, float | int | None]:
+        """滚动分位快照（样本按需排序；样本量 ≤256，开销可忽略）。"""
+        samples = sorted(stream.deliveryLatencyMs)
+        n = len(samples)
+        if n == 0:
+            return {"n": 0, "p50": None, "p95": None, "max": None}
+        return {
+            "n": n,
+            "p50": samples[n // 2],
+            "p95": samples[min(n - 1, int(n * 0.95))],
+            "max": samples[-1],
+        }
 
     def record_drop(self, session_id: str, kind: str) -> None:
         """明细事件丢弃计数。
@@ -235,6 +305,9 @@ class StreamRegistry:
             "subscribers": len(stream.subscribers) if stream else 0,
             "queue_depths": [q.qsize() for q in stream.subscribers] if stream else [],
             "last_seq": stream.lastSeq if stream else 0,
+            "delivery_latency_ms": self._latency_stats(stream)
+            if stream
+            else {"n": 0, "p50": None, "p95": None, "max": None},
         }
 
     def all_backlog_stats(self) -> dict[str, dict]:
@@ -259,6 +332,7 @@ class StreamRegistry:
         stream = self._streams.get(session_id)
         if stream:
             stream.lastSeq = seq
+            self._stamp_pub_ts(stream, seq)
             for q in list(stream.subscribers):
                 with contextlib.suppress(asyncio.QueueFull):
                     q.put_nowait(event)
@@ -371,6 +445,7 @@ class StreamRegistry:
                     except (json.JSONDecodeError, TypeError):
                         continue
                     event["seq"] = row["seq"]
+                    self._record_delivery_latency(session_id, stream, event)
                     yield event
 
             # 5. 消费实时队列
@@ -380,6 +455,7 @@ class StreamRegistry:
                     if event is None:
                         # 哨兵：任务结束通知
                         break
+                    self._record_delivery_latency(session_id, stream, event)
                     yield event
                     if event.get("type") in ("done", "interrupted", "error"):
                         break

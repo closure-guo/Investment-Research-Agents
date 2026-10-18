@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -398,3 +399,84 @@ def test_all_backlog_stats_lists_active_streams():
     snapshot = reg.all_backlog_stats()
     assert set(snapshot.keys()) == {"s-a"}
     assert snapshot["s-a"]["drops"] == {"thinking": 2}
+
+
+# ── 投递时延埋点（issue #328：publish→deliver 分布，量化 relay 成批延迟） ──
+
+
+@pytest.mark.asyncio
+async def test_delivery_latency_recorded_on_realtime_consume(tmp_path, monkeypatch):
+    """实时队列投递记录 publish→deliver 时延：消费端停滞 → 快照可见高时延样本。"""
+    _setup_db(tmp_path, monkeypatch)
+    reg = stream_registry.StreamRegistry()
+    sid = session_store.create_session(status="running")
+
+    async def dummy_task():
+        await asyncio.sleep(10)
+
+    await reg.start(sid, dummy_task())
+    gen = reg.subscribe(sid, after_seq=0)
+    # 先驱动生成器完成重放（空）并进入实时 queue.get() 等待
+    pending = asyncio.ensure_future(_next_event(gen, timeout=5))
+    await asyncio.sleep(0.05)
+
+    await reg.publish_many(sid, [{"type": "thinking_token", "token": "t1"}])
+    # 模拟事件循环饥饿（#328 机制假设：高 CPU 争用下队列 waiter 调度停滞）：
+    # 同步 sleep 阻塞整个循环，waiter 只能在释放后运行 → 投递时延 ≈150ms
+    time.sleep(0.15)
+    event = await pending
+    assert event["type"] == "thinking_token"
+
+    stats = reg.backlog_stats(sid)["delivery_latency_ms"]
+    assert stats["n"] >= 1
+    assert stats["max"] >= 100, stats
+    assert stats["p50"] is not None and stats["p95"] is not None
+    await gen.aclose()
+    await reg.cancel(sid)
+
+
+@pytest.mark.asyncio
+async def test_delivery_latency_missing_pub_ts_not_counted(tmp_path, monkeypatch):
+    """重放历史事件（无 publish 时点）不计入投递时延分布。"""
+    _setup_db(tmp_path, monkeypatch)
+    reg = stream_registry.StreamRegistry()
+    sid = session_store.create_session(status="running")
+    # 直接落 journal（模拟上一进程遗留事件），不经 publish
+    session_store.append_session_event(sid, {"type": "thinking_token", "token": "old"})
+
+    async def dummy_task():
+        await asyncio.sleep(10)
+
+    await reg.start(sid, dummy_task())
+    gen = reg.subscribe(sid, after_seq=0)
+    event = await _next_event(gen)
+    assert event["type"] == "thinking_token"
+    stats = reg.backlog_stats(sid)["delivery_latency_ms"]
+    assert stats["n"] == 0
+    await gen.aclose()
+    await reg.cancel(sid)
+
+
+@pytest.mark.asyncio
+async def test_delivery_latency_warning_over_threshold(tmp_path, monkeypatch, caplog):
+    """超阈投递延迟打 WARNING（#328 生产可观测入口），阈值可配置。"""
+    monkeypatch.setattr(stream_registry, "DELIVERY_LATENCY_WARN_MS", 50.0)
+    monkeypatch.setattr(stream_registry, "DELIVERY_WARN_MIN_INTERVAL_S", 0.0)
+    _setup_db(tmp_path, monkeypatch)
+    reg = stream_registry.StreamRegistry()
+    sid = session_store.create_session(status="running")
+
+    async def dummy_task():
+        await asyncio.sleep(10)
+
+    await reg.start(sid, dummy_task())
+    gen = reg.subscribe(sid, after_seq=0)
+    pending = asyncio.ensure_future(_next_event(gen, timeout=5))
+    await asyncio.sleep(0.05)
+    await reg.publish(sid, {"type": "thinking_token", "token": "t1"})
+    time.sleep(0.12)  # 同步阻塞循环模拟投递停滞（同上一用例）
+    await pending
+
+    assert any("投递延迟" in str(r.getMessage()) for r in caplog.records)
+    await gen.aclose()
+    await reg.cancel(sid)
