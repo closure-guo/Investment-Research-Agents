@@ -3,12 +3,16 @@
 
 表（C5 / pipeline Global Constraints，逐字）：
 
-- ``l2_candidates(trade_date, symbol, composite_score, rank, PRIMARY KEY(trade_date, symbol))``：
-  L2 打分名单日快照，幂等 upsert（同日重跑覆盖）。**日批重跑走 ``rewrite_day_l2_board``**
-  （当日榜原子替换：旧行不留残——表的读取契约是「行的存在性 ≡ 当日在该榜内」）；
-- ``triage_decisions(trade_date, symbol, verdict, reason, degraded, created_at,
-  PRIMARY KEY(trade_date, symbol))``：L3 keep/drop 决策，幂等 upsert（同日重跑覆盖）；
-  日批重跑时当日旧决策随 ``rewrite_day_l2_board`` 同事务清空后重写。
+- ``l2_candidates(trade_date, pool, symbol, composite_score, rank,
+  PRIMARY KEY(trade_date, pool, symbol))``：L2 打分名单日快照（按档隔离），幂等 upsert
+  （同日重跑覆盖）。**日批重跑走 ``rewrite_day_l2_board``**（当日**该档**榜原子替换：
+  旧行不留残——表的读取契约是「行的存在性 ≡ 当日在该档榜内」）；
+- ``triage_decisions(trade_date, pool, symbol, verdict, reason, degraded, created_at,
+  PRIMARY KEY(trade_date, pool, symbol))``：L3 keep/drop 决策（按档隔离），幂等 upsert；
+  日批重跑时当日**该档**旧决策随 ``rewrite_day_l2_board`` 同事务清空后重写。
+  **档位隔离（评审 C1）**：16:45 小票通道与 15:40 主档同日各跑一轮时，两表清行/写入
+  一律按 ``pool`` 收窄——主档当日榜与决策逐行不变（主档「连续在榜 ≥3 日」门槛与
+  评测三腿取样都读主档行）；读侧 ``pool`` 缺省 ``'main'``。
   两表供消融（±L3 粗筛）与前向命中率分层（后续 change）查询，是稳定性门槛查询的
   唯一数据源；
 - ``screening_batches(trade_date, pool, status, error, started_at, finished_at,
@@ -25,8 +29,8 @@
   PK(trade_date, symbol, reason))``：分析前时效性校验的移除审计行（``trade_date``
   = 校验基准日 = 快照日；同标的多因多行，幂等覆盖）。
 
-稳定性口径（C4）：``consecutive_days_in_top`` 从 ``as_of`` 起向前沿**表内交易日
-轴**（``l2_candidates`` 的 DISTINCT ``trade_date``）逐日查该 symbol 是否在榜，
+稳定性口径（C4）：``consecutive_days_in_top`` 从 ``as_of`` 起向前沿**该档表内交易日
+轴**（``l2_candidates`` 的 DISTINCT ``trade_date``，按 ``pool`` 收窄）逐日查该 symbol 是否在榜，
 返回尾部连续段长度；``as_of`` 当日不在榜（含当日无任何榜单行）→ 0。表里只有
 交易日行 → 非交易日（周末/节假日）天然不在轴内、不打断连续段；中间断档（某交易
 日榜单存在但该 symbol 不在）→ 重新计数。``eligible_for_selection`` = 计数 ≥
@@ -51,29 +55,28 @@ from finance_agent.screening.candidate_llm import VERDICTS, TriageDecision
 from finance_agent.screening.ranker import Candidate
 
 # 表 DDL（幂等 CREATE IF NOT EXISTS；列名与 C5 逐字一致）
+# 注：l2_candidates / triage_decisions 的索引引用 pool 列，**不在**本 DDL 内创建——
+# 老库（表已存在、缺 pool 列）上建索引会报 no such column，须待主键重建后由
+# ``init_screening_db`` 显式循环补建（见 ``_L2_INDEX_SQL`` / ``_TRIAGE_INDEX_SQL``）。
 SCREENING_DDL = """
 CREATE TABLE IF NOT EXISTS l2_candidates (
   trade_date      TEXT NOT NULL,
+  pool            TEXT NOT NULL DEFAULT 'main',
   symbol          TEXT NOT NULL,
   composite_score REAL NOT NULL,
   rank            INTEGER NOT NULL,
-  PRIMARY KEY (trade_date, symbol)
+  PRIMARY KEY (trade_date, pool, symbol)
 );
-CREATE INDEX IF NOT EXISTS idx_l2_candidates_date_rank
-  ON l2_candidates (trade_date, rank);
-CREATE INDEX IF NOT EXISTS idx_l2_candidates_symbol_date
-  ON l2_candidates (symbol, trade_date);
 CREATE TABLE IF NOT EXISTS triage_decisions (
   trade_date TEXT NOT NULL,
+  pool       TEXT NOT NULL DEFAULT 'main',
   symbol     TEXT NOT NULL,
   verdict    TEXT NOT NULL,
   reason     TEXT NOT NULL,
   degraded   INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
-  PRIMARY KEY (trade_date, symbol)
+  PRIMARY KEY (trade_date, pool, symbol)
 );
-CREATE INDEX IF NOT EXISTS idx_triage_decisions_symbol_date
-  ON triage_decisions (symbol, trade_date);
 CREATE TABLE IF NOT EXISTS screening_batches (
   trade_date  TEXT NOT NULL,
   pool        TEXT NOT NULL DEFAULT 'main',
@@ -201,6 +204,40 @@ _POOL_TABLE_REBUILD_SQL: tuple[str, ...] = (
 # 中断恢复语句（``*__migrate`` 留存 = 上次重建中断）：换入前先过**行数守卫**
 # （见 ``_recover_interrupted_rebuild``）——仅 migrate 行数 >= 正式表（或正式表缺失）
 # 才视为权威副本并 DROP 正式表后改名换入；否则清理残留、保留正式表。
+_L2_INDEX_SQL: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_l2_candidates_date_rank "
+    "ON l2_candidates (trade_date, pool, rank)",
+    "CREATE INDEX IF NOT EXISTS idx_l2_candidates_symbol_date "
+    "ON l2_candidates (symbol, trade_date, pool)",
+)
+_TRIAGE_INDEX_SQL: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_triage_decisions_symbol_date "
+    "ON triage_decisions (symbol, trade_date, pool)",
+)
+# L2 榜 / triage 决策表重建（加 pool 进主键，评审 C1：小票通道不得覆盖主档当日榜与决策）
+_L2_TABLE_REBUILD_SQL: tuple[str, ...] = (
+    "CREATE TABLE l2_candidates__migrate ("
+    "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', symbol TEXT NOT NULL, "
+    "composite_score REAL NOT NULL, rank INTEGER NOT NULL, "
+    "PRIMARY KEY (trade_date, pool, symbol))",
+    "INSERT INTO l2_candidates__migrate (trade_date, pool, symbol, composite_score, rank) "
+    "SELECT trade_date, 'main', symbol, composite_score, rank FROM l2_candidates",
+    "DROP TABLE l2_candidates",
+    "ALTER TABLE l2_candidates__migrate RENAME TO l2_candidates",
+    *_L2_INDEX_SQL,
+)
+_TRIAGE_TABLE_REBUILD_SQL: tuple[str, ...] = (
+    "CREATE TABLE triage_decisions__migrate ("
+    "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', symbol TEXT NOT NULL, "
+    "verdict TEXT NOT NULL, reason TEXT NOT NULL, degraded INTEGER NOT NULL DEFAULT 0, "
+    "created_at TEXT NOT NULL, PRIMARY KEY (trade_date, pool, symbol))",
+    "INSERT INTO triage_decisions__migrate "
+    "(trade_date, pool, symbol, verdict, reason, degraded, created_at) "
+    "SELECT trade_date, 'main', symbol, verdict, reason, degraded, created_at FROM triage_decisions",
+    "DROP TABLE triage_decisions",
+    "ALTER TABLE triage_decisions__migrate RENAME TO triage_decisions",
+    *_TRIAGE_INDEX_SQL,
+)
 _RECOVERY_SQL: dict[str, tuple[str, ...]] = {
     "screening_batches": (
         "DROP TABLE IF EXISTS screening_batches",
@@ -210,6 +247,16 @@ _RECOVERY_SQL: dict[str, tuple[str, ...]] = {
         "DROP TABLE IF EXISTS selection_pool",
         "ALTER TABLE selection_pool__migrate RENAME TO selection_pool",
         _POOL_INDEX_SQL,
+    ),
+    "l2_candidates": (
+        "DROP TABLE IF EXISTS l2_candidates",
+        "ALTER TABLE l2_candidates__migrate RENAME TO l2_candidates",
+        *_L2_INDEX_SQL,
+    ),
+    "triage_decisions": (
+        "DROP TABLE IF EXISTS triage_decisions",
+        "ALTER TABLE triage_decisions__migrate RENAME TO triage_decisions",
+        *_TRIAGE_INDEX_SQL,
     ),
 }
 
@@ -305,12 +352,17 @@ def _rebuild_pool_pk_if_needed(conn: sqlite3.Connection) -> None:
     已含 ``pool`` 主键（新库/已迁移）→ 无操作。重建为**显式事务**（见
     ``_run_statements_in_transaction``）：中途失败整体回滚，不留「已 DROP 未 RENAME」半态。
     """
-    if "pool" not in _table_pk_columns(conn, "screening_batches"):
-        _run_statements_in_transaction(conn, _BATCH_TABLE_REBUILD_SQL)
-    if "pool" not in _table_pk_columns(conn, "selection_pool"):
-        _run_statements_in_transaction(conn, _POOL_TABLE_REBUILD_SQL)
-    # 恢复路径可能重建过池表：索引兜底恢复（幂等）
-    conn.execute(_POOL_INDEX_SQL)
+    for table, statements in (
+        ("screening_batches", _BATCH_TABLE_REBUILD_SQL),
+        ("selection_pool", _POOL_TABLE_REBUILD_SQL),
+        ("l2_candidates", _L2_TABLE_REBUILD_SQL),
+        ("triage_decisions", _TRIAGE_TABLE_REBUILD_SQL),
+    ):
+        if "pool" not in _table_pk_columns(conn, table):
+            _run_statements_in_transaction(conn, statements)
+    # 恢复路径可能重建过这些表：索引兜底恢复（幂等）
+    for index_sql in (_POOL_INDEX_SQL, *_L2_INDEX_SQL, *_TRIAGE_INDEX_SQL):
+        conn.execute(index_sql)
 
 
 def init_screening_db(db_path: str | Path | None = None) -> Path:
@@ -330,8 +382,13 @@ def init_screening_db(db_path: str | Path | None = None) -> Path:
     conn = _connect(path)
     try:
         conn.executescript(SCREENING_DDL)
-        _recover_interrupted_rebuild(conn, "screening_batches")  # ① 数据优先
-        _recover_interrupted_rebuild(conn, "selection_pool")
+        for table in (
+            "screening_batches",
+            "selection_pool",
+            "l2_candidates",
+            "triage_decisions",
+        ):  # ① 数据优先（行数守卫）
+            _recover_interrupted_rebuild(conn, table)
         _ensure_batch_columns(conn)  # ② 列补齐（重建 SQL 引用这些列）
         _rebuild_pool_pk_if_needed(conn)  # ③ 主键重建（幂等）
         conn.commit()
@@ -366,18 +423,18 @@ def _finite_float(value: Any, field: str) -> float:
 
 
 _L2_UPSERT_SQL = (
-    "INSERT INTO l2_candidates (trade_date, symbol, composite_score, rank) "
-    "VALUES (?, ?, ?, ?) "
-    "ON CONFLICT(trade_date, symbol) DO UPDATE SET "
+    "INSERT INTO l2_candidates (trade_date, pool, symbol, composite_score, rank) "
+    "VALUES (?, ?, ?, ?, ?) "
+    "ON CONFLICT(trade_date, pool, symbol) DO UPDATE SET "
     "composite_score = excluded.composite_score, rank = excluded.rank"
 )
 
 
 def _l2_payload(
-    trade_date: str, candidates: Sequence[Candidate]
-) -> list[tuple[str, str, float, int]]:
+    trade_date: str, candidates: Sequence[Candidate], *, pool: str = POOL_MAIN
+) -> list[tuple[str, str, str, float, int]]:
     """Candidate 序列 → ``l2_candidates`` payload（逐行 fail loud，坏值不落库）。"""
-    payload: list[tuple[str, str, float, int]] = []
+    payload: list[tuple[str, str, str, float, int]] = []
     for candidate in candidates:
         rank = candidate.rank
         if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
@@ -385,6 +442,7 @@ def _l2_payload(
         payload.append(
             (
                 trade_date,
+                pool,
                 candidate.symbol,
                 _finite_float(candidate.composite_score, "composite_score"),
                 rank,
@@ -394,9 +452,16 @@ def _l2_payload(
 
 
 def record_l2_candidates(
-    trade_date: str, candidates: Sequence[Candidate], db_path: str | Path | None = None
+    trade_date: str,
+    candidates: Sequence[Candidate],
+    db_path: str | Path | None = None,
+    *,
+    pool: str = POOL_MAIN,
 ) -> int:
-    """写入某一交易日的 L2 名单（整批同一交易日）；同 ``(trade_date, symbol)`` 幂等覆盖。
+    """写入某一交易日的 L2 名单（整批同一交易日）；同 ``(trade_date, pool, symbol)`` 幂等覆盖。
+
+    ``pool`` 缺省 ``'main'``（既有调用路径逐字节不变）；小票通道显式传
+    ``pool='microcap'``——两档榜单互不覆盖（评审 C1）。
 
     入参约定：**截断后的 Top-N 名单**（``rank_universe(top_n=…)`` 输出，日批经
     ``pipeline`` 全量迁移）——表内行的**存在性**即「当日在该榜内」，稳定性查询
@@ -409,9 +474,11 @@ def record_l2_candidates(
     空批 → 0，不建表（无行可写，连库都不碰）。返回写入行数。
     """
     normalized = _parse_trade_date(trade_date)
+    if pool not in POOLS:
+        raise ValueError(f"非法池 pool {pool!r}；允许: {list(POOLS)}")
     if not candidates:
         return 0
-    payload = _l2_payload(normalized, candidates)
+    payload = _l2_payload(normalized, candidates, pool=pool)
     init_screening_db(db_path)
     conn = _connect(db_path)
     try:
@@ -423,29 +490,43 @@ def record_l2_candidates(
 
 
 def rewrite_day_l2_board(
-    trade_date: str, candidates: Sequence[Candidate], db_path: str | Path | None = None
+    trade_date: str,
+    candidates: Sequence[Candidate],
+    db_path: str | Path | None = None,
+    *,
+    pool: str = POOL_MAIN,
 ) -> int:
-    """日批重跑入口：当日 L2 榜单**原子替换**（单事务），返回写入行数。
+    """日批重跑入口：当日**该档** L2 榜单**原子替换**（单事务），返回写入行数。
 
     与 ``record_l2_candidates`` 的区别 = 同日重跑语义：upsert 只保证同键覆盖，本轮
     不再产出的旧行会残留；本函数把「表内行的**存在性** ≡ 当日在该榜内」（C4 稳定性
     查询的唯一依据）做成硬不变量——先清当日 ``l2_candidates`` 旧行再写新名单，
     残留行无法把已出榜标的的 ``consecutive_days_in_top`` 虚增。
 
-    ``triage_decisions`` 当日旧行**同事务**清除：调用方（日批）紧随其后经
+    ``triage_decisions`` 当日**该档**旧行**同事务**清除：调用方（日批）紧随其后经
     ``run_triage`` 重写当日决策，旧决策不得跨轮幸存。清行与新行同一事务提交 →
     中途失败回滚后仍是上一轮的行（不会留下「已清未写」的空榜）。
+
+    **档位隔离**（评审 C1）：清行与新行都按 ``pool`` 收窄——16:45 小票通道与 15:40
+    主档同日各跑一轮时，MUST NOT 触碰对方当日榜与决策（主档「连续在榜」门槛与
+    评测三腿取样都读主档行）。
 
     空批 → 当日榜替换为空（清旧行、写 0 行；日批「候选为空」即当日无在榜标的）。
     任一坏值（非规范日期/rank/分值）→ 整批不落且不清旧行。
     """
     normalized = _parse_trade_date(trade_date)
-    payload = _l2_payload(normalized, candidates)
+    if pool not in POOLS:
+        raise ValueError(f"非法池 pool {pool!r}；允许: {list(POOLS)}")
+    payload = _l2_payload(normalized, candidates, pool=pool)
     init_screening_db(db_path)
     conn = _connect(db_path)
     try:
-        conn.execute("DELETE FROM l2_candidates WHERE trade_date = ?", (normalized,))
-        conn.execute("DELETE FROM triage_decisions WHERE trade_date = ?", (normalized,))
+        conn.execute(
+            "DELETE FROM l2_candidates WHERE trade_date = ? AND pool = ?", (normalized, pool)
+        )
+        conn.execute(
+            "DELETE FROM triage_decisions WHERE trade_date = ? AND pool = ?", (normalized, pool)
+        )
         if payload:
             conn.executemany(_L2_UPSERT_SQL, payload)
         conn.commit()
@@ -454,16 +535,23 @@ def rewrite_day_l2_board(
         conn.close()
 
 
-def list_l2_candidates(trade_date: str, db_path: str | Path | None = None) -> list[dict[str, Any]]:
-    """某交易日 L2 名单（按 rank 升序，同 rank 按 symbol 升序）；无记录 → 空列表。"""
+def list_l2_candidates(
+    trade_date: str, db_path: str | Path | None = None, *, pool: str = POOL_MAIN
+) -> list[dict[str, Any]]:
+    """某交易日某档 L2 名单（按 rank 升序，同 rank 按 symbol 升序）；无记录 → 空列表。
+
+    ``pool`` 缺省 ``'main'``（既有调用路径/评测取样口径不变）。
+    """
     normalized = _parse_trade_date(trade_date)
+    if pool not in POOLS:
+        raise ValueError(f"非法池 pool {pool!r}；允许: {list(POOLS)}")
     init_screening_db(db_path)
     conn = _connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT trade_date, symbol, composite_score, rank FROM l2_candidates "
-            "WHERE trade_date = ? ORDER BY rank, symbol",
-            (normalized,),
+            "SELECT trade_date, pool, symbol, composite_score, rank FROM l2_candidates "
+            "WHERE trade_date = ? AND pool = ? ORDER BY rank, symbol",
+            (normalized, pool),
         ).fetchall()
         return [dict(row) for row in rows]
     finally:
@@ -473,23 +561,30 @@ def list_l2_candidates(trade_date: str, db_path: str | Path | None = None) -> li
 # ── 在榜稳定性门槛（C4） ────────────────────────────────────────────────────
 
 
-def consecutive_days_in_top(symbol: str, as_of: str, *, db_path: str | Path | None = None) -> int:
-    """``symbol`` 截至 ``as_of``（含）的连续在榜交易日数（断档重新计数，C4）。
+def consecutive_days_in_top(
+    symbol: str, as_of: str, *, db_path: str | Path | None = None, pool: str = POOL_MAIN
+) -> int:
+    """``symbol`` 截至 ``as_of``（含）**该档**的连续在榜交易日数（断档重新计数，C4）。
+
+    ``pool`` 缺省 ``'main'``（主档口径逐字节不变）；小票通道显式传 ``pool='microcap'``
+    ——两档榜单互不干扰计数（评审 C1）。
 
     沿**表内交易日轴**（``l2_candidates`` 的 DISTINCT ``trade_date ≤ as_of``）自
     ``as_of`` 向前逐日判定：``as_of`` 当日不在榜（含当日无任何榜单行 / 空库）→ 0；
     遇首个不在榜交易日即停。表里只有交易日行 → 非交易日不打断（不产生缺口）。
     """
     normalized = _parse_trade_date(as_of)
+    if pool not in POOLS:
+        raise ValueError(f"非法池 pool {pool!r}；允许: {list(POOLS)}")
     init_screening_db(db_path)
     conn = _connect(db_path)
     try:
         date_axis = [
             str(row[0])
             for row in conn.execute(
-                "SELECT DISTINCT trade_date FROM l2_candidates WHERE trade_date <= ? "
-                "ORDER BY trade_date DESC",
-                (normalized,),
+                "SELECT DISTINCT trade_date FROM l2_candidates "
+                "WHERE trade_date <= ? AND pool = ? ORDER BY trade_date DESC",
+                (normalized, pool),
             ).fetchall()
         ]
         if not date_axis or date_axis[0] != normalized:
@@ -497,8 +592,9 @@ def consecutive_days_in_top(symbol: str, as_of: str, *, db_path: str | Path | No
         symbol_dates = {
             str(row[0])
             for row in conn.execute(
-                "SELECT trade_date FROM l2_candidates WHERE symbol = ? AND trade_date <= ?",
-                (symbol, normalized),
+                "SELECT trade_date FROM l2_candidates "
+                "WHERE symbol = ? AND trade_date <= ? AND pool = ?",
+                (symbol, normalized, pool),
             ).fetchall()
         }
     finally:
@@ -512,21 +608,36 @@ def consecutive_days_in_top(symbol: str, as_of: str, *, db_path: str | Path | No
 
 
 def eligible_for_selection(
-    symbol: str, as_of: str, *, min_days: int = DEFAULT_MIN_DAYS, db_path: str | Path | None = None
+    symbol: str,
+    as_of: str,
+    *,
+    min_days: int = DEFAULT_MIN_DAYS,
+    db_path: str | Path | None = None,
+    pool: str = POOL_MAIN,
 ) -> bool:
-    """精选池资格：连续在榜日数 ≥ ``min_days``（默认 3，可配置；``min_days`` 须正整数）。"""
+    """精选池资格：**该档**连续在榜日数 ≥ ``min_days``（默认 3，可配置；须正整数）。
+
+    ``pool`` 缺省 ``'main'``（主档门槛口径逐字节不变）。
+    """
     if isinstance(min_days, bool) or not isinstance(min_days, int) or min_days < 1:
         raise ValueError(f"min_days 必须是正整数: {min_days!r}")
-    return consecutive_days_in_top(symbol, as_of, db_path=db_path) >= min_days
+    return consecutive_days_in_top(symbol, as_of, db_path=db_path, pool=pool) >= min_days
 
 
 # ── triage 决策（C5 决策部分） ──────────────────────────────────────────────
 
 
 def record_triage_decisions(
-    trade_date: str, decisions: Sequence[TriageDecision], db_path: str | Path | None = None
+    trade_date: str,
+    decisions: Sequence[TriageDecision],
+    db_path: str | Path | None = None,
+    *,
+    pool: str = POOL_MAIN,
 ) -> int:
-    """批量写入某交易日的 L3 决策（单连接 executemany + 单次 commit，T1 评审修正）。
+    """批量写入某交易日**该档**的 L3 决策（单连接 executemany + 单次 commit，T1 评审修正）。
+
+    ``pool`` 缺省 ``'main'``（既有调用路径逐字节不变）；小票通道显式传
+    ``pool='microcap'``——两档决策互不覆盖（评审 C1）。
 
     批量路径是唯一写入口：``run_triage`` 每批只调一次本函数，避免逐行
     ``init_screening_db`` + 新建连接 + 独立 commit 的 N 倍开销。全部 ``verdict``
@@ -535,9 +646,11 @@ def record_triage_decisions(
     空批 → 0，不建表。返回写入行数。
     """
     normalized = _parse_trade_date(trade_date)
+    if pool not in POOLS:
+        raise ValueError(f"非法池 pool {pool!r}；允许: {list(POOLS)}")
     if not decisions:
         return 0
-    payload: list[tuple[str, str, str, str, int, str]] = []
+    payload: list[tuple[str, str, str, str, str, int, str]] = []
     now = datetime.now().isoformat()
     for decision in decisions:
         if decision.verdict not in VERDICTS:
@@ -545,6 +658,7 @@ def record_triage_decisions(
         payload.append(
             (
                 normalized,
+                pool,
                 decision.symbol,
                 decision.verdict,
                 decision.reason,
@@ -557,9 +671,9 @@ def record_triage_decisions(
     try:
         conn.executemany(
             "INSERT INTO triage_decisions "
-            "(trade_date, symbol, verdict, reason, degraded, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(trade_date, symbol) DO UPDATE SET "
+            "(trade_date, pool, symbol, verdict, reason, degraded, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(trade_date, pool, symbol) DO UPDATE SET "
             "verdict = excluded.verdict, reason = excluded.reason, "
             "degraded = excluded.degraded, created_at = excluded.created_at",
             payload,
@@ -571,7 +685,11 @@ def record_triage_decisions(
 
 
 def record_triage_decision(
-    trade_date: str, decision: TriageDecision, db_path: str | Path | None = None
+    trade_date: str,
+    decision: TriageDecision,
+    db_path: str | Path | None = None,
+    *,
+    pool: str = POOL_MAIN,
 ) -> None:
     """写入某标的某交易日的 L3 决策；同 ``(trade_date, symbol)`` **幂等**覆盖（upsert）。
 
@@ -579,7 +697,7 @@ def record_triage_decision(
     （不落坏值）；``created_at`` 为写入时刻（同日重跑覆盖为最新）。单行写入是
     ``record_triage_decisions`` 的薄封装——批量路径是唯一实现，语义恒一致。
     """
-    record_triage_decisions(trade_date, [decision], db_path=db_path)
+    record_triage_decisions(trade_date, [decision], db_path=db_path, pool=pool)
 
 
 def list_triage_decisions(
@@ -587,15 +705,23 @@ def list_triage_decisions(
     trade_date: str | None = None,
     symbol: str | None = None,
     db_path: str | Path | None = None,
+    pool: str = POOL_MAIN,
 ) -> list[dict[str, Any]]:
-    """L3 决策列表（按 trade_date、symbol 升序）；``trade_date``/``symbol`` 可选过滤。
+    """某档 L3 决策列表（按 trade_date、symbol 升序）；``trade_date``/``symbol`` 可选过滤。
 
-    ``degraded`` 为 SQLite 0/1 原值（与 snapshot/library 读出口径一致，不隐式转 bool）。
+    ``pool`` 缺省 ``'main'``（既有调用路径/评测取样口径不变）；小票通道显式传
+    ``pool='microcap'``。``degraded`` 为 SQLite 0/1 原值（与 snapshot/library 读出口径
+    一致，不隐式转 bool）。
     """
+    if pool not in POOLS:
+        raise ValueError(f"非法池 pool {pool!r}；允许: {list(POOLS)}")
     init_screening_db(db_path)
-    sql = "SELECT trade_date, symbol, verdict, reason, degraded, created_at FROM triage_decisions"
-    conditions: list[str] = []
-    params: list[Any] = []
+    sql = (
+        "SELECT trade_date, pool, symbol, verdict, reason, degraded, created_at "
+        "FROM triage_decisions"
+    )
+    conditions: list[str] = ["pool = ?"]
+    params: list[Any] = [pool]
     if trade_date is not None:
         conditions.append("trade_date = ?")
         params.append(_parse_trade_date(trade_date))

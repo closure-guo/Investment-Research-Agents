@@ -33,7 +33,7 @@ from evals.screening.forward import (
 )
 from finance_agent.execution.matching import MatchingConfig
 from finance_agent.factors.eval_engine import MarketPanel
-from finance_agent.screening.store import list_selection_pool, list_triage_decisions
+from finance_agent.screening.store import POOL_MAIN, list_selection_pool, list_triage_decisions
 
 # 踩雷阈值（20 日窗口损失达约一个跌停板幅度）
 BLOWUP_THRESHOLD = -0.10
@@ -49,7 +49,7 @@ def build_l3_keep_drop_groups(
         pool_symbols = {
             str(row["symbol"]) for row in list_selection_pool(pool_date, db_path=db_path)
         }
-        decisions = list_triage_decisions(trade_date=pool_date, db_path=db_path)
+        decisions = list_triage_decisions(trade_date=pool_date, db_path=db_path, pool=POOL_MAIN)
         keep[pool_date] = sorted(
             str(row["symbol"])
             for row in decisions

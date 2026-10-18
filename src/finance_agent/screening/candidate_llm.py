@@ -291,6 +291,7 @@ def run_triage(
     trade_date: str,
     max_workers: int = DEFAULT_MAX_WORKERS,
     db_path: str | Path | None = None,
+    pool: str = "main",
 ) -> TriageBatchResult:
     """L3 粗筛批次入口：并发逐只 triage → 合同校验/降级 → 落库 → 返回（输入序）。
 
@@ -302,6 +303,8 @@ def run_triage(
     - 每只决策（含降级 keep）批次一次经 ``store.record_triage_decisions`` 落库
       （单连接 executemany + 单次 commit，避免逐行建连/重复建表；主线程顺序写，
       短连接纪律，避免并发写 SQLite 争锁）；
+    - ``pool`` 透传落库档位（缺省 ``'main'``——既有调用路径逐字节不变；
+      合法值由 ``store.record_triage_decisions`` 校验，本模块不复制枚举）；
     - 批次 trace metadata（含 warnings）best-effort 发射到 Langfuse。
     """
     if max_workers < 1:
@@ -322,7 +325,7 @@ def run_triage(
     # 且本函数是该 seam 的唯一消费点。
     from finance_agent.screening.store import record_triage_decisions
 
-    record_triage_decisions(trade_date, decisions, db_path=db_path)
+    record_triage_decisions(trade_date, decisions, db_path=db_path, pool=pool)
     trace_metadata = _trace_metadata(
         trade_date=trade_date, decisions=decisions, warnings=warnings, max_workers=max_workers
     )

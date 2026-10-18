@@ -472,3 +472,35 @@ def test_record_screening_batch_pool_field_is_readable(tmp_path):
     )
     micro = latest_screening_batch(db_path=db, pool="microcap")
     assert micro is not None and (micro["pool"], micro["frontier_gate"]) == ("microcap", "ready")
+
+
+def test_lane_does_not_touch_main_l2_board_and_triage(ws):
+    """C1（评审 Critical）：16:45 小票通道不得覆盖主档 15:40 当日 L2 榜与 triage 决策。
+
+    旧代码：两表主键仅 ``(trade_date, symbol)`` 且 ``rewrite_day_l2_board`` 无条件
+    DELETE 当日行 → 通道跑批把主档当日榜/决策整体替换 → 主档「连续在榜 ≥3 日」
+    门槛与评测三腿取样被污染。本回归在无 pool 隔离时必红（先红）。
+    """
+    from finance_agent.screening.store import list_l2_candidates, list_triage_decisions
+
+    _run_main(ws)
+    main_l2_before = list_l2_candidates(_AS_OF, db_path=ws.screening_db)
+    main_triage_before = list_triage_decisions(trade_date=_AS_OF, db_path=ws.screening_db)
+    assert [row["symbol"] for row in main_l2_before] == [_LIQUID]
+    assert [row["symbol"] for row in main_triage_before] == [_LIQUID]
+
+    _run_lane(ws)  # 同一 trade_date
+
+    assert list_l2_candidates(_AS_OF, db_path=ws.screening_db) == main_l2_before, (
+        "主档当日 L2 榜必须逐行不变"
+    )
+    assert (
+        list_triage_decisions(trade_date=_AS_OF, db_path=ws.screening_db) == main_triage_before
+    ), "主档当日 triage 决策必须逐行不变"
+    # 通道自身产出可读（两档并存）
+    micro_l2 = list_l2_candidates(_AS_OF, db_path=ws.screening_db, pool="microcap")
+    assert sorted(row["symbol"] for row in micro_l2) == sorted([_LIQUID, _MICRO])
+    micro_triage = list_triage_decisions(
+        trade_date=_AS_OF, db_path=ws.screening_db, pool="microcap"
+    )
+    assert sorted(row["symbol"] for row in micro_triage) == sorted([_LIQUID, _MICRO])

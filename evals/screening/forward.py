@@ -48,7 +48,7 @@ from finance_agent.execution.matching import (
     sealed_flags_from_ohlc,
 )
 from finance_agent.factors.eval_engine import MarketPanel
-from finance_agent.screening.store import list_l2_candidates, list_selection_pool
+from finance_agent.screening.store import POOL_MAIN, list_l2_candidates, list_selection_pool
 
 # 默认 horizon（Global Constraints：5/10/20 交易日）
 DEFAULT_HORIZONS: tuple[int, ...] = (5, 10, 20)
@@ -393,7 +393,10 @@ def build_pool_groups(
             str(row["symbol"]) for row in list_selection_pool(normalized, db_path=db_path)
         ]
         in_pool = set(pool_symbols)
-        l2_symbols = [str(row["symbol"]) for row in list_l2_candidates(normalized, db_path=db_path)]
+        l2_symbols = [
+            str(row["symbol"])
+            for row in list_l2_candidates(normalized, db_path=db_path, pool=POOL_MAIN)
+        ]
         selected[normalized] = pool_symbols
         rejected[normalized] = [symbol for symbol in l2_symbols if symbol not in in_pool]
     return {"selected": selected, "rejected": rejected}

@@ -380,7 +380,7 @@ def run_screening_batch(
                 as_of=trade_date,
                 top_n=L2_TOP_N,
             )
-        rewrite_day_l2_board(trade_date, candidates, db_path=db_path)
+        rewrite_day_l2_board(trade_date, candidates, db_path=db_path, pool=pool)
         l2_top = len(candidates)
         # ④ L3：quick profile 粗筛（事件注入；单只失败降级不阻断）
         client: TriageLLMClient = (
@@ -397,6 +397,7 @@ def run_screening_batch(
             client=client,
             trade_date=trade_date,
             db_path=db_path,
+            pool=pool,
         )
         decisions = triage_result.decisions
         l3_keep = sum(1 for decision in decisions if decision.verdict == "keep")
@@ -412,7 +413,11 @@ def run_screening_batch(
             if decision.verdict != "keep":
                 continue
             if not eligible_for_selection(
-                decision.symbol, trade_date, min_days=POOL_MIN_DAYS, db_path=db_path
+                decision.symbol,
+                trade_date,
+                min_days=POOL_MIN_DAYS,
+                db_path=db_path,
+                pool=pool,
             ):
                 continue
             candidate = by_symbol[decision.symbol]
@@ -422,7 +427,7 @@ def run_screening_batch(
                     "composite_score": candidate.composite_score,
                     "rank": candidate.rank,
                     "consecutive_days": consecutive_days_in_top(
-                        candidate.symbol, trade_date, db_path=db_path
+                        candidate.symbol, trade_date, db_path=db_path, pool=pool
                     ),
                     "l3_verdict": decision.verdict,
                     "l3_reason": decision.reason,

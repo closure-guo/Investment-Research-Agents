@@ -1005,3 +1005,139 @@ def test_recovery_guard_keeps_real_table_when_migrate_has_fewer_rows(tmp_path) -
         conn.close()
     assert dates == ["2026-10-01", "2026-10-02"]
     assert "screening_batches__migrate" not in _objects(db)
+
+
+# ── L2 榜与 triage 决策的通道隔离（评审 C1：小票通道不得覆盖主档当日榜/决策） ──
+
+
+def test_l2_and_triage_are_pool_namespaced(tmp_path) -> None:
+    """C1（先红）：同 trade_date 两档写入互不覆盖（主档榜/决策逐行不变）。"""
+    from finance_agent.screening.store import (
+        list_l2_candidates,
+        list_triage_decisions,
+        record_triage_decisions,
+        rewrite_day_l2_board,
+    )
+
+    db = tmp_path / "screening.db"
+    main_board = [
+        Candidate(symbol="600519", trade_date=_D1, composite_score=1.5, rank=1, factor_contribs=())
+    ]
+    micro_board = [
+        Candidate(symbol="300750", trade_date=_D1, composite_score=0.9, rank=1, factor_contribs=())
+    ]
+    rewrite_day_l2_board(_D1, main_board, db_path=db)
+    record_triage_decisions(
+        _D1, [TriageDecision(symbol="600519", verdict="keep", reason="无风险事件")], db_path=db
+    )
+
+    # 小票通道（同 trade_date）：原子替换 + 决策落库
+    rewrite_day_l2_board(_D1, micro_board, db_path=db, pool="microcap")
+    record_triage_decisions(
+        _D1,
+        [TriageDecision(symbol="300750", verdict="drop", reason="流动性偏弱")],
+        db_path=db,
+        pool="microcap",
+    )
+
+    main_l2 = list_l2_candidates(_D1, db_path=db)
+    assert [(row["symbol"], row["pool"]) for row in main_l2] == [("600519", "main")]
+    micro_l2 = list_l2_candidates(_D1, db_path=db, pool="microcap")
+    assert [(row["symbol"], row["pool"]) for row in micro_l2] == [("300750", "microcap")]
+
+    main_triage = list_triage_decisions(trade_date=_D1, db_path=db)
+    assert [(row["symbol"], row["verdict"], row["pool"]) for row in main_triage] == [
+        ("600519", "keep", "main")
+    ]
+    micro_triage = list_triage_decisions(trade_date=_D1, db_path=db, pool="microcap")
+    assert [(row["symbol"], row["verdict"]) for row in micro_triage] == [("300750", "drop")]
+
+
+def test_consecutive_days_in_top_is_pool_scoped(tmp_path) -> None:
+    """C1：稳定性计数按档隔离——通道在榜不得虚增/打断主档连续天数。"""
+    from finance_agent.screening.store import (
+        consecutive_days_in_top,
+        eligible_for_selection,
+        rewrite_day_l2_board,
+    )
+
+    db = tmp_path / "screening.db"
+    for day in (_D1, _D2, _D3):
+        rewrite_day_l2_board(
+            day,
+            [
+                Candidate(
+                    symbol="600519", trade_date=day, composite_score=1.0, rank=1, factor_contribs=()
+                )
+            ],
+            db_path=db,
+        )
+    # 通道同日榜只含另一标的：不得影响主档计数
+    for day in (_D1, _D2, _D3):
+        rewrite_day_l2_board(
+            day,
+            [
+                Candidate(
+                    symbol="300750", trade_date=day, composite_score=1.0, rank=1, factor_contribs=()
+                )
+            ],
+            db_path=db,
+            pool="microcap",
+        )
+
+    assert consecutive_days_in_top("600519", _D3, db_path=db) == 3
+    assert eligible_for_selection("600519", _D3, db_path=db) is True
+    assert consecutive_days_in_top("600519", _D3, db_path=db, pool="microcap") == 0
+    assert consecutive_days_in_top("300750", _D3, db_path=db) == 0
+    assert consecutive_days_in_top("300750", _D3, db_path=db, pool="microcap") == 3
+
+
+def test_l2_triage_legacy_migration_adds_pool_pk(tmp_path) -> None:
+    """C1：老库两表（单列主键）→ init 重建为 (trade_date, pool, symbol)，旧行落 'main'。"""
+    from finance_agent.screening.store import list_l2_candidates, list_triage_decisions
+
+    db = tmp_path / "screening.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            "CREATE TABLE l2_candidates ("
+            "trade_date TEXT NOT NULL, symbol TEXT NOT NULL, composite_score REAL NOT NULL, "
+            "rank INTEGER NOT NULL, PRIMARY KEY (trade_date, symbol));"
+            "CREATE INDEX idx_l2_candidates_date_rank ON l2_candidates (trade_date, rank);"
+            "CREATE TABLE triage_decisions ("
+            "trade_date TEXT NOT NULL, symbol TEXT NOT NULL, verdict TEXT NOT NULL, "
+            "reason TEXT NOT NULL, degraded INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, "
+            "PRIMARY KEY (trade_date, symbol));"
+            "INSERT INTO l2_candidates VALUES ('2026-10-01', '600519', 1.5, 1);"
+            "INSERT INTO triage_decisions VALUES "
+            "('2026-10-01', '600519', 'keep', '无风险事件', 0, 't0');"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    init_screening_db(db)
+    init_screening_db(db)  # 幂等
+
+    objects = _objects(db)
+    assert "l2_candidates__migrate" not in objects
+    assert "triage_decisions__migrate" not in objects
+    conn = sqlite3.connect(db)
+    try:
+        l2_pk = [
+            row[1]
+            for row in conn.execute("PRAGMA table_info(l2_candidates)").fetchall()
+            if row[5] > 0
+        ]
+        triage_pk = [
+            row[1]
+            for row in conn.execute("PRAGMA table_info(triage_decisions)").fetchall()
+            if row[5] > 0
+        ]
+    finally:
+        conn.close()
+    assert l2_pk == ["trade_date", "pool", "symbol"]
+    assert triage_pk == ["trade_date", "pool", "symbol"]
+    assert list_l2_candidates("2026-10-01", db_path=db)[0]["symbol"] == "600519"
+    assert list_l2_candidates("2026-10-01", db_path=db)[0]["pool"] == "main"
+    assert list_triage_decisions(trade_date="2026-10-01", db_path=db)[0]["verdict"] == "keep"
