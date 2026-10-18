@@ -3725,11 +3725,16 @@ async def events_watchlist_analyze(item_id: int) -> Any:
       单例，同并发上限，MUST NOT 另建分析/并发通道；
     - 重复点击（条已有 ``session_id``）→ 幂等返回既有状态（``already_started=true``），
       MUST NOT 重复入队；
+    - **条款事件条目（``source=cbb``）v1 禁用本入口 → 409**（评审 F3 控制器裁决）：
+      cbb 行的标的代码在 ``cb_code``（业绩预告侧 ``code`` 为 NULL），若放行会以空标的
+      建会话并入队（``symbol=""``）——空标的分析无意义且污染队列，故 v1 明拒；
     - 未知 id → 404；成功后条目置 ``analyzing`` 并关联 session。
     """
     item = await asyncio.to_thread(get_watchlist_item, item_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"未知观察清单条目: {item_id}")
+    if item.get("source") == WATCHLIST_SOURCE_CBB:
+        raise HTTPException(status_code=409, detail="条款事件暂不支持发起深度分析（v1）")
     queue = _get_analyze_queue()
     existing_session = item.get("session_id")
     if existing_session:

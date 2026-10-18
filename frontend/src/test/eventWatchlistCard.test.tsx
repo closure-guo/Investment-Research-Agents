@@ -280,6 +280,21 @@ describe('EventWatchlistCard 清单渲染', () => {
     expect(within(row).getByTestId('event-element-9-countdown').textContent).toContain('3 个交易日')
   })
 
+  it('条款事件（source=cbb）→ 不提供「发起深度分析」入口（v1 禁用，后端 409 同义）', async () => {
+    mockFetch({
+      watchlist: { items: [cbbItem(), item({ id: 1 })] },
+    })
+    render(<EventWatchlistCard />)
+
+    const cbbRow = await screen.findByTestId('event-watchlist-row-9')
+    expect(within(cbbRow).queryByTestId('event-analyze-btn-9')).toBeNull()
+    // 业绩预告条目照常保留该入口（不影响既有权路径）
+    const earningsRow = await screen.findByTestId('event-watchlist-row-1')
+    expect(within(earningsRow).getByTestId('event-analyze-btn-1').textContent).toContain(
+      '发起深度分析'
+    )
+  })
+
   it('条款事件要素缺失 → 四格均如实 —（显式 null 与键缺位两条路径都不折算、不隐藏）', async () => {
     // cbbItem 缺省即不带四要素键（真实缺位路径）；第二条例显式 null（未来后端置空路径）
     const missingKeys = cbbItem({ id: 10 })

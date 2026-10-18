@@ -376,6 +376,36 @@ class TestWatchlistCbbEndpoint:
         assert item["price"] == 101.332, "联表要素不受注记损坏影响"
         assert "注记" in caplog.text
 
+    def test_cbb_item_analyze_is_rejected_409(self, _events_db, monkeypatch) -> None:
+        """v1 禁用条款事件发起深度分析：409 + 不建会话、不入队（评审 F3 控制器裁决）。"""
+        started = _stub_pipeline_start(monkeypatch)
+        _stub_sessions(monkeypatch)
+        self._seed_cb(_events_db)
+        item_id = TestClient(app).get("/api/events/watchlist?source=cbb").json()["items"][0]["id"]
+
+        with TestClient(app) as client:
+            resp = client.post(f"/api/events/watchlist/{item_id}/analyze")
+
+        assert resp.status_code == 409
+        assert "条款事件暂不支持发起深度分析" in resp.json()["detail"]
+        assert started == [], "MUST NOT 建会话/启动管线（空标的分析入口关闭）"
+        import finance_agent.api as api_module
+
+        assert len(api_module._get_analyze_queue().snapshot()) == 0, "MUST NOT 入队"
+        assert list_watchlist(db_path=_events_db)[0]["status"] == "pending", "状态零改写"
+
+    def test_earnings_item_analyze_still_works(self, _events_db, monkeypatch) -> None:
+        """既有权入口不受影响（业绩预告条目照常发起）。"""
+        started = _stub_pipeline_start(monkeypatch)
+        _stub_sessions(monkeypatch)
+        item_id = _seed_item(_events_db)
+
+        with TestClient(app) as client:
+            resp = client.post(f"/api/events/watchlist/{item_id}/analyze")
+
+        assert resp.status_code == 200 and resp.json()["session_id"]
+        assert started == [resp.json()["session_id"]]
+
 
 class TestEventsSeed:
     """TESTING 造数：``events`` 块 + ``events_reset``（delta add-event-driven-lane）。

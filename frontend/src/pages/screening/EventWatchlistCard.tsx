@@ -22,7 +22,9 @@ import type {
  *   设计令牌），结论附口径注释「研究标记，非投资建议」（徽章 title 同源）；
  * - 「发起深度分析」→ ``POST /api/events/watchlist/{id}/analyze``（复用既有分析
  *   队列，MUST NOT 另建并发通道）：响应 ``queue_state`` 即刻渲染排队/运行态，
- *   已发起条目按钮禁用（后端幂等，前端不重复提交）；
+ *   已发起条目按钮禁用（后端幂等，前端不重复提交）；**条款事件条目（``source=cbb``）
+ *   v1 不渲染该按钮**（后端对 cbb 条目 409 同义：cbb 行标的在 ``cb_code``、业绩预告
+ *   侧 ``code`` 为 NULL，放行会以空标的建会话入队）；
  * - 队列态单一真源 = 页面既有队列快照（``queue`` prop，来自 ``/api/screening/pool``
  *   ``queue`` 字段）：本组件不另起定时器，随 ScreeningPage 的 ``pollIntervalMs``
  *   轮询推进（排队中 → 分析中 → 已完成）；``onAnalysisStarted`` 供页面在事件入队
@@ -298,9 +300,11 @@ export function EventWatchlistCard({ queue = NO_QUEUE, onAnalysisStarted }: Even
           {items.map(item => {
             const local = startedMeta[item.id]
             const sessionId = item.session_id ?? local?.sessionId ?? null
-            const started = sessionId !== null || item.status === 'analyzing'
+            // 条款事件（cbb）v1 不提供发起入口（后端 409 同义；空标的分析无意义）
+            const analysable = item.source !== 'cbb'
+            const started = analysable && (sessionId !== null || item.status === 'analyzing')
             const queueState =
-              (sessionId !== null ? queueBySession.get(sessionId) : undefined) ??
+              (analysable && sessionId !== null ? queueBySession.get(sessionId) : undefined) ??
               local?.queueState ??
               null
             const queueLabel = queueState !== null ? QUEUE_STATE_LABEL[queueState] ?? queueState : null
@@ -358,18 +362,20 @@ export function EventWatchlistCard({ queue = NO_QUEUE, onAnalysisStarted }: Even
                         {queueLabel ?? '已发起'}
                       </span>
                     )}
-                    <Button
-                      data-testid={`event-analyze-btn-${item.id}`}
-                      variant="outline"
-                      size="sm"
-                      disabled={started || busy[item.id] === true}
-                      onClick={() => {
-                        void triggerAnalyze(item.id)
-                      }}
-                    >
-                      <i className="fas fa-magnifying-glass-chart text-[10px]"></i>
-                      发起深度分析
-                    </Button>
+                    {analysable && (
+                      <Button
+                        data-testid={`event-analyze-btn-${item.id}`}
+                        variant="outline"
+                        size="sm"
+                        disabled={started || busy[item.id] === true}
+                        onClick={() => {
+                          void triggerAnalyze(item.id)
+                        }}
+                      >
+                        <i className="fas fa-magnifying-glass-chart text-[10px]"></i>
+                        发起深度分析
+                      </Button>
+                    )}
                   </div>
                 </div>
 
