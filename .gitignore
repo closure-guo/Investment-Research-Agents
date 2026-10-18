@@ -319,6 +319,14 @@ tests/e2e/_*/
 # judge 端点切换前的本地备份（含 key，不入库）
 .env.bak-*
 
+# 密钥文件兜底（见 docs/agents/secret-hygiene.md）：新增 provider/文件形态时先挡在仓库外，
+# 不必等扫描器补盲；.env.example 为占位符模板，显式放行。
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
 # Excel 锁文件（标注表被打开时产生）
 ~$*
 

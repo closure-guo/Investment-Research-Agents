@@ -41,6 +41,8 @@ KEY_PATTERNS = [
     # 真实 Tavily key 形如 tvly-dev-xxxx-yyyy（含连字符）——旧式 [A-Za-z0-9] 会漏检。
     re.compile(r"\btvly-[A-Za-z0-9-]{10,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    # 智谱/bigmodel：<32hex>.<16+ alnum>（系统 env 持有该 key；judge 曾用 bigmodel）
+    re.compile(r"\b[0-9a-f]{32}\.[A-Za-z0-9]{16,}\b"),
 ]
 
 # 占位符白名单：文档/示例中明确标注的伪密钥，不是真实凭证
@@ -90,6 +92,18 @@ def tracked_files() -> list[str]:
         return all_files
 
 
+def _mask(hit: str) -> str:
+    """模糊化输出，避免把密钥打印到 CI 日志。"""
+    return hit[:6] + "***" + hit[-4:]
+
+
+def _is_known_or_placeholder(hit: str) -> bool:
+    """黑名单全值 / 占位符：历史扫描报告但不判失败（已吊销留档 / 明确伪值）。"""
+    if hit in PLACEHOLDERS:
+        return True
+    return any(hit == key or hit in key or key.startswith(hit) for key in KNOWN_LEAKED_KEYS)
+
+
 def scan_file(rel_path: str) -> list[str]:
     """扫描单个文件，返回命中的泄露描述列表。"""
     full = REPO_ROOT / rel_path
@@ -111,13 +125,93 @@ def scan_file(rel_path: str) -> list[str]:
                 hit = m.group(0)
                 if hit in PLACEHOLDERS:
                     continue
-                # 模糊化输出，避免把密钥打印到 CI 日志
-                masked = hit[:6] + "***" + hit[-4:]
-                hits.append(f"  {rel_path}:{i} 疑似密钥: {masked}")
+                hits.append(f"  {rel_path}:{i} 疑似密钥: {_mask(hit)}")
     return hits
 
 
-def main() -> int:
+def _git(args: list[str], *, timeout: int = 300) -> str:
+    """在 REPO_ROOT 跑 git（历史扫描用；REPO_ROOT 可被测试 monkeypatch）。"""
+    git = shutil.which("git")
+    if not git:
+        raise RuntimeError("git 不可用，无法执行历史扫描")
+    out = subprocess.run(  # noqa: S603 - git 路径来自 shutil.which，非用户输入
+        [git, *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if out.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} 失败: {out.stderr.strip()[:200]}")
+    return out.stdout
+
+
+def scan_history() -> tuple[list[str], list[str]]:
+    """扫描**全部 git 历史**（所有分支）的密钥痕迹（``--history`` 模式）。
+
+    与当前树扫描互补：当前树答"现在有没有"，历史扫描答"曾经有没有进过仓"——
+    本仓库两次真实泄露（提交后删除、当前树干净）恰属后者，只靠当前树扫描永远
+    看不见。判定口径：黑名单全值（已吊销+留档）与占位符**报告但不判失败**
+    （否则门禁被历史钉死）；其余命中 = 新/未知密钥形态 → 判失败。
+
+    返回 ``(new_hits, known_hits)``；输出一律掩码。
+    """
+    new_hits: list[str] = []
+    known_hits: list[str] = []
+
+    def _record(sha: str, subject: str, hit: str) -> None:
+        if (sha, hit) in seen_hits:
+            return
+        seen_hits.add((sha, hit))
+        line = f"  {sha[:12]} {subject[:60]} → {_mask(hit)}"
+        (known_hits if _is_known_or_placeholder(hit) else new_hits).append(line)
+
+    seen: set[tuple[str, str]] = set()
+    seen_hits: set[tuple[str, str]] = set()
+    for pat in KEY_PATTERNS:
+        log = _git(["log", "--all", f"-G{pat.pattern}", "--format=%H%x09%s"])
+        for entry in log.splitlines():
+            if not entry.strip():
+                continue
+            sha, _, subject = entry.partition("\t")
+            if (sha, pat.pattern) in seen:
+                continue
+            seen.add((sha, pat.pattern))
+            diff = _git(["show", sha, "--format=", f"-G{pat.pattern}"])
+            for line in diff.splitlines():
+                for m in pat.finditer(line):
+                    _record(sha, subject, m.group(0))
+    # 黑名单全值另走字面量（形态可能不匹配任何正则，防漏）
+    for key in KNOWN_LEAKED_KEYS:
+        log = _git(["log", "--all", "-S", key, "--format=%H%x09%s"])
+        for entry in log.splitlines():
+            if not entry.strip():
+                continue
+            sha, _, subject = entry.partition("\t")
+            known_hits.append(f"  {sha[:12]} {subject[:60]} → {_mask(key)}（黑名单全值命中）")
+    return new_hits, known_hits
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--history" in args:
+        new_hits, known_hits = scan_history()
+        if known_hits:
+            print(f"[INFO] 历史中的已知泄露（已吊销，不判失败）{len(known_hits)} 条：")
+            for h in known_hits:
+                print(h)
+        if new_hits:
+            print("[FAIL] 历史扫描发现疑似密钥曾进仓（当前树干净不代表历史干净）：")
+            for h in new_hits:
+                print(h)
+            print(
+                "\n处置顺序（GitHub 官方）：① 先吊销/轮换该密钥；② 再按需清历史"
+                "（git-filter-repo --sensitive-data-removal + 联系 GitHub Support 清缓存/fork）。"
+            )
+            return 1
+        print("[PASS] 历史扫描未发现新泄露（已知吊销项见上）")
+        return 0
+
     files = tracked_files()
     all_hits: list[str] = []
     for rel in files:
