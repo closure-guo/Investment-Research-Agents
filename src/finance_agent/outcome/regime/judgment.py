@@ -76,8 +76,10 @@ def staleness(trade_date: str, *, now: date | None = None, stale_days: int = 7) 
     """数据日期距判定时刻的自然日数与陈旧标记。
 
     口径（spec crowding-regime：``stale`` = ``age_days > 7``，即超过 7 个自然日
-    才判陈旧；边界 ``age_days == stale_days`` 不陈旧）。``trade_date`` 非规范
-    ``YYYY-MM-DD`` → ``ValueError``（调用方按 corrupt 处置，不静默按 0 天）。
+    才判陈旧；边界 ``age_days == stale_days`` 不陈旧）。``now`` 缺省取进程本地
+    日期（部署容器 TZ=Asia/Shanghai，同 ingest/paper 的「本地=北京」惯例；调用方
+    可显式注入）。``trade_date`` 非规范 ``YYYY-MM-DD`` → ``ValueError``（调用方按
+    corrupt 处置，不静默按 0 天）。
     """
     age_days = ((now or date.today()) - date.fromisoformat(str(trade_date))).days
     return age_days, age_days > stale_days

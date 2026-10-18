@@ -8,9 +8,11 @@
    拉取失败/缺列/覆盖不全 → 不产行 + ``cap_data_missing``（MUST NOT 以成交额等
    替代口径冒充市值分组）；
 3. ``read_universe(as_of)``（当日无行 → 同上 ``no_snapshot_data``）→
-   ``compute_indicators``（``quantile`` 取自配置，默认 0.3）；
+   ``compute_indicators``（``quantile`` 取自配置，默认 0.3；参与集任一标的
+   amount/pct_chg 非有限值亦不可计算 → 同 ``cap_data_missing`` 槽，不产行）；
 4. 历史分位：窗口 = 历史行（严格早于当日，最近 ``history_window - 1`` 条）+ 当日值
    = 最多 ``history_window`` 个交易日（含当日）；样本 < ``min_history`` → null；
+   同日重跑时当日已有行不重复计数（按 ``trade_date < as_of`` 过滤后回加当日值）；
 5. ``upsert_regime_daily``（``trade_date`` 唯一，同日重跑覆盖）。
 
 旁路铁律：本模块只吞「快照不可用」类跳过（返回摘要），其余故障（网络异常、库不可写）

@@ -204,7 +204,7 @@ class TestPercentiles:
                 db_path=regime_db,
             )
 
-    def _run(self, tmp_path, regime_db, snap_db, client):
+    def _run(self, regime_db, snap_db, client):
         write_snapshot_rows(_AS_OF, _snapshot_rows(), db_path=snap_db)
         return run_regime_daily(db_path=regime_db, snapshot_db_path=snap_db, client=client)
 
@@ -218,12 +218,37 @@ class TestPercentiles:
         self._seed_history(regime_db, 59)
         client = _FakeClient(_spot(caps={"600001": 1.0, "600002": 2.0, "600003": 3.0}))
 
-        summary = self._run(tmp_path, regime_db, snap_db, client)
+        summary = self._run(regime_db, snap_db, client)
 
         assert summary["produced"] is True
         row = latest_regime(db_path=regime_db)
         assert row["small_cap_share_pctile"] == pytest.approx(1.0)
         assert row["total_amount_pctile"] == pytest.approx(1.0 / 60.0)
+
+    def test_same_day_row_not_double_counted_in_window(self, tmp_path):
+        """同日重跑：当日已有行不计入历史段（窗口大小不因重跑变大）。
+
+        造 58 条历史 + 1 条当日行（模拟上一轮同日产行）→ 重跑后窗口 = 58 + 当日 = 59
+        < 60 → 分位 null；若实现把当日已有行当历史（59 + 当日 = 60）则为非 null。
+        """
+        regime_db, snap_db = _dbs(tmp_path)
+        self._seed_history(regime_db, 58)
+        upsert_regime_daily(
+            _AS_OF,
+            {**_INDICATORS, "small_cap_share": 0.1, "total_amount": 100.0},
+            {"small_cap_share_pctile": None, "total_amount_pctile": None},
+            computed_at="2026-01-01T00:00:00",
+            db_path=regime_db,
+        )
+        client = _FakeClient(_spot(caps={"600001": 1.0, "600002": 2.0, "600003": 3.0}))
+
+        self._run(regime_db, snap_db, client)
+
+        row = latest_regime(db_path=regime_db)
+        assert row is not None
+        assert row["small_cap_share_pctile"] is None
+        assert row["total_amount_pctile"] is None
+        assert len(list_regime_history(db_path=regime_db)) == 59  # 仍单日单行
 
     def test_58_history_rows_below_threshold_yield_null_pctiles(self, tmp_path):
         """58 条历史 + 当日 = 59 样本 < 60 → 分位 null（insufficient_history）。"""
@@ -231,7 +256,7 @@ class TestPercentiles:
         self._seed_history(regime_db, 58)
         client = _FakeClient(_spot(caps={"600001": 1.0, "600002": 2.0, "600003": 3.0}))
 
-        self._run(tmp_path, regime_db, snap_db, client)
+        self._run(regime_db, snap_db, client)
 
         row = latest_regime(db_path=regime_db)
         assert row["small_cap_share_pctile"] is None
@@ -259,6 +284,6 @@ class TestPercentiles:
         monkeypatch.setenv("REGIME_CONFIG_PATH", str(config_path))
         client = _FakeClient(_spot(caps={"600001": 1.0, "600002": 2.0, "600003": 3.0}))
 
-        self._run(tmp_path, regime_db, snap_db, client)
+        self._run(regime_db, snap_db, client)
 
         assert latest_regime(db_path=regime_db)["small_cap_share"] == pytest.approx(1.0)
