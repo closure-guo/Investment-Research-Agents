@@ -128,9 +128,78 @@ class TestFetchDelistLists:
 
         assert client.fetch_delist_lists() == []
 
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_missing_delist_date_column_source_is_unusable(self, mock_ak, client, caplog):
+        """F4：缺退市日列（列名漂移）→ 该源不可用（不产全 None 日期行）+ ERROR。
+
+        明细类约定：日期列缺失不得降级为「一批无日期行」冒充成功。
+        """
+        mock_ak.stock_info_sh_delist.return_value = pd.DataFrame(
+            {
+                "公司代码": ["600001"],
+                "公司简称": ["邯郸钢铁"],
+                "上市日期": ["19980101"],
+                # 缺「暂停上市日期」列（源列名漂移）
+            }
+        )
+        mock_ak.stock_info_sz_delist.return_value = _sz_frame()
+
+        with caplog.at_level(logging.ERROR, logger="finance_agent.data.akshare_client"):
+            rows = client.fetch_delist_lists()
+
+        assert [row["code"] for row in rows] == ["000001"]  # 沪源被丢弃，深源照常
+        assert any("退市清单" in record.message for record in caplog.records)
+        assert client.sources_seen["delist"] == {"sz_delist"}
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_missing_list_date_column_degrades_with_warning(self, mock_ak, client, caplog):
+        """F4：缺上市日期列 → 降级保留行（list_date=None）+ WARN（不丢弃该源）。"""
+        mock_ak.stock_info_sh_delist.return_value = pd.DataFrame(
+            {
+                "公司代码": ["600001"],
+                "公司简称": ["邯郸钢铁"],
+                "暂停上市日期": ["20091229"],
+                # 缺「上市日期」列
+            }
+        )
+        mock_ak.stock_info_sz_delist.return_value = None
+
+        with caplog.at_level(logging.WARNING, logger="finance_agent.data.akshare_client"):
+            rows = client.fetch_delist_lists()
+
+        assert rows == [
+            {
+                "code": "600001",
+                "name": "邯郸钢铁",
+                "list_date": None,
+                "delist_date": "2009-12-29",
+                "source": "sh_suspend",
+            }
+        ]
+        assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_delist_date_row_level_missing_stays_none(self, mock_ak, client):
+        """行级日期缺失（列在、值为空）仍如实置 None（与列缺失区分）。"""
+        mock_ak.stock_info_sh_delist.return_value = pd.DataFrame(
+            {
+                "公司代码": ["600002"],
+                "公司简称": ["缺日期"],
+                "上市日期": ["20000101"],
+                "暂停上市日期": [None],
+            }
+        )
+        mock_ak.stock_info_sz_delist.return_value = None
+
+        rows = client.fetch_delist_lists()
+
+        assert rows[0]["delist_date"] is None
+        assert rows[0]["list_date"] == "2000-01-01"
+
 
 class TestSecurityMasterDelistDate:
-    def test_fresh_db_has_delist_date_column(self, tmp_path):
+    def test_fresh_db_has_delist_date_and_source_columns(self, tmp_path):
+        """F2：主表增 ``delist_date`` 与 ``delist_source``（审计留痕落库）。"""
         db = tmp_path / "snap.db"
         init_snapshot_db(db)
 
@@ -139,10 +208,10 @@ class TestSecurityMasterDelistDate:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(security_master)")}
         finally:
             conn.close()
-        assert "delist_date" in columns
+        assert {"delist_date", "delist_source"} <= columns
 
     def test_legacy_db_migration_preserves_existing_rows(self, tmp_path):
-        """老库（无 delist_date 列）→ init 幂等 ALTER 补列；旧数据保留、新列 NULL。"""
+        """老库（无 delist_date/delist_source 列）→ init 幂等 ALTER 补列；旧数据保留、新列 NULL。"""
         db = tmp_path / "legacy_snap.db"
         conn = sqlite3.connect(db)
         try:
@@ -166,10 +235,11 @@ class TestSecurityMasterDelistDate:
             "name": "贵州茅台",
             "list_date": "2001-08-27",
             "delist_date": None,
+            "delist_source": None,
         }
 
-    def test_upsert_security_master_coalesces_delist_date(self, tmp_path):
-        """写入 delist_date；后续缺该字段的部分拉取不得清空已知值（COALESCE 保值）。"""
+    def test_upsert_security_master_coalesces_delist_fields(self, tmp_path):
+        """写入 delist_date/delist_source；后续缺该字段的部分拉取不得清空已知值（COALESCE 保值）。"""
         db = tmp_path / "snap.db"
         upsert_security_master(
             [
@@ -178,6 +248,7 @@ class TestSecurityMasterDelistDate:
                     "name": "邯郸钢铁",
                     "list_date": "1998-01-01",
                     "delist_date": "2009-12-29",
+                    "delist_source": "sh_suspend",
                 }
             ],
             db_path=db,
@@ -189,7 +260,50 @@ class TestSecurityMasterDelistDate:
             "name": "邯郸钢铁",
             "list_date": "1998-01-01",
             "delist_date": "2009-12-29",
+            "delist_source": "sh_suspend",
         }
+
+    def test_upsert_delisted_masters_persists_source_for_audit(self, tmp_path):
+        """F2：``source`` 落库为 ``delist_source``（消费方据此区分沪「暂停上市日期」语义）。"""
+        db = tmp_path / "snap.db"
+        upsert_delisted_masters(
+            [
+                {
+                    "code": "600001",
+                    "name": "邯郸钢铁",
+                    "list_date": "1998-01-01",
+                    "delist_date": "2009-12-29",
+                    "source": "sh_suspend",
+                },
+                {
+                    "code": "000001",
+                    "name": "深市退市",
+                    "list_date": "1995-01-01",
+                    "delist_date": "2005-01-01",
+                    "source": "sz_delist",
+                },
+            ],
+            db_path=db,
+        )
+
+        master = get_security_master(db)
+        assert master["600001"]["delist_source"] == "sh_suspend"
+        assert master["000001"]["delist_source"] == "sz_delist"
+
+        # 仅补名字的部分拉取（无 source）→ 不得清空审计来源
+        upsert_delisted_masters(
+            [
+                {
+                    "code": "600001",
+                    "name": "邯郸钢铁A",
+                    "list_date": None,
+                    "delist_date": None,
+                    "source": None,
+                }
+            ],
+            db_path=db,
+        )
+        assert get_security_master(db)["600001"]["delist_source"] == "sh_suspend"
 
     def test_upsert_delisted_masters_idempotent(self, tmp_path):
         """幂等 upsert：重复写同一批不增行；新值覆盖；空 code 跳过。"""

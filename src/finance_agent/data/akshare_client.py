@@ -438,17 +438,25 @@ _DELIST_SOURCE_SPECS: tuple[dict[str, object], ...] = (
 def _delist_rows(df: pd.DataFrame, *, source: str, spec: dict[str, object]) -> list[dict]:
     """单所退市清单 DataFrame → ``[{"code","name","list_date","delist_date","source"}]``。
 
-    缺代码列 / 子帧不可用 → ``[]``（该源不可用，不产半口径行）；日期列缺失或值不可解析
-    → 对应字段 None（不编造）；``source`` 标明日期语义来源（审计用）。
+    - 缺**代码列**或**退市日列**（列名漂移）→ ``[]``：该源不可用（明细类约定：
+      不产「一批全 None 日期」的半口径行冒充成功；调用方按失败记 ERROR）；
+    - 缺**上市日期列** → 降级：保留行、``list_date=None`` + WARNING（退市日才是本
+      清单的核心字段；缺上市日由调用方如实标注，不丢整源）；
+    - 行级日期值缺失/不可解析 → 对应字段 None（不编造）；
+    - ``source`` 标明日期语义来源（审计用：``sh_suspend`` = 沪「暂停上市日期」）。
     """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return []
     code_col = _pick_col(df, spec["code_cols"])  # type: ignore[arg-type]
     if code_col is None:
         return []
+    delist_col = _pick_col(df, spec["delist_cols"])  # type: ignore[arg-type]
+    if delist_col is None:
+        return []
     name_col = _pick_col(df, spec["name_cols"])  # type: ignore[arg-type]
     list_col = _pick_col(df, spec["list_cols"])  # type: ignore[arg-type]
-    delist_col = _pick_col(df, spec["delist_cols"])  # type: ignore[arg-type]
+    if list_col is None:
+        logger.warning("退市清单 %s 缺上市日期列：list_date 置空降级（如实标注）", source)
 
     def _text(value) -> str | None:
         if value is None:
@@ -471,9 +479,7 @@ def _delist_rows(df: pd.DataFrame, *, source: str, spec: dict[str, object]) -> l
                 "code": code,
                 "name": _text(raw.get(name_col)) if name_col is not None else None,
                 "list_date": _norm_date_iso(raw.get(list_col)) if list_col is not None else None,
-                "delist_date": (
-                    _norm_date_iso(raw.get(delist_col)) if delist_col is not None else None
-                ),
+                "delist_date": _norm_date_iso(raw.get(delist_col)),
                 "source": source,
             }
         )

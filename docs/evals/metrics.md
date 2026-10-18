@@ -254,8 +254,11 @@ horizon 默认 T+5 独立于观点线 T+20，MUST NOT 混入观点统计（predi
 **语义注明（不得误读）**：沪清单的日期列是「**暂停上市日期**」而非交易所正式退市日，本口径将其映射为
 `delist_date` 并保留 `source="sh_suspend"` 供审计（深市源列名「终止上市日期」→ `source="sz_delist"`）；
 消费方以 `source` 区分两类日期语义，MUST NOT 把沪源 `delist_date` 读作交易所退市日。
-抓取失败/空 → 空列表 + ERROR 留痕（明细类约定），MUST NOT 以空表冒充成功。
-落库：`security_master` 扩展列 `delist_date`（ALTER 增量迁移，先例 `selection_mode`）；退市清单经
+抓取失败/空 → 空列表 + ERROR 留痕（明细类约定），MUST NOT 以空表冒充成功；
+**列漂移**：缺**代码列**或缺**退市日列** → 该源判不可用（`[]` + ERROR，不产「一批全 None 日期」的
+半口径行冒充成功）；缺**上市日期列** → 降级保留行（`list_date=None` + WARN，如实标注）。
+落库：`security_master` 扩展列 `delist_date` 与 `delist_source`（ALTER 增量迁移，先例 `selection_mode`；
+`delist_source` = 日期语义来源的**持久审计留痕**，消费方据库内值即可区分沪/深语义）；退市清单经
 `upsert_delisted_masters` 幂等 upsert（`COALESCE` 保值，不因部分拉取失败清空已知字段）；
 **生产触发点** = 快照日批主表刷新分支（名单为空或每周一），与上市清单同频，失败只 WARN 不失败整批。
 
@@ -265,6 +268,10 @@ horizon 默认 T+5 独立于观点线 T+20，MUST NOT 混入观点统计（predi
 退市标的价格历史经 `scripts/backfill_delisted.py` 按 `list_date..delist_date` 窗口补采
 （复用既有回填通道，回填行不含状态位/前收盘，勿接 rebase/停牌合成链）；
 源无历史 → `history_missing` 计数 + 代码明细如实标注，不伪造。
+**断点续跑 = 整窗覆盖判据**（不只是「窗口内有行」）：窗口内有行、字段齐备、且最早行触及窗口起点锚
+（日历中首个 ≥ `list_date` 的交易日）才跳过；只判头部（退市整理期结束日 ≠ 退市日，尾部不判；停牌日本无行）；
+仅尾部有行（如运行期日批行）→ 部分覆盖，进 `partial_overlap` 明细并重取（INSERT OR REPLACE 幂等），
+MUST NOT 谎报覆盖。缺失/覆盖明细随非 dry-run 运行落 `snapshot_meta["delist_backfill_missing"]`（持久留痕）。
 `security_master` 的既有**隐式**退市口径（快照 D2：不在 master 名单 → 不补行）保留不动；
 两口径关系：显式 `delist_date` 供池可见性判定，隐式「不在名单」仅用于停牌合成（见 `snapshot.py` 注释）。
 

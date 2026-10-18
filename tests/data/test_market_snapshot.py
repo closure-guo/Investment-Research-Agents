@@ -90,8 +90,16 @@ def test_init_creates_tables_and_is_idempotent(tmp_path):
         master_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(security_master)").fetchall()
         }
-        # add-microcap-lane-guardrails：security_master 扩 delist_date（退市日，见 metrics.md §1.16）
-        assert master_cols == {"code", "name", "list_date", "delist_date", "updated_at"}
+        # add-microcap-lane-guardrails：security_master 扩 delist_date/delist_source
+        # （退市日 + 语义来源审计，见 metrics.md §1.16）
+        assert master_cols == {
+            "code",
+            "name",
+            "list_date",
+            "delist_date",
+            "delist_source",
+            "updated_at",
+        }
 
         indexes = {
             row[0]
@@ -692,8 +700,9 @@ def test_security_master_upsert_roundtrip(tmp_path):
     assert master["000001"] == {
         "name": "平安银行",
         "list_date": "1991-04-03",
-        # add-microcap-lane-guardrails：主表形状扩 delist_date（存续标的为 None）
+        # add-microcap-lane-guardrails：主表形状扩 delist_date/delist_source（存续标的为 None）
         "delist_date": None,
+        "delist_source": None,
     }
     assert _count(db, "security_master") == 2
 
