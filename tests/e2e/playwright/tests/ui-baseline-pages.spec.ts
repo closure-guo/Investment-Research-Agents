@@ -36,7 +36,8 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from '@
  *                   settings-cache-light/dark.png     缓存管理分区（settings-nav-cache）
  *                   settings-monitor-light/dark.png   数据监控分区（settings-nav-monitor）
  *   /screening      screening-light/dark.png          空选股池（先 screening_reset；
- *                                                      温度计专属空库 → 「未接入」空态）
+ *                                                      温度计专属空库 → 「未接入」空态；
+ *                                                      事件观察专属空库 → 「清单为空」空态）
  *
  * Mask（唯一一处，非跳过页面）：
  * - /track-record 总览「截至」卡显示后端 _track_as_of（北京时间当天，跨日必变）→
@@ -207,6 +208,16 @@ const CAPTURES: Capture[] = [
       await expect(page.getByTestId('market-regime-card')).toBeVisible()
       await expect(page.getByTestId('regime-empty')).toHaveText(
         '温度计未接入：暂无市场状态数据（等待日批采集）'
+      )
+      // add-event-driven-lane T8 增补（2026-10-18 基线二次重采）：事件观察区块紧随
+      // 温度计之后，自带 GET /api/events/watchlist 取数，同样晚于 screening-empty 锚点
+      // 到达（区块高度随「加载中…/清单行/空态」变化 → fullPage 成图整体高度不稳）。
+      // 专属库 EVENTS_DB_PATH=data/test-e2e-ui-baseline-events.db 为**空库** → 必为
+      // 确定的空态文案（无日期/金额类读数，故无需额外 mask；mask 与容差均未改动）。
+      // 同款钉死前提：若未来造数写入该库，此处显式失败而不是让基线悄悄漂移。
+      await expect(page.getByTestId('event-watchlist-card')).toBeVisible()
+      await expect(page.getByTestId('event-watchlist-empty')).toHaveText(
+        '事件观察清单为空：暂无通过分诊的事件（等待日批抓取与分诊）'
       )
     },
   },
