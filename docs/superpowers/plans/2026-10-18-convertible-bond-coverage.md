@@ -47,7 +47,7 @@
 
 **Files:** Modify `outcome/events/watchlist.py`（`build_watchlist` 增 `source="cbb"` 分支）；Test 扩展
 
-- [ ] 先红后绿：`sync_cb_events` 造 2 条（1 强赎 counting + 1 undetermined 缺要素）→ `build_watchlist` 产出 `source=cbb` 条目，要素含 现价（`bond_zh_hs_cov_spot` 可得时）/溢价率/剩余规模/倒计时（不可得如实 null + note）；零 LLM 调用断言；`GET /api/events/watchlist?source=cbb` 仅回转债条目
+- [ ] 先红后绿：`sync_cb_events` 造 2 条（1 强赎 counting + 1 undetermined 缺要素）→ `build_watchlist` 产出 `source=cbb` 条目，要素含 现价（`bond_zh_hs_cov_spot` 可得时）/溢价率/剩余规模/倒计时（不可得如实 null + note）；**载荷键名冻结（跨变更契约）：`price` / `premium_rate` / `remaining_size` / `call_countdown_days`**（前端已预留读取位，缺值 `—`）；零 LLM 调用断言；`GET /api/events/watchlist?source=cbb` 仅回转债条目
 - [ ] 提交 `feat(cbb): 条款事件接入事件观察清单（source=cbb）`
 
 ### Task 5: 日批 job + 调度
