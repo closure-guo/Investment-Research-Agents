@@ -23,6 +23,29 @@ function sse(events: object[]): Response {
   })
 }
 
+// 受控 SSE（issue #331 时序硬化）：事件按需推送、流闸门由测试持有——
+// 「切走时后端任务仍在执行（流未关闭）」成为确定性状态，不再取决于
+// 快机/慢机上「流自然关闭 vs 用户切换」谁先发生（CI 慢机上流必然先自然关闭，
+// 相位落 idle 后切回不再 resume → chat_token 永不渲染，两次重试确定失败）。
+function controlledSse() {
+  const encoder = new TextEncoder()
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c
+    },
+  })
+  return {
+    response: new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    }),
+    push(ev: object) {
+      controller?.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`))
+    },
+  }
+}
+
 describe('会话切换时 messagesRef 同步，resumeStream 事件不丢失', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -38,13 +61,13 @@ describe('会话切换时 messagesRef 同步，resumeStream 事件不丢失', ()
   it('切换会话再切回，resumeStream 的 chat_token 被正确渲染到 UI', { timeout: 20000 }, async () => {
     vi.useRealTimers()
 
-    // 第一轮 SSE：session_created + thinking_token + tool_call + 流关闭（无 done，模拟切换中断）
-    // 后端任务仍在运行（search_stock 执行中）
-    const round1 = [
+    // 第一轮 SSE（受控流）：session_created + thinking_token + tool_call；
+    // 流保持打开——模拟用户切走时后端任务仍在执行（search_stock 执行中，未收尾）
+    const round1 = controlledSse()
+    const round1Events = [
       { type: 'session_created', session_id: 's1', seq: 1 },
       { type: 'thinking_token', token: '让我搜索安孚科技', seq: 2 },
       { type: 'tool_call', name: 'search_stock', args: { query: '安孚科技' }, seq: 3 },
-      // 无 done — 流关闭，模拟用户切换会话中断
     ]
 
     let analyzeCallCount = 0
@@ -64,7 +87,7 @@ describe('会话切换时 messagesRef 同步，resumeStream 事件不丢失', ()
 
       if (url === '/api/analyze') {
         analyzeCallCount++
-        return sse(round1)
+        return round1.response
       }
 
       // 会话详情：s1 状态为 running（后端任务仍在执行）
@@ -134,8 +157,10 @@ describe('会话切换时 messagesRef 同步，resumeStream 事件不丢失', ()
       })).toBe(true)
     }, { timeout: 5000 })
 
-    // 等待第一轮 SSE 事件被消费（条件等待，取代固定 sleep——issue #331：
-    // 慢机上固定窗口赌不中事件链时点，CI 曾因此超时）
+    // 推送第一轮事件（受控流按需推）并等渲染完成——不赌固定时序窗口
+    await act(async () => {
+      for (const ev of round1Events) round1.push(ev)
+    })
     await screen.findByText('让我搜索安孚科技', undefined, { timeout: 10000 })
     await screen.findByText(/调用工具中/, undefined, { timeout: 10000 })
 
@@ -161,5 +186,7 @@ describe('会话切换时 messagesRef 同步，resumeStream 事件不丢失', ()
     await waitFor(() => {
       expect(screen.getByText('安孚科技分析完成')).toBeInTheDocument()
     }, { timeout: 10000 })
+    // 续传游标：切回 s1 后 resume 应从第一轮最后 seq(3) 续传（不是全量重放）
+    expect(streamAfterSeq).toBe(3)
   })
 })
