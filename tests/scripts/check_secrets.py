@@ -46,8 +46,11 @@ KEY_PATTERNS = [
 ]
 
 # 占位符白名单：文档/示例中明确标注的伪密钥，不是真实凭证
+# （2026-10-18 历史扫描 CI 首跑实证：本文件注释里的 tvly-dev-xxxx-yyyy 被抓成「新泄露」
+#  —— 当前树扫描自跳过本文件、历史扫描看 diff 不看排除表，占位符必须显式放行）
 PLACEHOLDERS = {
     "tvly-xxxxxxxxxxxx",
+    "tvly-dev-xxxx-yyyy",
 }
 
 # 排除路径：依赖、构建产物、虚拟环境、git 内部
