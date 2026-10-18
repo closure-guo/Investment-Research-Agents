@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS event_watchlist (
   source       TEXT NOT NULL DEFAULT 'earnings',
   status       TEXT NOT NULL DEFAULT 'pending',
   session_id   TEXT,
-  created_at   TEXT NOT NULL
+  created_at   TEXT NOT NULL,
+  note         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS event_journal (
@@ -111,7 +112,14 @@ def _connect(db_path: str | Path | None) -> sqlite3.Connection:
 
 
 def init_events_db(db_path: str | Path | None = None) -> Path:
-    """幂等建四表，返回实际使用的库路径。"""
+    """幂等建四表（+ 转债三表并库迁移链，add-convertible-bond-coverage），返回库路径。
+
+    cb 三表与 ``event_watchlist.note`` 增量列由 ``cb_model.init_cb_db`` 在同一库上
+    幂等应用（cb_model 单向依赖本模块的 ``_connect``，故此处**函数内**局部导入，
+    避免模块级循环导入）。
+    """
+    from finance_agent.outcome.events.cb_model import init_cb_db
+
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
     try:
@@ -119,6 +127,7 @@ def init_events_db(db_path: str | Path | None = None) -> Path:
         conn.commit()
     finally:
         conn.close()
+    init_cb_db(path)
     return path
 
 
@@ -258,6 +267,7 @@ def insert_watchlist(
     source: str = "earnings",
     status: str = WATCHLIST_STATUS_PENDING,
     session_id: str | None = None,
+    note: str | None = None,
     created_at: str | None = None,
     db_path: str | Path | None = None,
 ) -> int | None:
@@ -265,16 +275,18 @@ def insert_watchlist(
 
     ``INSERT ... ON CONFLICT(forecast_key) DO NOTHING``——命中冲突 → ``None``
     （不重复插入、不覆盖既有状态/session）；是否真正插入按 ``rowcount`` 判定
-    （先查后插两步在并发下会竞态，单语句原子）。
+    （先查后插两步在并发下会竞态，单语句原子）。``note`` = 规则化注记
+    （cbb 条目倒计时/理由的载体；业绩预告条目恒 None）。
     """
     init_events_db(db_path)
     conn = _connect(db_path)
     try:
         cursor = conn.execute(
-            """INSERT INTO event_watchlist (forecast_key, source, status, session_id, created_at)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO event_watchlist
+                 (forecast_key, source, status, session_id, note, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(forecast_key) DO NOTHING""",
-            (key, source, status, session_id, created_at or datetime.now().isoformat()),
+            (key, source, status, session_id, note, created_at or datetime.now().isoformat()),
         )
         conn.commit()
         if cursor.rowcount <= 0:
@@ -284,16 +296,41 @@ def insert_watchlist(
         conn.close()
 
 
-# 清单读取：清单列 + 预告要素 + 分诊理由/证据（端点只读载荷的单一取数面）
+def update_watchlist_note(key: str, *, note: str, db_path: str | Path | None = None) -> bool:
+    """刷新清单条目规则化注记（cbb 倒计时每日重算）；**不动** status/session/created_at。
+
+    返回是否有行被更新（未知键 → ``False``）。
+    """
+    init_events_db(db_path)
+    conn = _connect(db_path)
+    try:
+        cursor = conn.execute("UPDATE event_watchlist SET note=? WHERE forecast_key=?", (note, key))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+# 清单读取：清单列 + 预告要素 + 分诊理由/证据 + 转债要素（事件/标的/最新行情）
+# （端点只读载荷的单一取数面）。cbb 行经 ``event_key = forecast_key`` 联 `cb_events`；
+# 现价取该代码**最新交易日**行情（``cb_quotes`` 相关子查询，索引 idx_cb_quotes_code 支撑）。
 _WATCHLIST_SELECT = """
-SELECT w.id, w.forecast_key, w.source, w.status, w.session_id, w.created_at,
+SELECT w.id, w.forecast_key, w.source, w.status, w.session_id, w.created_at, w.note,
        f.code, f.name, f.report_period, f.forecast_type, f.change_low, f.change_high,
        f.announce_date, f.available_at,
-       t.verdict, t.reason, t.evidence_json, t.model, t.prompt_fingerprint, t.triaged_at
+       t.verdict, t.reason, t.evidence_json, t.model, t.prompt_fingerprint, t.triaged_at,
+       e.code AS cb_code, e.event_type AS cb_event_type,
+       e.announce_date AS cb_announce_date, e.remain_scale AS cb_remain_scale,
+       m.name AS cb_name, m.premium_rate AS cb_premium_rate,
+       q.close AS cb_close
 FROM event_watchlist w
 LEFT JOIN earnings_forecasts f
   ON f.code || '|' || f.report_period || '|' || f.source_record_id = w.forecast_key
 LEFT JOIN event_triage t ON t.forecast_key = w.forecast_key
+LEFT JOIN cb_events e ON e.event_key = w.forecast_key
+LEFT JOIN cb_master m ON m.code = e.code
+LEFT JOIN cb_quotes q
+  ON q.code = e.code AND q.trade_date = (SELECT MAX(trade_date) FROM cb_quotes WHERE code = e.code)
 """
 
 

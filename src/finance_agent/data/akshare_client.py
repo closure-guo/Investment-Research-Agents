@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -343,6 +344,70 @@ _FORECAST_NEGATIVE_DIRECTIONS = ("下降", "减少")
 # 季度报告期（月, 日）
 _QUARTER_ENDS: tuple[tuple[int, int], ...] = ((3, 31), (6, 30), (9, 30), (12, 31))
 
+# ── add-convertible-bond-coverage：可转债标的/行情/条款事件 ──────────────────────
+# 列名映射（本机 akshare 1.18.94 实测，2026-10-18；口径见 docs/evals/metrics.md §1.17）：
+# bond_zh_cov：债券代码→code / 债券简称→name / 正股代码→stock_code / 转股价→convert_price
+#   （元）/ 转股溢价率→premium_rate（**%**，原样不除 100）；**该源无剩余规模列** →
+#   master 的 remain_scale 恒 None（MUST NOT 以发行规模冒充剩余规模）；
+# bond_cb_redeem_jsl：强赎触发价→trigger_price / 强赎触发比→trigger_ratio（%原样）/
+#   强赎天计数→count_text（原样文本，解析归状态推导层）/ 最后交易日→last_trade_date /
+#   剩余规模→remain_scale（**亿元**，与设计冻结的 remaining_size 同口径直落）/ 强赎状态→
+#   redeem_status（供状态推导；源行逐字入 raw_json 审计）；
+# bond_zh_hs_cov_spot（新浪）：trade→close（元）/ amount→amount（元，源单位原样）；trade
+#   缺失或 ≤0（停牌/零成交）→ 跳过该行（MUST NOT 折算 0）；
+# bond_cb_adj_logs_jsl（逐代码，下修历史）：股东大会日→meeting_date / 下修前转股价→
+#   convert_price_before / 下修后转股价→convert_price_after / 新转股价生效日期→effective_date。
+_CB_MASTER_SOURCE = "eastmoney"
+_CB_QUOTES_SOURCE = "sina"
+_CB_REDEEM_SOURCE = "jisilu"
+_CB_ADJ_SOURCE = "jisilu"
+_CB_MASTER_CODE_COL = "债券代码"
+_CB_MASTER_NAME_COL = "债券简称"
+_CB_MASTER_STOCK_COL = "正股代码"
+_CB_MASTER_CONVERT_COL = "转股价"
+_CB_MASTER_PREMIUM_COL = "转股溢价率"
+_CB_MASTER_RATING_COL = "信用评级"
+_CB_REDEEM_CODE_COL = "代码"
+_CB_REDEEM_NAME_COL = "名称"
+_CB_REDEEM_TRIGGER_PRICE_COL = "强赎触发价"
+_CB_REDEEM_TRIGGER_RATIO_COL = "强赎触发比"
+_CB_REDEEM_COUNT_COL = "强赎天计数"
+_CB_REDEEM_LAST_TRADE_COL = "最后交易日"
+_CB_REDEEM_REMAIN_COL = "剩余规模"
+_CB_REDEEM_STATUS_COL = "强赎状态"
+_CB_ADJ_MEETING_COL = "股东大会日"
+_CB_ADJ_BEFORE_COL = "下修前转股价"
+_CB_ADJ_AFTER_COL = "下修后转股价"
+_CB_ADJ_EFFECTIVE_COL = "新转股价生效日期"
+
+
+def _raw_json(payload: dict) -> str:
+    """源行 → JSON 文本留痕（NaN/日期等不可序列化值统一转字符串）。"""
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _jsonable(value):
+    """源单元格 → 可 JSON 序列化值（NaN/NaT → None，其余原样）。"""
+    try:
+        if value is None or pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _text_or_none(value) -> str | None:
+    """文本单元格 → 去空白字符串；缺失/空串 → None（如实缺值，不折算空串）。"""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return text or None
+
 
 def _norm_report_period(value) -> str | None:
     """报告期归一 ``YYYY-MM-DD``（接受 8 位串/ISO 串/date）；不可解析 → None。"""
@@ -615,9 +680,17 @@ class AKShareClient:
             "earnings_forecast": set(),
             # add-microcap-lane-guardrails：退市清单实际生效源（sh_suspend|sz_delist|none）
             "delist": set(),
+            # add-convertible-bond-coverage：转债标的/行情/强赎/下修实际生效源
+            # （eastmoney|sina|jisilu|none；none = 请求失败，日批据此上抛留痕）
+            "cb_master": set(),
+            "cb_quotes": set(),
+            "cb_redeem": set(),
+            "cb_adj": set(),
         }
         # 全市场 spot 最近一次实际生效源（日批成功摘要 spot_source 消费；未尝试/双源失败 → None）
         self.last_spot_source: str | None = None
+        # 逐代码下修抓取最近一次调用成败（逐代码循环的失败判据；未调用 → None）
+        self.last_cb_adj_failed: bool | None = None
 
     def _filter_annual(self, df: pd.DataFrame) -> pd.DataFrame:
         """只保留年报（报告日以 1231 结尾），并按报告日降序（最新在前）对齐契约。"""
@@ -1713,6 +1786,161 @@ class AKShareClient:
                 period,
             )
         self.sources_seen["earnings_forecast"].add(_FORECAST_SOURCE)
+        return rows
+
+    # ── add-convertible-bond-coverage：转债标的 / 行情 / 条款事件（详见模块常量注释）──
+
+    def fetch_cb_master(self) -> list[dict]:
+        """拉取可转债标的主表（东财 ``bond_zh_cov``，全市场）。
+
+        返回 list[dict]：``code``（6 位归一）/ ``name`` / ``stock_code``（正股代码）/
+        ``convert_price``（转股价，元）/ ``premium_rate``（转股溢价率，**%** 原样）/
+        ``remain_scale``（**恒 None**：该源无剩余规模列，MUST NOT 以发行规模冒充）/
+        ``rating``（信用评级；空串 → None）。
+
+        代码缺失行跳过（无主键不可落库）并记 WARNING；未上市/缺要素行照落、字段如实
+        None（不估算不剔除）。失败/空 → ``[]`` + ERROR（明细类约定），失败时
+        ``sources_seen["cb_master"]`` 记 ``none``、可达记 ``eastmoney``。
+        """
+        df = _call_ak(ak.bond_zh_cov)
+        if df is None or df.empty:
+            logger.error("可转债标的拉取失败/返回空（信源缺失）: bond_zh_cov")
+            self.sources_seen["cb_master"].add("none")
+            return []
+        rows: list[dict] = []
+        skipped = 0
+        for _, raw in df.iterrows():
+            code = _norm_six_digit_code(raw.get(_CB_MASTER_CODE_COL))
+            if not code:
+                skipped += 1
+                continue
+            rows.append(
+                {
+                    "code": code,
+                    "name": _text_or_none(raw.get(_CB_MASTER_NAME_COL)),
+                    "stock_code": _norm_six_digit_code(raw.get(_CB_MASTER_STOCK_COL)),
+                    "convert_price": _safe_float(raw.get(_CB_MASTER_CONVERT_COL)),
+                    "premium_rate": _safe_float(raw.get(_CB_MASTER_PREMIUM_COL)),
+                    "remain_scale": None,  # 源无剩余规模列（不拿发行规模冒充）
+                    "rating": _text_or_none(raw.get(_CB_MASTER_RATING_COL)),
+                }
+            )
+        rows.sort(key=lambda row: str(row["code"]))
+        if skipped:
+            logger.warning("可转债标的跳过代码缺失行 %d 条（无主键不可落库）", skipped)
+        self.sources_seen["cb_master"].add(_CB_MASTER_SOURCE)
+        return rows
+
+    def fetch_cb_quotes(self) -> list[dict]:
+        """拉取沪深可转债实时行情快照（新浪 ``bond_zh_hs_cov_spot``）。
+
+        返回 list[dict]：``code``（6 位归一）/ ``close``（``trade``，元）/
+        ``amount``（``amount``，元，源单位原样不换算）。``trade`` 缺失或 ≤ 0
+        （停牌/零成交）→ 跳过该行并计数（WARNING），MUST NOT 折算 0 冒充价格。
+
+        失败/空 → ``[]`` + ERROR；``sources_seen["cb_quotes"]`` 记 ``sina`` / ``none``。
+        """
+        df = _call_ak(ak.bond_zh_hs_cov_spot)
+        if df is None or df.empty:
+            logger.error("可转债行情拉取失败/返回空（信源缺失）: bond_zh_hs_cov_spot")
+            self.sources_seen["cb_quotes"].add("none")
+            return []
+        rows: list[dict] = []
+        skipped = 0
+        for _, raw in df.iterrows():
+            code = _norm_six_digit_code(raw.get("code"))
+            close = _safe_float(raw.get("trade"))
+            if not code or close is None or close <= 0:
+                skipped += 1
+                continue
+            rows.append({"code": code, "close": close, "amount": _safe_float(raw.get("amount"))})
+        rows.sort(key=lambda row: str(row["code"]))
+        if skipped:
+            logger.warning("可转债行情跳过无有效价行 %d 条（停牌/零成交，不折算 0）", skipped)
+        self.sources_seen["cb_quotes"].add(_CB_QUOTES_SOURCE)
+        return rows
+
+    def fetch_cb_redeem_events(self) -> list[dict]:
+        """拉取强赎条款事件（集思录 ``bond_cb_redeem_jsl``，全市场）。
+
+        返回 list[dict]：``code`` / ``name`` / ``trigger_price``（强赎触发价）/
+        ``trigger_ratio``（强赎触发比，% 原样）/ ``count_text``（强赎天计数**原样文本**，
+        形如 ``"12/15 | 30"``；解析归状态推导层）/ ``last_trade_date``（归一 ISO）/
+        ``remain_scale``（剩余规模，**亿元**，源单位原样）/ ``redeem_status``（强赎状态，
+        供状态推导）/ ``raw_json``（源行逐字留痕，审计可辨）。
+
+        代码缺失行跳过并记 WARNING；失败/空 → ``[]`` + ERROR（明细类约定），失败时
+        ``sources_seen["cb_redeem"]`` 记 ``none``、可达记 ``jisilu``。
+        """
+        df = _call_ak(ak.bond_cb_redeem_jsl)
+        if df is None or df.empty:
+            logger.error("强赎事件拉取失败/返回空（信源缺失）: bond_cb_redeem_jsl")
+            self.sources_seen["cb_redeem"].add("none")
+            return []
+        rows: list[dict] = []
+        skipped = 0
+        for _, raw in df.iterrows():
+            code = _norm_six_digit_code(raw.get(_CB_REDEEM_CODE_COL))
+            if not code:
+                skipped += 1
+                continue
+            rows.append(
+                {
+                    "code": code,
+                    "name": _text_or_none(raw.get(_CB_REDEEM_NAME_COL)),
+                    "trigger_price": _safe_float(raw.get(_CB_REDEEM_TRIGGER_PRICE_COL)),
+                    "trigger_ratio": _safe_float(raw.get(_CB_REDEEM_TRIGGER_RATIO_COL)),
+                    "count_text": _text_or_none(raw.get(_CB_REDEEM_COUNT_COL)),
+                    "last_trade_date": _norm_date_iso(raw.get(_CB_REDEEM_LAST_TRADE_COL)),
+                    "remain_scale": _safe_float(raw.get(_CB_REDEEM_REMAIN_COL)),
+                    "redeem_status": _text_or_none(raw.get(_CB_REDEEM_STATUS_COL)),
+                    "raw_json": _raw_json(
+                        {str(key): _jsonable(value) for key, value in raw.items()}
+                    ),
+                }
+            )
+        rows.sort(key=lambda row: str(row["code"]))
+        if skipped:
+            logger.warning("强赎事件跳过代码缺失行 %d 条（无主键不可落库）", skipped)
+        self.sources_seen["cb_redeem"].add(_CB_REDEEM_SOURCE)
+        return rows
+
+    def fetch_cb_adj_logs(self, code: str) -> list[dict]:
+        """拉取单只转债的转股价调整（下修）历史（集思录 ``bond_cb_adj_logs_jsl``）。
+
+        **逐代码接口**（无全市场批量模式）——调用方按「转股价变化触发」的有界集合取数
+        （见 ``outcome/events/cb_sync.py``）。返回 list[dict]：``code`` / ``name`` /
+        ``meeting_date``（股东大会日，归一 ISO）/ ``convert_price_before`` /
+        ``convert_price_after`` / ``effective_date``（新转股价生效日期）/ ``raw_json``。
+
+        无下修记录 → ``[]``（源可达、空表，**非失败**：``sources_seen["cb_adj"]`` 记
+        ``jisilu``）；请求失败 → ``[]`` + ERROR + 记 ``none``。单次调用成败另经
+        ``last_cb_adj_failed`` 留痕（逐代码循环里 ``sources_seen`` 差集无法区分
+        「重复失败」与「本次无记录」，先例 ``last_spot_source``）。
+        """
+        df = _call_ak(ak.bond_cb_adj_logs_jsl, symbol=code)
+        if df is None:
+            logger.error("下修历史拉取失败（信源缺失）: code=%s", code)
+            self.sources_seen["cb_adj"].add("none")
+            self.last_cb_adj_failed = True
+            return []
+        self.last_cb_adj_failed = False
+        rows: list[dict] = []
+        for _, raw in df.iterrows():
+            rows.append(
+                {
+                    "code": code,
+                    "name": _text_or_none(raw.get("转债名称")),
+                    "meeting_date": _norm_date_iso(raw.get(_CB_ADJ_MEETING_COL)),
+                    "convert_price_before": _safe_float(raw.get(_CB_ADJ_BEFORE_COL)),
+                    "convert_price_after": _safe_float(raw.get(_CB_ADJ_AFTER_COL)),
+                    "effective_date": _norm_date_iso(raw.get(_CB_ADJ_EFFECTIVE_COL)),
+                    "raw_json": _raw_json(
+                        {str(key): _jsonable(value) for key, value in raw.items()}
+                    ),
+                }
+            )
+        self.sources_seen["cb_adj"].add(_CB_ADJ_SOURCE)
         return rows
 
     def fetch_research_reports(self, stock_code: str) -> list[dict]:
