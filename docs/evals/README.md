@@ -16,7 +16,7 @@
 | evals/backtest/results/formal-2026q3.md | ![active](badge:active) | — |
 | evals/backtest/results/pilot-2023-shock.md | ![active](badge:active) | — |
 
-## 未标注生命周期（11 份）
+## 未标注生命周期（12 份）
 
 - docs/evals/2026-09-25-回测正式批申报.md
 - docs/evals/2026-10-05-多Agent对单Agent选型调研.md
@@ -24,6 +24,7 @@
 - docs/evals/2026-10-15-量化投研设计文档对标与差距分析.md
 - docs/evals/2026-10-17-研报驱动分析管线生态调研.md
 - docs/evals/2026-10-17-闸②门槛复审.md
+- docs/evals/2026-10-18-个人小资金量化策略调研.md
 - docs/evals/dataset-baseline.md
 - docs/evals/decision-stability-offline-20261002.md
 - docs/evals/hosted-evaluator-template.md
