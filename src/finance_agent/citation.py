@@ -1184,6 +1184,12 @@ def _check_period_disambiguation(claim: Claim, state: dict) -> CitationResult | 
 # ── claim 内部一致性（harden-citation-semantic-coverage）──
 
 _NUMBER_PATTERN = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?\s*(?:%|％|亿|万|元)?")
+# 来源 ID 记号（issue #327-2）：prediction_id = ``p_<12 hex>``、clause_id =
+# ``c_<12 hex>``（track_record.model / memory.semantic 生成）。记忆块要求
+# interpretation 不写来源 ID，若 LLM 照写，ID 内数字会被 `_extract_number_candidates`
+# 读作数值候选 → `_check_internal_echo` 误判 internal_inconsistency。ID 是标识符
+# 而非数值，提取前剔除；词界按非 ASCII 字母数字判定（CJK 紧邻无空格时也须命中）。
+_SOURCE_ID_PATTERN = re.compile(r"(?<![0-9A-Za-z_])[pc]_[0-9a-fA-F]{6,}(?![0-9A-Za-z_])")
 _UNIT_SCALE = {"亿": 1e8, "万": 1e4, "元": 1.0, "%": 1.0, "％": 1.0, "": 1.0}
 
 _NEGATIVE_WORDS = ("负增长", "下降", "下滑", "下跌", "回落", "走低", "减少", "降低", "恶化", "走弱")
@@ -1249,7 +1255,8 @@ def _check_internal_echo(claim: Claim) -> CitationResult | None:
         stated = float(claim.stated_value)
     except (TypeError, ValueError):
         return None  # 非数值 stated（比较方向等）不适用回声检查
-    candidates = _extract_number_candidates(claim.interpretation or "")
+    text = _SOURCE_ID_PATTERN.sub(" ", claim.interpretation or "")
+    candidates = _extract_number_candidates(text)
     if not candidates:
         return None  # 定性表述不强制回声（召回由正文覆盖率普查承担）
     for cand in candidates:
