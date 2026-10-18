@@ -19,6 +19,7 @@ from finance_agent.execution.store import (
     write_position,
 )
 from finance_agent.outcome.scorecards import (
+    _LOADERS,
     FAMILY_REGISTRY,
     FamilyContract,
     FamilySpec,
@@ -49,9 +50,34 @@ def _s(ticker: str, day: str, ret: float) -> Sample:
 # ── 纯计算（Task 2）──
 
 
-def test_registry_families() -> None:
-    ids = [spec.family_id for spec in FAMILY_REGISTRY]
-    assert ids == ["predictions", "execution"]
+def test_registry_declares_full_family_contract() -> None:
+    """spec：每族 SHALL 声明 family_id / 名称 / 数据源 / 收益口径（含费与否）/ 费后说明 / 样本门槛。"""
+    assert [spec.family_id for spec in FAMILY_REGISTRY] == ["predictions", "execution"]
+    for spec in FAMILY_REGISTRY:
+        assert spec.name
+        assert spec.data_source in _LOADERS  # 数据源已接线装载器
+        assert isinstance(spec.cost_bearing, bool)
+        assert spec.min_samples == 10
+        assert spec.extreme_threshold < 0
+        assert spec.caliber_note
+
+
+def test_cost_bearing_declaration_drives_net_deduction() -> None:
+    """费后处理随族声明：cost_bearing=True → 净=毛−成本率；False → 毛=净（不二次扣减）。"""
+    samples = [_s("600519", f"2026-09-{day:02d}", 0.01) for day in range(1, 12)]
+    bearing, contained = FAMILY_REGISTRY
+    assert bearing.cost_bearing is True
+    assert contained.cost_bearing is False
+
+    net_payload = build_family_payload(bearing, samples, contract=_contract())
+    cost_rate = estimate_round_trip_cost_rate()
+    assert net_payload["expectancy"]["net"] == pytest.approx(
+        net_payload["expectancy"]["gross"] - cost_rate, abs=1e-4
+    )
+    assert net_payload["expectancy"]["net"] < net_payload["expectancy"]["gross"]
+
+    gross_payload = build_family_payload(contained, samples, contract=_contract())
+    assert gross_payload["expectancy"]["net"] == gross_payload["expectancy"]["gross"]
 
 
 def test_cost_rate_matches_matching_config() -> None:
@@ -340,6 +366,18 @@ def test_capacity_slot_null_when_snapshot_empty(tmp_path, monkeypatch) -> None:
     assert pred["expectancy"]["n"] == 22  # 其余槽位不受快照缺失影响
 
 
+def test_capacity_slot_null_when_snapshot_db_corrupt(tmp_path, monkeypatch) -> None:
+    """快照库为损坏文件（非 SQLite 内容）：容量槽 null + no_liquidity_data，不抛错。"""
+    sessions, _execution, snapshot = _three_db_env(monkeypatch, tmp_path)
+    _seed_predictions(sessions)
+    snapshot.write_bytes(b"not a sqlite database")  # sqlite3.DatabaseError（非 SnapshotError）
+
+    pred = _family(get_scorecards(), "predictions")
+    assert pred["capacity"] is None
+    assert pred["capacity_reason"] == "no_liquidity_data"
+    assert pred["expectancy"]["n"] == 22  # 其余槽位不受快照损坏影响
+
+
 def test_get_scorecards_empty_databases(tmp_path, monkeypatch) -> None:
     """三库皆空（文件不存在）：两族均以 null + 原因码如实返回，MUST NOT 报错。"""
     monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "missing-s.db"))
@@ -355,34 +393,61 @@ def test_get_scorecards_empty_databases(tmp_path, monkeypatch) -> None:
         assert family["as_of"] is None
 
 
-def test_registered_family_without_loader_reports_empty(monkeypatch, tmp_path) -> None:
-    """注册表可扩展：新增族不改计算核心——四槽按空样本如实返回，未注册数据源不出现。"""
-    extended = (*FAMILY_REGISTRY, FamilySpec("events", "事件线", extreme_threshold=-0.10))
+def test_registered_family_with_unknown_data_source_reports_no_loader(
+    tmp_path, monkeypatch
+) -> None:
+    """未知数据源（未接线装载器）：四槽 null + ``no_loader``，且既有两族读数不受影响。"""
+    sessions, _execution, snapshot = _three_db_env(monkeypatch, tmp_path)
+    _seed_predictions(sessions)
+    _seed_snapshot(snapshot)
+    extended = (
+        *FAMILY_REGISTRY,
+        FamilySpec(
+            "events",
+            "事件线",
+            data_source="unknown",
+            cost_bearing=False,
+            min_samples=10,
+            extreme_threshold=-0.10,
+            caliber_note="事件线口径（极端样本阈值 -10%，测试声明）",
+        ),
+    )
     monkeypatch.setattr("finance_agent.outcome.scorecards.FAMILY_REGISTRY", extended)
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "missing-s.db"))
-    monkeypatch.setenv("EXECUTION_DB_PATH", str(tmp_path / "missing-e.db"))
-    monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "missing-snap.db"))
 
-    families = get_scorecards()["families"]
-    assert [family["family_id"] for family in families] == ["predictions", "execution", "events"]
-    events = families[2]
+    result = get_scorecards()
+    assert [family["family_id"] for family in result["families"]] == [
+        "predictions",
+        "execution",
+        "events",
+    ]
+    events = result["families"][2]
     assert events["name"] == "事件线"
+    assert events["as_of"] is None
     assert events["expectancy"] is None
-    assert events["expectancy_reason"] == "no_samples"
-    assert events["max_drawdown_reason"] == "insufficient_history"
-    assert events["capacity_reason"] == "no_liquidity_data"
+    assert events["expectancy_reason"] == "no_loader"
+    assert events["max_drawdown"] is None
+    assert events["max_drawdown_reason"] == "no_loader"
+    assert events["capacity"] is None
+    assert events["capacity_reason"] == "no_loader"
+    assert events["extreme_samples"] == []
     assert events["win_rate"] is None
-    assert "阈值 -10%" in events["caliber_note"]  # 阈值随各族注册项
+    assert "阈值 -10%" in events["caliber_note"]  # 口径注释取自注册声明
+
+    pred = _family(result, "predictions")  # 既有两族读数不受未知数据源影响
+    assert pred["expectancy"]["n"] == 22
+    assert pred["capacity"]["min_adv20"] == pytest.approx(50_000_000.0)
+    exe = _family(result, "execution")
+    assert exe["expectancy_reason"] == "no_samples"
+    assert exe["capacity_reason"] == "no_liquidity_data"
 
 
 def test_extreme_threshold_is_configurable() -> None:
     """阈值调整后极端样本清单随之变化（同一批样本，仅 spec 阈值不同）。"""
     samples = [_s("600519", "2026-09-01", -0.20), _s("000001", "2026-09-02", 0.01)]
-    default = build_family_payload(
-        FamilySpec("predictions", "观点线", -0.15), samples, contract=_contract()
-    )
+    default_spec = FAMILY_REGISTRY[0]
+    default = build_family_payload(default_spec, samples, contract=_contract())
     stricter = build_family_payload(
-        FamilySpec("predictions", "观点线", -0.30), samples, contract=_contract()
+        default_spec._replace(extreme_threshold=-0.30), samples, contract=_contract()
     )
     assert [row["ret"] for row in default["extreme_samples"]] == [-0.20]
     assert stricter["extreme_samples"] == []

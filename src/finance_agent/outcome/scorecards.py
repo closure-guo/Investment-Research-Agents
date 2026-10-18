@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -21,13 +21,13 @@ from finance_agent.execution.store import list_paper_equity, list_positions
 
 logger = logging.getLogger(__name__)
 
-# ── 口径常量（design.md §已知边界：门槛/阈值/参与率/名义仓位集中定义）──
+# ── 口径常量（design.md §已知边界：具名常量集中定义；族级门槛/阈值随注册表声明）──
 SCORECARD_NOTIONAL = 100_000.0  # 成本估算名义仓位（与撮合配置参数同源换算）
 CAPACITY_PARTICIPATION = 0.01  # 参与率上限 1%
 CAPACITY_SYMBOL_LIMIT = 20  # 容量口径取样标的数（最近 N 个）
 CAPACITY_LOOKBACK_DAYS = 40  # 快照读取窗口（自然日；覆盖 20 交易日）
 CAPACITY_ADV_DAYS = 20  # 日均成交额窗口（交易日）
-MIN_SAMPLES = 10  # 期望值样本门槛
+MIN_SAMPLES = 10  # 期望值样本门槛（各族注册项 min_samples 的默认值出处）
 MIN_HISTORY_DAYS = 20  # 最大回撤结算日门槛
 PORTFOLIO_TICKER = "<portfolio>"  # 执行线样本标的（组合级，无单票）
 
@@ -36,14 +36,23 @@ REASON_NO_SAMPLES = "no_samples"
 REASON_INSUFFICIENT_SAMPLE = "insufficient_sample"
 REASON_INSUFFICIENT_HISTORY = "insufficient_history"
 REASON_NO_LIQUIDITY_DATA = "no_liquidity_data"
+REASON_NO_LOADER = "no_loader"  # 族声明的数据源未接线装载器（空壳语义，不抛错）
 
 
 class FamilySpec(NamedTuple):
-    """族注册项：``family_id`` + 名称 + 极端样本阈值（组合级/单标的级）。"""
+    """族注册项：逐族声明 spec 要求的全部口径（数据源/费后处理/门槛/阈值/注释）。
+
+    ``data_source`` 经 ``_LOADERS`` 映射到装载器；``cost_bearing=True`` 表示虚拟
+    结算族（净 = 毛 − 往返成本估算率），``False`` 表示毛=净（已含费，不二次扣减）。
+    """
 
     family_id: str
     name: str
+    data_source: str
+    cost_bearing: bool
+    min_samples: int
     extreme_threshold: float
+    caliber_note: str
 
 
 class Sample(NamedTuple):
@@ -61,13 +70,50 @@ class FamilyContract(NamedTuple):
     caliber_note: str
 
 
-FAMILY_REGISTRY: tuple[FamilySpec, ...] = (
-    FamilySpec("predictions", "观点线", extreme_threshold=-0.15),
-    FamilySpec("execution", "执行线", extreme_threshold=-0.05),
-)
+class FamilyReadings(NamedTuple):
+    """数据源装载结果：样本 + 容量取数标的 + 展示胜率。"""
 
-# 虚拟结算族：毛=虚拟收益，净=毛−往返成本估算率；未列入者视为已含费（毛=净）
-_COST_BEARING_FAMILIES = frozenset({"predictions"})
+    samples: list[Sample]
+    capacity_symbols: list[str]
+    win_rate: float | None
+
+
+class FamilyDbPaths(NamedTuple):
+    """族装载入参：会话/执行库路径（缺省由数据读取层调用期读 env）。"""
+
+    sessions_db_path: str | Path | None = None
+    execution_db_path: str | Path | None = None
+
+
+FAMILY_REGISTRY: tuple[FamilySpec, ...] = (
+    FamilySpec(
+        "predictions",
+        "观点线",
+        data_source="predictions",
+        cost_bearing=True,  # 虚拟结算：净 = 毛 − 往返成本估算率（§1.13）
+        min_samples=MIN_SAMPLES,
+        extreme_threshold=-0.15,
+        caliber_note=(
+            "毛=已判定观点 raw_return 均值；净=毛−往返成本估算率（参数同源撮合配置，见 §1.13）；"
+            f"回撤=结算日等权复利；容量=最近 {CAPACITY_SYMBOL_LIMIT} 个样本标的近 "
+            f"{CAPACITY_ADV_DAYS} 交易日日均成交额×参与率 {CAPACITY_PARTICIPATION:.0%}；"
+            "极端样本阈值 -15%；胜率仅展示（同 prediction_stats 分母）"
+        ),
+    ),
+    FamilySpec(
+        "execution",
+        "执行线",
+        data_source="paper_equity",
+        cost_bearing=False,  # 净值已含撮合费：毛=净，不二次扣减
+        min_samples=MIN_SAMPLES,
+        extreme_threshold=-0.05,
+        caliber_note=(
+            "毛=净=组合级日收益均值（paper_equity 净值派生，已含撮合费，不二次扣减）；"
+            f"回撤=净值日收益同一 MDD 函数；容量=当前持仓近 {CAPACITY_ADV_DAYS} 交易日日均成交额"
+            f"×参与率 {CAPACITY_PARTICIPATION:.0%}；极端样本阈值 -5%（组合级）；胜率不适用"
+        ),
+    ),
+)
 
 
 def estimate_round_trip_cost_rate(config: MatchingConfig | None = None) -> float:
@@ -136,7 +182,8 @@ def build_family_payload(
 
     ``capacity_inputs``：请求标的 → 近 20 交易日日均成交额；值 ``None``/非正表示该
     标的数据缺失（计入 ``capacity["excluded"]``）。``None`` 或空 dict＝无任何流动性
-    证据 → 容量槽 null + ``no_liquidity_data``（全缺不折算 0）。
+    证据 → 容量槽 null + ``no_liquidity_data``（全缺不折算 0）。样本门槛与费后处理
+    均取自注册项（``spec.min_samples`` / ``spec.cost_bearing``）。
     """
     payload: dict[str, Any] = {}
 
@@ -144,14 +191,12 @@ def build_family_payload(
     if not samples:
         payload["expectancy"] = None
         payload["expectancy_reason"] = REASON_NO_SAMPLES
-    elif len(samples) < MIN_SAMPLES:
+    elif len(samples) < spec.min_samples:
         payload["expectancy"] = None
         payload["expectancy_reason"] = REASON_INSUFFICIENT_SAMPLE
     else:
         gross = sum(sample.ret for sample in samples) / len(samples)
-        cost_rate = (
-            estimate_round_trip_cost_rate() if spec.family_id in _COST_BEARING_FAMILIES else 0.0
-        )
+        cost_rate = estimate_round_trip_cost_rate() if spec.cost_bearing else 0.0
         payload["expectancy"] = {
             "gross": round(gross, 4),
             "net": round(gross - cost_rate, 4),
@@ -299,23 +344,24 @@ def _capacity_inputs(
 ) -> dict[str, float | None]:
     """容量槽输入：标的 → 近 20 交易日日均成交额（快照 ``amount`` 尾部均值）。
 
-    快照库空/不新鲜/区间无行一律捕获：容量是提示槽，缺数据由载荷以 null + 原因码
-    呈现，MUST NOT 抛给调用方。不可用标的（无行/成交额非正）记 ``None``，由
-    ``build_family_payload`` 计入 ``excluded``。
+    取数整体捕获：快照库空/不新鲜/损坏（``SnapshotError`` / ``sqlite3.Error`` /
+    ``OSError``）或区间无行一律按缺数据处理——容量是提示槽，缺数据由载荷以
+    null + 原因码呈现，MUST NOT 抛给调用方。不可用标的（无行/成交额非正）记
+    ``None``，由 ``build_family_payload`` 计入 ``excluded``。
     """
     from finance_agent.data.snapshot import SnapshotError, latest_snapshot_date, read_bars
 
     requested = list(dict.fromkeys(symbols))  # 去重保序
     if not requested:
         return {}
-    latest = latest_snapshot_date(snapshot_db_path)
-    if latest is None:
-        return dict.fromkeys(requested)
-    start = (date.fromisoformat(latest) - timedelta(days=CAPACITY_LOOKBACK_DAYS)).isoformat()
-    codes = sorted({_snapshot_code(symbol) for symbol in requested})
     try:
+        latest = latest_snapshot_date(snapshot_db_path)
+        if latest is None:
+            return dict.fromkeys(requested)
+        start = (date.fromisoformat(latest) - timedelta(days=CAPACITY_LOOKBACK_DAYS)).isoformat()
+        codes = sorted({_snapshot_code(symbol) for symbol in requested})
         frame = read_bars(codes, start, latest, as_of=latest, db_path=snapshot_db_path)
-    except SnapshotError as exc:  # 含 SnapshotEmptyError / SnapshotNotFreshError
+    except (SnapshotError, sqlite3.Error, OSError) as exc:  # 含 SnapshotEmptyError/NotFreshError
         logger.warning("快照读取失败，容量槽按缺数据处理: %s", exc)
         return dict.fromkeys(requested)
     buckets: dict[str, list[float]] = {}
@@ -337,21 +383,28 @@ def _position_symbols(db_path: str | Path | None) -> list[str]:
     return [str(row["symbol"]) for row in rows[:CAPACITY_SYMBOL_LIMIT]]
 
 
-def _caliber_note(spec: FamilySpec, cost_rate: float) -> str:
-    """随行口径注释（spec：口径注释必须随行展示）。"""
-    if spec.family_id in _COST_BEARING_FAMILIES:
-        return (
-            f"毛=已判定观点 raw_return 均值；净=毛−往返成本估算率 {cost_rate:.2%}（参数同源撮合配置）；"
-            f"回撤=结算日等权复利；容量=最近 {CAPACITY_SYMBOL_LIMIT} 个样本标的近 "
-            f"{CAPACITY_ADV_DAYS} 交易日日均成交额×参与率 {CAPACITY_PARTICIPATION:.0%}；"
-            f"极端样本阈值 {spec.extreme_threshold:.0%}；胜率仅展示（同 prediction_stats 分母）"
-        )
-    return (
-        "毛=净=组合级日收益均值（paper_equity 净值派生，已含撮合费，不二次扣减）；"
-        f"回撤=净值日收益同一 MDD 函数；容量=当前持仓近 {CAPACITY_ADV_DAYS} 交易日日均成交额"
-        f"×参与率 {CAPACITY_PARTICIPATION:.0%}；极端样本阈值 {spec.extreme_threshold:.0%}（组合级）；"
-        "胜率不适用"
+def _read_predictions_family(paths: FamilyDbPaths) -> FamilyReadings:
+    """观点线装载（数据源 ``predictions``）：样本 + 最近样本标的 + 展示胜率。"""
+    samples = load_prediction_samples(db_path=paths.sessions_db_path)
+    return FamilyReadings(
+        samples, _recent_symbols(samples), _prediction_win_rate(paths.sessions_db_path)
     )
+
+
+def _read_execution_family(paths: FamilyDbPaths) -> FamilyReadings:
+    """执行线装载（数据源 ``paper_equity``）：净值派生样本 + 当前持仓；无胜率口径。"""
+    return FamilyReadings(
+        load_execution_samples(db_path=paths.execution_db_path),
+        _position_symbols(paths.execution_db_path),
+        None,
+    )
+
+
+# 数据源 → 装载器（族经 spec.data_source 接线；未接线 → 四槽 no_loader，不抛错）
+_LOADERS: dict[str, Callable[[FamilyDbPaths], FamilyReadings]] = {
+    "predictions": _read_predictions_family,
+    "paper_equity": _read_execution_family,
+}
 
 
 def get_scorecards(
@@ -362,40 +415,41 @@ def get_scorecards(
 ) -> dict[str, Any]:
     """注册表全族四槽成绩单（只读；族序 = 注册表序，未注册数据源不出现在输出中）。
 
-    各库路径缺省由数据读取层调用期读 env（``SESSIONS_DB_PATH`` /
-    ``EXECUTION_DB_PATH`` / ``SNAPSHOT_DB_PATH``）。任一槽缺数据以 null + 原因码
-    如实返回，MUST NOT 整体报错。
+    遍历 ``FAMILY_REGISTRY``，每族按 ``spec.data_source`` 经 ``_LOADERS`` 取数；
+    未接线数据源 → 该族四槽 null + ``no_loader``（空壳语义，不抛错）。各库路径缺省
+    由数据读取层调用期读 env（``SESSIONS_DB_PATH`` / ``EXECUTION_DB_PATH`` /
+    ``SNAPSHOT_DB_PATH``）。任一槽缺数据以 null + 原因码如实返回，MUST NOT 整体报错。
     """
-    cost_rate = estimate_round_trip_cost_rate()
-    prediction_samples = load_prediction_samples(db_path=sessions_db_path)
-    execution_samples = load_execution_samples(db_path=execution_db_path)
-    inputs_by_family: dict[str, tuple[list[Sample], list[str], float | None]] = {
-        "predictions": (
-            prediction_samples,
-            _recent_symbols(prediction_samples),
-            _prediction_win_rate(sessions_db_path),
-        ),
-        "execution": (execution_samples, _position_symbols(execution_db_path), None),
-    }
-
+    reading_paths = FamilyDbPaths(sessions_db_path, execution_db_path)
     families: list[dict[str, Any]] = []
     for spec in FAMILY_REGISTRY:
-        entry = inputs_by_family.get(spec.family_id)
-        if entry is None:  # 注册了新族但未接线数据源：四槽按空样本如实返回
-            logger.warning("族 %s 无数据加载器，四槽按空样本如实返回", spec.family_id)
-            entry = ([], [], None)
-        samples, capacity_symbols, win_rate = entry
+        loader = _LOADERS.get(spec.data_source)
+        if loader is None:
+            logger.warning(
+                "族 %s 数据源 %s 无装载器，四槽以 %s 如实返回",
+                spec.family_id,
+                spec.data_source,
+                REASON_NO_LOADER,
+            )
+            readings = FamilyReadings(samples=[], capacity_symbols=[], win_rate=None)
+        else:
+            readings = loader(reading_paths)
         payload = build_family_payload(
             spec,
-            samples,
-            contract=FamilyContract(win_rate=win_rate, caliber_note=_caliber_note(spec, cost_rate)),
-            capacity_inputs=_capacity_inputs(capacity_symbols, snapshot_db_path=snapshot_db_path),
+            readings.samples,
+            contract=FamilyContract(win_rate=readings.win_rate, caliber_note=spec.caliber_note),
+            capacity_inputs=_capacity_inputs(
+                readings.capacity_symbols, snapshot_db_path=snapshot_db_path
+            ),
         )
+        if loader is None:  # 未接线数据源：在空壳之上把槽位原因码改写为 no_loader
+            for reason_key in ("expectancy_reason", "max_drawdown_reason", "capacity_reason"):
+                payload[reason_key] = REASON_NO_LOADER
         families.append(
             {
                 "family_id": spec.family_id,
                 "name": spec.name,
-                "as_of": max((sample.date for sample in samples), default=None),
+                "as_of": max((sample.date for sample in readings.samples), default=None),
                 **payload,
             }
         )

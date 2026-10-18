@@ -194,6 +194,8 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 4. **极端样本**：观点线 `raw_return ≤ -0.15`、执行线组合日收益 ≤ -0.05（具名常量）；清单含 ticker/日期/收益。
 
 **胜率定位**：`win_rate` 保留为展示字段（四槽之后）；MUST NOT 作为任何自动处置/门禁/告警输入。
+口径：观点线 `win_rate` = `resolved_win` 占比（分母沿用 `prediction_stats` 既有口径，仅 long/short 已判定，
+`neutral`/`avoidance`/`duplicate_of_day` 等既有排除项不进分母）；执行线 `win_rate = null`（不适用——执行线无胜率口径）。
 
 ---
 

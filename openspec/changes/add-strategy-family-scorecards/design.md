@@ -27,13 +27,13 @@
 {
   "families": [
     {
-      "family_id": "decision",
+      "family_id": "predictions",
       "name": "观点线",
       "as_of": "2026-10-18",
       "expectancy": {"gross": 0.012, "net": 0.009, "n": 34, "insufficient": false},
       "max_drawdown": {"value": -0.18, "n_days": 41},
       "capacity": {"suggested_capital": 1200000, "min_adv20": 120000000, "excluded": 2},
-      "extreme_samples": [{"ticker": "600519", "settled_at": "2026-09-30", "return": -0.22}],
+      "extreme_samples": [{"ticker": "600519", "date": "2026-09-30", "ret": -0.22}],
       "win_rate": 0.56,
       "caliber_note": "……口径注释随行……"
     }
@@ -41,7 +41,9 @@
 }
 ```
 
-缺数据槽位以 `null` + 原因码呈现（`insufficient_sample` / `insufficient_history` / `no_liquidity_data`），MUST NOT 折算 0。
+执行线族：`win_rate` 为 `null`（不适用——执行线无胜率口径，毛=净）。
+
+缺数据槽位以 `null` + 原因码呈现（`insufficient_sample` / `insufficient_history` / `no_liquidity_data`；族声明数据源未接线装载器时四槽原因码为 `no_loader`），MUST NOT 折算 0。
 
 ## 备选与取舍
 
@@ -52,4 +54,4 @@
 ## 已知边界
 
 - 不引入新表、不做写入路径、不含自动处置；纯读层。
-- 阈值（门槛 10 / 极端 −15% / 参与率 1% / 名义仓位 10 万）均为具名常量，集中定义，便于后续注册表化。
+- 阈值（门槛 10 / 极端 −15% / 参与率 1% / 名义仓位 10 万）均为具名常量；族级门槛 / 极端阈值 / 费后口径 / 数据源随注册表逐族声明（spec「策略族注册与口径声明」），参与率与名义仓位集中定义。
