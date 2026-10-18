@@ -615,3 +615,19 @@ class TestEventFamilyScorecards:
         assert event["capacity"]["min_adv20"] == pytest.approx(
             100_000_000.0
         )  # 取样来自最近 20 个标的
+
+
+def test_capacity_slot_null_when_snapshot_meta_date_corrupt(tmp_path, monkeypatch) -> None:
+    """I4（评审）：快照 meta 日期非 ISO（ValueError）→ 容量槽 null + 原因，MUST NOT 抛给调用方。"""
+    sessions, _execution, snapshot = _three_db_env(monkeypatch, tmp_path)
+    _seed_predictions(sessions)
+    _seed_snapshot(snapshot, {"600519": 100_000_000.0})
+    # 坏日期行的真实形态：market_snapshot 出现非 ISO 的 trade_date（人工/外部写入）
+    # → latest_snapshot_date() 返回该值 → date.fromisoformat 抛 ValueError
+    write_snapshot_rows("not-a-date", [{"code": "600519", "amount": 1.0}], db_path=snapshot)
+
+    pred = _family(get_scorecards(), "predictions")
+
+    assert pred["capacity"] is None
+    assert pred["capacity_reason"] == "no_liquidity_data"
+    assert pred["expectancy"]["n"] == 22  # 其余槽位不受影响

@@ -379,7 +379,9 @@ def _capacity_inputs(
         start = (date.fromisoformat(latest) - timedelta(days=CAPACITY_LOOKBACK_DAYS)).isoformat()
         codes = sorted({_snapshot_code(symbol) for symbol in requested})
         frame = read_bars(codes, start, latest, as_of=latest, db_path=snapshot_db_path)
-    except (SnapshotError, sqlite3.Error, OSError) as exc:  # 含 SnapshotEmptyError/NotFreshError
+    except (SnapshotError, sqlite3.Error, OSError, ValueError) as exc:
+        # ValueError 覆盖「meta 日期非 ISO」（评审 I4：date.fromisoformat 坏值不得上抛，
+        # 某族缺数据 MUST NOT 整体报错）；含 SnapshotEmptyError/NotFreshError。
         logger.warning("快照读取失败，容量槽按缺数据处理: %s", exc)
         return dict.fromkeys(requested)
     buckets: dict[str, list[float]] = {}
