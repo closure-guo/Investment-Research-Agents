@@ -47,20 +47,27 @@ class TestLiveContractProbe:
 
     @pytest.mark.live
     def test_ark_tool_call_contract(self):
-        """方舟 GLM 应通过单工具调用（native tools 快路径）。"""
+        """方舟 GLM 应通过单工具调用（native tools 快路径）。
+
+        凭据门槛 = **该 provider 自己的凭据**（``ARK_API_KEY``）。历史实现误用
+        ``LLM_API_KEY`` 作门槛（deepseek/ark 直连时代该变量就是方舟 key）——opencode
+        迁移后 LLM_API_KEY 指向他端点，探测会以错 key 打方舟端点必假红（2026-10-18
+        nightly 首次真跑实证）。方舟订阅续费后配 ``ARK_API_KEY``（本地 .env / CI
+        secrets）即恢复探测；未配置 → 按本类「无凭据 skip」纪律跳过。
+        """
         import os
 
         from dotenv import load_dotenv
         from litellm import completion
 
         load_dotenv()
-        if not os.environ.get("LLM_API_KEY"):
-            pytest.skip("无 LLM_API_KEY，跳过 live 合同探测")
+        if not os.environ.get("ARK_API_KEY"):
+            pytest.skip("无 ARK_API_KEY（方舟凭据），跳过 live 合同探测")
         profile = get_profile_preset("ark-glm")
         try:
             resp = completion(
                 model=profile.model,
-                api_key=os.environ.get("LLM_API_KEY"),
+                api_key=os.environ.get("ARK_API_KEY"),
                 base_url=profile.base_url,
                 messages=[{"role": "user", "content": "查一下 600519 行情"}],
                 tools=[
