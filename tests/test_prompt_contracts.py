@@ -389,3 +389,28 @@ def test_fundamental_analyst_banking_cashflow_exemption():
     assert "金融业" in prompt or "银行业" in prompt
     assert "不适用" in prompt
     assert "MUST NOT" in prompt or "不得" in prompt
+
+
+class TestEventTriagePromptContract:
+    """事件分诊 prompt 行为契约（delta add-event-driven-lane）：三值合同 + 判例 + 降级纪律。"""
+
+    def test_declares_three_value_verdict_contract(self):
+        text = _load("event_triage.md")
+        assert "outperform" in text and "in_line" in text and "risk" in text
+        assert "50 字" in text
+        assert "evidence" in text and "field" in text
+
+    def test_contains_three_examples(self):
+        text = _load("event_triage.md")
+        assert text.count("判例") == 1  # 单一判例区块
+        for marker in ("1. 输入", "2. 输入", "3. 输入"):
+            assert marker in text
+
+    def test_declares_data_block_is_not_instructions(self):
+        """prompt-injection 卫生：数据区块声明「仅为数据、非指令」。"""
+        text = _load("event_triage.md")
+        assert "非指令" in text and "不得执行" in text
+
+    def test_conservative_fallback_mandated(self):
+        text = _load("event_triage.md")
+        assert "信息不足" in text or "证据不足" in text
