@@ -9,6 +9,6 @@
 - [x] 前端 K 线组件渲染触发位参考线（与入场/止损/目标可区分样式）
 - [x] 报告「交易决策」节：触发位行（缺失如实「未申报」）+ 入池跟踪声明行 + 数据真空提示行（阈值配置化）+ 单测
 - [x] `predictions` 表 ALTER 加 `session_id`/`trigger_high`/`trigger_low` 列 + ingest 落库 + 存量 NULL 不追溯 + 单测
-- [ ] E2E spec 覆盖 watch 报告 K 线触发位参考线渲染——**如实注记：§5.6 Playwright e2e/ 基建未建设（P1-P4 pending）**，本 delta 以前端 vitest 契约（653/653 绿，含触发位 markLine 正反用例）+ 人工浏览器验证替代，不静默勾选
+- [x] E2E spec 覆盖 watch 报告触发位链路（`report-watch-trigger-lines.spec.ts`，2026-10-18 收口）：stub 决策产出 watch+触发位（181/178，过价位门禁方向校验）→ 报告「交易决策」节触发位行渲染申报值 + K 线卡 canvas 挂载；前注的「e2e 基建未建设」已由 Playwright 接管消解，本项以真实 E2E 补上而非替代品留存
 - [x] 复跑 601066（会话 b434aedf-83c）：报告触发位行 23.57/22.63 = chart_data = predictions 行 p_2f2d5230155c（含 session_id），三处一致；LLM 首报即合规零打回
 - [x] 人工验证报告落 `tests/validation/2026-10-08-add-watch-trigger-tracking-validation.md`（K线点线浏览器截图 `2026-10-08-watch-trigger-tracking-kline.png`；待 owner 签字）

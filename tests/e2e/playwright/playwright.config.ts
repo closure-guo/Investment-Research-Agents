@@ -27,6 +27,8 @@ export default defineConfig({
     'report-export.spec.ts',
     // 股价 K 线图同依赖 pipeline 环境（8002/5175），timeline config 运行，默认排除
     'report-kline-chart.spec.ts',
+    // watch 触发位链路同依赖 pipeline 环境（8002/5175），timeline config 运行，默认排除
+    'report-watch-trigger-lines.spec.ts',
     // 报告面板与主顶栏层叠同依赖 pipeline 环境（8002/5175），timeline config 运行，默认排除
     'report-panel-overlay.spec.ts',
     // 消息操作条（复制/重试/点赞/点踩）同依赖 8002/5175 pipeline 环境，

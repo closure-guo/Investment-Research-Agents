@@ -47,8 +47,17 @@ def test_stub_payload_matches_node_model(node_name: str, model: type) -> None:
     model.model_validate(payload)
 
 
-def test_stub_hold_carries_inaction_rationale():
-    """require-watch-hold-rationale：stub hold 载荷须带结构化理由（E2E 报告结构化渲染）。"""
+def test_stub_watch_carries_inaction_rationale_and_triggers():
+    """require-watch-hold-rationale + add-watch-trigger-tracking：stub watch 载荷
+    须带结构化理由与非空触发位（E2E 报告结构化渲染 + K 线触发参考线覆盖的前提）。
+
+    触发位方向须与 stub K 线最新收盘（180.0）相容：high > close > low——
+    价位门禁方向校验（_check_structured_trigger_levels）以此为判据。
+    """
     payload = json.loads(_stub_pipeline_answer("trader"))
+    assert payload.get("action") == "watch"
     assert payload.get("inaction_reason")
     assert payload.get("reeval_triggers")
+    assert payload.get("trigger_high") == 181.0
+    assert payload.get("trigger_low") == 178.0
+    assert payload["trigger_high"] > 180.0 > payload["trigger_low"]

@@ -5,7 +5,9 @@ TBD - created by archiving change update-price-chart-kline. Update Purpose after
 ## Requirements
 ### Requirement: K 线图表数据采集
 
-系统 SHALL 在采集报告图表数据时，基于会话 state 中的日 K 线输出 K 线图表数据：最近 250 个交易日的开盘/最高/最低/收盘/成交量逐日序列（口径与 state 日 K 线一致，前复权）、MA5/MA20/MA60 均线序列（收盘价简单移动平均，与报告技术指标使用的均线口径一致，窗口前段无值处为空）、以及交易决策价位（入场价/止损价/目标价，取自最终交易决策或交易员方案，仅在场字段携带）。
+系统 SHALL 在采集报告图表数据时，基于会话 state 中的日 K 线输出 K 线图表数据：最近 250 个交易日的开盘/最高/最低/收盘/成交量逐日序列（口径与 state 日 K 线一致，前复权）、MA5/MA20/MA60 均线序列（收盘价简单移动平均，与报告技术指标使用的均线口径一致，窗口前段无值处为空）、以及交易决策价位（入场价/止损价/目标价，取自最终交易决策或交易员方案，仅在场字段携带）；决策携带结构化触发位（`trigger_high`/`trigger_low`）时 SHALL 一并携带（仅在场字段携带）。
+
+(Previously: 决策价位仅携带入场价/止损价/目标价——watch 决策无此三价，其双向触发位无法入图。)
 
 #### Scenario: OHLCV 与均线序列输出
 
@@ -22,6 +24,14 @@ TBD - created by archiving change update-price-chart-kline. Update Purpose after
 - **GIVEN** 决策价位缺失（如 neutral/hold 无价位、审批未通过、历史会话 state）
 - **THEN** 不携带对应价位字段，数据采集不报错、不影响其余字段输出
 
+#### Scenario: 触发位携带
+
+- **GIVEN** 最终交易决策为 watch 且申报 `trigger_high=24.6`、`trigger_low=22.91`
+- **WHEN** 采集报告图表数据
+- **THEN** 价格图表数据携带两个触发位
+- **GIVEN** 触发位缺失（未申报、buy/sell 决策、历史会话 state）
+- **THEN** 不携带触发位字段，数据采集不报错、不影响其余字段输出
+
 #### Scenario: 日 K 线缺失降级
 
 - **GIVEN** 会话 state 无日 K 线，或日线数量少于 10 个交易日
@@ -29,7 +39,9 @@ TBD - created by archiving change update-price-chart-kline. Update Purpose after
 
 ### Requirement: K 线图双端渲染
 
-系统 SHALL 将报告股价图渲染为 K 线图，服务端 PNG 与前端交互图表 SHALL 消费同一份图表数据：蜡烛主图（开高低收）叠加 MA5/MA20/MA60 均线，成交量副图与蜡烛同日对齐；交易决策价位在场时 SHALL 渲染为水平参考线并带区分标签；涨跌配色 SHALL 遵循 A 股惯例（收阳为红系、收阴为绿系）；报告期截止日标注 SHALL 保留，且双端标签与标题措辞 MUST 如实表述为「报告期截止」，MUST NOT 表述为「财报发布日」或「年报发布日」（数据源为利润表报告日即报告期截止日，非披露日）。
+系统 SHALL 将报告股价图渲染为 K 线图，服务端 PNG 与前端交互图表 SHALL 消费同一份图表数据：蜡烛主图（开高低收）叠加 MA5/MA20/MA60 均线，成交量副图与蜡烛同日对齐；交易决策价位在场时 SHALL 渲染为水平参考线并带区分标签；触发位（`trigger_high`/`trigger_low`）在场时 SHALL 渲染为水平参考线并带区分标签（上破触发/下破触发），其视觉样式 SHALL 与入场/止损/目标参考线可区分（颜色或线型不同）；涨跌配色 SHALL 遵循 A 股惯例（收阳为红系、收阴为绿系）；报告期截止日标注 SHALL 保留，且双端标签与标题措辞 MUST 如实表述为「报告期截止」，MUST NOT 表述为「财报发布日」或「年报发布日」（数据源为利润表报告日即报告期截止日，非披露日）。
+
+(Previously: 仅入场价/止损价/目标价渲染为水平参考线——watch 决策的触发位不上图。)
 
 #### Scenario: 服务端 PNG 蜡烛图
 
@@ -49,6 +61,13 @@ TBD - created by archiving change update-price-chart-kline. Update Purpose after
 - **GIVEN** 价格图表数据携带入场价/止损价/目标价
 - **THEN** 图上渲染三条水平参考线并带区分标签（入场/止损/目标）
 - **GIVEN** 未携带任一决策价位
+- **THEN** 不渲染对应参考线，图表其余部分正常
+
+#### Scenario: 触发位参考线
+
+- **GIVEN** 价格图表数据携带 `trigger_high`/`trigger_low`
+- **THEN** 图上渲染对应水平参考线并带「上破触发」「下破触发」标签，样式与入场/止损/目标参考线可区分
+- **GIVEN** 未携带触发位
 - **THEN** 不渲染对应参考线，图表其余部分正常
 
 #### Scenario: 涨跌配色
