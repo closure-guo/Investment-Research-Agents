@@ -229,6 +229,12 @@ export function MarketRegimeCard() {
   const stateMeta = available ? STATE_META[available.state] : null
   const metrics = available ? indicatorMetrics(available.indicators) : []
   const hasHistory = available !== null && available.history.length > 0
+  // 分位需历史积累：全 null（上线初期 < min_history）时不画空坐标系，改显式提示
+  const hasPctileHistory =
+    available !== null &&
+    available.history.some(
+      row => row.small_cap_share_pctile !== null || row.total_amount_pctile !== null
+    )
   const emptyText =
     data && !data.available ? EMPTY_TEXT[data.reason] ?? EMPTY_TEXT.missing : null
 
@@ -320,9 +326,19 @@ export function MarketRegimeCard() {
             ))}
           </div>
 
-          {hasHistory && (
+          {hasPctileHistory && (
             <div data-testid="regime-chart" className="mt-3">
               <ReactECharts option={buildChartOption(available.history)} style={{ height: '200px' }} />
+            </div>
+          )}
+
+          {hasHistory && !hasPctileHistory && (
+            <div
+              data-testid="regime-chart-pending"
+              className="mt-3 text-xs"
+              style={{ color: 'var(--text-tertiary)' }}
+            >
+              分位样本积累中（不足 60 个交易日）
             </div>
           )}
 

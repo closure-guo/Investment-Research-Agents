@@ -213,6 +213,46 @@ describe('MarketRegimeCard 曲线', () => {
     expect(screen.queryByTestId('regime-chart')).toBeNull()
     expect(capturedOptions).toHaveLength(0)
   })
+
+  it('history 全 null（分位未积累期）→ 不画空坐标系，渲染积累中提示', async () => {
+    mockFetch(
+      availablePayload({
+        history: [
+          historyRow('2026-10-14', null, null),
+          historyRow('2026-10-15', null, null),
+          historyRow('2026-10-16', null, null),
+        ],
+      })
+    )
+    render(<MarketRegimeCard />)
+
+    const pending = await screen.findByTestId('regime-chart-pending')
+    expect(pending.textContent).toContain('分位样本积累中')
+    expect(pending.textContent).toContain('60')
+    expect(screen.queryByTestId('regime-chart')).toBeNull()
+    expect(capturedOptions).toHaveLength(0)
+    // 未积累 ≠ 无数据：指标/理由照常可见
+    expect(screen.getByTestId('regime-metrics')).toBeTruthy()
+    expect(screen.getByTestId('regime-reasons')).toBeTruthy()
+  })
+
+  it('部分分位可用（一条序列全 null）→ 照常渲染曲线，无误导性积累提示', async () => {
+    mockFetch(
+      availablePayload({
+        history: [historyRow('2026-10-15', null, 0.66), historyRow('2026-10-16', null, 0.95)],
+      })
+    )
+    render(<MarketRegimeCard />)
+
+    expect(await screen.findByTestId('regime-chart')).toBeTruthy()
+    expect(screen.queryByTestId('regime-chart-pending')).toBeNull()
+    expect(capturedOptions).toHaveLength(1)
+    const option = capturedOptions[0] as {
+      series: Array<{ name: string; data: Array<number | null> }>
+    }
+    expect(option.series[0].data).toEqual([null, null])
+    expect(option.series[1].data).toEqual([0.66, 0.95])
+  })
 })
 
 describe('MarketRegimeCard 陈旧披露', () => {
@@ -231,6 +271,14 @@ describe('MarketRegimeCard 陈旧披露', () => {
     expect(screen.getByTestId('regime-state-badge')).toBeTruthy()
     expect(screen.getByTestId('regime-metrics')).toBeTruthy()
     expect(screen.getByTestId('regime-chart')).toBeTruthy()
+  })
+
+  it('stale=false → 无陈旧提示（不无端告警）', async () => {
+    mockFetch(availablePayload({ stale: false }))
+    render(<MarketRegimeCard />)
+
+    expect(await screen.findByTestId('regime-multiplier')).toBeTruthy()
+    expect(screen.queryByTestId('regime-stale-notice')).toBeNull()
   })
 })
 
