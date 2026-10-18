@@ -117,7 +117,7 @@ print(len(list_batches()), len(list_batches(pool='microcap')))
 |---|---|---|
 | F1 断点判据缺覆盖语义 | `scripts/backfill_delisted.py` 改**整窗覆盖判据**（行齐备 + 最早行触及窗口起点锚 = 日历中首个 ≥ `list_date` 的交易日；只判头部），新增 `partial_overlap` 明细 | 先红：`test_single_window_row_is_not_skipped`（1 行日批行 → 旧判据跳过、零取数）→ 绿；`test_calendar_anchor_allows_skip_when_head_is_first_trading_day` 先红后绿；真实复跑摘要 `skipped_resumed=0 partial_overlap=0 rows_written=6175` |
 | F2 审计来源未落库 | `security_master.delist_source` 列（ALTER 迁移）+ `upsert_delisted_masters` 写入 + `get_security_master` 读出；§1.16 措辞同步 | 先红 4 例 → 绿；真实主表读回 `delist_source='sh_suspend'` |
-| F3 迁移原子性 | 重建改**显式事务**逐条执行（`BEGIN IMMEDIATE`…`ROLLBACK/COMMIT`，关闭 legacy 隐式提交）；`*__migrate` 残留**恢复路径**（数据以 migrate 表换入）；`_ensure_batch_columns` 列补齐在恢复之后 | 先红 3 例 → 绿：中断残留恢复（批次表/池表）、失败注入 `SELECT * FROM table_does_not_exist` → 原表与旧行在位、无残留 |
+| F3 迁移原子性 | 重建改**显式事务**逐条执行（`BEGIN IMMEDIATE`…`ROLLBACK/COMMIT`，关闭 legacy 隐式提交）；`*__migrate` 残留**恢复路径** + **行数守卫**（round 3：仅正式表缺失或 `rows(migrate) >= rows(real)` 才换入，否则清理残留、保留正式表并继续迁移）；`_ensure_batch_columns` 列补齐在恢复之后 | 先红 5 例 → 绿：中断残留恢复（批次表/池表）、失败注入 `SELECT * FROM table_does_not_exist` → 原表与旧行在位、**空 migrate + 有行正式表 → 行保留且主键重建完成**（round 3，`91ac94c7`） |
 | F4 日期列漂移 | 缺**退市日列** → 该源判不可用（`[]` + ERROR）；缺**上市日列** → 降级保留 + WARN；行级缺失仍 None | 先红 3 例 → 绿（含行级/列级区分） |
 | F4b 缺失明细持久留痕 | 非 dry-run 落 `snapshot_meta["delist_backfill_missing"]`（JSON：history/window/partial/skipped/updated_at） | 先红 2 例 → 绿；真实运行 meta 读回 `{"history_missing": [], "window_missing": [], ...}` |
 | F5 批次执行约束记录字段 | `screening_batches.exec_constraints`（JSON）+ 3 SELECT/UPSERT/迁移同步 + microcap 写入 `{"suggested_single_cap":0.05,"slippage_tier_bump":1}` | 先红 3 例 → 绿（store 三读侧一致、主档 None、老库补列、非法值拒收） |
@@ -136,3 +136,7 @@ history_missing=0`；`read_universe("2025-07-18")` 池含退市标的（1/1）�
 （如 600190：清单 `list_date` 1998-05-19 有重复行/数据瑕疵，实际行情起于 1999-06-09）时，覆盖判据
 永不满足 → **每次运行都会重取**（幂等、成本 = 一次取数）。属保守取舍（宁可重取不可谎报覆盖），
 如后续需要可在清单侧修 `list_date` 或引入「源历史起点」留痕后再放宽。
+
+**round 3 补记（`91ac94c7`）**：恢复规则加行数守卫，修复「CREATE 后、INSERT 前中断」形态下
+恢复把有行正式表换成空 migrate 表的静默丢行缺陷（评审实测：正式表 2 行 + 空 migrate → 0 行）；
+守卫后行保留、残留清理、同一次 init 继续完成列补齐与事务化主键重建（`tests/screening/test_screening_store.py` 35 passed）。
