@@ -308,8 +308,10 @@ MUST NOT 谎报覆盖。缺失/覆盖明细随非 dry-run 运行落 `snapshot_me
 - **日行情**：`ak.bond_zh_hs_cov_spot()`（新浪财经沪深可转债实时行情；本机 320 行）→ `cb_quotes(trade_date,
   code)` 唯一。`close` ← `trade`（元）、`amount` ← `amount`（元，源单位原样落库，不换算万元/亿元）。
   `trade` 缺失或 ≤ 0（停牌/零成交）→ 跳过该行并计数（WARNING），MUST NOT 折算 0 冒充价格。
-  **交易日注记**：`trade_date` = 日批 `as_of`，且必须落在快照库交易日历内；日历判非交易日 → 当次跳过
-  行情落库（摘要留痕 `quotes_skipped=non_trading_day`），MUST NOT 拿前一交易日价位冒充当日。
+  **交易日注记**：`trade_date` = 日批 `as_of`，且必须落在快照库交易日历内；**两种跳过**：日历判非交易日 →
+  当次跳过行情落库（摘要留痕 `skipped_reason=non_trading_day`）、**日历不可得（缺/空）→ 同样跳过**
+  （`skipped_reason=calendar_unavailable`，且不发起抓取）——缺日历无法确认当日是交易日，
+  MUST NOT 拿前一交易日价位冒充当日（评审 F4 口径对齐）。
 - **条款事件（强赎）**：`ak.bond_cb_redeem_jsl()`（集思录强赎；本机 317 行）→ `cb_events`，
   `event_type='强赎'`。列映射 `强赎触发价→trigger_price` / `强赎触发比→trigger_ratio`（%口径原样，样本 130）/
   `强赎天计数→count_text`（原样文本）/ `最后交易日→last_trade_date`（归一 `YYYY-MM-DD`）/
@@ -337,7 +339,10 @@ MUST NOT 谎报覆盖。缺失/覆盖明细随非 dry-run 运行落 `snapshot_me
 - 输入：事件行（`count_text` / `announce_date` / `last_trade_date` / 状态文本，状态取自 `raw_json` 的
   `强赎状态`）+ `as_of` + 交易日历。输出 `{state, days_done, days_needed, trading_days_to_last, note}`。
 - `count_text` 解析：`已触发天数/所需天数 | 上限天数`（形如 `12/15 | 30`，兼容空格/全角竖线变体）→
-  `days_done=12`、`days_needed=15`；不可解析（如到期类文案「临近到期 …」）→ 两者 None，MUST NOT 猜测。
+  `days_done=12`、`days_needed=15`；**结构锚定**（评审 F1）：必须带 `| 上限天数` 段且数字两侧不粘数字/斜杠，
+  另有合理性校验（`days_needed ≥ 1` 且 `days_done ≤ days_needed`）——越界/无结构文本一律不可解析
+  （防把斜杠日期 `2026/10/27` 读成天计数而误判 triggered）；不可解析（如到期类文案「临近到期 …」）→
+  两者 None，MUST NOT 猜测。
 - 状态判定（生命周期序 counting → triggered → announced，故 announced 优先级最高）：
   - `强赎状态 == "已公告强赎"` → **announced**；**此状态要求 `last_trade_date` 存在且可解析，缺失 → undetermined**
     （spec 场景「缺少最后交易日的强赎公告 → 不可判定」）；`公告不强赎` 无专用状态位，沿用天计数判定
@@ -348,7 +353,8 @@ MUST NOT 谎报覆盖。缺失/覆盖明细随非 dry-run 运行落 `snapshot_me
   - 边界：`days_done == days_needed` 判 triggered（含边界）；差一天判 counting。
 - **倒计时**：`trading_days_to_last` = 交易日历中 `as_of < d ≤ last_trade_date` 的交易日个数
   （`last_trade_date ≤ as_of` → 0，含边界不含当日）；跨周末/节假日由日历自然扣除。
-  日历缺失（空/不可得）或 `last_trade_date` 缺失 → `None` + note（如实缺值，不估算自然日）。
+  日历缺失（空/不可得）/ 日历未覆盖 `last_trade_date` / `last_trade_date` 缺失 → `None` + note
+  （如实缺值，不估算自然日；counting/triggered 未公告态本无最后交易日，note 亦指明缺字段）。
 - `as_of` 非规范 ISO 日期 → 上抛 `ValueError`（调用方缺陷，不静默降级）。
 
 **清单接线（规则化准入，零 LLM）**：`cb_events` 全部条目进入既有观察清单（`source="cbb"`，
@@ -358,7 +364,12 @@ MUST NOT 谎报覆盖。缺失/覆盖明细随非 dry-run 运行落 `snapshot_me
 清单注记）——缺值一律 null（前端 `—`），MUST NOT 折算/估算/换单位。清单构建**零 LLM 调用**（MUST NOT 依赖
 LLM 分诊）；`reason` = 规则化标注文本（状态标签 + 天计数 + 距最后交易日 + 不可判定 note）。
 清单条目不因状态为 undetermined 而被剔除（如实入清单，倒计时 null + note）。
-每日构建时刷新既有 cbb 条目的注记（倒计时随交易日递减），**不动** `status`/`session_id`/`created_at`。
+注记刷新纪律：**交易日历可得时**刷新既有 cbb 条目的注记（倒计时随交易日递减），
+**日历不可得时只插不覆盖**（如业绩预告分诊日批经本函数顺带构建的路径——MUST NOT 把既有倒计时降级为
+null + 「日历不可用」文案冒充刷新，评审 F2）；两种情形均**不动** `status`/`session_id`/`created_at`。
+**深度分析入口 v1 禁用**（评审 F3 控制器裁决）：条款事件条目 MUST NOT 经
+`POST /api/events/watchlist/{id}/analyze` 发起深度分析（后端 409「条款事件暂不支持发起深度分析（v1）」，
+前端不渲染该入口）——cbb 条目标的在 `cb_code`（业绩预告侧 `code` 为 NULL），放行会以空标的建会话入队。
 
 **家族隔离声明**：本变不注册策略族成绩单、不建记账（`event_journal` 仅事件线业绩预告写入），
 **不进 T+20 观点统计**（`predictions` 族样本不含转债样本）；转债观察清单为纯观察/研究通道，

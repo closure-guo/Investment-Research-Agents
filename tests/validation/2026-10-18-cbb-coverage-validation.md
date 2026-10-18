@@ -84,11 +84,14 @@ TDD 先红后绿证据逐任务见 `.superpowers/sdd/cbb/task-1-6-report.md` §2
 
 - 接口失败不落行：核心源（标的/强赎）失败 → 成功部分先落库 + 上抛（`run_job` 记 failed）；
   次要源（行情/逐代码下修）失败 → 摘要 `failed_secondary_sources` 留痕不阻断（对应要素 null）。
-- 非交易日：`as_of` 不在快照日历 → 行情跳过（`skipped_reason=non_trading_day`，且不发起抓取），MUST NOT 用过期价冒充当日。
-- 幂等：主表（代码唯一）/行情（交易日+代码唯一）/事件（`code|event_type|announce_date`）/清单（`forecast_key` 唯一）
-  重复运行零重复；cbb 条目注记每日刷新（倒计时递减）但 `status`/`session_id`/`created_at` 零改写。
+- 非交易日：`as_of` 不在快照日历 → 行情跳过（`skipped_reason=non_trading_day`，且不发起抓取）；
+  **日历不可得 → 同样跳过（`skipped_reason=calendar_unavailable`）**，两种情形均 MUST NOT 用过期价冒充当日（评审 F4）。
+- 幂等：主表（代码唯一，`remain_scale` COALESCE 保值）/行情（交易日+代码唯一）/事件（`code|event_type|announce_date` 唯一，空键不绕过）/清单（`forecast_key` 唯一）
+  重复运行零重复；cbb 条目注记在**日历可得**时刷新（倒计时递减）但 `status`/`session_id`/`created_at` 零改写；
+  日历不可得时只插不覆盖（评审 F2）。条款事件条目的深度分析入口 v1 禁用（后端 409、前端不渲染，评审 F3）。
 - 状态推导边界：天数恰好达标（含边界）→ triggered、差一天 → counting；日历跨周末；
-  缺 `last_trade_date`（已公告）→ undetermined + note；`as_of` 非规范 ISO → ValueError。
+  缺 `last_trade_date`（已公告）→ undetermined + note；斜杠日期/越界计数 → 不可解析不 triggered（评审 F1）；
+  `as_of` 非规范 ISO → ValueError。
 
 ## 5. 遗留与待决策
 
@@ -100,6 +103,10 @@ TDD 先红后绿证据逐任务见 `.superpowers/sdd/cbb/task-1-6-report.md` §2
 4. **`cb_events` 无专用状态列**（DDL 按 brief 冻结）：`强赎状态` 落在 `raw_json`，状态推导在读时提取；
    留痕损坏 → 不可判定（写明原因），已测。
 5. **`cb_quotes` 行情源为实时快照**（无历史回补）：日批仅在交易日落当日行；历史行情回补不在本变范围。
+6. **`cb_master.remain_scale` v1 恒 NULL（来源约束）**：标的源（`bond_zh_cov`）无剩余规模列，MUST NOT 以发行规模冒充；
+   清单条目的 `remaining_size` 改由强赎事件行的 `剩余规模`（亿元）供给（317 条全覆盖）。
+   若后续要从更全来源回填该列（强赎列表子集之外的标的），需另立数据源/提案（本变不做）；
+   upsert 已加 COALESCE 保值（评审 F6），日后回填不会被日常同步清空。控制器已同步在 delta spec 增「可得来源内」限定。
 
 ## 6. 结论
 
@@ -107,3 +114,26 @@ TDD 先红后绿证据逐任务见 `.superpowers/sdd/cbb/task-1-6-report.md` §2
 - [x] 人工项（清单条目四要素与倒计时手算抽样核对）**通过**（§3 六条倒计时全部与手算一致；两例四要素与源值逐项一致）
 - [x] 本变纯增量：不新增页面、不接执行链、不产生订单、零 LLM 准入
 - 可进入 sync + archive（回售事件类型清单待 owner 决策，见 §5.1）
+
+## 7. 评审修复复核（round 2，2026-10-18）
+
+评审结论 Needs fixes（5 Important + 4 小项），逐项修复（TDD 先红后绿，逐条有先红证据）：
+
+| 项 | 问题 | 修复 | 提交 | 先红 → 后绿 |
+|---|---|---|---|---|
+| F1 | 天计数正则过宽：`2026/10/27` 被读成 `2026/10` → 误判 triggered | 结构锚定（必须带 `| 上限天数` 段）+ 合理性校验（`1 ≤ days_needed`、`days_done ≤ days_needed`） | `f062b5fb` | 4 failed → 27 passed |
+| F2 | 兄弟日批（预告分诊）无日历调 `build_watchlist` → 清空 cbb 倒计时注记 + 误称「日历不可用」 | 无日历只插不覆盖（`refresh = bool(days)`） | `8d11ed4f` | 2 failed → 30 passed |
+| F3 | cbb 条目可发起空标的深度分析（`symbol=""` 建会话入队） | v1 禁用：API 对 `source=cbb` 409 + 前端不渲染入口（控制器裁决） | `2f163fd8` | 后端 1 failed / 前端 1 failed → 18 passed / 23 passed |
+| F4 | 日历不可得时按 `as_of` 落行情（与 §1.17「MUST NOT 拿前一日价冒充当日」冲突） | `calendar is None` → 跳过（`skipped_reason=calendar_unavailable`）不抓取不落行 | `abe1275f` | 4 failed → 42 passed |
+| F5 | `cb_master.remain_scale` 恒 NULL 与 spec 措辞差 | 代码侧不动；§5.6 登记来源约束（spec 由控制器改「可得来源内」） | 本报告 | — |
+| F6① | counting 缺 `last_trade_date` 无 note | 补 note（与 §1.17 字面一致） | `f062b5fb` | 含上 |
+| F6② | master upsert 会清空已回填的 `remain_scale` | 该列 `COALESCE(excluded, 既有)` | `abe1275f` | 含上 |
+| F6③ | 显式 `event_key=None` 绕过合成（SQLite TEXT PK 允许 NULL → 重复行） | `if not item.get("event_key")` 合成 | `abe1275f` | 含上 |
+| F6④ | 字面量 `"转债名称"` / `WARNNING` 拼写 | 走 `_CB_ADJ_NAME_COL` 常量 + 拼写修正 | `c40869e4` | 29 passed（映射行为不变） |
+
+修复后复跑门禁：`uv run pytest tests/outcome/ tests/test_api_events.py -q` → **888 passed**；
+`uv run ruff check` 改动文件全绿；新文件 mypy 零新增（`api.py` 8→8、`akshare_client.py` 9→9 均为存量）；
+前端 `npx vitest run src/test/eventWatchlistCard.test.tsx` → **23 passed**、`npx tsc --noEmit` 干净；
+真实数据实跑复核（§3 同款，2026-10-18 二次跑）：标的 1063 / 行情 306 / 事件 **318**（源当日新增 1 只）→
+清单 318 条、倒计时非空 **6 条且数值与首跑逐一相同**（7/2/20/10/8/18）——6/6 手算一致结论不因修复漂移；
+状态分布 311 counting / 6 announced / 1 undetermined（`强赎天计数` 311 条 pipe 结构全解析、6 条到期文案如实不解析）。
