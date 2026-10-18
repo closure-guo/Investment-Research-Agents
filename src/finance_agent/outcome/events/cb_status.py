@@ -126,6 +126,8 @@ def derive_redeem_status(
             state = STATE_ANNOUNCED
     elif days_done is None or days_needed is None:
         notes.insert(0, "count_text 缺失或不可解析（天计数不可判定）")
+        if last_trade_date is None:
+            notes.insert(1, "缺 last_trade_date")
         state = STATE_UNDETERMINED
     elif as_of >= announce_date and days_done >= days_needed:
         state = STATE_TRIGGERED

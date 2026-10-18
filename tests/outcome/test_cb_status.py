@@ -174,6 +174,16 @@ class TestUndetermined:
         assert result["state"] == "undetermined"
         assert "count_text" in str(result["note"])
 
+    def test_note_names_every_missing_element(self):
+        """多要素齐缺：note 逐个指明（count_text 不可解析 + 缺 last_trade_date）。"""
+        result = derive_redeem_status(
+            _event(count_text="临近到期 <span>…", last_trade_date=None, redeem_status=""),
+            as_of="2026-10-16",
+            calendar=_CALENDAR,
+        )
+        assert result["state"] == "undetermined"
+        assert "count_text" in str(result["note"]) and "last_trade_date" in str(result["note"])
+
     def test_missing_announce_date_is_undetermined(self):
         result = derive_redeem_status(
             _event(announce_date=None), as_of="2026-10-16", calendar=_CALENDAR

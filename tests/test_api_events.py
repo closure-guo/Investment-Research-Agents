@@ -6,6 +6,10 @@
 - POST analyze：复用既有分析队列单例（同一并发通道）、关联 session、重复点击幂等
   且 MUST NOT 重复入队、未知 id 404。
 
+add-convertible-bond-coverage 扩展：``source=cbb`` 条目载荷四键冻结
+（``price``（元）/ ``premium_rate``（%）/ ``remaining_size``（亿元）/ ``call_countdown_days``；
+缺值如实 null，MUST NOT 折算），按来源过滤仅回转债条目（口径见 §1.17）。
+
 零网络：PipelineRunner.start 与会话状态读取以可控桩替换（照 test_api_screening.py 先例）。
 """
 
@@ -19,6 +23,12 @@ from fastapi.testclient import TestClient
 
 from finance_agent import session_store
 from finance_agent.api import app
+from finance_agent.outcome.events.cb_model import (
+    cb_event_key,
+    upsert_cb_events,
+    upsert_cb_masters,
+    upsert_cb_quotes,
+)
 from finance_agent.outcome.events.model import (
     forecast_key,
     insert_watchlist,
@@ -26,9 +36,13 @@ from finance_agent.outcome.events.model import (
     record_triage,
     upsert_forecasts,
 )
+from finance_agent.outcome.events.watchlist import build_watchlist
 from finance_agent.screening.queue import AnalyzeQueue
 
 _NET = "归属于上市公司股东的净利润"
+
+# 2026-10-16 周五；下一交易日 10-19
+_CB_CALENDAR = ["2026-10-15", "2026-10-16", "2026-10-19", "2026-10-20"]
 
 
 @pytest.fixture
@@ -270,6 +284,97 @@ class TestAnalyzeEndpoint:
     def test_unknown_id_404(self, _events_db) -> None:
         resp = TestClient(app).post("/api/events/watchlist/999/analyze")
         assert resp.status_code == 404
+
+
+class TestWatchlistCbbEndpoint:
+    """条款事件条目（``source=cbb``）：四键冻结载荷 + 来源过滤（零 LLM 准入）。"""
+
+    def _seed_cb(self, db, *, countdown_event: bool = True) -> str:
+        """走真实构建路径造一条 cbb 条目（cb_events → build_watchlist）。"""
+        code, announce = "113046", "2026-10-15"
+        upsert_cb_masters(
+            [{"code": code, "name": "金田转债", "premium_rate": 1.63, "remain_scale": None}],
+            db_path=db,
+        )
+        upsert_cb_quotes([{"trade_date": "2026-10-16", "code": code, "close": 101.332}], db_path=db)
+        upsert_cb_events(
+            [
+                {
+                    "event_key": cb_event_key(code, "强赎", announce),
+                    "code": code,
+                    "event_type": "强赎",
+                    "announce_date": announce,
+                    "trigger_price": 13.234,
+                    "trigger_ratio": 130.0,
+                    "count_text": "12/15 | 30" if countdown_event else "临近到期 <span>…",
+                    "last_trade_date": "2026-10-20" if countdown_event else None,
+                    "remain_scale": 9.905,
+                    "raw_json": json.dumps({"强赎状态": "已公告强赎"}, ensure_ascii=False),
+                }
+            ],
+            db_path=db,
+        )
+        build_watchlist(db_path=db, as_of="2026-10-16", calendar=_CB_CALENDAR)
+        return cb_event_key(code, "强赎", announce)
+
+    def test_cbb_payload_carries_frozen_four_keys(self, _events_db) -> None:
+        key = self._seed_cb(_events_db)
+        resp = TestClient(app).get("/api/events/watchlist?source=cbb")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 1
+        item = items[0]
+        assert item["forecast_key"] == key and item["source"] == "cbb"
+        # 四键冻结：price（元）/ premium_rate（%）/ remaining_size（亿元）/ 倒计时（交易日）
+        assert item["price"] == 101.332
+        assert item["premium_rate"] == 1.63
+        assert item["remaining_size"] == 9.905
+        assert item["call_countdown_days"] == 2
+        # 标的与公告日走转债侧（预告侧联表对 cbb 行如实留空）
+        assert item["code"] == "113046" and item["name"] == "金田转债"
+        assert item["announce_date"] == "2026-10-15"
+        assert item["report_period"] is None and item["verdict"] is None
+        # 规则化理由文本（零 LLM 准入）：状态 + 天计数 + 倒计时
+        assert "已公告强赎" in item["reason"] and "天计数 12/15" in item["reason"]
+        assert "2 个交易日" in item["reason"]
+
+    def test_missing_elements_stay_null_with_note(self, _events_db) -> None:
+        """要素缺失：倒计时如实 null（不折算 0/不估算），理由注明缺失字段。"""
+        self._seed_cb(_events_db, countdown_event=False)
+        item = TestClient(app).get("/api/events/watchlist?source=cbb").json()["items"][0]
+        assert item["call_countdown_days"] is None
+        assert item["remaining_size"] == 9.905
+        assert "last_trade_date" in item["reason"]
+
+    def test_source_filter_isolates_sources(self, _events_db) -> None:
+        _seed_item(_events_db, code="600519", source="earnings")
+        self._seed_cb(_events_db)
+        client = TestClient(app)
+        cbb = client.get("/api/events/watchlist?source=cbb").json()["items"]
+        earnings = client.get("/api/events/watchlist?source=earnings").json()["items"]
+        assert [item["source"] for item in cbb] == ["cbb"]
+        assert [item["source"] for item in earnings] == ["earnings"]
+        assert "price" not in earnings[0], "四键仅条款事件条目携带（预告条目不受影响）"
+        assert len(client.get("/api/events/watchlist").json()["items"]) == 2
+
+    def test_corrupt_note_degrades_to_null_with_warning(self, _events_db, caplog) -> None:
+        """注记 JSON 损坏 → 四键中倒计时 null + 理由 null（不伪装、不编造）。"""
+        import logging
+
+        key = self._seed_cb(_events_db)
+        import sqlite3
+
+        conn = sqlite3.connect(_events_db)
+        try:
+            conn.execute("UPDATE event_watchlist SET note='{坏' WHERE forecast_key=?", (key,))
+            conn.commit()
+        finally:
+            conn.close()
+        with caplog.at_level(logging.WARNING):
+            item = TestClient(app).get("/api/events/watchlist?source=cbb").json()["items"][0]
+        assert item["call_countdown_days"] is None and item["reason"] is None
+        assert item["price"] == 101.332, "联表要素不受注记损坏影响"
+        assert "注记" in caplog.text
 
 
 class TestEventsSeed:

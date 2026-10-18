@@ -189,6 +189,9 @@ from finance_agent.outcome.events.model import (  # noqa: E402
     list_watchlist,
     mark_watchlist_analyzing,
 )
+from finance_agent.outcome.events.watchlist import (  # noqa: E402
+    WATCHLIST_SOURCE_CBB,
+)
 from finance_agent.outcome.regime.payload import build_regime_payload  # noqa: E402
 from finance_agent.outcome.store import (  # noqa: E402
     DECISION_STATUSES,
@@ -3640,9 +3643,33 @@ def _watchlist_evidence(raw: Any) -> Any:
     return parsed
 
 
+def _cbb_note_payload(raw: Any) -> dict[str, Any] | None:
+    """条款事件条目的规则化注记（``event_watchlist.note`` JSON）→ dict。
+
+    损坏/非对象 → ``None`` + WARNNING（四键中倒计时如实 null，不伪装成 0 或编造理由）。
+    """
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(str(raw))
+    except ValueError:
+        _logger.warning("条款事件注记 JSON 损坏，按 null 返回: %.80s", raw)
+        return None
+    if not isinstance(parsed, dict):
+        _logger.warning("条款事件注记非对象，按 null 返回: %.80s", raw)
+        return None
+    return parsed
+
+
 def _event_watchlist_payload(row: dict[str, Any]) -> dict[str, Any]:
-    """清单行（库列名）→ API 载荷（前端契约字段名）。"""
-    return {
+    """清单行（库列名）→ API 载荷（前端契约字段名）。
+
+    条款事件条目（``source=cbb``）额外携带**冻结四键**（跨变更契约，2026-10-18 裁决）：
+    ``price``（元，最新交易日行情）/ ``premium_rate``（%，标的表）/ ``remaining_size``
+    （亿元，事件行剩余规模）/ ``call_countdown_days``（交易日个数，构建时按日历推导后落注记）
+    ——缺值一律 null（前端 ``—``），MUST NOT 折算；``reason`` = 规则化理由文本。
+    """
+    payload = {
         "id": row.get("id"),
         "forecast_key": row.get("forecast_key"),
         "source": row.get("source"),
@@ -3664,6 +3691,17 @@ def _event_watchlist_payload(row: dict[str, Any]) -> dict[str, Any]:
         "prompt_fingerprint": row.get("prompt_fingerprint"),
         "triaged_at": row.get("triaged_at"),
     }
+    if row.get("source") == WATCHLIST_SOURCE_CBB:
+        note = _cbb_note_payload(row.get("note")) or {}
+        payload["code"] = row.get("cb_code")
+        payload["name"] = row.get("cb_name")
+        payload["announce_date"] = row.get("cb_announce_date")
+        payload["price"] = row.get("cb_close")
+        payload["premium_rate"] = row.get("cb_premium_rate")
+        payload["remaining_size"] = row.get("cb_remain_scale")
+        payload["call_countdown_days"] = note.get("call_countdown_days")
+        payload["reason"] = note.get("reason")
+    return payload
 
 
 @app.get("/api/events/watchlist")
