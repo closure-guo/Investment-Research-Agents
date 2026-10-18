@@ -56,6 +56,7 @@ function snapshotBody(overrides: Partial<FactorResearchStatusResponse> = {}): Fa
       },
     ],
     totals: { sessions: 2, candidates: 135, workspace_tasks: 222 },
+    control: { desired_running: null, requested_at: null, pending: false },
     ...overrides,
   }
 }
@@ -288,5 +289,250 @@ describe('因子研发监控页（delta add-factor-research-monitor T3）', () =
     await screen.findByTestId('factor-research-progress')
     expect(screen.getByTestId('factor-research-progress').textContent).toBe('暂无进度标记')
     expect(screen.queryByTestId('factor-research-step-timing')).toBeNull()
+  })
+})
+
+/**
+ * 看护启停开关（delta add-factor-research-control T3；spec frontend「因子研发监控页」改编点）。
+ *
+ * - 两态位置按快照实态（不乐观翻转）；pending → 「切换中」+ 禁用；
+ * - 停止二次确认（未确认不发请求）；启动直发；
+ * - 陈旧/缺失/损坏 → 禁用 + 明示理由；409/网络失败如实提示且位置不翻转。
+ */
+describe('因子研发监控页 · 看护启停开关（delta add-factor-research-control）', () => {
+  function mockControlFetch(
+    statusBodies: FactorResearchStatusResponse[],
+    putResponse: { status?: number; body?: unknown } = {}
+  ) {
+    let statusCalls = 0
+    const putCalls: Array<{ body: unknown }> = []
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/factor-research/status') {
+        const body = statusBodies[Math.min(statusCalls, statusBodies.length - 1)]
+        statusCalls += 1
+        return respond(body)
+      }
+      if (url === '/api/factor-research/control' && init?.method === 'PUT') {
+        putCalls.push({ body: JSON.parse(String(init.body)) })
+        return respond(
+          putResponse.body ?? {
+            control: { desired_running: false, requested_at: '2026-10-17T23:10:00+08:00', pending: true },
+          },
+          putResponse.status ?? 200
+        )
+      }
+      if (url === '/api/sessions') return respond({ sessions: [] })
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return { fetchMock, putCalls }
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('两态：运行中 → 开关为开且可操作，文案「已开启」', async () => {
+    mockControlFetch([snapshotBody()])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const sw = await screen.findByTestId('factor-research-control-switch')
+    expect(sw.getAttribute('aria-checked')).toBe('true')
+    expect((sw as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByTestId('factor-research-control-state').textContent).toContain('已开启')
+  })
+
+  it('停止：二次确认后才发 PUT；pending 期间「切换中」+ 禁用；请求体仅布尔期望态', async () => {
+    const { putCalls } = mockControlFetch([
+      snapshotBody(),
+      snapshotBody({
+        control: { desired_running: false, requested_at: '2026-10-17T23:10:00+08:00', pending: true },
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const sw = await screen.findByTestId('factor-research-control-switch')
+    fireEvent.click(sw)
+
+    // 二次确认弹窗出现（含「终止当前研发会话」语义）
+    const confirm = await screen.findByTestId('factor-research-control-confirm')
+    expect(screen.getByTestId('factor-research-control-confirm-dialog').textContent).toContain(
+      '将终止当前研发会话'
+    )
+    // 未确认前 MUST NOT 发出控制请求
+    expect(putCalls).toHaveLength(0)
+
+    fireEvent.click(confirm)
+    await waitFor(() => expect(putCalls).toHaveLength(1))
+    expect(putCalls[0].body).toEqual({ desired_running: false })
+    // pending → 切换中 + 禁用（位置仍为实态开，不冒充已停止）
+    await waitFor(() =>
+      expect(screen.getByTestId('factor-research-control-state').textContent).toContain('切换中')
+    )
+    expect((screen.getByTestId('factor-research-control-switch') as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByTestId('factor-research-control-switch').getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('取消确认：不发请求', async () => {
+    const { putCalls } = mockControlFetch([snapshotBody()])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    fireEvent.click(await screen.findByTestId('factor-research-control-switch'))
+    fireEvent.click(await screen.findByTestId('factor-research-control-cancel'))
+    expect(putCalls).toHaveLength(0)
+  })
+
+  it('启动：关闭态点击直接 PUT（无二次确认）', async () => {
+    const { putCalls } = mockControlFetch([
+      snapshotBody({ supervisor: { running: false, pid: null, started_at: null } }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const sw = await screen.findByTestId('factor-research-control-switch')
+    expect(sw.getAttribute('aria-checked')).toBe('false')
+    fireEvent.click(sw)
+
+    expect(screen.queryByTestId('factor-research-control-confirm-dialog')).toBeNull()
+    await waitFor(() => expect(putCalls).toHaveLength(1))
+    expect(putCalls[0].body).toEqual({ desired_running: true })
+  })
+
+  it('pending 渲染：切换中 + 禁用（MUST NOT 冒充已生效）', async () => {
+    mockFetch(
+      snapshotBody({
+        control: { desired_running: false, requested_at: '2026-10-17T23:10:00+08:00', pending: true },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-control-switch')
+    expect(screen.getByTestId('factor-research-control-state').textContent).toContain('切换中')
+    expect((screen.getByTestId('factor-research-control-switch') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('陈旧：开关禁用 + 明示理由，点击不发请求', async () => {
+    const { putCalls } = mockControlFetch([snapshotBody({ stale: true, age_seconds: 400 })])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const sw = await screen.findByTestId('factor-research-control-switch')
+    expect((sw as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByTestId('factor-research-control-state').textContent).toContain('数据已陈旧')
+    fireEvent.click(sw)
+    expect(putCalls).toHaveLength(0)
+  })
+
+  it('缺失：控制条仍在但开关禁用 + 「控制通道未接入」', async () => {
+    mockControlFetch([{ available: false, reason: 'missing' }])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-empty-missing')
+    const sw = screen.getByTestId('factor-research-control-switch')
+    expect((sw as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByTestId('factor-research-control-state').textContent).toContain('控制通道未接入')
+  })
+
+  it('409：开关立即禁用（禁用至下一轮刷新），成功刷新后解封并清除提示', async () => {
+    // 闸门控制下一轮轮询的返回时机（全量并发下 30ms 轮询会与点击流竞态 → 确定性设计）
+    let statusCalls = 0
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    let putCalls = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/factor-research/status') {
+        statusCalls += 1
+        if (statusCalls >= 2) await gate
+        return respond(snapshotBody())
+      }
+      if (url === '/api/factor-research/control' && init?.method === 'PUT') {
+        putCalls += 1
+        return respond({ detail: 'control_unavailable' }, 409)
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={30} />)
+
+    fireEvent.click(await screen.findByTestId('factor-research-control-switch'))
+    fireEvent.click(await screen.findByTestId('factor-research-control-confirm'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('factor-research-control-error').textContent).toContain('控制通道不可用')
+    )
+    // 409 后立即禁用（spec：端点返回 409 时开关 SHALL 禁用并明示理由）
+    expect(
+      (screen.getByTestId('factor-research-control-switch') as HTMLButtonElement).disabled
+    ).toBe(true)
+    expect(putCalls).toBe(1)
+    expect(screen.getByTestId('factor-research-control-switch').getAttribute('aria-checked')).toBe('true')
+
+    // 放行下一轮成功刷新 → 解封 + 提示清除
+    release()
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('factor-research-control-switch') as HTMLButtonElement).disabled
+      ).toBe(false)
+    )
+    expect(screen.queryByTestId('factor-research-control-error')).toBeNull()
+  })
+
+  it('损坏快照：开关禁用 + 「控制通道未接入（快照损坏）」', async () => {
+    mockControlFetch([{ available: false, reason: 'corrupt' }])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-empty-corrupt')
+    const sw = screen.getByTestId('factor-research-control-switch')
+    expect((sw as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByTestId('factor-research-control-state').textContent).toContain('快照损坏')
+  })
+
+  it('网络失败：如实提示且开关位置保持实态', async () => {
+    let statusCalls = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/factor-research/status') {
+        statusCalls += 1
+        return respond(snapshotBody())
+      }
+      if (url === '/api/factor-research/control' && init?.method === 'PUT') {
+        return Promise.reject(new Error('network down'))
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    fireEvent.click(await screen.findByTestId('factor-research-control-switch'))
+    fireEvent.click(await screen.findByTestId('factor-research-control-confirm'))
+    await waitFor(() =>
+      expect(screen.getByTestId('factor-research-control-error').textContent).toContain('网络错误')
+    )
+    expect(statusCalls).toBe(1) // 失败不触发刷新
+    expect(screen.getByTestId('factor-research-control-switch').getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('409：如实提示且开关位置保持实态（不翻转冒充成功）', async () => {
+    const { putCalls } = mockControlFetch([snapshotBody()], {
+      status: 409,
+      body: { detail: 'control_unavailable' },
+    })
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    fireEvent.click(await screen.findByTestId('factor-research-control-switch'))
+    fireEvent.click(await screen.findByTestId('factor-research-control-confirm'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('factor-research-control-error').textContent).toContain('控制通道不可用')
+    )
+    expect(putCalls).toHaveLength(1)
+    expect(screen.getByTestId('factor-research-control-switch').getAttribute('aria-checked')).toBe('true')
   })
 })

@@ -36,6 +36,17 @@ def _status_path(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def _control_path(tmp_path, monkeypatch):
+    """控制文件路径指向 tmp（调用期读 env；delta add-factor-research-control）。"""
+    path = tmp_path / "control.json"
+    monkeypatch.setenv("FACTOR_RESEARCH_CONTROL_PATH", str(path))
+    return path
+
+
+_NO_CONTROL = {"desired_running": None, "requested_at": None, "pending": False}
+
+
 def _snapshot(age_s: int = 40) -> dict:
     """合法快照 fixture：形状与采集器契约（factor-research-monitor spec）一致。"""
     epoch = int(time.time() - age_s)
@@ -70,28 +81,36 @@ def _snapshot(age_s: int = 40) -> dict:
 
 
 def test_missing_file_reports_missing():
-    """文件缺失 → 200 + available=false + reason=missing（第一类「未接入」状态）。"""
+    """文件缺失 → 200 + available=false + reason=missing（第一档「未接入」状态）。"""
     resp = TestClient(app).get(_ENDPOINT)
     assert resp.status_code == 200
-    assert resp.json() == {"available": False, "reason": "missing"}
+    assert resp.json() == {"available": False, "reason": "missing", "control": _NO_CONTROL}
 
 
 def test_corrupt_text_reports_corrupt(_status_path):
     _status_path.write_text("not json at all", encoding="utf-8")
     resp = TestClient(app).get(_ENDPOINT)
     assert resp.status_code == 200
-    assert resp.json() == {"available": False, "reason": "corrupt"}
+    assert resp.json() == {"available": False, "reason": "corrupt", "control": _NO_CONTROL}
 
 
 def test_non_object_json_reports_corrupt(_status_path):
     _status_path.write_text("[1, 2, 3]", encoding="utf-8")
-    assert TestClient(app).get(_ENDPOINT).json() == {"available": False, "reason": "corrupt"}
+    assert TestClient(app).get(_ENDPOINT).json() == {
+        "available": False,
+        "reason": "corrupt",
+        "control": _NO_CONTROL,
+    }
 
 
 def test_missing_timestamp_reports_corrupt(_status_path):
     """无可解析时间戳（epoch 与 ISO 均缺）→ corrupt（age 不可计算即不可信）。"""
     _status_path.write_text(json.dumps({"supervisor": {"running": True}}), encoding="utf-8")
-    assert TestClient(app).get(_ENDPOINT).json() == {"available": False, "reason": "corrupt"}
+    assert TestClient(app).get(_ENDPOINT).json() == {
+        "available": False,
+        "reason": "corrupt",
+        "control": _NO_CONTROL,
+    }
 
 
 def test_fresh_snapshot_passthrough_with_derived(_status_path):
@@ -156,3 +175,153 @@ def test_endpoint_read_only(_status_path):
     before = _status_path.read_bytes()
     TestClient(app).get(_ENDPOINT)
     assert _status_path.read_bytes() == before
+
+
+# ── control 块（delta add-factor-research-control T2；spec「只读查询端点」附加条款）──
+
+
+def test_status_control_block_null_when_control_file_missing(_status_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    body = TestClient(app).get(_ENDPOINT).json()
+    assert body["control"] == _NO_CONTROL
+
+
+def test_status_control_block_pending_reflects_desired_vs_actual(_status_path, _control_path):
+    """pending = 期望与非陈旧快照实态不一致（两个方向都真）。"""
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")  # running=True
+    _control_path.write_text(
+        json.dumps({"desired_running": False, "requested_at": "2026-10-17T23:00:00+08:00"}),
+        encoding="utf-8",
+    )
+    control = TestClient(app).get(_ENDPOINT).json()["control"]
+    assert control["desired_running"] is False
+    assert control["requested_at"] == "2026-10-17T23:00:00+08:00"
+    assert control["pending"] is True
+
+    _control_path.write_text(json.dumps({"desired_running": True}), encoding="utf-8")
+    assert TestClient(app).get(_ENDPOINT).json()["control"]["pending"] is False
+
+
+def test_status_control_block_pending_true_when_turning_on(_status_path, _control_path):
+    """停止态 + 期望开启 → pending 同样如实（方向对称）。"""
+    snap = _snapshot()
+    snap["supervisor"] = {"running": False, "pid": None, "started_at": None}
+    _status_path.write_text(json.dumps(snap), encoding="utf-8")
+    _control_path.write_text(json.dumps({"desired_running": True}), encoding="utf-8")
+    assert TestClient(app).get(_ENDPOINT).json()["control"]["pending"] is True
+
+
+def test_status_control_block_pending_false_when_stale(_status_path, _control_path):
+    """陈旧快照 → 实态不可证 → pending 恒假（MUST NOT 据陈旧数据判「切换中」）。"""
+    _status_path.write_text(json.dumps(_snapshot(age_s=400)), encoding="utf-8")
+    _control_path.write_text(json.dumps({"desired_running": False}), encoding="utf-8")
+    body = TestClient(app).get(_ENDPOINT).json()
+    assert body["stale"] is True
+    assert body["control"]["desired_running"] is False
+    assert body["control"]["pending"] is False
+
+
+def test_status_control_block_invalid_control_file_null(_status_path, _control_path):
+    """控制文件损坏 / 字段类型非法 → desired=null（如实不猜）。"""
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    _control_path.write_text("not json", encoding="utf-8")
+    assert TestClient(app).get(_ENDPOINT).json()["control"] == _NO_CONTROL
+    _control_path.write_text(json.dumps({"desired_running": "true"}), encoding="utf-8")
+    assert TestClient(app).get(_ENDPOINT).json()["control"] == _NO_CONTROL
+    _control_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")  # 合法 JSON 但非对象
+    assert TestClient(app).get(_ENDPOINT).json()["control"] == _NO_CONTROL
+
+
+# ── PUT /api/factor-research/control（spec「控制请求端点」）──
+
+_CONTROL_ENDPOINT = "/api/factor-research/control"
+
+
+def test_control_put_writes_file_and_returns_block(_status_path, _control_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")  # running=True
+    resp = TestClient(app).put(_CONTROL_ENDPOINT, json={"desired_running": False})
+    assert resp.status_code == 200
+    control = resp.json()["control"]
+    assert control["desired_running"] is False
+    assert control["pending"] is True
+    on_disk = json.loads(_control_path.read_text(encoding="utf-8"))
+    assert set(on_disk) == {"desired_running", "requested_at", "requested_at_epoch", "request_id"}
+    assert on_disk["desired_running"] is False
+    assert isinstance(on_disk["requested_at"], str) and on_disk["requested_at"]
+    assert isinstance(on_disk["requested_at_epoch"], int)
+    assert isinstance(on_disk["request_id"], str) and on_disk["request_id"]
+    assert not list(_control_path.parent.glob("*.tmp"))  # 原子写：无残留临时文件
+
+
+def test_control_put_pending_false_when_aligned(_status_path, _control_path):
+    """期望与实态一致（停止态写 false）→ pending=false。"""
+    snap = _snapshot()
+    snap["supervisor"] = {"running": False, "pid": None, "started_at": None}
+    _status_path.write_text(json.dumps(snap), encoding="utf-8")
+    resp = TestClient(app).put(_CONTROL_ENDPOINT, json={"desired_running": False})
+    assert resp.status_code == 200
+    assert resp.json()["control"]["pending"] is False
+
+
+def test_control_put_idempotent_repeat(_status_path, _control_path):
+    """重复同值 → 幂等成功（requested_at 可更新留痕，期望态不变）。"""
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    client = TestClient(app)
+    client.put(_CONTROL_ENDPOINT, json={"desired_running": False})
+    first = json.loads(_control_path.read_text(encoding="utf-8"))
+    resp = client.put(_CONTROL_ENDPOINT, json={"desired_running": False})
+    assert resp.status_code == 200
+    assert json.loads(_control_path.read_text(encoding="utf-8"))["desired_running"] is False
+    assert first["desired_running"] == resp.json()["control"]["desired_running"] is False
+
+
+def test_control_put_rejected_when_snapshot_missing(_control_path):
+    """通道无存活证据（快照缺失）→ 409 control_unavailable 且不写控制文件。"""
+    resp = TestClient(app).put(_CONTROL_ENDPOINT, json={"desired_running": True})
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "control_unavailable"
+    assert not _control_path.exists()
+
+
+def test_control_put_rejected_when_snapshot_corrupt(_status_path, _control_path):
+    _status_path.write_text("not json", encoding="utf-8")
+    resp = TestClient(app).put(_CONTROL_ENDPOINT, json={"desired_running": True})
+    assert resp.status_code == 409
+    assert not _control_path.exists()
+
+
+def test_control_put_rejected_when_snapshot_stale(_status_path, _control_path):
+    _status_path.write_text(json.dumps(_snapshot(age_s=400)), encoding="utf-8")
+    resp = TestClient(app).put(_CONTROL_ENDPOINT, json={"desired_running": False})
+    assert resp.status_code == 409
+    assert not _control_path.exists()
+
+
+def test_control_put_body_must_be_boolean(_status_path):
+    """零命令面：仅接受布尔期望态（字符串/缺失 → 422）。"""
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    assert (
+        TestClient(app).put(_CONTROL_ENDPOINT, json={"desired_running": "yes"}).status_code == 422
+    )
+    assert TestClient(app).put(_CONTROL_ENDPOINT, json={}).status_code == 422
+    assert (
+        TestClient(app)
+        .put(_CONTROL_ENDPOINT, json={"desired_running": False, "cmd": "rm -rf /"})
+        .status_code
+        == 422
+    )
+
+
+def test_control_path_read_at_call_time(tmp_path, monkeypatch):
+    """控制文件路径调用期读 env（与快照路径同纪律）。"""
+    first = tmp_path / "c1.json"
+    second = tmp_path / "c2.json"
+    monkeypatch.setenv("FACTOR_RESEARCH_CONTROL_PATH", str(first))
+    monkeypatch.setenv("FACTOR_RESEARCH_STATUS_PATH", str(tmp_path / "s.json"))
+    (tmp_path / "s.json").write_text(json.dumps(_snapshot()), encoding="utf-8")
+    client = TestClient(app)
+    client.put(_CONTROL_ENDPOINT, json={"desired_running": False})
+    assert first.exists() and not second.exists()
+    monkeypatch.setenv("FACTOR_RESEARCH_CONTROL_PATH", str(second))
+    client.put(_CONTROL_ENDPOINT, json={"desired_running": True})
+    assert second.exists()

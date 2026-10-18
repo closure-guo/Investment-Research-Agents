@@ -974,6 +974,15 @@ export interface FactorResearchTotals {
   workspace_tasks: number
 }
 
+export interface FactorResearchControl {
+  /** 期望态（控制文件缺失/不可解析 → null，如实不猜） */
+  desired_running: boolean | null
+  /** 控制请求发起时刻（ISO8601；缺失 → null） */
+  requested_at: string | null
+  /** 期望与新鲜快照实态不一致（切换中）；陈旧/不可用快照恒 false */
+  pending: boolean
+}
+
 export interface FactorResearchStatusResponse {
   available: boolean
   /** available=false 时如实二分：missing（未接入）/ corrupt（快照损坏） */
@@ -986,6 +995,8 @@ export interface FactorResearchStatusResponse {
   current_session?: FactorResearchCurrentSession | null
   sessions?: FactorResearchSession[]
   totals?: FactorResearchTotals | null
+  /** 控制块（delta add-factor-research-control；快照不可用/陈旧时同样返回） */
+  control?: FactorResearchControl | null
 }
 
 // ── 执行台账只读契约（delta add-broker-console：GET /api/broker/*） ──

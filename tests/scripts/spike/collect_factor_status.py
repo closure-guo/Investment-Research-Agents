@@ -18,11 +18,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import sys
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -226,9 +228,13 @@ def _rdagent_session_alive() -> bool:
 
 
 def atomic_write_json(path: Path, payload: dict) -> None:
-    """原子写：同目录临时文件 + os.replace（读取方任一时刻只见完整快照）。"""
+    """原子写：同目录唯一临时文件 + os.replace（读取方任一时刻只见完整快照）。
+
+    唯一 tmp 名（pid + 随机后缀）：代理守护与手动兜底 `--once` 可能并存写同一状态文件，
+    固定名会在交叉时 replace 出残缺 JSON。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
 
@@ -438,11 +444,10 @@ def collect_once(
         },
     }
     atomic_write_json(out_path, snapshot)
-    try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(new_state, ensure_ascii=False), encoding="utf-8")
-    except OSError:
-        pass  # 状态文件写失败不阻断快照（下轮重建，代价=重扫本会话）
+    with contextlib.suppress(OSError):
+        # 原子写（delta add-factor-research-control：代理守护与手动兜底并存，防半读重建）；
+        # 状态文件写失败不阻断快照（下轮重建，代价=重扫本会话）
+        atomic_write_json(state_path, new_state)
     return snapshot
 
 

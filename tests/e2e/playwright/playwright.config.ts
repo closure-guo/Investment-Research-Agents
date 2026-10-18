@@ -101,7 +101,7 @@ export default defineConfig({
       // 监控 E2E 的 fixture 快照由 spec 直接写文件，绝不能落到生产快照
       // data/factor_research/status.json（采集器运行时产物）
       command: 'uv run uvicorn finance_agent.api:app --port 8000',
-      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
+      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
       url: 'http://localhost:8000/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,

@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, StrictBool, field_validator
 
 _logger = logging.getLogger("finance_agent.api")
 
@@ -3693,16 +3693,23 @@ async def factor_library_detail(factor_id: int) -> dict[str, Any]:
     return payload
 
 
-# ── 因子研发监控（delta add-factor-research-monitor：快照透传 + 陈旧派生）──
+# ── 因子研发监控（delta add-factor-research-monitor：快照透传 + 陈旧派生；
+#    delta add-factor-research-control：控制请求端点 + control 块）──
 #
 # 只读面：读取 distro 采集器（collect_factor_status.py）经宿主 data/ 桥写入的 JSON
 # 快照，零写入、零业务复制。路径调用期读 ``FACTOR_RESEARCH_STATUS_PATH``
 # （E2E env 注入即生效，同 SNAPSHOT_DB_PATH 纪律）。缺失/损坏二分如实——
 # 监控页需要第一类「未接入」状态，MUST NOT 以 500 或伪快照冒充。
+#
+# 控制面（add-factor-research-control）：``PUT /api/factor-research/control`` 原子写控制
+# 文件（宿主 data/ 桥反向，distro 侧研发代理轮询调和）；零命令面——仅布尔期望态，
+# 无任意命令/脚本字段。快照缺失/损坏/陈旧 = 控制通道无存活证据 → 409 拒绝（不留
+# 无人受理的请求）。
 FACTOR_RESEARCH_STALE_AFTER_S = 180  # 3× 采集周期（契约 ≤60s）；阈值单源
 
 
-def _factor_research_status_payload() -> dict[str, Any]:
+def _factor_research_snapshot_payload() -> dict[str, Any]:
+    """快照面：透传 + 派生 ``available``/``age_seconds``/``stale``（控制块另行附加）。"""
     path = Path(os.environ.get("FACTOR_RESEARCH_STATUS_PATH", "data/factor_research/status.json"))
     if not path.is_file():
         return {"available": False, "reason": "missing"}
@@ -3732,10 +3739,85 @@ def _factor_research_status_payload() -> dict[str, Any]:
     return payload
 
 
+def _read_control_file(path: Path) -> dict[str, Any]:
+    """控制文件读取：缺失/不可解析/字段非法 → ``desired_running=None``（如实不猜）。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {"desired_running": None, "requested_at": None}
+    if not isinstance(data, dict):
+        return {"desired_running": None, "requested_at": None}
+    desired = data.get("desired_running")
+    requested_at = data.get("requested_at")
+    return {
+        "desired_running": desired if isinstance(desired, bool) else None,
+        "requested_at": requested_at if isinstance(requested_at, str) else None,
+    }
+
+
+def _factor_research_control_block(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """control 块：期望态 + requested_at + ``pending``（期望与新鲜快照实态不一致）。
+
+    陈旧/不可用快照 → 实态不可证 → ``pending`` 恒假（MUST NOT 据陈旧数据判「切换中」）。
+    """
+    control = _read_control_file(
+        Path(os.environ.get("FACTOR_RESEARCH_CONTROL_PATH", "data/factor_research/control.json"))
+    )
+    pending = False
+    if (
+        control["desired_running"] is not None
+        and snapshot.get("available")
+        and not snapshot.get("stale")
+    ):
+        running = bool((snapshot.get("supervisor") or {}).get("running"))
+        pending = control["desired_running"] != running
+    return {**control, "pending": pending}
+
+
+def _factor_research_status_payload() -> dict[str, Any]:
+    snapshot = _factor_research_snapshot_payload()
+    return {**snapshot, "control": _factor_research_control_block(snapshot)}
+
+
+class FactorResearchControlRequest(BaseModel):
+    """控制请求：仅接受布尔期望态（StrictBool——无字符串/数字强转；多余字段 422）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    desired_running: StrictBool
+
+
+def _factor_research_control_update(desired_running: bool) -> dict[str, Any]:
+    """写控制文件（原子 tmp + replace）；通道无存活证据 → 409，MUST NOT 落文件。"""
+    snapshot = _factor_research_snapshot_payload()
+    if not snapshot.get("available") or snapshot.get("stale"):
+        raise HTTPException(status_code=409, detail="control_unavailable")
+    now = datetime.now().astimezone()
+    payload = {
+        "desired_running": desired_running,
+        "requested_at": now.isoformat(),
+        "requested_at_epoch": int(now.timestamp()),
+        "request_id": uuid.uuid4().hex[:12],
+    }
+    path = Path(os.environ.get("FACTOR_RESEARCH_CONTROL_PATH", "data/factor_research/control.json"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # 唯一 tmp 名（宿主容器与 distro 侧脚本可能并发写同一控制文件：固定名会交叉落残缺 JSON）
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return {"control": _factor_research_control_block(_factor_research_snapshot_payload())}
+
+
 @app.get("/api/factor-research/status")
 async def factor_research_status() -> dict[str, Any]:
-    """因子研发监控快照（只读）：透传采集器快照 + 派生 ``age_seconds`` / ``stale``。"""
+    """因子研发监控快照（只读）：透传快照 + 派生 ``age_seconds`` / ``stale`` + ``control`` 块。"""
     return await asyncio.to_thread(_factor_research_status_payload)
+
+
+@app.put("/api/factor-research/control")
+async def factor_research_control(req: FactorResearchControlRequest) -> dict[str, Any]:
+    """看护启停控制：期望态写入控制文件（distro 代理调和）；快照缺失/损坏/陈旧 → 409。"""
+    return await asyncio.to_thread(_factor_research_control_update, req.desired_running)
 
 
 # ── 执行台账只读查询（delta add-broker-console：暴露 + 呈现，零业务复制） ──
