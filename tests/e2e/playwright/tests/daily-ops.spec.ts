@@ -107,31 +107,33 @@ test('当日时间线：注册表全部任务按排程时刻升序渲染，每�
   // 批次卡 = 当日各批（任务载荷数据驱动）；数量 = 当前注册表规模
   // （spec 场景 GIVEN 10 个日批任务 + add-monthly-batch-scheduling 的 2 个月批任务
   //  + wire-builtin-factor-registration 的内置因子注册 + add-factor-harvest-bridge
-  //  的因子收割 = 14）
+  //  的因子收割 + add-crowding-regime-positioning 的拥挤度日批 = 15）
   const items = page.locator('[data-testid^="page-shell-batch-"]')
-  await expect(items).toHaveCount(14)
+  await expect(items).toHaveCount(15)
 
-  // 排程升序（数据驱动）：09:00/10:00 月批 → 15:30 行情快照 → 15:40 选股 →
-  // 15:45 因子衰减监控 → 15:50 内置因子注册 → … → 18:00 cohort
+  // 排程升序（数据驱动）：09:00/10:00 月批 → 15:30 行情快照 → 15:35 拥挤度 →
+  // 15:40 选股 → 15:45 因子衰减监控 → 15:50 内置因子注册 → … → 18:00 cohort
   await expect(items.nth(0)).toContainText('每月 1 日 09:00')
   await expect(items.nth(0)).toContainText('记忆提炼')
   await expect(items.nth(1)).toContainText('每月 1 日 10:00')
   await expect(items.nth(1)).toContainText('因子提案')
   await expect(items.nth(2)).toContainText('15:30')
   await expect(items.nth(2)).toContainText('行情快照')
-  await expect(items.nth(3)).toContainText('15:40')
-  await expect(items.nth(3)).toContainText('选股')
-  await expect(items.nth(4)).toContainText('15:45')
-  await expect(items.nth(4)).toContainText('因子衰减监控')
-  await expect(items.nth(5)).toContainText('15:50')
-  await expect(items.nth(5)).toContainText('内置因子注册')
-  await expect(items.nth(6)).toContainText('15:55')
-  await expect(items.nth(6)).toContainText('因子收割')
-  await expect(items.nth(13)).toContainText('18:00')
-  await expect(items.nth(13)).toContainText('cohort 跑批')
+  await expect(items.nth(3)).toContainText('15:35')
+  await expect(items.nth(3)).toContainText('市场拥挤度')
+  await expect(items.nth(4)).toContainText('15:40')
+  await expect(items.nth(4)).toContainText('选股')
+  await expect(items.nth(5)).toContainText('15:45')
+  await expect(items.nth(5)).toContainText('因子衰减监控')
+  await expect(items.nth(6)).toContainText('15:50')
+  await expect(items.nth(6)).toContainText('内置因子注册')
+  await expect(items.nth(7)).toContainText('15:55')
+  await expect(items.nth(7)).toContainText('因子收割')
+  await expect(items.nth(14)).toContainText('18:00')
+  await expect(items.nth(14)).toContainText('cohort 跑批')
 
   // 每项状态徽章 ∈ 五态（成功/失败/未跑/运行中/跳过；运行历史不由本 spec 控制，只断言枚举不变量）
-  for (let index = 0; index < 14; index += 1) {
+  for (let index = 0; index < 15; index += 1) {
     const badge = items.nth(index).getByTestId('status-badge')
     await expect(badge).toHaveAttribute('data-status', /^(active|failed|retired|running|degraded)$/)
     await expect(badge).toHaveText(/^(成功|失败|未跑|运行中|跳过)$/)

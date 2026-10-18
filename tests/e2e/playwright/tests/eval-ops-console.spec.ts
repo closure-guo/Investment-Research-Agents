@@ -118,7 +118,7 @@ async function cohortAuditCount(request: APIRequestContext): Promise<number> {
 }
 
 test.describe('评估运维分区（设置中心）', () => {
-  test('分区渲染任务卡片（当前 14 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
+  test('分区渲染任务卡片（当前 15 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
     await openEvalOps(page)
 
     // TESTING=1 → 调度器未启动：显式提示，不得空白、不得以空列表冒充「一切正常」
