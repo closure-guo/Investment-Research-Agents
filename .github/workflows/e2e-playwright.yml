@@ -225,6 +225,14 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           LLM_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          # LLM 端点/模型：opencode 迁移后 key 必须与端点成对（只给 key → 解析器回退
+          # registry 默认 deepseek-official（api.deepseek.com）+ opencode key → 401，
+          # 2026-10-18 nightly 二次真跑实证）；与本地 .env 同值。
+          LLM_BASE_URL: https://opencode.ai/zen/go/v1
+          LLM_MODEL: openai/deepseek-v4.1-flash
+          LLM_QUICK_MODEL: openai/deepseek-v4.1-flash
+          LLM_MAX_CONTEXT: "256000"
+          LLM_TIMEOUT_SECONDS: "300"
           # Judge 链路（tests/evals/test_eval_live.py 真实裁判调用）需完整 JUDGE_* 三件套：
           # 只给 key 属"半套配置"→ judge_config_error（2026-10-18 首次真跑实证）；与本地
           # .env 同值（judge=glm-5.3-flash@opencode）。
