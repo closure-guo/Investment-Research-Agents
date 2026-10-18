@@ -945,6 +945,62 @@ export interface RegimeUnavailablePayload {
 
 export type RegimePayload = RegimeAvailablePayload | RegimeUnavailablePayload
 
+// 事件观察清单（delta add-event-driven-lane T7；GET /api/events/watchlist）。
+// 字段名权威源 `src/finance_agent/api.py::_event_watchlist_payload`（逐字对齐，不猜测）；
+// 清单列 + 预告要素 + 分诊理由/证据同源于该载荷，缺项后端给 null（前端一律显示 —）。
+export type EventVerdict = 'outperform' | 'in_line' | 'risk'
+
+export interface EventEvidenceRef {
+  field: string
+  value: unknown
+}
+
+export interface EventWatchlistItem {
+  id: number
+  forecast_key: string | null
+  /** 清单来源：earnings（业绩预告，v1）／cbb（条款事件，未来增量，同表同端点） */
+  source: string | null
+  /** 清单状态：pending（待分析）／analyzing（已发起深度分析并关联 session） */
+  status: string | null
+  session_id: string | null
+  created_at: string | null
+  code: string | null
+  name: string | null
+  report_period: string | null
+  forecast_type: string | null
+  /** 净利润变动幅度区间（% 口径，与预告源同单位；不折算） */
+  change_low: number | null
+  change_high: number | null
+  announce_date: string | null
+  available_at: string | null
+  verdict: string | null
+  reason: string | null
+  /** 证据引用；JSON 损坏时后端给 null（前端显示 —，不当空数组） */
+  evidence: EventEvidenceRef[] | null
+  model: string | null
+  prompt_fingerprint: string | null
+  triaged_at: string | null
+  // 条款事件（source=cbb）风险要素：后端载荷扩展时可选携带；缺失一律显示 —。
+  // 键名以 add-convertible-bond-coverage 实现期载荷为准（此处为预留读取位）。
+  price?: number | null
+  premium_rate?: number | null
+  call_countdown_days?: number | null
+}
+
+export interface EventWatchlistResponse {
+  items: EventWatchlistItem[]
+}
+
+// POST /api/events/watchlist/{id}/analyze 响应（重复发起为幂等返回：already_started=true）
+export interface EventAnalyzeResponse {
+  id: number
+  session_id: string | null
+  status: string | null
+  /** 既有队列快照中的状态（queued/running/done/failed）；不在快照 → null */
+  queue_state: string | null
+  already_started: boolean
+}
+
 // 选股批次历史（delta add-daily-ops-page：GET /api/screening/batches 载荷行）。
 // 字段名逐字对齐 `src/finance_agent/screening/store.py::list_batches`（不猜测）。
 export interface ScreeningBatch {
