@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import sqlite3
 from datetime import date, timedelta
 
 import pytest
@@ -20,6 +21,7 @@ from finance_agent.execution.store import (
 from finance_agent.outcome.scorecards import (
     FAMILY_REGISTRY,
     FamilyContract,
+    FamilySpec,
     Sample,
     aggregate_daily_returns,
     build_family_payload,
@@ -351,3 +353,53 @@ def test_get_scorecards_empty_databases(tmp_path, monkeypatch) -> None:
         assert family["max_drawdown_reason"] == "insufficient_history"
         assert family["capacity_reason"] == "no_liquidity_data"
         assert family["as_of"] is None
+
+
+def test_registered_family_without_loader_reports_empty(monkeypatch, tmp_path) -> None:
+    """注册表可扩展：新增族不改计算核心——四槽按空样本如实返回，未注册数据源不出现。"""
+    extended = (*FAMILY_REGISTRY, FamilySpec("events", "事件线", extreme_threshold=-0.10))
+    monkeypatch.setattr("finance_agent.outcome.scorecards.FAMILY_REGISTRY", extended)
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "missing-s.db"))
+    monkeypatch.setenv("EXECUTION_DB_PATH", str(tmp_path / "missing-e.db"))
+    monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "missing-snap.db"))
+
+    families = get_scorecards()["families"]
+    assert [family["family_id"] for family in families] == ["predictions", "execution", "events"]
+    events = families[2]
+    assert events["name"] == "事件线"
+    assert events["expectancy"] is None
+    assert events["expectancy_reason"] == "no_samples"
+    assert events["max_drawdown_reason"] == "insufficient_history"
+    assert events["capacity_reason"] == "no_liquidity_data"
+    assert events["win_rate"] is None
+    assert "阈值 -10%" in events["caliber_note"]  # 阈值随各族注册项
+
+
+def test_extreme_threshold_is_configurable() -> None:
+    """阈值调整后极端样本清单随之变化（同一批样本，仅 spec 阈值不同）。"""
+    samples = [_s("600519", "2026-09-01", -0.20), _s("000001", "2026-09-02", 0.01)]
+    default = build_family_payload(
+        FamilySpec("predictions", "观点线", -0.15), samples, contract=_contract()
+    )
+    stricter = build_family_payload(
+        FamilySpec("predictions", "观点线", -0.30), samples, contract=_contract()
+    )
+    assert [row["ret"] for row in default["extreme_samples"]] == [-0.20]
+    assert stricter["extreme_samples"] == []
+
+
+def test_missing_predictions_table_reports_empty(tmp_path, monkeypatch) -> None:
+    """老库无 predictions 表：样本空、胜率 null（如实返回，不抛错）。"""
+    legacy = tmp_path / "legacy.db"
+    conn = sqlite3.connect(legacy)
+    conn.execute("CREATE TABLE unrelated (x INTEGER)")
+    conn.commit()
+    conn.close()
+    assert load_prediction_samples(db_path=legacy) == []
+
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(legacy))
+    monkeypatch.setenv("EXECUTION_DB_PATH", str(tmp_path / "e.db"))
+    monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "snap.db"))
+    pred = _family(get_scorecards(), "predictions")
+    assert pred["expectancy_reason"] == "no_samples"
+    assert pred["win_rate"] is None

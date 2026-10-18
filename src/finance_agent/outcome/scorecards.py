@@ -324,10 +324,10 @@ def _capacity_inputs(
         if amount is None or amount <= 0:
             continue
         buckets.setdefault(str(record["code"]), []).append(amount)
-    advances = {
-        code: sum(values[-CAPACITY_ADV_DAYS:]) / len(values[-CAPACITY_ADV_DAYS:])
-        for code, values in buckets.items()
-    }
+    advances: dict[str, float] = {}
+    for code, values in buckets.items():
+        tail = values[-CAPACITY_ADV_DAYS:]
+        advances[code] = sum(tail) / len(tail)
     return {symbol: advances.get(_snapshot_code(symbol)) for symbol in requested}
 
 
