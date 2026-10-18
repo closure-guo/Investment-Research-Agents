@@ -409,6 +409,77 @@ def _listing_rows(df: pd.DataFrame) -> list[dict]:
     return rows
 
 
+# ── add-microcap-lane-guardrails：退市清单（两所，口径见 metrics.md §1.16） ──────
+# 沪清单日期列实测名为「暂停上市日期」（非交易所正式退市日）→ 映射 delist_date 并保留
+# source="sh_suspend" 供审计；深清单为「终止上市日期」→ source="sz_delist"。
+_DELIST_SOURCE_SPECS: tuple[dict[str, object], ...] = (
+    {
+        "label": "沪",
+        "func_name": "stock_info_sh_delist",
+        "source": "sh_suspend",
+        "code_cols": ("公司代码", "证券代码", "A股代码", "代码"),
+        "name_cols": ("公司简称", "证券简称", "A股简称", "简称", "名称"),
+        "list_cols": ("上市日期", "上市时间"),
+        # 沪清单日期列 = 暂停上市日期（口径注明：不得读作交易所退市日）
+        "delist_cols": ("暂停上市日期", "终止上市日期", "退市日期"),
+    },
+    {
+        "label": "深",
+        "func_name": "stock_info_sz_delist",
+        "source": "sz_delist",
+        "code_cols": ("证券代码", "公司代码", "A股代码", "代码"),
+        "name_cols": ("证券简称", "公司简称", "A股简称", "简称", "名称"),
+        "list_cols": ("上市日期", "上市时间"),
+        "delist_cols": ("终止上市日期", "暂停上市日期", "退市日期"),
+    },
+)
+
+
+def _delist_rows(df: pd.DataFrame, *, source: str, spec: dict[str, object]) -> list[dict]:
+    """单所退市清单 DataFrame → ``[{"code","name","list_date","delist_date","source"}]``。
+
+    缺代码列 / 子帧不可用 → ``[]``（该源不可用，不产半口径行）；日期列缺失或值不可解析
+    → 对应字段 None（不编造）；``source`` 标明日期语义来源（审计用）。
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+    code_col = _pick_col(df, spec["code_cols"])  # type: ignore[arg-type]
+    if code_col is None:
+        return []
+    name_col = _pick_col(df, spec["name_cols"])  # type: ignore[arg-type]
+    list_col = _pick_col(df, spec["list_cols"])  # type: ignore[arg-type]
+    delist_col = _pick_col(df, spec["delist_cols"])  # type: ignore[arg-type]
+
+    def _text(value) -> str | None:
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip()
+        return text or None
+
+    rows: list[dict] = []
+    for _, raw in df.iterrows():
+        code = _norm_six_digit_code(raw.get(code_col))
+        if not code:
+            continue
+        rows.append(
+            {
+                "code": code,
+                "name": _text(raw.get(name_col)) if name_col is not None else None,
+                "list_date": _norm_date_iso(raw.get(list_col)) if list_col is not None else None,
+                "delist_date": (
+                    _norm_date_iso(raw.get(delist_col)) if delist_col is not None else None
+                ),
+                "source": source,
+            }
+        )
+    return rows
+
+
 # ── add-market-data-fallback：新浪全市场 spot → 东财列形映射（纯函数） ─────────
 # 日批（snapshot.build_snapshot_rows / _spot_row / compute_rebase_factors）实际消费
 # 的 spot 列清单——逐列核对 src/finance_agent/data/snapshot.py 行构造得出，
@@ -536,6 +607,8 @@ class AKShareClient:
             "market_spot": set(),
             # add-event-driven-lane：业绩预告实际生效源（eastmoney|none）
             "earnings_forecast": set(),
+            # add-microcap-lane-guardrails：退市清单实际生效源（sh_suspend|sz_delist|none）
+            "delist": set(),
         }
         # 全市场 spot 最近一次实际生效源（日批成功摘要 spot_source 消费；未尝试/双源失败 → None）
         self.last_spot_source: str | None = None
@@ -1946,6 +2019,47 @@ class AKShareClient:
         if not rows:
             logger.warning("上市清单全源失败/不可用（返回 None）")
             return None
+        return rows
+
+    def fetch_delist_lists(self) -> list[dict]:
+        """沪 + 深退市清单合并 → ``[{"code","name","list_date","delist_date","source"}]``。
+
+        口径（docs/evals/metrics.md §1.16，实施者不得自行改）：
+
+        - 沪 ``stock_info_sh_delist`` 实测列 ``公司代码/公司简称/上市日期/暂停上市日期``：
+          日期列是「**暂停上市日期**」而非交易所正式退市日 → 映射 ``delist_date`` 并保留
+          ``source="sh_suspend"`` 供审计（消费方不得读作交易所退市日）；
+        - 深 ``stock_info_sz_delist`` 实测列 ``证券代码/证券简称/上市日期/终止上市日期``
+          → ``source="sz_delist"``；
+        - 每源独立取数：单源失败/空（含列名漂移）只记 ERROR 并继续另一源——明细类
+          约定；两源皆失败/空 → ``[]`` + ``logger.error``（不以空表冒充成功）；
+        - ``list_date``/``delist_date`` 不可解析或缺失 → ``None``（不编造）。
+
+        实际生效源记入 ``sources_seen["delist"]``（``sh_suspend`` / ``sz_delist`` /
+        全失败记 ``none``）。抓取端点无参数（两接口均为全量清单）。
+        """
+        rows: list[dict] = []
+        for spec in _DELIST_SOURCE_SPECS:
+            label = str(spec["label"])
+            source = str(spec["source"])
+            func = getattr(ak, str(spec["func_name"]), None)
+            if func is None:
+                logger.error("退市清单 %s所接口不可用（akshare 缺 %s）", label, spec["func_name"])
+                continue
+            try:
+                df = _call_ak(func)
+            except Exception as e:  # noqa: BLE001 - 单源失败不拖垮另一源（明细类约定）
+                logger.error("退市清单 %s所拉取异常，跳过: %s", label, e)
+                continue
+            parsed = _delist_rows(df, source=source, spec=spec)
+            if parsed:
+                rows.extend(parsed)
+                self.sources_seen["delist"].add(source)
+            else:
+                logger.error("退市清单 %s所失败/空（返回/列名漂移）", label)
+        if not rows:
+            logger.error("退市清单全源失败/空（返回空列表）")
+            self.sources_seen["delist"].add("none")
         return rows
 
     def fetch_symbol_history_raw_qfq(self, code: str, start: str, end: str) -> pd.DataFrame | None:

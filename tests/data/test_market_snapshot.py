@@ -90,7 +90,8 @@ def test_init_creates_tables_and_is_idempotent(tmp_path):
         master_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(security_master)").fetchall()
         }
-        assert master_cols == {"code", "name", "list_date", "updated_at"}
+        # add-microcap-lane-guardrails：security_master 扩 delist_date（退市日，见 metrics.md §1.16）
+        assert master_cols == {"code", "name", "list_date", "delist_date", "updated_at"}
 
         indexes = {
             row[0]
@@ -688,7 +689,12 @@ def test_security_master_upsert_roundtrip(tmp_path):
     master = get_security_master(db_path=db)
     assert set(master) == {"600519", "000001"}
     assert master["600519"]["name"] == "贵州茅台A"
-    assert master["000001"] == {"name": "平安银行", "list_date": "1991-04-03"}
+    assert master["000001"] == {
+        "name": "平安银行",
+        "list_date": "1991-04-03",
+        # add-microcap-lane-guardrails：主表形状扩 delist_date（存续标的为 None）
+        "delist_date": None,
+    }
     assert _count(db, "security_master") == 2
 
     upsert_security_master(  # 新值缺失 → COALESCE 保留旧值

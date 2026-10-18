@@ -283,15 +283,17 @@ _D3 = "2026-10-13"  # 周二（默认批日）
 
 
 class FakeSnapshotClient:
-    """日批 stub 客户端：四个取数方法的假实现（不触碰 akshare）。"""
+    """日批 stub 客户端：取数方法的假实现（不触碰 akshare）。"""
 
-    def __init__(self, *, calendar=None, spot=None, listing=None):
+    def __init__(self, *, calendar=None, spot=None, listing=None, delist=None):
         self.calendar = calendar
         self.spot = spot
         self.listing = listing
+        self.delist = delist
         self.calendar_calls = 0
         self.spot_calls = 0
         self.listing_calls = 0
+        self.delist_calls = 0
 
     def fetch_trade_calendar(self):
         self.calendar_calls += 1
@@ -304,6 +306,10 @@ class FakeSnapshotClient:
     def fetch_listing_info(self):
         self.listing_calls += 1
         return self.listing
+
+    def fetch_delist_lists(self):
+        self.delist_calls += 1
+        return self.delist if self.delist is not None else []
 
     def fetch_symbol_history_raw_qfq(self, code, start, end):  # 日批不调用；回填才用
         return None
@@ -642,3 +648,58 @@ class TestMarketSnapshotBatch:
         assert out["master"] == "skipped"
         assert out["written"] == 1
         assert get_all_meta(db)["last_success_date"] == _D3
+
+    def test_master_refresh_also_upserts_delist_lists(self, tmp_path):
+        """主表刷新分支同抓退市清单（delta add-microcap-lane-guardrails）：delist_date 落库。"""
+        db = tmp_path / "snap.db"
+        client = FakeSnapshotClient(
+            calendar=[_D3],
+            spot=_spot(10.5, 10.0),
+            listing=[{"code": "600519", "name": "贵州茅台", "list_date": "2001-08-27"}],
+            delist=[
+                {
+                    "code": "600001",
+                    "name": "邯郸钢铁",
+                    "list_date": "1998-01-01",
+                    "delist_date": "2009-12-29",
+                    "source": "sh_suspend",
+                }
+            ],
+        )
+
+        out = run_market_snapshot_batch(_D3, client=client, db_path=db)
+
+        assert out["master"] == "refreshed"
+        assert client.delist_calls == 1
+        master = get_security_master(db)
+        assert master["600001"]["delist_date"] == "2009-12-29"
+        assert master["600519"]["delist_date"] is None  # 存续标的不编造退市日
+
+    def test_delist_fetch_failure_keeps_batch_ok(self, tmp_path):
+        """退市清单拉取失败/空（[]）只 WARN，不失败整批（主表刷新照常）。"""
+        db = tmp_path / "snap.db"
+        client = FakeSnapshotClient(
+            calendar=[_D3],
+            spot=_spot(10.5, 10.0),
+            listing=[{"code": "600519", "name": "贵州茅台", "list_date": "2001-08-27"}],
+            delist=[],
+        )
+
+        out = run_market_snapshot_batch(_D3, client=client, db_path=db)
+
+        assert out["master"] == "refreshed"
+        assert out["written"] == 1
+        assert get_security_master(db)["600519"]["delist_date"] is None
+
+    def test_delist_fetch_not_attempted_when_master_refresh_skipped(self, tmp_path):
+        """非刷新分支（名单存在且非周一）不触发退市清单抓取（同频：随刷新走）。"""
+        db = tmp_path / "snap.db"
+        upsert_security_master(
+            [{"code": "600519", "name": "贵州茅台", "list_date": "2001-08-27"}], db_path=db
+        )
+        client = FakeSnapshotClient(calendar=[_D3], spot=_spot(10.5, 10.0))
+
+        out = run_market_snapshot_batch(_D3, client=client, db_path=db)  # 周二
+
+        assert out["master"] == "skipped"
+        assert client.delist_calls == 0

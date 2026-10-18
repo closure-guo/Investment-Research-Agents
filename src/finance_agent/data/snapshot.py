@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS security_master (
   code       TEXT PRIMARY KEY,
   name       TEXT,
   list_date  TEXT,
+  delist_date TEXT,
   updated_at TEXT
 );
 """
@@ -151,11 +152,19 @@ def _connect(db_path: str | Path | None) -> sqlite3.Connection:
 
 
 def init_snapshot_db(db_path: str | Path | None = None) -> Path:
-    """幂等建 3 表 + 2 索引，返回实际使用的库路径。"""
+    """幂等建 3 表 + 2 索引，返回实际使用的库路径。
+
+    增量迁移（add-microcap-lane-guardrails）：旧库 ``security_master`` 缺
+    ``delist_date`` 列 → ``ALTER TABLE ADD COLUMN`` 补列（旧行保留，该列 NULL
+    = 「未退市/退市日未知」——两者以是否出现在退市清单区分，见 metrics.md §1.16）。
+    """
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
     try:
         conn.executescript(SNAPSHOT_DDL)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(security_master)")}
+        if "delist_date" not in columns:
+            conn.execute("ALTER TABLE security_master ADD COLUMN delist_date TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -498,10 +507,11 @@ def read_bars(
 
 
 def upsert_security_master(rows: list[dict], db_path: str | Path | None = None) -> int:
-    """证券主表 upsert（同 code 覆盖 name/list_date/updated_at），返回处理行数。
+    """证券主表 upsert（同 code 覆盖 name/list_date/delist_date/updated_at），返回处理行数。
 
     空 code 行跳过；新值为空（None）时保留已有值（COALESCE），避免部分拉取
-    失败把已知字段清空。
+    失败把已知字段清空。``delist_date`` 由退市清单路径（``upsert_delisted_masters``）
+    写入；上市清单路径不带该字段 → 已入库的退市日不被清空。
     """
     init_snapshot_db(db_path)
     now_iso = datetime.now().isoformat()
@@ -510,16 +520,26 @@ def upsert_security_master(rows: list[dict], db_path: str | Path | None = None) 
         code = _norm_code(row.get("code"))
         if not code:
             continue
-        payload.append((code, _text(row.get("name")), _text(row.get("list_date")), now_iso))
+        payload.append(
+            (
+                code,
+                _text(row.get("name")),
+                _text(row.get("list_date")),
+                _text(row.get("delist_date")),
+                now_iso,
+            )
+        )
     if not payload:
         return 0
     conn = _connect(db_path)
     try:
         conn.executemany(
-            "INSERT INTO security_master (code, name, list_date, updated_at) VALUES (?, ?, ?, ?) "
+            "INSERT INTO security_master (code, name, list_date, delist_date, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(code) DO UPDATE SET "
             "name = COALESCE(excluded.name, security_master.name), "
             "list_date = COALESCE(excluded.list_date, security_master.list_date), "
+            "delist_date = COALESCE(excluded.delist_date, security_master.delist_date), "
             "updated_at = excluded.updated_at",
             payload,
         )
@@ -529,18 +549,54 @@ def upsert_security_master(rows: list[dict], db_path: str | Path | None = None) 
         conn.close()
 
 
+def upsert_delisted_masters(rows: list[dict], db_path: str | Path | None = None) -> int:
+    """退市清单落库入口（``AKShareClient.fetch_delist_lists`` 输出形状）→ 返回处理行数。
+
+    与 ``upsert_security_master`` 同表同 upsert 语义（COALESCE 保值、空 code 跳过）；
+    本函数是退市清单的**唯一写入口**，供日批主表刷新与运维补数复用。``source``
+    字段（``sh_suspend``/``sz_delist``）仅作抓取审计留在调用侧，不入库。
+    """
+    if not rows:
+        return 0
+    return upsert_security_master(rows, db_path=db_path)
+
+
 def get_security_master(db_path: str | Path | None = None) -> dict[str, dict]:
-    """全量证券主表 ``{code: {"name","list_date"}}``（build_snapshot_rows 的 master 形状）。"""
+    """全量证券主表 ``{code: {"name","list_date","delist_date"}}``（build_snapshot_rows 的 master 形状）。
+
+    ``delist_date`` 非空 = 已知退市日（沪源语义见 metrics.md §1.16）；None = 未退市
+    或退市日未知。
+    """
     init_snapshot_db(db_path)
     conn = _connect(db_path)
     try:
         master = {
-            row["code"]: {"name": row["name"], "list_date": row["list_date"]}
-            for row in conn.execute("SELECT code, name, list_date FROM security_master").fetchall()
+            row["code"]: {
+                "name": row["name"],
+                "list_date": row["list_date"],
+                "delist_date": row["delist_date"],
+            }
+            for row in conn.execute(
+                "SELECT code, name, list_date, delist_date FROM security_master"
+            ).fetchall()
         }
     finally:
         conn.close()
     return master
+
+
+def count_delisted_masters(db_path: str | Path | None = None) -> int:
+    """主表中 ``delist_date`` 非空的行数（小票通道前置门禁「退市池就绪」判据）。"""
+    init_snapshot_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM security_master "
+            "WHERE delist_date IS NOT NULL AND TRIM(delist_date) <> ''"
+        ).fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
 
 
 # ── 状态纯函数（T4）：D5 stale 判定（无 IO；API 端点/前端横幅的文案唯一来源）──
@@ -674,6 +730,12 @@ def build_snapshot_rows(
         if code in seen:
             continue
         if master and code not in master:
+            # 已退市：不做正向补行，历史行保持不动。
+            # 口径关系（add-microcap-lane-guardrails，见 metrics.md §1.16）：本条是**隐式**
+            # 退市判定（不在名单 = 退市），仅服务停牌合成；显式退市判定用 security_master
+            # 的 ``delist_date``（池可见性 `list_date ≤ t ≤ delist_date`，见 data/universe.py）。
+            # 两者不互相替代：日批 spot 名单不含退市票，隐式口径决定「今天不补行」；
+            # delist_date 决定回测/统计池在某历史时点是否可见。
             continue  # 已退市：不做正向补行，历史行保持不动
         row = _synthesize_suspended_row(trade_date, code, prev, master)
         if row is not None:
