@@ -207,6 +207,34 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 否则 normal；系数映射 1.0 / 0.5 / 0.0（全部可配置）；分位不可用不触发且在 reasons 注明。**陈旧**：数据日期距判定时刻超过 7 个自然日（可配置；与 spec/design 的「>7」口径一致）。
 **执行链**：目标权重 × 系数；系数 ≠ 1.0 逐票 `REGIME_SCALE`，摘要记状态与系数；缺失/陈旧 → 1.0 + `no_regime_data`。
 
+### 1.15 业绩预告事件线（delta `add-event-driven-lane`，2026-10-18 登记）
+
+**数据源与字段口径**：akshare `stock_yjyg_em`（东方财富业绩预告，按报告期拉取；本机实测 1.18.94 可用，列名见实现映射表）；
+取数口径 = `预测指标` 为「归属于上市公司股东的净利润」的行（归母口径，与全库报表口径一致；源多指标行只取净利润行）。
+字段：代码 / 名称 / 报告期（`report_period` 归一 `YYYY-MM-DD`）/ 预告类型（源取值原样落库，不做二次归类）/
+**变动幅度下限与上限**（优先解析 `业绩变动` 文本「同比上年 增长|变动|下降 A% 至 B%」区间，方向词定符号——`下降`/`减少` 取负、
+`增长`/`变动` 原样；无区间 → 下限 = 上限 = 源 `业绩变动幅度` 单值；均缺 → NULL，不折算 0）/ 公告日期 / 来源标识（`source="eastmoney"`）。
+**可得时点**：`available_at` = 公告日期（`announce_date`）——下游判断、分诊输入与回填一律 `available_at ≤ 判断日`（时点截断，MUST NOT 前视）。
+唯一键 `(代码, 报告期, source_record_id)`；`source_record_id` = `预测指标|公告日期`（稳定复合键，重抓幂等覆盖为最新值）。
+抓取失败/空 → 返回空列表 + ERROR 留痕，MUST NOT 以零新增冒充成功。
+
+**分诊合同与降级**：LLM 输出 `{verdict ∈ {outperform, in_line, risk}, reason ≤ 50 字, evidence: [{field, value}]}`；
+非法 verdict / 超长 reason / 缺证据 = 拒收；单条调用失败（typed LLM error）或拒收 → 降级 `in_line` + trace warning，
+不阻断本批其余记录；分诊结果落库含模型标识与 prompt 版本指纹（`load_prompt_with_meta`）。
+prompt 权威源 `src/finance_agent/prompts/event_triage.md`，发布走 `scripts/deploy_prompts.py`（prompt-deploy-consistency 门禁适用）。
+分诊输入预算 ≤ 12 字段（预告要素全量 + 标的快照要素，常量集中定义）。
+
+**入场 / horizon / 结算口径**：入场 = **公告日次一交易日开盘价**（`fetch_kline(adjust=SETTLEMENT_ADJUST)` 后复权 hfq，与执行链同口径）；
+不可成交判定读当日快照 `read_universe(as_of=entry_date)`——`is_suspended=1` 或 `limit_up_sealed=1`/`limit_down_sealed=1`（缺失行/读不到快照
+视为不可判定 → fail-closed）→ 顺延至下一可成交交易日并留痕 `note=deferred:<原因>`；horizon 默认 **5 个交易日**（可配置）；
+结算 = 结算日（入场日起第 horizon 个交易日）**收盘价** / 入场价 − 1（`raw_return`）；参考价缺失（该日无 K 线 / 取数失败）→
+保持 `open` + 留痕重试，MUST NOT 以 0 或估算值结算。
+
+**家族隔离声明**：事件读数注册为策略族成绩单 `family_id=event`（`data_source="events"`、`cost_bearing=True`、`min_samples=10`、
+`extreme_threshold=-0.15`），样本 = 已结算 `event_journal` 行（ticker=`symbol`、日期=`settle_date`、收益=`raw_return`）；
+horizon 默认 T+5 独立于观点线 T+20，MUST NOT 混入观点统计（predictions 族样本只取 `predictions` 表已判定行，两者互不包含对方样本）。
+事件线 v1 为纯观察/研究通道：不接 regime 系数、不进执行链目标（避免与 paper 台账双重记账）。
+
 ---
 
 ## 2. 时间线（每轮一行，收口时追加）
