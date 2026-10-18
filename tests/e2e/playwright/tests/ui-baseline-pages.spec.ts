@@ -35,7 +35,8 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from '@
  *   /settings       settings-llm-light/dark.png       设置中心默认分区（LLM 配置）
  *                   settings-cache-light/dark.png     缓存管理分区（settings-nav-cache）
  *                   settings-monitor-light/dark.png   数据监控分区（settings-nav-monitor）
- *   /screening      screening-light/dark.png          空选股池（先 screening_reset）
+ *   /screening      screening-light/dark.png          空选股池（先 screening_reset；
+ *                                                      温度计专属空库 → 「未接入」空态）
  *
  * Mask（唯一一处，非跳过页面）：
  * - /track-record 总览「截至」卡显示后端 _track_as_of（北京时间当天，跨日必变）→
@@ -195,6 +196,19 @@ const CAPTURES: Capture[] = [
     url: '/screening',
     anchor: (page) => page.getByTestId('screening-empty'),
     reset: resetScreening,
+    // add-crowding-regime-positioning T8 增补（2026-10-18 基线重采）：市场温度计区块
+    // 是滚动容器首子节点，自带 GET /api/regime 取数，晚于 screening-empty 锚点到达——
+    // 只等锚点会在「加载中…」与终态之间抢跑（同一版本像素随状态漂移）。专属库
+    // REGIME_DB_PATH=data/test-e2e-ui-baseline-regime.db 为**空库** → 该区块必为确定的
+    // missing 空态「温度计未接入：暂无市场状态数据」，不含日期/金额等随时间变化的
+    // 读数，故无需额外 mask（mask 与容差均未改动）。此处把前提钉死：若未来造数写入
+    // 该库，显式失败而不是让基线悄悄漂移。
+    settle: async (page) => {
+      await expect(page.getByTestId('market-regime-card')).toBeVisible()
+      await expect(page.getByTestId('regime-empty')).toHaveText(
+        '温度计未接入：暂无市场状态数据（等待日批采集）'
+      )
+    },
   },
 ]
 
