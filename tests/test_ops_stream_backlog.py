@@ -56,6 +56,8 @@ def test_stream_backlog_lists_active_sessions(client, clean_registry):
     assert stats["subscribers"] == 1
     assert stats["last_seq"] == 7
     assert stats["drops"] == {"thinking": 1}
+    # 投递时延埋点（#328）：无样本时全 None（不冒充 0）
+    assert stats["delivery_latency_ms"] == {"n": 0, "p50": None, "p95": None, "max": None}
 
 
 def test_stream_backlog_empty_when_no_active_sessions(client, clean_registry):
