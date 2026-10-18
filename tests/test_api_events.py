@@ -250,6 +250,23 @@ class TestAnalyzeEndpoint:
         assert snapshot[1]["session_id"] == body["session_id"]
         assert queue.max_concurrency == 2  # 并发上限同源（不加新通道）
 
+    def test_session_created_event_carries_source_event(self, _events_db, monkeypatch) -> None:
+        """spec「来源标记 event」：``session_created`` 载荷带 ``source=event``。"""
+        _stub_pipeline_start(monkeypatch)
+        _stub_sessions(monkeypatch)
+        item_id = _seed_item(_events_db)
+
+        with TestClient(app) as client:
+            body = client.post(f"/api/events/watchlist/{item_id}/analyze").json()
+
+        events = [
+            json.loads(row["event_json"])
+            for row in session_store.list_session_events(body["session_id"])
+        ]
+        created = [event for event in events if event.get("type") == "session_created"]
+        assert len(created) == 1
+        assert created[0]["source"] == "event"
+
     def test_unknown_id_404(self, _events_db) -> None:
         resp = TestClient(app).post("/api/events/watchlist/999/analyze")
         assert resp.status_code == 404

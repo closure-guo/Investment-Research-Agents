@@ -7,7 +7,7 @@
   → 日批 B：扫描未分诊记录 → LLM 分诊（event_triage.md prompt）
     → verdict=outperform → 事件观察清单（落库 + 端点 + 选股页区块）
       → 发起深度分析（复用 screening/queue.py，source=event）→ 关联 session
-    → 全部候选 → event_journal 记账（T+1 开盘口径，horizon 默认 5）
+    → outperform 候选 → event_journal 记账（T+1 开盘口径，horizon 默认 5）
       → 每日结算 job → 事件族读数 → strategy-scorecards（family=event）
 ```
 

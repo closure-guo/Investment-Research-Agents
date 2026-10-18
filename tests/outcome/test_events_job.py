@@ -87,6 +87,31 @@ class TestFetchDaily:
             events_job.run_earnings_fetch_daily()
         assert "业绩预告抓取失败" in str(excinfo.value)
 
+    def test_partial_failure_persists_successes_then_raises(self, monkeypatch, _events_env) -> None:
+        """部分期失败：成功期先落库（不丢已成功数据），再上抛并带 upserted/失败期列表。"""
+        from finance_agent.outcome.events.model import list_untriaged
+
+        stub = _StubFetchClient(
+            {
+                "2025-12-31": [_forecast_row("2026-01-10", code="600519")],
+                "2026-06-30": [_forecast_row("2026-07-10", code="000001")],
+                "2026-09-30": [_forecast_row("2026-10-10", code="600000")],
+            },
+            fail_periods={"2026-03-31"},
+        )
+        monkeypatch.setattr(events_job, "AKShareClient", lambda: stub)
+        monkeypatch.setattr(events_job, "_default_report_period", lambda today=None: "2026-09-30")
+        monkeypatch.setenv("EVENTS_FETCH_PERIODS", "4")
+
+        with pytest.raises(RuntimeError) as excinfo:
+            events_job.run_earnings_fetch_daily()
+
+        message = str(excinfo.value)
+        assert "2026-03-31" in message  # 失败期列表
+        assert "upserted=3" in message  # 已成功落库行数
+        stored = list_untriaged(db_path=_events_env / "events.db")
+        assert {row["code"] for row in stored} == {"600519", "000001", "600000"}
+
 
 class _StubTriageClient:
     model_label = "job-stub"
@@ -96,6 +121,23 @@ class _StubTriageClient:
 
     def complete_json(self, prompt, *, purpose="quick", metadata=None):
         self.calls += 1
+        return {
+            "verdict": "outperform",
+            "reason": "预增 60%~90%",
+            "evidence": [{"field": "change_low", "value": 60.0}],
+        }
+
+
+class _PromptCapturingTriageClient:
+    """分诊桩：记录 ``(code, prompt)``，恒返回 outperform（快照注入断言用）。"""
+
+    model_label = "job-stub"
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def complete_json(self, prompt, *, purpose="quick", metadata=None):
+        self.calls.append({"prompt": prompt, "metadata": metadata or {}})
         return {
             "verdict": "outperform",
             "reason": "预增 60%~90%",
@@ -123,7 +165,56 @@ class TestTriageDaily:
         monkeypatch.setattr(events_job, "GatewayTriageClient", lambda: stub)
         summary = events_job.run_earnings_triage_daily()
         assert summary["triaged"] == 0 and summary["watchlist_added"] == 0
+        assert summary["snapshot_ctx_missing"] == 0
         assert stub.calls == 0  # 无未分诊记录 → 零 LLM 调用
+
+    def test_snapshot_context_is_point_in_time_per_row(self, monkeypatch, _events_env) -> None:
+        """逐行时点化：每行取 ≤ available_at 的最近快照日该股字段（消除回填前视）。
+
+        快照库仅覆盖近 N 日：旧公告行 prompt 不含快照字段（该日无覆盖），
+        ``available_at == 快照日`` 的行含；更晚的快照日 MUST NOT 被前视取用。
+        """
+        from finance_agent.outcome.events.model import upsert_forecasts
+
+        db = str(_events_env / "events.db")
+        old = _forecast_row("2024-01-05", code="600519")
+        fresh = _forecast_row("2025-04-15", code="000001")
+        upsert_forecasts([old, fresh], db_path=db)
+        write_snapshot_rows(
+            "2025-04-15",
+            [{"code": "000001", "close_raw": 10.5, "pct_chg": 2.0, "amount": 123456.0}],
+            db_path=str(_events_env / "snap.db"),
+        )
+        write_snapshot_rows(
+            "2025-04-20",
+            [{"code": "600519", "close_raw": 999.0, "pct_chg": 9.9, "amount": 888.0}],
+            db_path=str(_events_env / "snap.db"),
+        )
+        stub = _PromptCapturingTriageClient()
+        monkeypatch.setattr(events_job, "GatewayTriageClient", lambda: stub)
+
+        summary = events_job.run_earnings_triage_daily(as_of="2025-04-21")
+
+        prompts = {call["metadata"]["code"]: call["prompt"] for call in stub.calls}
+        assert set(prompts) == {"600519", "000001"}
+        assert "- close: 10.5" in prompts["000001"]  # available_at == 快照日 → 注入该日字段
+        assert "- close:" not in prompts["600519"]  # 无 ≤ available_at 的快照覆盖 → 不注入
+        assert "999" not in prompts["600519"]  # MUST NOT 前视取未来快照
+        assert summary["snapshot_ctx_missing"] == 1
+
+    def test_snapshot_absent_degrades_to_forecast_only(self, monkeypatch, _events_env) -> None:
+        """无快照覆盖退化路径：不注入快照字段，照常分诊并在批次摘要计数留痕。"""
+        from finance_agent.outcome.events.model import upsert_forecasts
+
+        upsert_forecasts([_forecast_row("2025-04-15")], db_path=str(_events_env / "events.db"))
+        stub = _PromptCapturingTriageClient()
+        monkeypatch.setattr(events_job, "GatewayTriageClient", lambda: stub)
+
+        summary = events_job.run_earnings_triage_daily(as_of="2025-04-16")
+
+        assert summary["triaged"] == 1 and summary["watchlist_added"] == 1
+        assert summary["snapshot_ctx_missing"] == 1
+        assert "- close:" not in stub.calls[0]["prompt"]
 
 
 class TestSettleDaily:
@@ -232,5 +323,7 @@ class TestSettleDaily:
 
         events_job.run_event_settle_daily()
 
-        # horizon 3 → 当轮即到期结算（06-16 起第 3 个交易日 = 04-21）；记账行记 horizon=3
-        assert list_settled_journal(db_path=db)[0]["horizon_days"] == 3
+        # horizon 3 → 当轮即到期结算（04-16 入场后第 3 个交易日 = 04-21）；记账行记 horizon=3
+        settled = list_settled_journal(db_path=db)
+        assert settled[0]["horizon_days"] == 3
+        assert settled[0]["settle_date"] == "2025-04-21"

@@ -171,6 +171,95 @@ class TestEntryCandidates:
         assert row["entry_price"] == 101.5
         assert row["note"] == "deferred:suspended@2025-04-16"
 
+    def test_entry_defers_on_suspension_gap_without_kline_row(self, tmp_path) -> None:
+        """停牌真实形态：停牌日**无 kline 行**（快照 is_suspended=1）→ 用交易日历识别缺失交易日并留痕。"""
+        db = tmp_path / "events.db"
+        snap = tmp_path / "snap.db"
+        _seed_forecast(db)
+        calendar = ["2025-04-16", "2025-04-17", "2025-04-18"]
+        _snapshot(snap, "2025-04-16", suspended=1)  # 停牌日在快照里，但没有行情行
+        _snapshot(snap, "2025-04-17")
+        client = _FakeKlineClient(
+            {
+                _CODE: _rows(
+                    [
+                        ("2025-04-17", 101.5, 102.0),
+                        ("2025-04-18", 102.0, 103.0),
+                    ]
+                )
+            }
+        )
+        summary = entry_candidates(
+            as_of="2025-04-18",
+            kline_client=client,
+            snapshot_db_path=snap,
+            db_path=db,
+            calendar=calendar,
+        )
+        assert summary["entered"] == 1 and summary["deferred"] == 1
+        row = list_open_journal(db_path=db)[0]
+        assert row["entry_date"] == "2025-04-17"
+        assert row["entry_price"] == 101.5
+        assert row["note"] == "deferred:suspended@2025-04-16"
+
+    def test_entry_merges_multi_day_suspension_gap_note(self, tmp_path) -> None:
+        """多日停牌（连续缺失交易日）合并为一条 deferred 注记（逗号分隔逐日留痕）。"""
+        db = tmp_path / "events.db"
+        snap = tmp_path / "snap.db"
+        _seed_forecast(db)
+        calendar = ["2025-04-16", "2025-04-17", "2025-04-18"]
+        _snapshot(snap, "2025-04-16", suspended=1)
+        _snapshot(snap, "2025-04-17", suspended=1)
+        _snapshot(snap, "2025-04-18")
+        client = _FakeKlineClient({_CODE: _rows([("2025-04-18", 102.0, 103.0)])})
+        summary = entry_candidates(
+            as_of="2025-04-18",
+            kline_client=client,
+            snapshot_db_path=snap,
+            db_path=db,
+            calendar=calendar,
+        )
+        assert summary["entered"] == 1 and summary["deferred"] == 1
+        row = list_open_journal(db_path=db)[0]
+        assert row["entry_date"] == "2025-04-18"
+        assert row["note"] == "deferred:suspended@2025-04-16,suspended@2025-04-17"
+
+    def test_entry_anchor_prefers_available_at_over_announce(self, tmp_path) -> None:
+        """入场取日锚点：优先 ``available_at``（可得时点），回落 ``announce_date``。"""
+        db = tmp_path / "events.db"
+        snap = tmp_path / "snap.db"
+        row = _forecast("2025-04-14")
+        row["available_at"] = "2025-04-15"  # 可得时点晚于公告日：入场从 available_at 起算
+        upsert_forecasts([row], db_path=db)
+        key = forecast_key(row)
+        record_triage(
+            key,
+            verdict="outperform",
+            reason="预增",
+            evidence=[{"field": "forecast_type", "value": "预增"}],
+            model="m",
+            prompt_fingerprint="event_triage@1",
+            db_path=db,
+        )
+        _snapshot(snap, "2025-04-16")
+        client = _FakeKlineClient(
+            {
+                _CODE: _rows(
+                    [
+                        ("2025-04-15", 99.0, 99.5),
+                        ("2025-04-16", 100.5, 101.0),
+                        ("2025-04-17", 101.0, 102.0),
+                    ]
+                )
+            }
+        )
+        entry_candidates(as_of="2025-04-17", kline_client=client, snapshot_db_path=snap, db_path=db)
+        entry = list_open_journal(db_path=db)[0]
+        assert (
+            entry["entry_date"] == "2025-04-16"
+        )  # available_at 次一交易日（非 announce 次日 04-15）
+        assert entry["entry_price"] == 100.5
+
     def test_entry_defers_on_limit_up_sealed_only(self, tmp_path) -> None:
         """一字板顺延沿用执行链**买入侧**门禁语义：涨停板挡买、跌停板不挡买。"""
         db = tmp_path / "events.db"
@@ -280,14 +369,23 @@ class TestSettleDue:
         "2025-04-24",
     ]
 
-    def _seed_open(self, db, *, entry_date: str = "2025-04-16", entry_price: float = 100.0) -> int:
-        _seed_forecast(db, "2025-04-15")
+    def _seed_open(
+        self,
+        db,
+        *,
+        entry_date: str = "2025-04-16",
+        entry_price: float = 100.0,
+        announce: str = "2025-04-15",
+        note: str | None = None,
+    ) -> int:
+        _seed_forecast(db, announce)
         return insert_journal(
-            forecast_key=forecast_key(_forecast("2025-04-15")),
+            forecast_key=forecast_key(_forecast(announce)),
             symbol=f"{_CODE}.SH",
             entry_date=entry_date,
             entry_price=entry_price,
             horizon_days=5,
+            note=note,
             db_path=db,
         )
 
@@ -372,6 +470,41 @@ class TestSettleDue:
         assert row["settle_date"] == "2025-04-24"
         assert row["settle_price"] == pytest.approx(110.0)
         assert row["note"] and row["note"].startswith("deferred:")
+
+    def test_settle_preserves_entry_deferral_note(self, tmp_path) -> None:
+        """结算留痕与入场顺延注记拼接（不覆盖）：两条 deferred 注记都在。"""
+        db = tmp_path / "events.db"
+        self._seed_open(
+            db, entry_date="2025-04-16", announce="2025-04-14", note="deferred:suspended@2025-04-15"
+        )
+        closes = {"2025-04-16": 100.0, "2025-04-17": 101.0, "2025-04-24": 110.0}
+        client = self._kline(closes)
+        summary = settle_due(
+            as_of="2025-04-24", kline_client=client, calendar=self._DAYS, db_path=db
+        )
+        assert summary["settled"] == 1
+        note = str(list_settled_journal(db_path=db)[0]["note"])
+        assert "deferred:suspended@2025-04-15" in note  # 入场顺延注记保留
+        assert "deferred:2025-04-24@2025-04-23" in note  # 结算递延注记并入
+
+    def test_settle_pending_preserves_entry_note_and_does_not_duplicate(self, tmp_path) -> None:
+        """参考价缺失留痕同样拼接入场注记；重试不叠写同款 pending 段。"""
+        db = tmp_path / "events.db"
+        self._seed_open(
+            db, entry_date="2025-04-16", announce="2025-04-14", note="deferred:suspended@2025-04-15"
+        )
+        closes = {day: 100.0 + index for index, day in enumerate(self._DAYS[:3])}  # 缺结算日
+        client = self._kline(closes)
+        for _ in range(2):  # 保持 open 的重试
+            summary = settle_due(
+                as_of="2025-04-24", kline_client=client, calendar=self._DAYS, db_path=db
+            )
+            assert summary["settled"] == 0
+        row = list_open_journal(db_path=db)[0]
+        assert row["status"] == "open"
+        assert "deferred:suspended@2025-04-15" in str(row["note"])
+        assert str(row["note"]).count("settle_pending:") == 1  # 同款 pending 不重复叠写
+        assert row["raw_return"] is None  # 不得以 0/估算值结算
 
     def test_settle_without_calendar_uses_symbol_kline_days(self, tmp_path) -> None:
         db = tmp_path / "events.db"

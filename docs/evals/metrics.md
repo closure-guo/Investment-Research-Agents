@@ -222,13 +222,23 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 非法 verdict / 超长 reason / 缺证据 = 拒收；单条调用失败（typed LLM error）或拒收 → 降级 `in_line` + trace warning，
 不阻断本批其余记录；分诊结果落库含模型标识与 prompt 版本指纹（`load_prompt_with_meta`）。
 prompt 权威源 `src/finance_agent/prompts/event_triage.md`，发布走 `scripts/deploy_prompts.py`（prompt-deploy-consistency 门禁适用）。
-分诊输入预算 ≤ 12 字段（预告要素全量 + 标的快照要素，常量集中定义）。
+分诊输入预算 ≤ 12 字段（预告要素全量 + 快照表**实际可得键** `close`/`pct_chg`/`amount`，常量集中定义）；快照要素**逐行时点化**注入——
+每行取「≤ 该行 `available_at` 的最近快照日」的该股快照字段，该日无覆盖（老公告/空库）→ 该行不注入快照字段（仅预告要素）并在日批摘要
+计数留痕 `snapshot_ctx_missing`（MUST NOT 对回填批次共用单一快照日/前视）。
 
-**入场 / horizon / 结算口径**：入场 = **公告日次一交易日开盘价**（`fetch_kline(adjust=SETTLEMENT_ADJUST)` 后复权 hfq，与执行链同口径）；
-不可成交判定读当日快照 `read_universe(as_of=entry_date)`——`is_suspended=1` 或 `limit_up_sealed=1`/`limit_down_sealed=1`（缺失行/读不到快照
-视为不可判定 → fail-closed）→ 顺延至下一可成交交易日并留痕 `note=deferred:<原因>`；horizon 默认 **5 个交易日**（可配置）；
-结算 = 结算日（入场日起第 horizon 个交易日）**收盘价** / 入场价 − 1（`raw_return`）；参考价缺失（该日无 K 线 / 取数失败）→
-保持 `open` + 留痕重试，MUST NOT 以 0 或估算值结算。
+**入场 / horizon / 结算口径**：入场 = 可得时点（`available_at`，缺省回落 `announce_date`）**次一交易日开盘价**
+（`fetch_kline(adjust=SETTLEMENT_ADJUST)` 后复权 hfq，与执行链同口径）；记账人口 = `verdict='outperform'` 且未入场者
+（`in_line`/`risk` 不记账；全候选反事实读数为非目标，如需另立 delta）。
+不可成交判定读入场候选日快照 `read_universe(as_of=entry_date)`——`is_suspended=1` 或 `limit_up_sealed=1` 挡买顺延
+（**买入侧门禁语义**，与执行链 `risk_gate`/`matching` 一致；跌停板可买，不挡）；停牌真实形态（该交易日无 kline 行）由交易日历识别
+`available_at → 入场日` 间缺失交易日 = 停牌日，并入 `note=deferred:suspended@<日期>`（多日逗号合并）；
+快照行缺失/快照库不可读 → 退化为 **kline OHLC 判板**降级（一字板口径 = 开=高=低=收 且 `收盘 / 前一交易日收盘 − 1 ≥ 4.8%`
+（含边界，`sealed_flags_from_ohlc` 与快照 D3 同源；前收取该标的上一交易日收盘，缺失不判板；OHLC 不完整 → fail-closed 顺延），并日志注明口径降级。
+horizon 默认 **5 个交易日**（可配置）；结算日 = 入场日之后第 horizon 个交易日，结算价 = **该日收盘价**，
+`raw_return = 结算价 / 入场价 − 1`（round 6）；结算日无 K 线行（停牌）→ **递延至复牌首日收盘结算**并留痕
+`note=deferred:<复牌日>@<原结算日>`（与「取数失败」区分）；kline 取数失败/窗口未覆盖（参考价缺失）→ 保持 `open` +
+留痕 `note=settle_pending:<原因>` 重试，MUST NOT 以 0 或估算值结算；结算留痕与入场顺延注记**拼接不覆盖**
+（`;` 分隔，重试不叠写同款 pending 段）；已结算读数按 `settle_date` **降序**保留近期（超读取上限丢最旧，不静默丢最新）。
 
 **家族隔离声明**：事件读数注册为策略族成绩单 `family_id=event`（`data_source="events"`、`cost_bearing=True`、`min_samples=10`、
 `extreme_threshold=-0.15`），样本 = 已结算 `event_journal` 行（ticker=`symbol`、日期=`settle_date`、收益=`raw_return`）；

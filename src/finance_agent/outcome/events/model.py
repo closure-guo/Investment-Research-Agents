@@ -261,21 +261,24 @@ def insert_watchlist(
     created_at: str | None = None,
     db_path: str | Path | None = None,
 ) -> int | None:
-    """观察清单插入（同 ``forecast_key`` 去重）：已存在 → ``None``（不重复插入）。"""
+    """观察清单插入（同 ``forecast_key`` 去重，原子）：
+
+    ``INSERT ... ON CONFLICT(forecast_key) DO NOTHING``——命中冲突 → ``None``
+    （不重复插入、不覆盖既有状态/session）；是否真正插入按 ``rowcount`` 判定
+    （先查后插两步在并发下会竞态，单语句原子）。
+    """
     init_events_db(db_path)
     conn = _connect(db_path)
     try:
-        existing = conn.execute(
-            "SELECT id FROM event_watchlist WHERE forecast_key=?", (key,)
-        ).fetchone()
-        if existing is not None:
-            return None
         cursor = conn.execute(
             """INSERT INTO event_watchlist (forecast_key, source, status, session_id, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(forecast_key) DO NOTHING""",
             (key, source, status, session_id, created_at or datetime.now().isoformat()),
         )
         conn.commit()
+        if cursor.rowcount <= 0:
+            return None
         return int(cursor.lastrowid or 0)
     finally:
         conn.close()
@@ -491,13 +494,18 @@ def update_journal_note(row_id: int, *, note: str, db_path: str | Path | None = 
 def list_settled_journal(
     limit: int = _MAX_SETTLED_LIMIT, *, db_path: str | Path | None = None
 ) -> list[dict[str, Any]]:
-    """已结算记账读数（成绩单 event 族装载器消费）：``settle_date`` 升序取前 ``limit`` 行。"""
+    """已结算记账读数（成绩单 event 族装载器消费）。
+
+    口径：按 ``settle_date`` **降序**（保留近期）取前 ``limit`` 行——超读取上限时
+    丢最旧、不静默丢最新。
+    """
     limit = max(1, min(int(limit), _MAX_SETTLED_LIMIT))
     init_events_db(db_path)
     conn = _connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT * FROM event_journal WHERE status = ? ORDER BY settle_date ASC, id ASC LIMIT ?",
+            "SELECT * FROM event_journal WHERE status = ? "
+            "ORDER BY settle_date DESC, id DESC LIMIT ?",
             (JOURNAL_STATUS_SETTLED, limit),
         ).fetchall()
         return [dict(row) for row in rows]

@@ -7,8 +7,10 @@
   purpose 钉死 ``"quick"``（成本纪律）；默认实现 ``GatewayTriageClient`` 薄包
   gateway ``complete_text`` + ``extract_json``（不可解析 → ``EventTriageResponseError``）。
 - **prompt 组装**：``build_triage_prompt`` 渲染 ``prompts/event_triage.md``（权威源），
-  注入预告要素全量 + 标的快照要素余量，输入预算 ≤ ``MAX_INPUT_FIELDS``（12）字段
-  ——预算常量集中定义，禁止散落。
+  注入预告要素全量 + 快照要素（``SNAPSHOT_INPUT_FIELDS``，快照表实际可得键），输入预算
+  ≤ ``MAX_INPUT_FIELDS``（12）字段——预算常量集中定义，禁止散落。快照上下文由调用方
+  **逐行时点化**注入（键 = ``forecast_key``；每行取 ≤ 该行 ``available_at`` 的最近快照日
+  字段，MUST NOT 共用单一快照日/前视），缺 → 该条无快照字段。
 - **合同与降级**：``verdict ∈ {outperform, in_line, risk}``、``reason ≤ 50 字``、
   ``evidence`` 至少 1 条（field+value）——非法输出拒收；单条失败（typed ``LLMError``
   或解析失败）降级 ``in_line`` + warning，**不阻断批次**。降级行照常落库（reason 为
@@ -61,13 +63,13 @@ FORECAST_INPUT_FIELDS: tuple[str, ...] = (
     "change_high",
     "announce_date",
 )
-# 快照要素候选顺序（取前 MAX_INPUT_FIELDS - len(FORECAST_INPUT_FIELDS) 个）
+# 快照要素（**快照表实际可得键**：close←close_raw / pct_chg / amount；pe/market_cap
+# 快照表无此列，不得出现在注入面）——调用方按行时点化注入，取前
+# MAX_INPUT_FIELDS - len(FORECAST_INPUT_FIELDS) 个。
 SNAPSHOT_INPUT_FIELDS: tuple[str, ...] = (
     "close",
     "pct_chg",
     "amount",
-    "pe",
-    "market_cap",
 )
 
 # 并发上限默认（brief：并发 ≤ 8）
@@ -214,13 +216,14 @@ def _triage_one(
     snapshot_ctx: Mapping[str, Any] | None,
 ) -> tuple[tuple[str, str, list[dict[str, Any]]], dict[str, Any] | None]:
     """单条：组装 → 调用 → 合同校验；抛异常/违约一律降级（不向外抛，不阻断批次）。"""
-    prompt = build_triage_prompt(forecast, snapshot_ctx=snapshot_ctx)
     metadata: dict[str, Any] = {
         "purpose_tag": PURPOSE_TAG,
         "code": forecast.get("code"),
         "report_period": forecast.get("report_period"),
     }
     try:
+        # prompt 组装也在降级面内（模板缺失/渲染异常同样按 in_line 降级，不阻断批次）
+        prompt = build_triage_prompt(forecast, snapshot_ctx=snapshot_ctx)
         payload = client.complete_json(prompt, purpose=PURPOSE_TAG, metadata=metadata)
     except Exception as exc:  # noqa: BLE001 -- 单条失败按 in_line 降级，不阻断批次
         error_type = type(exc).__name__
@@ -256,20 +259,21 @@ def triage_forecasts(
     client: Any,
     db_path: str | Any = None,
     as_of: str | None = None,
-    snapshot_ctx_by_symbol: Mapping[str, Mapping[str, Any]] | None = None,
+    snapshot_ctx_by_key: Mapping[str, Mapping[str, Any]] | None = None,
     max_workers: int = DEFAULT_MAX_WORKERS,
 ) -> dict[str, Any]:
     """分诊批次入口：并发逐条 → 合同校验/降级 → 落库 → 返回摘要。
 
     - ``as_of`` 给定：``available_at > as_of`` 的行跳过（时点纪律防御，计入 ``skipped``）；
-    - ``snapshot_ctx_by_symbol``：调用方注入的标的快照要素（缺 → 该条无快照字段）；
+    - ``snapshot_ctx_by_key``：调用方注入的**逐行**快照要素，键 = ``forecast_key(row)``
+      （调用方按各行 ``available_at`` 时点化取数；缺 → 该条无快照字段）；
     - 结果按输入序归位；落库在主线程顺序执行（单连接逐条 UPSERT，幂等）；
     - 返回 ``{"triaged", "skipped", "outperform", "in_line", "risk", "degraded",
       "model", "prompt_fingerprint", "warnings"}``。
     """
     if max_workers < 1:
         raise ValueError(f"max_workers 必须是正整数: {max_workers!r}")
-    snapshot_ctx_by_symbol = snapshot_ctx_by_symbol or {}
+    snapshot_ctx_by_key = snapshot_ctx_by_key or {}
     pending: list[Mapping[str, Any]] = []
     skipped = 0
     for row in rows:
@@ -278,7 +282,7 @@ def triage_forecasts(
             skipped += 1  # 时点截断：公告日晚于判断日的记录不进分诊（MUST NOT 前视）
             continue
         pending.append(row)
-    prompts_ctx = [snapshot_ctx_by_symbol.get(str(row.get("code"))) for row in pending]
+    prompts_ctx = [snapshot_ctx_by_key.get(forecast_key(row)) for row in pending]
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(_triage_one, row, client=client, snapshot_ctx=ctx)

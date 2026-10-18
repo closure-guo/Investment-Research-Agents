@@ -2,12 +2,16 @@
 
 口径权威 ``docs/evals/metrics.md`` §1.15 + design.md「记账口径」：
 
-- **入场**：对 ``verdict='outperform'`` 且未入场者，在**公告日次一交易日开盘价**入场
-  （kline 取数显式 ``adjust=SETTLEMENT_ADJUST``（hfq 后复权），与执行链同口径）；
+- **入场**：对 ``verdict='outperform'`` 且未入场者，在**可得时点（``available_at``，
+  缺省回落 ``announce_date``）次一交易日开盘价**入场（kline 取数显式
+  ``adjust=SETTLEMENT_ADJUST``（hfq 后复权），与执行链同口径）；
 - **不可成交顺延**：入场候选日读当日快照行（``read_universe(as_of=entry_date)``）——
   ``is_suspended=1`` 或 ``limit_up_sealed=1`` 顺延至下一交易日并留痕
   ``note=deferred:<原因>@<日期>``。涨停一字板挡买沿用执行链**买入侧**门禁语义
   （``risk_gate``/``matching``：买 + ``limit_up_sealed`` 拒绝；跌停板可买，不挡）；
+  停牌真实形态是「该交易日无 kline 行」——选定入场日后按交易日历识别
+  ``available_at → 入场日`` 之间缺失的交易日 = 停牌日，同样落
+  ``deferred:suspended@<日期>``（多日逗号合并注记）；
   快照行缺失/快照库不可读（历史回填场景）→ 退化为 **kline OHLC 判板**
   （``sealed_flags_from_ohlc``，与快照 D3 同源阈值 ±4.8%；停牌无 kline 行天然顺延），
   并在日志注明口径降级；
@@ -18,14 +22,16 @@
   该日无行（停牌）→ 递延至复牌首日收盘（行驱动顺延，同 ``outcome/settle.py`` 纪律）
   并留痕 ``note=deferred:<复牌日>@<原结算日>``；
 - **参考价缺失**（kline 取数失败 / 窗口未覆盖）→ 保持 ``open`` + 留痕
-  ``note=settle_pending:<原因>``，MUST NOT 以 0 或估算值结算。
+  ``note=settle_pending:<原因>``，MUST NOT 以 0 或估算值结算；
+- **留痕拼接**：结算阶段的注记与入场顺延注记**拼接不覆盖**（``;`` 分隔，重试不叠写
+  同款 pending 段）。
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -169,6 +175,44 @@ def _tradable_on(
     return True, None
 
 
+def _suspension_gap_days(
+    calendar: Sequence[str] | None,
+    symbol_days: set[str],
+    *,
+    anchor: str,
+    entry_day: str,
+) -> list[str]:
+    """``anchor → entry_day`` 之间（不含两端）市场交易日中无该标的 kline 行者 = 停牌日。
+
+    停牌真实形态是「该交易日无 kline 行」，行驱动遍历天然看不见；选定入场日后用
+    市场交易日历识别缺口补留痕。``calendar`` 不可得（None）→ 空（无法识别，不猜）。
+    """
+    if not calendar:
+        return []
+    gaps = {
+        day
+        for day in (str(item)[:10] for item in calendar)
+        if anchor < day < entry_day and day not in symbol_days
+    }
+    return sorted(gaps)
+
+
+def _format_deferrals(deferrals: Sequence[tuple[str, str]]) -> str | None:
+    """顺延留痕 → ``note=deferred:<原因>@<日期>[,...]``（按日期升序，多日合并）。"""
+    if not deferrals:
+        return None
+    ordered = sorted(deferrals, key=lambda item: item[0])
+    return f"{_DEFERRED_PREFIX}{','.join(f'{reason}@{day}' for day, reason in ordered)}"
+
+
+def _merge_note(existing: Any, new: str) -> str:
+    """note 拼接（不覆盖）：既有注记保留，同款段跳过（重试不叠写同款 pending）。"""
+    parts = [part for part in str(existing or "").split(";") if part]
+    if new not in parts:
+        parts.append(new)
+    return ";".join(parts)
+
+
 def entry_candidates(
     *,
     as_of: str,
@@ -176,12 +220,14 @@ def entry_candidates(
     snapshot_db_path: str | Path | None = None,
     db_path: str | Path | None = None,
     horizon_days: int = DEFAULT_HORIZON_DAYS,
+    calendar: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """对 ``outperform`` 且未入场者在公告日次一交易日开盘入场（幂等）。
+    """对 ``outperform`` 且未入场者在其可得时点次一交易日开盘入场（幂等）。
 
     返回 ``{"entered", "deferred", "not_due", "errors"}``：``deferred`` 计入发生过
     顺延的入场；``not_due`` 为次一交易日尚未到（或不晚于 as_of 无可成交日）；单标的
-    异常跳过并计入 ``errors``（不阻断整批）。
+    异常跳过并计入 ``errors``（不阻断整批）。``calendar``（市场交易日历，升序）用于
+    识别停牌缺口日（该交易日无 kline 行 → 留痕 ``deferred:suspended@<日期>``）。
     """
     summary = {"entered": 0, "deferred": 0, "not_due": 0, "errors": 0}
     for forecast in list_outperform_without_journal(db_path=db_path):
@@ -193,6 +239,7 @@ def entry_candidates(
                 snapshot_db_path=snapshot_db_path,
                 db_path=db_path,
                 horizon_days=horizon_days,
+                calendar=calendar,
                 summary=summary,
             )
         except Exception:  # noqa: BLE001 -- 单标的异常跳过，不阻断整批
@@ -204,34 +251,36 @@ def entry_candidates(
 
 
 def _enter_one(
-    forecast: dict[str, Any],
+    forecast: Mapping[str, Any],
     *,
     as_of: str,
     kline_client: Any,
     snapshot_db_path: str | Path | None,
     db_path: str | Path | None,
     horizon_days: int,
+    calendar: Sequence[str] | None,
     summary: dict[str, int],
 ) -> None:
-    """单条入场：定位公告日后的首个可成交交易日 → 开盘价入场（顺延留痕）。"""
-    announce = str(forecast.get("announce_date") or "")
+    """单条入场：定位可得时点后的首个可成交交易日 → 开盘价入场（顺延留痕）。"""
+    anchor = str(forecast.get("available_at") or forecast.get("announce_date") or "")
     code = str(forecast.get("code") or "")
-    if not announce or not code:
+    if not anchor or not code:
         summary["not_due"] += 1
         return
-    span = max((pd.Timestamp(as_of) - pd.Timestamp(announce)).days, 30)
+    span = max((pd.Timestamp(as_of) - pd.Timestamp(anchor)).days, 30)
     frame = _fetch_kline(kline_client, code, span_days=span + 30)
     if frame is None:
         summary["errors"] += 1
         logger.warning("入场取数失败，保持未入场（下次重试）: %s", code)
         return
-    later = frame[frame["日期"] > announce]
+    later = frame[frame["日期"] > anchor]
     if later.empty:
-        summary["not_due"] += 1  # 次一交易日尚未到（或 K 线窗口未覆盖公告日）
+        summary["not_due"] += 1  # 次一交易日尚未到（或 K 线窗口未覆盖可得时点）
         return
     closes = {str(row["日期"]): _positive(row.get("收盘")) for _, row in frame.iterrows()}
     ordered_days = [str(day) for day in frame["日期"]]
-    deferrals: list[str] = []
+    symbol_days = set(ordered_days)
+    deferrals: list[tuple[str, str]] = []  # (日期, 原因)
     for _, row in later.iterrows():
         day = str(row["日期"])
         if day > as_of:
@@ -252,16 +301,18 @@ def _enter_one(
             snapshot_db_path=snapshot_db_path,
         )
         if not tradable:
-            deferrals.append(f"{reason}@{day}")
+            deferrals.append((day, reason or "ineligible"))
             continue
-        note = f"{_DEFERRED_PREFIX}{','.join(deferrals)}" if deferrals else None
+        # 停牌缺口日（该交易日无 kline 行）并入留痕：锚点 → 入场日之间
+        for gap_day in _suspension_gap_days(calendar, symbol_days, anchor=anchor, entry_day=day):
+            deferrals.append((gap_day, "suspended"))
         insert_journal(
             forecast_key=forecast_key(forecast),
             symbol=_symbol_for(code),
             entry_date=day,
             entry_price=open_price,
             horizon_days=horizon_days,
-            note=note,
+            note=_format_deferrals(deferrals),
             db_path=db_path,
         )
         summary["entered"] += 1
@@ -334,15 +385,22 @@ def _settle_one(
     entry_date = str(journal.get("entry_date") or "")
     entry_price = _positive(journal.get("entry_price"))
     horizon = int(journal.get("horizon_days") or DEFAULT_HORIZON_DAYS)
+    existing_note = journal.get("note")  # 入场顺延注记：结算留痕拼接不覆盖
     if not symbol or not entry_date or entry_price is None:
         summary["pending"] += 1
-        update_journal_note(row_id, note=f"{_PENDING_PREFIX}invalid_row", db_path=db_path)
+        update_journal_note(
+            row_id,
+            note=_merge_note(existing_note, f"{_PENDING_PREFIX}invalid_row"),
+            db_path=db_path,
+        )
         return
     span = max((pd.Timestamp(as_of) - pd.Timestamp(entry_date)).days, 30)
     frame = _fetch_kline(kline_client, _code(symbol), span_days=span + horizon * 2)
     if frame is None:
         summary["errors"] += 1
-        update_journal_note(row_id, note=f"{_PENDING_PREFIX}no_kline", db_path=db_path)
+        update_journal_note(
+            row_id, note=_merge_note(existing_note, f"{_PENDING_PREFIX}no_kline"), db_path=db_path
+        )
         logger.warning("结算取数失败，保持 open（下次重试）: %s", symbol)
         return
     symbol_days = [str(day) for day in frame["日期"]]
@@ -358,7 +416,9 @@ def _settle_one(
     if at_or_after.empty:
         summary["pending"] += 1
         update_journal_note(
-            row_id, note=f"{_PENDING_PREFIX}no_price@{settle_date}", db_path=db_path
+            row_id,
+            note=_merge_note(existing_note, f"{_PENDING_PREFIX}no_price@{settle_date}"),
+            db_path=db_path,
         )
         logger.warning("结算日无行情（%s/%s），保持 open + 留痕重试", symbol, settle_date)
         return
@@ -368,12 +428,14 @@ def _settle_one(
     if exit_price is None:
         summary["pending"] += 1
         update_journal_note(
-            row_id, note=f"{_PENDING_PREFIX}no_price@{settle_date}", db_path=db_path
+            row_id,
+            note=_merge_note(existing_note, f"{_PENDING_PREFIX}no_price@{settle_date}"),
+            db_path=db_path,
         )
         return
-    note = None
+    note = existing_note
     if exit_date != settle_date:
-        note = f"{_DEFERRED_PREFIX}{exit_date}@{settle_date}"
+        note = _merge_note(existing_note, f"{_DEFERRED_PREFIX}{exit_date}@{settle_date}")
         summary["deferred"] += 1
     settle_journal(
         row_id,

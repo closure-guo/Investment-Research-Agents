@@ -305,7 +305,8 @@ class TestJournal:
             is False
         )
 
-    def test_list_settled_journal_ascending_with_limit(self, tmp_path):
+    def test_list_settled_journal_keeps_recent_within_limit(self, tmp_path):
+        """超读取上限时保留近期（``settle_date`` 降序），不静默丢最新。"""
         db = tmp_path / "events.db"
         for day, ret in [("2025-04-23", 0.01), ("2025-04-24", -0.02), ("2025-04-25", 0.03)]:
             row_id = insert_journal(
@@ -319,7 +320,7 @@ class TestJournal:
             )
             settle_journal(row_id, settle_date=day, settle_price=100.0, raw_return=ret, db_path=db)
         rows = list_settled_journal(limit=2, db_path=db)
-        assert [row["raw_return"] for row in rows] == [0.01, -0.02]  # 升序取前 limit
+        assert [row["raw_return"] for row in rows] == [0.03, -0.02]  # 降序取前 limit（保留近期）
 
     def test_insert_journal_records_deferred_note(self, tmp_path):
         db = tmp_path / "events.db"

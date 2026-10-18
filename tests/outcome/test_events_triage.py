@@ -11,12 +11,14 @@ import json
 import pytest
 
 from finance_agent.llm.errors import RateLimitError
-from finance_agent.outcome.events.model import list_untriaged, upsert_forecasts
+from finance_agent.outcome.events.model import forecast_key, list_untriaged, upsert_forecasts
 from finance_agent.outcome.events.triage import (
     DEFAULT_MAX_WORKERS,
     DEGRADED_REASON,
+    FORECAST_INPUT_FIELDS,
     MAX_INPUT_FIELDS,
     MAX_REASON_CHARS,
+    SNAPSHOT_INPUT_FIELDS,
     VERDICTS,
     EventTriageResponseError,
     GatewayTriageClient,
@@ -115,8 +117,8 @@ class TestBuildPrompt:
             "close": 1500.0,
             "pct_chg": 1.2,
             "amount": 1e9,
-            "pe": 30.0,
-            "market_cap": 1.9e12,
+            "pe": 33.3,
+            "market_cap": 8.8e11,
             "turnover": 0.5,
             "extra": "不应出现",
         }
@@ -124,16 +126,19 @@ class TestBuildPrompt:
         assert "600519" in prompt and "贵州茅台" in prompt and "略增" in prompt
         assert "11.57" in prompt and "18.55" in prompt
         assert "1500.0" in prompt  # 快照字段入 prompt
-        assert "不应出现" not in prompt  # 预算截断：超 12 字段不渲染
+        assert "- pe:" not in prompt and "- market_cap:" not in prompt  # 快照表无此列，不渲染
+        assert "不应出现" not in prompt  # 非快照要素键不渲染
         assert "{{" not in prompt  # 占位符全部替换
         block = prompt.split("<forecast_data>")[1].split("</forecast_data>")[0]
         rendered = [line for line in block.strip().splitlines() if line.strip()]
-        assert MAX_INPUT_FIELDS == 12
-        assert len(rendered) == MAX_INPUT_FIELDS  # 预告 7 + 快照 5（预算满额）
+        assert MAX_INPUT_FIELDS == 12  # 输入预算上限（常量集中定义）
+        # 预告 7 + 快照表实际可得键 3（close/pct_chg/amount）＝ 10 ≤ 预算
+        assert len(rendered) == len(FORECAST_INPUT_FIELDS) + len(SNAPSHOT_INPUT_FIELDS) == 10
 
     def test_renders_without_snapshot_context(self):
         prompt = build_triage_prompt(_forecast_row(), snapshot_ctx=None)
         assert "600519" in prompt and "{{" not in prompt
+        assert "- close:" not in prompt
 
 
 class TestTriageBatch:
@@ -223,6 +228,79 @@ class TestTriageBatch:
         result = triage_forecasts(rows, client=_StubClient([]), db_path=db, as_of="2025-04-14")
         assert result["triaged"] == 0 and result["skipped"] == 1
         assert _triage_rows(db) == []
+
+    def test_snapshot_context_is_keyed_per_forecast_row(self, tmp_path):
+        """逐行快照上下文按 forecast_key 定位（同 code 多报告期可各带不同时点快照）。"""
+        db = tmp_path / "events.db"
+        row_a = _forecast_row(code="600519", announce_date="2025-04-15")
+        row_b = _forecast_row(code="000001", announce_date="2025-04-16")
+        upsert_forecasts([row_a, row_b], db_path=db)
+        client = _StubClient([_OK_PAYLOAD, _OK_PAYLOAD])
+
+        result = triage_forecasts(
+            list_untriaged(db_path=db),
+            client=client,
+            db_path=db,
+            snapshot_ctx_by_key={forecast_key(row_a): {"close": 1500.0, "pct_chg": 1.2}},
+        )
+
+        assert result["triaged"] == 2
+        prompts = {call["metadata"]["code"]: call["prompt"] for call in client.calls}
+        assert "- close: 1500.0" in prompts["600519"]
+        assert "- close:" not in prompts["000001"]  # 无该行上下文 → 不注入快照字段
+
+    def test_prompt_build_failure_degrades_not_raises(self, tmp_path, monkeypatch):
+        """prompt 组装失败同样按 in_line 降级（与 ``_triage_one``「一律降级」docstring 一致）。"""
+        db = tmp_path / "events.db"
+        upsert_forecasts([_forecast_row()], db_path=db)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("prompt 模板缺失")
+
+        monkeypatch.setattr("finance_agent.outcome.events.triage.build_triage_prompt", _boom)
+        result = triage_forecasts(
+            list_untriaged(db_path=db), client=_StubClient([_OK_PAYLOAD]), db_path=db
+        )
+        assert result["triaged"] == 1 and result["degraded"] == 1 and result["in_line"] == 1
+        assert result["warnings"][0]["error"] == "RuntimeError"
+        assert _triage_rows(db)[0]["reason"] == DEGRADED_REASON
+
+    def test_batch_concurrency_peak_never_exceeds_bound(self, tmp_path):
+        """行为断言：并发峰值 ≤ max_workers=8（桩计数峰值）。"""
+        import threading
+        import time
+
+        db = tmp_path / "events.db"
+        rows = [
+            _forecast_row(code=f"6005{index:02d}", announce_date="2025-04-15")
+            for index in range(16)
+        ]
+        upsert_forecasts(rows, db_path=db)
+        lock = threading.Lock()
+        state = {"active": 0, "peak": 0}
+
+        class _SlowClient:
+            model_label = "slow-stub"
+
+            def complete_json(self, prompt, *, purpose="quick", metadata=None):
+                with lock:
+                    state["active"] += 1
+                    state["peak"] = max(state["peak"], state["active"])
+                time.sleep(0.02)
+                with lock:
+                    state["active"] -= 1
+                return {
+                    "verdict": "in_line",
+                    "reason": "并发探针",
+                    "evidence": [{"field": "code", "value": "x"}],
+                }
+
+        result = triage_forecasts(
+            list_untriaged(db_path=db), client=_SlowClient(), db_path=db, max_workers=8
+        )
+        assert result["triaged"] == 16
+        assert state["peak"] <= DEFAULT_MAX_WORKERS == 8
+        assert state["peak"] > 1  # 确实并发执行（串行实现会让本断言失败）
 
     def test_concurrency_bound_is_eight(self):
         assert DEFAULT_MAX_WORKERS == 8

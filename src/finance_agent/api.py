@@ -3733,6 +3733,7 @@ async def events_watchlist_analyze(item_id: int) -> Any:
             "type": "session_created",
             "session_id": session_id,
             "display_name": display_name,
+            "source": "event",  # 来源标记（spec：事件线发起复用既有队列，标记 event）
             "timestamp": _now(),
         },
     )
