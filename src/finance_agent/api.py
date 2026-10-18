@@ -856,6 +856,11 @@ if TESTING:
         （delta add-crowding-regime-positioning T8）；库路径于调用期读
         REGIME_DB_PATH（E2E 指向独立测试库 data/test-e2e-regime.db，绝不落到
         开发库 data/regime.db）。
+        顶层可选 events（dict：``forecasts``/``triage``/``watchlist``/``journal``
+        逐条经既有落库入口写入：预告 upsert（幂等）/分诊/清单（去重）/记账）与
+        events_reset（bool：清事件线四表）造选股页事件观察区块三态/空态
+        （delta add-event-driven-lane）；库路径于调用期读 EVENTS_DB_PATH
+        （E2E 指向独立测试库 data/test-e2e-events.db，绝不落到开发库 data/events.db）。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
         # track_record / snapshot / screening / memory / factors / broker / regime
@@ -876,6 +881,8 @@ if TESTING:
             and not req.get("broker_reset")
             and not isinstance(req.get("regime"), list)
             and not req.get("regime_reset")
+            and not isinstance(req.get("events"), dict)
+            and not req.get("events_reset")
         ):
             return {"status": "ok", "mode": "testing"}
         # add-paper-broker：战绩造数复位（清 equity_curve + paper_equity 两表）。双曲线
@@ -1190,6 +1197,71 @@ if TESTING:
                     computed_at=str(regime_row.get("computed_at") or _now()),
                     cap_source=regime_row.get("cap_source"),
                 )
+        # delta add-event-driven-lane：事件线造数（四表经既有落库入口写入：预告
+        # upsert 幂等、分诊覆盖、清单去重、记账唯一）。库路径调用期读 EVENTS_DB_PATH
+        # （model._default_db_path env 口径，E2E 指向独立测试库 data/test-e2e-events.db，
+        # 绝不落到开发库 data/events.db）。events_reset 先清四表，供同套件多 spec 复位。
+        if req.get("events_reset"):
+            from finance_agent.outcome.events.model import delete_all_events_state
+
+            delete_all_events_state()
+        events_seed = req.get("events")
+        if isinstance(events_seed, dict):
+            from finance_agent.outcome.events.model import (
+                insert_journal as _seed_event_journal,
+            )
+            from finance_agent.outcome.events.model import (
+                insert_watchlist as _seed_event_watchlist,
+            )
+            from finance_agent.outcome.events.model import (
+                record_triage as _seed_event_triage,
+            )
+            from finance_agent.outcome.events.model import (
+                settle_journal as _seed_event_settle,
+            )
+            from finance_agent.outcome.events.model import (
+                upsert_forecasts as _seed_forecasts,
+            )
+
+            forecasts = events_seed.get("forecasts") or []
+            if forecasts:
+                _seed_forecasts([dict(row) for row in forecasts])
+            for triage_row in events_seed.get("triage") or []:
+                _seed_event_triage(
+                    str(triage_row["forecast_key"]),
+                    verdict=str(triage_row["verdict"]),
+                    reason=str(triage_row.get("reason") or ""),
+                    evidence=triage_row.get("evidence") or [],
+                    model=triage_row.get("model"),
+                    prompt_fingerprint=triage_row.get("prompt_fingerprint"),
+                    triaged_at=triage_row.get("triaged_at"),
+                )
+            for item in events_seed.get("watchlist") or []:
+                _seed_event_watchlist(
+                    str(item["forecast_key"]),
+                    source=str(item.get("source") or "earnings"),
+                    status=str(item.get("status") or "pending"),
+                    session_id=item.get("session_id"),
+                    created_at=item.get("created_at"),
+                )
+            for row in events_seed.get("journal") or []:
+                row_id = _seed_event_journal(
+                    forecast_key=str(row["forecast_key"]),
+                    source=str(row.get("source") or "earnings"),
+                    symbol=str(row["symbol"]),
+                    entry_date=str(row["entry_date"]),
+                    entry_price=float(row["entry_price"]),
+                    horizon_days=int(row.get("horizon_days") or 5),
+                    note=row.get("note"),
+                )
+                if str(row.get("status") or "open") == "settled":
+                    _seed_event_settle(
+                        row_id,
+                        settle_date=str(row["settle_date"]),
+                        settle_price=float(row["settle_price"]),
+                        raw_return=float(row["raw_return"]),
+                        note=row.get("note"),
+                    )
         # track_record-only（含 {} 空 dict）造数后即返回占位响应，不落会话
         if "chat_history" not in req:
             return {"status": "ok", "mode": "testing"}

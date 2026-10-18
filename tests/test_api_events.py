@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 
 import pytest
@@ -28,6 +29,20 @@ from finance_agent.outcome.events.model import (
 from finance_agent.screening.queue import AnalyzeQueue
 
 _NET = "归属于上市公司股东的净利润"
+
+
+@pytest.fixture
+def testing_client(monkeypatch):
+    """TESTING=1 下 reload 出带 ``/api/test/seed`` 的客户端（仓库既有模式）。"""
+    monkeypatch.setenv("TESTING", "1")
+    import finance_agent.api as api_module
+
+    importlib.reload(api_module)
+    try:
+        yield TestClient(api_module.app)
+    finally:
+        monkeypatch.delenv("TESTING", raising=False)
+        importlib.reload(api_module)
 
 
 @pytest.fixture(autouse=True)
@@ -238,3 +253,82 @@ class TestAnalyzeEndpoint:
     def test_unknown_id_404(self, _events_db) -> None:
         resp = TestClient(app).post("/api/events/watchlist/999/analyze")
         assert resp.status_code == 404
+
+
+class TestEventsSeed:
+    """TESTING 造数：``events`` 块 + ``events_reset``（delta add-event-driven-lane）。
+
+    守卫链键（api.py ``not ... and`` 链）：缺键会让 seed 请求被静默早退吞掉——
+    本组用例同时是守卫链的回归（seed 后经只读端点核验真实落库）。
+    """
+
+    def _seed_payload(self, **extra) -> dict:
+        return {
+            "events": {
+                "forecasts": [
+                    {
+                        "code": "600519",
+                        "name": "贵州茅台",
+                        "report_period": "2025-03-31",
+                        "source_record_id": "归属于上市公司股东的净利润|2025-04-15",
+                        "forecast_type": "预增",
+                        "change_low": 60.0,
+                        "change_high": 90.0,
+                        "announce_date": "2025-04-15",
+                    }
+                ],
+                "triage": [
+                    {
+                        "forecast_key": "600519|2025-03-31|归属于上市公司股东的净利润|2025-04-15",
+                        "verdict": "outperform",
+                        "reason": "预增 60%~90%",
+                        "evidence": [{"field": "change_low", "value": 60.0}],
+                        "model": "seed",
+                        "prompt_fingerprint": "event_triage@1",
+                    }
+                ],
+                "watchlist": [
+                    {
+                        "forecast_key": "600519|2025-03-31|归属于上市公司股东的净利润|2025-04-15",
+                        "source": "earnings",
+                    }
+                ],
+                "journal": [
+                    {
+                        "forecast_key": "600519|2025-03-31|归属于上市公司股东的净利润|2025-04-15",
+                        "symbol": "600519.SH",
+                        "entry_date": "2025-04-16",
+                        "entry_price": 100.0,
+                        "horizon_days": 5,
+                        "status": "settled",
+                        "settle_date": "2025-04-23",
+                        "settle_price": 105.0,
+                        "raw_return": 0.05,
+                    }
+                ],
+            },
+            **extra,
+        }
+
+    def test_seed_block_lands_rows_and_guard_chain_passes(self, _events_db, testing_client) -> None:
+        client = testing_client
+        resp = client.post("/api/test/seed", json=self._seed_payload())
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"  # 未被守卫链早退吞掉
+
+        items = client.get("/api/events/watchlist").json()["items"]
+        assert len(items) == 1
+        assert items[0]["verdict"] == "outperform" and items[0]["source"] == "earnings"
+
+        from finance_agent.outcome.events.model import list_settled_journal
+
+        settled = list_settled_journal(db_path=_events_db)
+        assert len(settled) == 1 and settled[0]["raw_return"] == 0.05
+
+    def test_events_reset_clears_four_tables(self, _events_db, testing_client) -> None:
+        client = testing_client
+        client.post("/api/test/seed", json=self._seed_payload())
+        resp = client.post("/api/test/seed", json={"events_reset": True})
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+        assert client.get("/api/events/watchlist").json() == {"items": []}

@@ -83,6 +83,9 @@ CREATE INDEX IF NOT EXISTS idx_journal_entry ON event_journal(entry_date);
 WATCHLIST_STATUS_PENDING = "pending"
 WATCHLIST_STATUS_ANALYZING = "analyzing"
 
+# 预告来源缺省（DDL 与 upsert 双处同源；抓取器恒显式传 ``eastmoney``）
+DEFAULT_SOURCE = "eastmoney"
+
 # 记账状态（open=未到期；settled=已结算）
 JOURNAL_STATUS_OPEN = "open"
 JOURNAL_STATUS_SETTLED = "settled"
@@ -167,9 +170,13 @@ def upsert_forecasts(
         )
         for row in payload:
             values = [
-                row.get(col)
-                if col != "available_at"
-                else (row.get("available_at") or row.get("announce_date"))
+                (
+                    row.get("available_at") or row.get("announce_date")
+                    if col == "available_at"
+                    else (row.get("source") or DEFAULT_SOURCE)
+                    if col == "source"
+                    else row.get(col)
+                )
                 for col in _FORECAST_COLUMNS
             ]
             conn.execute(sql, values)
