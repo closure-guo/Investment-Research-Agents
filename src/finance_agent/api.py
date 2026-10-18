@@ -3646,7 +3646,7 @@ def _watchlist_evidence(raw: Any) -> Any:
 def _cbb_note_payload(raw: Any) -> dict[str, Any] | None:
     """条款事件条目的规则化注记（``event_watchlist.note`` JSON）→ dict。
 
-    损坏/非对象 → ``None`` + WARNNING（四键中倒计时如实 null，不伪装成 0 或编造理由）。
+    损坏/非对象 → ``None`` + WARNING（四键中倒计时如实 null，不伪装成 0 或编造理由）。
     """
     if raw is None:
         return None

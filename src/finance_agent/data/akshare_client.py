@@ -375,6 +375,7 @@ _CB_REDEEM_COUNT_COL = "强赎天计数"
 _CB_REDEEM_LAST_TRADE_COL = "最后交易日"
 _CB_REDEEM_REMAIN_COL = "剩余规模"
 _CB_REDEEM_STATUS_COL = "强赎状态"
+_CB_ADJ_NAME_COL = "转债名称"
 _CB_ADJ_MEETING_COL = "股东大会日"
 _CB_ADJ_BEFORE_COL = "下修前转股价"
 _CB_ADJ_AFTER_COL = "下修后转股价"
@@ -1930,7 +1931,7 @@ class AKShareClient:
             rows.append(
                 {
                     "code": code,
-                    "name": _text_or_none(raw.get("转债名称")),
+                    "name": _text_or_none(raw.get(_CB_ADJ_NAME_COL)),
                     "meeting_date": _norm_date_iso(raw.get(_CB_ADJ_MEETING_COL)),
                     "convert_price_before": _safe_float(raw.get(_CB_ADJ_BEFORE_COL)),
                     "convert_price_after": _safe_float(raw.get(_CB_ADJ_AFTER_COL)),
