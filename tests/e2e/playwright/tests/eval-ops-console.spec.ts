@@ -34,7 +34,9 @@ test.describe.configure({ timeout: 120_000 })
 // 月批附于注册表末尾）与 wire-builtin-factor-registration（12→13：内置因子注册 15:50）
 // 后同步更新——断言强度不变（仍逐 id 断言存在与顺序）；
 // add-factor-harvest-bridge（13→14：因子收割 15:55）；
-// add-crowding-regime-positioning（14→15：拥挤度 15:35，插于快照之后）。
+// add-crowding-regime-positioning（14→15：拥挤度 15:35，插于快照之后）；
+// add-event-driven-lane（15→18：预告抓取 16:05 / 预告分诊 16:15 / 事件结算 16:25，
+// 按时刻序插于既有日批链空档）。
 const JOB_IDS = [
   'market_snapshot_daily',
   'regime_daily',
@@ -43,8 +45,11 @@ const JOB_IDS = [
   'factor_builtin_register',
   'factor_harvest_daily',
   'decision_settle_daily',
+  'earnings_fetch_daily',
   'paper_execute_daily',
+  'earnings_triage_daily',
   'paper_settle_daily',
+  'event_settle_daily',
   'daily_marking',
   'metrics_snapshot',
   'integrity_check',
@@ -118,7 +123,7 @@ async function cohortAuditCount(request: APIRequestContext): Promise<number> {
 }
 
 test.describe('评估运维分区（设置中心）', () => {
-  test('分区渲染任务卡片（当前 15 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
+  test('分区渲染任务卡片（当前 18 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
     await openEvalOps(page)
 
     // TESTING=1 → 调度器未启动：显式提示，不得空白、不得以空列表冒充「一切正常」

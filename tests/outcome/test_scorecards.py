@@ -52,7 +52,7 @@ def _s(ticker: str, day: str, ret: float) -> Sample:
 
 def test_registry_declares_full_family_contract() -> None:
     """spec：每族 SHALL 声明 family_id / 名称 / 数据源 / 收益口径（含费与否）/ 费后说明 / 样本门槛。"""
-    assert [spec.family_id for spec in FAMILY_REGISTRY] == ["predictions", "execution"]
+    assert [spec.family_id for spec in FAMILY_REGISTRY] == ["predictions", "execution", "event"]
     for spec in FAMILY_REGISTRY:
         assert spec.name
         assert spec.data_source in _LOADERS  # 数据源已接线装载器
@@ -65,7 +65,7 @@ def test_registry_declares_full_family_contract() -> None:
 def test_cost_bearing_declaration_drives_net_deduction() -> None:
     """费后处理随族声明：cost_bearing=True → 净=毛−成本率；False → 毛=净（不二次扣减）。"""
     samples = [_s("600519", f"2026-09-{day:02d}", 0.01) for day in range(1, 12)]
-    bearing, contained = FAMILY_REGISTRY
+    bearing, contained = FAMILY_REGISTRY[0], FAMILY_REGISTRY[1]
     assert bearing.cost_bearing is True
     assert contained.cost_bearing is False
 
@@ -313,7 +313,9 @@ def test_get_scorecards_end_to_end(tmp_path, monkeypatch) -> None:
 
     result = get_scorecards()
     families = {family["family_id"]: family for family in result["families"]}
-    assert list(families) == ["predictions", "execution"]  # 注册表序；未注册族不出现
+    # 注册表序；未注册族不出现（event 族已注册：见 TestEventFamilyScorecards）
+    assert list(families) == ["predictions", "execution", "event"]
+    assert families["event"]["expectancy_reason"] == "no_samples"  # 空事件库：如实置空
 
     pred = families["predictions"]
     assert pred["name"] == "观点线"
@@ -403,13 +405,13 @@ def test_registered_family_with_unknown_data_source_reports_no_loader(
     extended = (
         *FAMILY_REGISTRY,
         FamilySpec(
-            "events",
-            "事件线",
+            "hypothetical",
+            "假想族",
             data_source="unknown",
             cost_bearing=False,
             min_samples=10,
             extreme_threshold=-0.10,
-            caliber_note="事件线口径（极端样本阈值 -10%，测试声明）",
+            caliber_note="假想族口径（极端样本阈值 -10%，测试声明）",
         ),
     )
     monkeypatch.setattr("finance_agent.outcome.scorecards.FAMILY_REGISTRY", extended)
@@ -418,10 +420,11 @@ def test_registered_family_with_unknown_data_source_reports_no_loader(
     assert [family["family_id"] for family in result["families"]] == [
         "predictions",
         "execution",
-        "events",
+        "event",
+        "hypothetical",
     ]
-    events = result["families"][2]
-    assert events["name"] == "事件线"
+    events = result["families"][3]
+    assert events["name"] == "假想族"
     assert events["as_of"] is None
     assert events["expectancy"] is None
     assert events["expectancy_reason"] == "no_loader"
@@ -468,3 +471,91 @@ def test_missing_predictions_table_reports_empty(tmp_path, monkeypatch) -> None:
     pred = _family(get_scorecards(), "predictions")
     assert pred["expectancy_reason"] == "no_samples"
     assert pred["win_rate"] is None
+
+
+class TestEventFamilyScorecards:
+    """delta add-event-driven-lane T6：事件族注册与装载（样本 = 已结算 event_journal 行）。"""
+
+    def _seed_events(self, db, *, settled: int = 12) -> None:
+        from finance_agent.outcome.events.model import (
+            init_events_db,
+            insert_journal,
+            settle_journal,
+        )
+
+        init_events_db(db)
+        for index in range(1, settled + 1):
+            ret = -0.20 if index == 1 else 0.02
+            row_id = insert_journal(
+                forecast_key=f"60051{index % 10}|2026-03-31|ind|2026-04-{index:02d}",
+                symbol="600519.SH" if index % 2 else "000001.SZ",
+                entry_date=f"2026-04-{index:02d}",
+                entry_price=100.0,
+                horizon_days=5,
+                db_path=db,
+            )
+            assert settle_journal(
+                row_id,
+                settle_date=f"2026-05-{index:02d}",
+                settle_price=100.0 * (1 + ret),
+                raw_return=ret,
+                db_path=db,
+            )
+
+    def test_event_family_declaration_verbatim(self):
+        spec = next(spec for spec in FAMILY_REGISTRY if spec.family_id == "event")
+        assert spec.name == "事件线"
+        assert spec.data_source == "events" and spec.data_source in _LOADERS
+        assert spec.cost_bearing is True  # 虚拟结算族：净 = 毛 − 往返成本估算率
+        assert spec.min_samples == 10
+        assert spec.extreme_threshold == -0.15
+        assert "阈值 -15%" in spec.caliber_note
+        assert "T+20" in spec.caliber_note  # 家族隔离声明（独立于观点线窗口）
+
+    def test_event_family_reads_settled_journal_only(self, tmp_path, monkeypatch):
+        events_db = tmp_path / "events.db"
+        self._seed_events(events_db, settled=12)
+        # 未结算行不入样本
+        from finance_agent.outcome.events.model import insert_journal
+
+        insert_journal(
+            forecast_key="999999|2026-03-31|ind|2026-04-30",
+            symbol="600000.SH",
+            entry_date="2026-04-30",
+            entry_price=100.0,
+            horizon_days=5,
+            db_path=events_db,
+        )
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "missing-s.db"))
+        monkeypatch.setenv("EXECUTION_DB_PATH", str(tmp_path / "missing-e.db"))
+        monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "missing-snap.db"))
+        monkeypatch.setenv("EVENTS_DB_PATH", str(events_db))
+
+        event = _family(get_scorecards(), "event")
+        assert event["name"] == "事件线"
+        assert event["expectancy"]["n"] == 12  # 只数已结算行
+        assert event["expectancy"]["net"] < event["expectancy"]["gross"]  # cost_bearing
+        assert event["as_of"] == "2026-05-12"
+        assert [row["ticker"] for row in event["extreme_samples"]] == ["600519.SH"]
+        assert event["win_rate"] is None  # 事件线无胜率口径
+        assert "往返成本" in event["caliber_note"]
+
+    def test_family_isolation_event_rows_do_not_enter_predictions(self, tmp_path, monkeypatch):
+        """家族隔离（spec 场景）：事件读数不进观点线统计，反之亦然。"""
+        events_db = tmp_path / "events.db"
+        sessions = tmp_path / "s.db"
+        init_track_record_tables(sessions)
+        self._seed_events(events_db, settled=12)
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(sessions))
+        monkeypatch.setenv("EXECUTION_DB_PATH", str(tmp_path / "e.db"))
+        monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "snap.db"))
+        monkeypatch.setenv("EVENTS_DB_PATH", str(events_db))
+
+        result = get_scorecards()
+        pred = _family(result, "predictions")
+        event = _family(result, "event")
+        assert pred["expectancy_reason"] == "no_samples"  # 观点库空：不受事件行影响
+        assert event["expectancy"]["n"] == 12
+
+        # 观点线样本装载器只读 predictions 表（事件行不可见）
+        assert load_prediction_samples(db_path=sessions) == []

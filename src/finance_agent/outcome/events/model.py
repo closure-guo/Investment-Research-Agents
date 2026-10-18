@@ -406,6 +406,29 @@ def get_journal(row_id: int, *, db_path: str | Path | None = None) -> dict[str, 
         conn.close()
 
 
+def list_outperform_without_journal(*, db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    """``verdict='outperform'`` 且尚无记账行的预告（记账入场的取数面）。
+
+    返回预告行全字段 + 分诊结论（``verdict``/``triaged_at``），按 ``available_at``、
+    ``code`` 升序（入场遍历顺序确定）。
+    """
+    init_events_db(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT f.*, t.verdict AS verdict, t.triaged_at AS triaged_at
+               FROM earnings_forecasts f
+               JOIN event_triage t
+                 ON t.forecast_key = f.code || '|' || f.report_period || '|' || f.source_record_id
+               LEFT JOIN event_journal j ON j.forecast_key = t.forecast_key
+               WHERE t.verdict = 'outperform' AND j.forecast_key IS NULL
+               ORDER BY f.available_at ASC, f.code ASC, f.source_record_id ASC"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 def settle_journal(
     row_id: int,
     *,

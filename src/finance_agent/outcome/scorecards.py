@@ -79,10 +79,11 @@ class FamilyReadings(NamedTuple):
 
 
 class FamilyDbPaths(NamedTuple):
-    """族装载入参：会话/执行库路径（缺省由数据读取层调用期读 env）。"""
+    """族装载入参：会话/执行/事件库路径（缺省由数据读取层调用期读 env）。"""
 
     sessions_db_path: str | Path | None = None
     execution_db_path: str | Path | None = None
+    events_db_path: str | Path | None = None
 
 
 FAMILY_REGISTRY: tuple[FamilySpec, ...] = (
@@ -111,6 +112,23 @@ FAMILY_REGISTRY: tuple[FamilySpec, ...] = (
             "毛=净=组合级日收益均值（paper_equity 净值派生，已含撮合费，不二次扣减）；"
             f"回撤=净值日收益同一 MDD 函数；容量=当前持仓近 {CAPACITY_ADV_DAYS} 交易日日均成交额"
             f"×参与率 {CAPACITY_PARTICIPATION:.0%}；极端样本阈值 -5%（组合级）；胜率不适用"
+        ),
+    ),
+    # add-event-driven-lane：事件线第三族（独立于观点线 T+20 窗口，家族隔离见口径注释）
+    FamilySpec(
+        "event",
+        "事件线",
+        data_source="events",
+        cost_bearing=True,  # 虚拟结算族：净 = 毛 − 往返成本估算率（同 predictions 口径）
+        min_samples=MIN_SAMPLES,
+        extreme_threshold=-0.15,
+        caliber_note=(
+            "毛=已结算事件记账 raw_return 均值（入场=公告日次一交易日开盘 hfq，"
+            "horizon 默认 5 交易日，结算=结算日收盘）；净=毛−往返成本估算率（见 §1.13）；"
+            f"回撤=结算日等权复利；容量=最近 {CAPACITY_SYMBOL_LIMIT} 个样本标的近 "
+            f"{CAPACITY_ADV_DAYS} 交易日日均成交额×参与率 {CAPACITY_PARTICIPATION:.0%}；"
+            "极端样本阈值 -15%；胜率不适用（事件线无胜率口径）；"
+            "家族隔离：样本只取事件库已结算记账行，独立于观点线 T+20 统计"
         ),
     ),
 )
@@ -400,10 +418,39 @@ def _read_execution_family(paths: FamilyDbPaths) -> FamilyReadings:
     )
 
 
+def load_event_samples(*, db_path: str | Path | None = None) -> list[Sample]:
+    """事件线样本：已结算 ``event_journal`` 行（``raw_return`` 非空、``settle_date`` 非空）。
+
+    与观点线样本正交（家族隔离）：只读事件库，不触 ``predictions``；空库/库不存在 →
+    空样本如实返回（缺数据由槽位 null + 原因码呈现，不抛错）。
+    """
+    from finance_agent.outcome.events.model import _default_db_path as events_default_path
+    from finance_agent.outcome.events.model import list_settled_journal
+
+    path = Path(db_path) if db_path else events_default_path()
+    if not path.exists():
+        return []
+    samples: list[Sample] = []
+    for row in list_settled_journal(db_path=path):
+        ret = _finite_number(row.get("raw_return"))
+        settle_date = str(row.get("settle_date") or "")
+        if ret is None or not settle_date:
+            continue  # 未结算/读数缺失行不进样本（不折算 0）
+        samples.append(Sample(str(row.get("symbol") or ""), settle_date[:10], ret))
+    return samples
+
+
+def _read_event_family(paths: FamilyDbPaths) -> FamilyReadings:
+    """事件线装载（数据源 ``events``）：已结算样本 + 最近样本标的；无胜率口径。"""
+    samples = load_event_samples(db_path=paths.events_db_path)
+    return FamilyReadings(samples, _recent_symbols(samples), None)
+
+
 # 数据源 → 装载器（族经 spec.data_source 接线；未接线 → 四槽 no_loader，不抛错）
 _LOADERS: dict[str, Callable[[FamilyDbPaths], FamilyReadings]] = {
     "predictions": _read_predictions_family,
     "paper_equity": _read_execution_family,
+    "events": _read_event_family,
 }
 
 
@@ -412,15 +459,17 @@ def get_scorecards(
     sessions_db_path: str | Path | None = None,
     execution_db_path: str | Path | None = None,
     snapshot_db_path: str | Path | None = None,
+    events_db_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """注册表全族四槽成绩单（只读；族序 = 注册表序，未注册数据源不出现在输出中）。
 
     遍历 ``FAMILY_REGISTRY``，每族按 ``spec.data_source`` 经 ``_LOADERS`` 取数；
     未接线数据源 → 该族四槽 null + ``no_loader``（空壳语义，不抛错）。各库路径缺省
     由数据读取层调用期读 env（``SESSIONS_DB_PATH`` / ``EXECUTION_DB_PATH`` /
-    ``SNAPSHOT_DB_PATH``）。任一槽缺数据以 null + 原因码如实返回，MUST NOT 整体报错。
+    ``SNAPSHOT_DB_PATH`` / ``EVENTS_DB_PATH``）。任一槽缺数据以 null + 原因码如实返回，
+    MUST NOT 整体报错。
     """
-    reading_paths = FamilyDbPaths(sessions_db_path, execution_db_path)
+    reading_paths = FamilyDbPaths(sessions_db_path, execution_db_path, events_db_path)
     families: list[dict[str, Any]] = []
     for spec in FAMILY_REGISTRY:
         loader = _LOADERS.get(spec.data_source)

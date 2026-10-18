@@ -68,7 +68,11 @@ def test_scorecards_endpoint_empty_databases(monkeypatch, tmp_path) -> None:
     payload = _scorecards()
 
     families = payload["families"]
-    assert [family["family_id"] for family in families] == ["predictions", "execution"]
+    assert [family["family_id"] for family in families] == [
+        "predictions",
+        "execution",
+        "event",
+    ]
     for family in families:
         assert family["expectancy"] is None
         assert family["max_drawdown"] is None
@@ -119,6 +123,13 @@ def test_scorecards_endpoint_payload_and_read_only(monkeypatch, tmp_path) -> Non
     assert exe["family_id"] == "execution"
     assert exe["expectancy"] is None
     assert exe["expectancy_reason"] == "no_samples"
+
+    event = payload["families"][2]  # delta add-event-driven-lane：事件族（空库如实置空）
+    assert event["family_id"] == "event" and event["name"] == "事件线"
+    assert event["expectancy"] is None
+    assert event["expectancy_reason"] == "no_samples"
+    assert event["win_rate"] is None
+    assert "往返成本" in event["caliber_note"]
 
     before = _prediction_rows(sessions)
     assert _scorecards() == payload

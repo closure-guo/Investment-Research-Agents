@@ -39,13 +39,15 @@ class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 15
+            len(JOB_IDS) == 18
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线，add-execution-chain-driver）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
         # 12→13：+factor_builtin_register（内置因子注册接线，wire-builtin-factor-registration）；
         # 13→14：+factor_harvest_daily（因子收割，add-factor-harvest-bridge）；
-        # 14→15：+regime_daily（拥挤度日批，add-crowding-regime-positioning，15:35 日批链内插入）
+        # 14→15：+regime_daily（拥挤度日批，add-crowding-regime-positioning，15:35 日批链内插入）；
+        # 15→18：+earnings_fetch_daily/earnings_triage_daily/event_settle_daily
+        # （业绩预告事件线，add-event-driven-lane，按时刻序插入 16:05/16:15/16:25）
         assert all(JOB_LABELS[jid] for jid in JOB_IDS)
 
 
@@ -58,8 +60,8 @@ class TestRegimeDailyRegistration:
         assert JOB_FUNCS["regime_daily"] is run_regime_daily
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 15
-        )  # 14→15：+regime_daily；10→12：+月批；12→13：+内置注册；13→14：+因子收割
+            len(JOB_IDS) == 18
+        )  # 14→15：+regime_daily；15→18：+事件线三件；10→12：+月批；12→13：+内置注册；13→14：+因子收割
         assert (
             JOB_IDS.index("market_snapshot_daily")
             < JOB_IDS.index("regime_daily")
@@ -89,14 +91,21 @@ class TestPaperExecuteDailyRegistration:
         assert JOB_FUNCS["paper_execute_daily"] is run_execution_daily
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 15
+            len(JOB_IDS) == 18
         )  # 9→10：+paper_execute_daily；10→12：+月批两任务；12→13：+内置注册；
-        # 13→14：+因子收割；14→15：+regime_daily（拥挤度）
+        # 13→14：+因子收割；14→15：+regime_daily（拥挤度）；15→18：+事件线三件
         assert (
             JOB_IDS.index("decision_settle_daily")
+            < JOB_IDS.index("earnings_fetch_daily")
             < JOB_IDS.index("paper_execute_daily")
+            < JOB_IDS.index("earnings_triage_daily")
             < JOB_IDS.index("paper_settle_daily")
-        ), "展示顺序 = 时刻顺序（判定 16:00 → 仿真执行 16:10 → paper 结算 16:20）"
+            < JOB_IDS.index("event_settle_daily")
+            < JOB_IDS.index("daily_marking")
+        ), (
+            "展示顺序 = 时刻顺序（判定 16:00 → 预告抓取 16:05 → 仿真执行 16:10 → 预告分诊 16:15"
+            " → paper 结算 16:20 → 事件结算 16:25 → 盯市 16:30）"
+        )
 
     def test_schedule_spec_is_1610_monfri(self):
         """执行链日批 16:10（mon-fri，Asia/Shanghai）逐字钉死；先于 paper 结算 16:20。"""
@@ -120,9 +129,9 @@ class TestScreeningDailyRegistration:
         assert JOB_LABELS["screening_daily"] == "选股"
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 15
+            len(JOB_IDS) == 18
         )  # 8→9：+screening_daily；9→10：+paper_execute_daily；10→12：+月批；12→13：+内置注册；
-        # 13→14：+收割；14→15：+regime_daily
+        # 13→14：+收割；14→15：+regime_daily；15→18：+事件线三件
         assert (
             JOB_IDS.index("market_snapshot_daily")
             < JOB_IDS.index("regime_daily")
@@ -239,14 +248,15 @@ class TestMonthlyBatchRegistration:
         assert JOB_FUNCS["memory_extract_monthly"] is run_memory_extract_monthly
         assert JOB_FUNCS["factor_proposal_monthly"] is run_factor_proposal_monthly
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 15  # 12→13：+内置注册；13→14：+因子收割；
-        # 14→15：+regime_daily（拥挤度，15:35 日批链内插入）
-        # 月批附于末尾：月批两任务下标不动；cohort 因 15:50 日批链内插入后移一位
+        assert len(JOB_IDS) == 18  # 12→13：+内置注册；13→14：+因子收割；
+        # 14→15：+regime_daily（拥挤度，15:35 日批链内插入）；15→18：+事件线三件
+        # 月批附于末尾：月批两任务下标不动；cohort 因日批链内插入后移
         assert JOB_IDS[-2:] == ("memory_extract_monthly", "factor_proposal_monthly")
         assert (
-            JOB_IDS.index("cohort_batch") == 12
+            JOB_IDS.index("cohort_batch") == 15
         )  # 9→10：+内置注册；13→14：+因子收割（15:55 插入其前）；
-        # 14→15：+regime_daily（15:35 插入其前）
+        # 14→15：+regime_daily（15:35 插入其前）；
+        # 15→18：+事件线三件（16:05/16:15/16:25 插入其前）
 
     def test_monthly_schedule_specs_verbatim(self):
         """月粒度以 ``day_of_month=1`` 表达（09:00 / 10:00，Asia/Shanghai）。"""
@@ -502,3 +512,84 @@ class TestActiveOwnershipScope:
         # 收尾即注销；他库视角始终为空
         assert active_run_ids(db_path=db_a) == frozenset()
         assert active_run_ids(db_path=db_b) == frozenset()
+
+
+class TestEarningsEventLaneRegistration:
+    """add-event-driven-lane：业绩预告事件线三件（16:05 抓取 / 16:15 分诊 / 16:25 结算）。"""
+
+    def test_registered_aligned_and_time_ordered(self):
+        from finance_agent.outcome.events.job import (
+            run_earnings_fetch_daily,
+            run_earnings_triage_daily,
+            run_event_settle_daily,
+        )
+
+        assert JOB_LABELS["earnings_fetch_daily"] == "业绩预告抓取"
+        assert JOB_LABELS["earnings_triage_daily"] == "预告分诊"
+        assert JOB_LABELS["event_settle_daily"] == "事件结算"
+        assert JOB_FUNCS["earnings_fetch_daily"] is run_earnings_fetch_daily
+        assert JOB_FUNCS["earnings_triage_daily"] is run_earnings_triage_daily
+        assert JOB_FUNCS["event_settle_daily"] is run_event_settle_daily
+        assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
+        assert (
+            JOB_IDS.index("decision_settle_daily")
+            < JOB_IDS.index("earnings_fetch_daily")
+            < JOB_IDS.index("paper_execute_daily")
+            < JOB_IDS.index("earnings_triage_daily")
+            < JOB_IDS.index("paper_settle_daily")
+            < JOB_IDS.index("event_settle_daily")
+            < JOB_IDS.index("daily_marking")
+        ), (
+            "展示顺序 = 时刻顺序（16:00 判定 → 16:05 抓取 → 16:10 执行 → 16:15 分诊 → 16:20 → 16:25 结算）"
+        )
+
+    @pytest.mark.parametrize(
+        ("job_id", "hour", "minute"),
+        [
+            ("earnings_fetch_daily", 16, 5),
+            ("earnings_triage_daily", 16, 15),
+            ("event_settle_daily", 16, 25),
+        ],
+    )
+    def test_schedule_specs_verbatim(self, job_id, hour, minute):
+        assert SCHEDULES[job_id] == {
+            "day_of_week": "mon-fri",
+            "hour": hour,
+            "minute": minute,
+            "timezone": "Asia/Shanghai",
+        }
+
+    def test_fetch_job_failure_lands_failed_run(self, tmp_path, monkeypatch):
+        """抓取失败 → run_job 记 failed + 原因（失败留痕，不静默零新增冒充成功）。"""
+        from finance_agent.outcome.events import job as events_job
+
+        db = tmp_path / "ops.db"
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(db))
+        monkeypatch.setenv("EVENTS_DB_PATH", str(tmp_path / "events.db"))
+        monkeypatch.setenv("EVENTS_FETCH_PERIODS", "1")
+
+        def _boom():
+            raise RuntimeError("业绩预告抓取失败（信源缺失）")
+
+        monkeypatch.setattr(events_job, "run_earnings_fetch_daily", _boom)
+        outcome = run_job("earnings_fetch_daily", func=_boom)
+        assert outcome["status"] == "failed"
+        assert "业绩预告抓取失败" in outcome["error"]
+        row = last_job_run("earnings_fetch_daily", db)
+        assert row["status"] == "failed" and "业绩预告抓取失败" in row["error"]
+
+    def test_settle_job_runs_both_steps(self, tmp_path, monkeypatch):
+        """结算 job：先记账后结算（同一编排），摘要含两步计数。"""
+        from finance_agent.outcome.events import job as events_job
+
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "ops.db"))
+        monkeypatch.setenv("EVENTS_DB_PATH", str(tmp_path / "events.db"))
+        monkeypatch.setattr(
+            events_job, "entry_candidates", lambda **kwargs: {"entered": 2, "deferred": 0}
+        )
+        monkeypatch.setattr(events_job, "settle_due", lambda **kwargs: {"settled": 1, "not_due": 1})
+        monkeypatch.setattr(events_job, "read_snapshot_calendar", lambda *a, **k: ["2025-04-16"])
+        outcome = run_job("event_settle_daily", func=events_job.run_event_settle_daily)
+        assert outcome["status"] == "ok"
+        assert outcome["summary"]["entry"] == {"entered": 2, "deferred": 0}
+        assert outcome["summary"]["settle"] == {"settled": 1, "not_due": 1}

@@ -41,6 +41,11 @@ from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.cohort.runner import run_cohort_batch
+from finance_agent.outcome.events.job import (
+    run_earnings_fetch_daily,
+    run_earnings_triage_daily,
+    run_event_settle_daily,
+)
 from finance_agent.outcome.ops.model import (
     _default_db_path,
     finish_job_run,
@@ -66,8 +71,14 @@ JOB_IDS: tuple[str, ...] = (
     "factor_builtin_register",
     "factor_harvest_daily",
     "decision_settle_daily",
+    # 业绩预告事件线（add-event-driven-lane）：16:05 抓取插在判定（16:00）之后
+    "earnings_fetch_daily",
     "paper_execute_daily",
+    # 16:15 分诊插在仿真执行（16:10）之后
+    "earnings_triage_daily",
     "paper_settle_daily",
+    # 16:25 事件结算插在 paper 结算（16:20）之后
+    "event_settle_daily",
     "daily_marking",
     "metrics_snapshot",
     "integrity_check",
@@ -84,7 +95,10 @@ JOB_LABELS: dict[str, str] = {
     "factor_builtin_register": "内置因子注册",
     "factor_harvest_daily": "因子收割",
     "decision_settle_daily": "判定",
+    "earnings_fetch_daily": "业绩预告抓取",
     "paper_execute_daily": "仿真执行",
+    "earnings_triage_daily": "预告分诊",
+    "event_settle_daily": "事件结算",
     "paper_settle_daily": "paper 结算",
     "daily_marking": "盯市",
     "metrics_snapshot": "指标快照",
@@ -103,7 +117,10 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "factor_builtin_register": run_factor_builtin_register,
     "factor_harvest_daily": run_factor_harvest,
     "decision_settle_daily": settle_open_predictions,
+    "earnings_fetch_daily": run_earnings_fetch_daily,
     "paper_execute_daily": run_execution_daily,
+    "earnings_triage_daily": run_earnings_triage_daily,
+    "event_settle_daily": run_event_settle_daily,
     "paper_settle_daily": run_paper_settle_daily,
     "daily_marking": run_daily_marking,
     "metrics_snapshot": persist_metrics_snapshot,
@@ -168,16 +185,40 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "minute": 0,
         "timezone": "Asia/Shanghai",
     },
+    # 业绩预告抓取（add-event-driven-lane）：16:05——判定（16:00）之后、仿真执行
+    # （16:10）之前；东财业绩预告按报告期幂等落库（失败上抛，run_job 记 failed）
+    "earnings_fetch_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 5,
+        "timezone": "Asia/Shanghai",
+    },
     "paper_execute_daily": {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 10,
         "timezone": "Asia/Shanghai",
     },
+    # 预告分诊（add-event-driven-lane）：16:15——抓取之后、paper 结算之前；
+    # 扫未分诊（available_at <= 当日）→ LLM 分诊 → 观察清单
+    "earnings_triage_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 15,
+        "timezone": "Asia/Shanghai",
+    },
     "paper_settle_daily": {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 20,
+        "timezone": "Asia/Shanghai",
+    },
+    # 事件结算（add-event-driven-lane）：16:25——paper 结算之后、盯市（16:30）之前；
+    # 记账入场（T+1 开盘）+ 到期结算（参考价缺失保持 open + 留痕）
+    "event_settle_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 25,
         "timezone": "Asia/Shanghai",
     },
     "daily_marking": {
