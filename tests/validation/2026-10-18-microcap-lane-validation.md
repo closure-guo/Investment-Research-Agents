@@ -41,12 +41,18 @@ TDD 先红后绿证据逐任务见 `.superpowers/sdd/microcap/task-1-6-report.md
 - `--dry-run --limit 2`（真实 368 码池）：`退市股补采完成: symbols_ok=0 rows_written=0 skipped_resumed=0 history_missing=2 window_missing=0 [dry-run]`，逐票 `无历史可得（源无数据，如实标注）`；
 - 真实补采 `--limit 1`（600190）：`history_missing=1`、`rows_written=0`、收尾完整性自检通过、退出码 0。
 
-**实测结论（重要，遗留项）**：既有**双口径**回填通道 `fetch_symbol_history_raw_qfq`（东财 raw+qfq 两腿按日期内连接，
-东财封禁时回退新浪）对退市码**两腿均不可得**（600190/600001/600555/600614/600625/000003 全 None：东财 `ConnectionError`、
-新浪 `JSONDecodeError`）；而 `fetch_kline` 三源链（东财→新浪→**腾讯**）实测可由腾讯返回退市前历史
-（600190 返回至 2025-07-18、600001 返回至 2009-12-15），但为**单口径**（无复权列）。脚本按 design
-「数据源无历史时如实标注 `history_missing`，不伪造」处理：**未写入任何退市股价行**。
-退市股价格序列要真正入池，需要「单口径 + 口径留痕」通道决策（见 §6 遗留 1）。
+**实测结论（两轮观测，结论已更正）**：既有**双口径**回填通道 `fetch_symbol_history_raw_qfq`
+（东财 raw+qfq 两腿按日期内连接，东财封禁时回退新浪）对退市码的可得性**随源可用性波动**：
+
+- 第一轮（18:0x）：600190/600001/600555/600614/600625/000003 全 None（东财 `ConnectionError` +
+  新浪 `JSONDecodeError`）→ 脚本如实标注 `history_missing`，未写入任何行（旧判据下也**未谎报覆盖**）；
+- 第二轮（19:1x，同一脚本同一码）：**源恢复**，600190 成功写入 **6175 行**（1999-06-09..2025-07-18，
+  amount/high/low/close_qfq 全齐备，覆盖退市前全部交易日）→ 说明退市股历史**可经既有双口径通道入池**，
+  第一轮的不可得属**源侧短暂不可用窗口**（非结构性缺口）；`fetch_kline` 三源链（腾讯兜底）在同一窗口仍可用，
+  为单口径（无复权列），仅作交叉印证。
+
+**口径提醒**：可得性有波动 → 运维补采需可重入（本脚本为 INSERT OR REPLACE + 覆盖判据，重跑安全）；
+`history_missing` 非零只代表**本轮**源不可得，不代表该码永远无历史。
 
 ## 4. 池可见性核对（真实主表行）
 
@@ -95,11 +101,38 @@ print(len(list_batches()), len(list_batches(pool='microcap')))
 
 ## 6. 遗留与待决策
 
-1. **退市股价格历史口径（需 owner 决策）**：可得源（腾讯兜底）为单口径、无复权列，写入 `market_snapshot`
-   需要 `close_qfq`；按「不产出半口径数据」纪律本轮**未落库**，脚本如实标注 `history_missing`。
-   选项：(a) 增设「退市股单口径回填 + 口径留痕列」通道；(b) 维持现状（池可见性可用、价系列缺失）。
+1. ~~**退市股价格历史口径（需 owner 决策）**~~ → **已澄清（round 2）**：既有双口径通道可用，第二轮实测
+   600190 写入 6175 行（见 §3）；先前「不可得」为源侧短暂窗口，无需新增单口径通道。
+   残余注意：源不可用窗口内 `history_missing` 非零属**如实标注**，重跑即可补齐（脚本幂等）。
 2. **E2E 未执行**：本变更 v1 明确无 UI；E2E 用例已随注册表计数同步更新（`18→19`、下标 17/18），
    未运行以免污染共享测试库（留待 CI 门禁）。
 3. **生产库未写入**：`security_master.delist_date` 与退市清单在生产库的落库经**快照日批主表刷新分支**
    （名单为空或每周一）发生；首次部署后需等一次主表刷新（或手动触发日批）方有退市数据。
 4. `selection_mode=fallback` 出现在核对中仅因临时因子库为空；真实环境沿用既有因子路径逻辑不变。
+
+
+## 7. 评审修复复核（round 2，2026-10-18）
+
+| 项 | 修复 | 验证证据 |
+|---|---|---|
+| F1 断点判据缺覆盖语义 | `scripts/backfill_delisted.py` 改**整窗覆盖判据**（行齐备 + 最早行触及窗口起点锚 = 日历中首个 ≥ `list_date` 的交易日；只判头部），新增 `partial_overlap` 明细 | 先红：`test_single_window_row_is_not_skipped`（1 行日批行 → 旧判据跳过、零取数）→ 绿；`test_calendar_anchor_allows_skip_when_head_is_first_trading_day` 先红后绿；真实复跑摘要 `skipped_resumed=0 partial_overlap=0 rows_written=6175` |
+| F2 审计来源未落库 | `security_master.delist_source` 列（ALTER 迁移）+ `upsert_delisted_masters` 写入 + `get_security_master` 读出；§1.16 措辞同步 | 先红 4 例 → 绿；真实主表读回 `delist_source='sh_suspend'` |
+| F3 迁移原子性 | 重建改**显式事务**逐条执行（`BEGIN IMMEDIATE`…`ROLLBACK/COMMIT`，关闭 legacy 隐式提交）；`*__migrate` 残留**恢复路径**（数据以 migrate 表换入）；`_ensure_batch_columns` 列补齐在恢复之后 | 先红 3 例 → 绿：中断残留恢复（批次表/池表）、失败注入 `SELECT * FROM table_does_not_exist` → 原表与旧行在位、无残留 |
+| F4 日期列漂移 | 缺**退市日列** → 该源判不可用（`[]` + ERROR）；缺**上市日列** → 降级保留 + WARN；行级缺失仍 None | 先红 3 例 → 绿（含行级/列级区分） |
+| F4b 缺失明细持久留痕 | 非 dry-run 落 `snapshot_meta["delist_backfill_missing"]`（JSON：history/window/partial/skipped/updated_at） | 先红 2 例 → 绿；真实运行 meta 读回 `{"history_missing": [], "window_missing": [], ...}` |
+| F5 批次执行约束记录字段 | `screening_batches.exec_constraints`（JSON）+ 3 SELECT/UPSERT/迁移同步 + microcap 写入 `{"suggested_single_cap":0.05,"slippage_tier_bump":1}` | 先红 3 例 → 绿（store 三读侧一致、主档 None、老库补列、非法值拒收） |
+| F6 反向依赖 | `screening → outcome.regime` 改函数内延迟 import | `test_pipeline_has_no_module_level_regime_dependency` 先红后绿 |
+| F7 形参遮蔽 | `list_selection_pool` 局部 `pool` 列表改名 `rows_out` | 既有 30 例回归绿 |
+
+round 2 机器门禁：`uv run pytest tests/data/ tests/screening/ tests/outcome/ -q` → **1261 passed**；
+`ruff check src/ tests/ scripts/` → **All checks passed**；`uv run mypy` 改动文件零新增
+（`screening/store.py` 由 3 errors → **0**，全仓 81→78）。
+
+真实复跑（临时库 `one.db`，600190）：`symbols_ok=1 rows_written=6175 skipped_resumed=0 partial_overlap=0
+history_missing=0`；`read_universe("2025-07-18")` 池含退市标的（1/1）、`t=2025-07-28` 边界可见、
+`t=2025-08-01` 剔除（残留行）。
+
+**残余注意（F1 口径取舍）**：覆盖锚 = 窗口起点后的首个交易日，故当「源历史起点晚于 `list_date`」
+（如 600190：清单 `list_date` 1998-05-19 有重复行/数据瑕疵，实际行情起于 1999-06-09）时，覆盖判据
+永不满足 → **每次运行都会重取**（幂等、成本 = 一次取数）。属保守取舍（宁可重取不可谎报覆盖），
+如后续需要可在清单侧修 `list_date` 或引入「源历史起点」留痕后再放宽。
