@@ -1,0 +1,362 @@
+[
+ {
+  "phase": "opencode",
+  "ticker": "000001",
+  "dim": "report_relevance",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.85,
+  "dt": 14.5
+ },
+ {
+  "phase": "opencode",
+  "ticker": "000001",
+  "dim": "debate_quality",
+  "score": 4.0,
+  "scores": [
+   4,
+   4,
+   4
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.85,
+  "dt": 40.5
+ },
+ {
+  "phase": "opencode",
+  "ticker": "000001",
+  "dim": "decision_grounding",
+  "score": 4.0,
+  "scores": [
+   4,
+   4,
+   4
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.85,
+  "dt": 29.1
+ },
+ {
+  "phase": "opencode",
+  "ticker": "000001",
+  "dim": "consistency",
+  "score": 4.667,
+  "scores": [
+   5,
+   5,
+   4
+  ],
+  "spread": 1,
+  "failures": 0,
+  "confidence": 0.85,
+  "dt": 11.7
+ },
+ {
+  "phase": "opencode",
+  "ticker": "300750",
+  "dim": "report_relevance",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 9.9
+ },
+ {
+  "phase": "opencode",
+  "ticker": "300750",
+  "dim": "debate_quality",
+  "score": 4.0,
+  "scores": [
+   4,
+   4,
+   4
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 33.2
+ },
+ {
+  "phase": "opencode",
+  "ticker": "300750",
+  "dim": "decision_grounding",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 21.4
+ },
+ {
+  "phase": "opencode",
+  "ticker": "300750",
+  "dim": "consistency",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 8.5
+ },
+ {
+  "phase": "opencode",
+  "ticker": "600887",
+  "dim": "report_relevance",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.85,
+  "dt": 10.9
+ },
+ {
+  "phase": "opencode",
+  "ticker": "600887",
+  "dim": "debate_quality",
+  "score": 4.0,
+  "scores": [
+   4,
+   4,
+   4
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.85,
+  "dt": 38.0
+ },
+ {
+  "phase": "opencode",
+  "ticker": "600887",
+  "dim": "decision_grounding",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 25.8
+ },
+ {
+  "phase": "opencode",
+  "ticker": "600887",
+  "dim": "consistency",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 12.0
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "000001",
+  "dim": "report_relevance",
+  "score": 4.667,
+  "scores": [
+   5,
+   5,
+   4
+  ],
+  "spread": 1,
+  "failures": 0,
+  "confidence": 0.8,
+  "dt": 7.4
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "000001",
+  "dim": "debate_quality",
+  "score": 4.0,
+  "scores": [
+   4,
+   4,
+   4
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.85,
+  "dt": 36.4
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "000001",
+  "dim": "decision_grounding",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 20.7
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "000001",
+  "dim": "consistency",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 8.7
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "300750",
+  "dim": "report_relevance",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 6.9
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "300750",
+  "dim": "debate_quality",
+  "score": 4.0,
+  "scores": [
+   4,
+   4,
+   4
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 37.6
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "300750",
+  "dim": "decision_grounding",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 12.4
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "300750",
+  "dim": "consistency",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 10.4
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "600887",
+  "dim": "report_relevance",
+  "score": 4.667,
+  "scores": [
+   5,
+   4,
+   5
+  ],
+  "spread": 1,
+  "failures": 0,
+  "confidence": 0.85,
+  "dt": 8.9
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "600887",
+  "dim": "debate_quality",
+  "score": 4.0,
+  "scores": [
+   4,
+   4,
+   4
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.85,
+  "dt": 44.0
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "600887",
+  "dim": "decision_grounding",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.9,
+  "dt": 20.7
+ },
+ {
+  "phase": "bigmodel",
+  "ticker": "600887",
+  "dim": "consistency",
+  "score": 5.0,
+  "scores": [
+   5,
+   5,
+   5
+  ],
+  "spread": 0,
+  "failures": 0,
+  "confidence": 0.95,
+  "dt": 7.5
+ }
+]

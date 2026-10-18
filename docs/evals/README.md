@@ -13,15 +13,22 @@
 | docs/evals/2026-09-14-round9-v8审计.md | ![active](badge:active) | — |
 | docs/evals/2026-09-21-决策层全watch取证.md | ![active](badge:active) | — |
 | evals/ablation/results/pilot.md | ![superseded](badge:superseded) → docs/evals/2026-09-03-消融n10权威结果.md | docs/evals/2026-09-03-消融n10权威结果.md |
+| evals/backtest/results/formal-2026q3.md | ![active](badge:active) | — |
 | evals/backtest/results/pilot-2023-shock.md | ![active](badge:active) | — |
 
-## 未标注生命周期（4 份）
+## 未标注生命周期（11 份）
 
+- docs/evals/2026-09-25-回测正式批申报.md
+- docs/evals/2026-10-05-多Agent对单Agent选型调研.md
+- docs/evals/2026-10-13-screening-forward-sample.md
+- docs/evals/2026-10-15-量化投研设计文档对标与差距分析.md
+- docs/evals/2026-10-17-研报驱动分析管线生态调研.md
+- docs/evals/2026-10-17-闸②门槛复审.md
 - docs/evals/dataset-baseline.md
+- docs/evals/decision-stability-offline-20261002.md
 - docs/evals/hosted-evaluator-template.md
 - docs/evals/metrics.md
 - docs/evals/金融分析Agent-GoldenSet设计文档.md
-
 
 ## 索引维护
 

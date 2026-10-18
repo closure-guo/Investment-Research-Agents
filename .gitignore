@@ -327,3 +327,6 @@ docker/clickhouse/users.d/default-user.xml
 # 本地验证运行产物（含 .env 密钥副本，严禁入库）
 .verify-*/
 data/charts/
+
+# 探针/运维运行态抓取目录（log/judge_ab_* 证据文件已显式入库；时间戳子目录为运行态，不入库）
+log/20*-*/
