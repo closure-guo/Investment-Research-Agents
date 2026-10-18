@@ -134,22 +134,24 @@ describe('会话切换时 messagesRef 同步，resumeStream 事件不丢失', ()
       })).toBe(true)
     }, { timeout: 5000 })
 
-    // 等待第一轮 SSE 事件被消费
-    await new Promise(r => setTimeout(r, 500))
+    // 等待第一轮 SSE 事件被消费（条件等待，取代固定 sleep——issue #331：
+    // 慢机上固定窗口赌不中事件链时点，CI 曾因此超时）
+    await screen.findByText('让我搜索安孚科技', undefined, { timeout: 10000 })
+    await screen.findByText(/调用工具中/, undefined, { timeout: 10000 })
 
-    // 切换到 s2（点击侧边栏中的"其他会话"）
+    // 切换到 s2（点击侧边栏中的"其他会话"）——等 s2 内容渲染为切完成条件
     await act(async () => {
       const s2Item = await screen.findByText('其他会话')
       fireEvent.click(s2Item)
     })
-    await new Promise(r => setTimeout(r, 300))
+    await screen.findByText('你好！', undefined, { timeout: 10000 })
 
-    // 切换回 s1（点击侧边栏中的"安孚科技分析"）
+    // 切换回 s1（点击侧边栏中的"安孚科技分析"）——等 s1 历史恢复渲染为切回条件
     await act(async () => {
       const s1Item = await screen.findByText('安孚科技分析')
       fireEvent.click(s1Item)
     })
-    await new Promise(r => setTimeout(r, 500))
+    await screen.findByText('让我搜索安孚科技', undefined, { timeout: 10000 })
 
     // 关键断言：resumeStream 收到的新事件（chat_token "安孚科技分析完成"）必须被正确处理并渲染到 UI
     // 修复前：messagesRef.current 滞后 → 快照保存错误内容 → assistantMsgIdRef 与 messages 不匹配 →
@@ -158,6 +160,6 @@ describe('会话切换时 messagesRef 同步，resumeStream 事件不丢失', ()
     //         chat_token 正确更新消息 → 内容渲染到 UI
     await waitFor(() => {
       expect(screen.getByText('安孚科技分析完成')).toBeInTheDocument()
-    }, { timeout: 5000 })
+    }, { timeout: 10000 })
   })
 })
