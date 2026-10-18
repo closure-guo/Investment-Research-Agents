@@ -604,3 +604,210 @@ def test_list_events_all_and_filtered(tmp_path):
     assert [event["factor_id"] for event in all_events] == [first, second, first]
     assert all(event["created_at"] for event in all_events)
     assert [event["event"] for event in list_events(second, db_path=db)] == ["created"]
+
+
+# ── 跨批次候选检验账本（add-fdr-candidate-ledger / issue #355 使能层） ──
+
+
+def test_admission_ledger_schema_and_roundtrip(tmp_path):
+    """账本 DDL 幂等；批量写入单事务；汇总含分批明细与总量。"""
+    from finance_agent.factors.library import (
+        ledger_summary,
+        list_ledger_entries,
+        record_admission_ledger,
+    )
+
+    db = tmp_path / "factor_library.db"
+    init_library(db)
+    conn = _connect(db)
+    try:
+        cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(factor_admission_ledger)").fetchall()
+        }
+    finally:
+        conn.close()
+    assert cols == {
+        "id",
+        "batch_id",
+        "source",
+        "expression",
+        "p_value",
+        "p_adj",
+        "q",
+        "n_hypotheses",
+        "admitted",
+        "factor_id",
+        "rejected_gate",
+        "created_at",
+    }
+
+    inserted = record_admission_ledger(
+        [
+            {
+                "batch_id": "b1",
+                "source": "monthly_broad",
+                "expression": "cs_zscore(close, 20)",
+                "p_value": 0.01,
+                "p_adj": 0.02,
+                "q": 0.1,
+                "n_hypotheses": 3,
+                "admitted": True,
+                "factor_id": 7,
+                "rejected_gate": None,
+            },
+            {
+                "batch_id": "b1",
+                "source": "monthly_broad",
+                "expression": "cs_rank(volume, 5)",
+                "p_value": None,
+                "p_adj": None,
+                "q": None,
+                "n_hypotheses": None,
+                "admitted": False,
+                "factor_id": None,
+                "rejected_gate": "WEAK_ICIR",
+            },
+            {
+                "batch_id": "b2",
+                "source": "harvest",
+                "expression": "ts_mean(amount, 10)",
+                "p_value": 0.2,
+                "p_adj": 0.3,
+                "q": 0.1,
+                "n_hypotheses": 1,
+                "admitted": False,
+                "factor_id": None,
+                "rejected_gate": "NOT_SIGNIFICANT",
+            },
+        ],
+        db_path=db,
+    )
+    assert inserted == 3
+
+    entries = list_ledger_entries(db_path=db)
+    assert [e["expression"] for e in entries] == [
+        "cs_zscore(close, 20)",
+        "cs_rank(volume, 5)",
+        "ts_mean(amount, 10)",
+    ]
+    assert entries[0]["admitted"] is True and entries[0]["factor_id"] == 7
+    assert entries[1]["p_value"] is None and entries[1]["rejected_gate"] == "WEAK_ICIR"
+
+    summary = ledger_summary(db_path=db)
+    assert summary["total"] == 3
+    assert summary["tested"] == 2  # p 值非空 = 已验证（跨批 FDR 家族面）
+    assert summary["admitted"] == 1
+    by_batch = {row["batch_id"]: row for row in summary["batches"]}
+    assert by_batch["b1"]["size"] == 2 and by_batch["b1"]["tested"] == 1
+    assert by_batch["b2"]["source"] == "harvest"
+
+
+def test_reset_factor_library_clears_admission_ledger(tmp_path):
+    """复位四表：账本随 factors/factor_ic/factor_events 一并清空。"""
+    from finance_agent.factors.library import record_admission_ledger, reset_factor_library
+
+    db = tmp_path / "factor_library.db"
+    init_library(db)
+    record_admission_ledger(
+        [
+            {
+                "batch_id": "b1",
+                "source": "builtin",
+                "expression": "close",
+                "p_value": 0.5,
+                "p_adj": 0.5,
+                "q": 0.1,
+                "n_hypotheses": 1,
+                "admitted": False,
+                "rejected_gate": "NOT_SIGNIFICANT",
+            }
+        ],
+        db_path=db,
+    )
+    removed = reset_factor_library(db_path=db)
+    assert removed["factor_admission_ledger"] == 1
+
+
+def test_cumulative_fdr_preview_pure_function(tmp_path):
+    """全局 BH 反事实预览：跨批次家族一次校正；NULL p 不入家族；不改任何行。"""
+    from finance_agent.factors.library import (
+        ledger_summary,
+        list_ledger_entries,
+        record_admission_ledger,
+    )
+    from finance_agent.factors.validate import cumulative_fdr_preview
+
+    db = tmp_path / "factor_library.db"
+    init_library(db)
+    record_admission_ledger(
+        [
+            # 强信号（跨批两批各一）＋ 噪声＋ 未测（NULL，不入家族）
+            {
+                "batch_id": "b1",
+                "source": "monthly_broad",
+                "expression": "e1",
+                "p_value": 0.001,
+                "p_adj": 0.004,
+                "q": 0.1,
+                "n_hypotheses": 2,
+                "admitted": True,
+                "factor_id": 1,
+                "rejected_gate": None,
+            },
+            {
+                "batch_id": "b1",
+                "source": "monthly_broad",
+                "expression": "e2",
+                "p_value": 0.8,
+                "p_adj": 0.8,
+                "q": 0.1,
+                "n_hypotheses": 2,
+                "admitted": False,
+                "factor_id": None,
+                "rejected_gate": "NOT_SIGNIFICANT",
+            },
+            {
+                "batch_id": "b2",
+                "source": "harvest",
+                "expression": "e3",
+                "p_value": 0.002,
+                "p_adj": 0.004,
+                "q": 0.1,
+                "n_hypotheses": 1,
+                "admitted": True,
+                "factor_id": 2,
+                "rejected_gate": None,
+            },
+            {
+                "batch_id": "b2",
+                "source": "harvest",
+                "expression": "e4",
+                "p_value": None,
+                "p_adj": None,
+                "q": None,
+                "n_hypotheses": None,
+                "admitted": False,
+                "factor_id": None,
+                "rejected_gate": "WEAK_ICIR",
+            },
+        ],
+        db_path=db,
+    )
+
+    entries = list_ledger_entries(db_path=db)
+    before = [dict(e) for e in entries]
+
+    preview = cumulative_fdr_preview(entries, q=0.1)
+    assert preview["family_size"] == 3  # NULL 不入家族
+    assert preview["significant_count"] == 2
+    assert {r["expression"] for r in preview["significant"]} == {"e1", "e3"}
+    assert all(r["p_adj"] is not None for r in preview["significant"])
+
+    # 只读：读数前后逐行一致
+    assert list_ledger_entries(db_path=db) == before
+    # 空家族 → 全零
+    empty = cumulative_fdr_preview([], q=0.1)
+    assert empty["family_size"] == 0 and empty["significant"] == []
+    # 汇总与家族面一致
+    summary = ledger_summary(db_path=db)
+    assert summary["tested"] == preview["family_size"]

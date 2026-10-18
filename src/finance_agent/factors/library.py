@@ -98,6 +98,22 @@ CREATE TABLE IF NOT EXISTS factor_events (
   created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_factor_events_factor ON factor_events (factor_id);
+CREATE TABLE IF NOT EXISTS factor_admission_ledger (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id      TEXT NOT NULL,
+  source        TEXT NOT NULL,
+  expression    TEXT NOT NULL,
+  p_value       REAL,
+  p_adj         REAL,
+  q             REAL,
+  n_hypotheses  INTEGER,
+  admitted      INTEGER NOT NULL,
+  factor_id     INTEGER,
+  rejected_gate TEXT,
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_factor_ledger_created ON factor_admission_ledger (created_at);
+CREATE INDEX IF NOT EXISTS idx_factor_ledger_p ON factor_admission_ledger (p_value);
 """
 
 
@@ -429,13 +445,120 @@ def reset_factor_library(db_path: str | Path | None = None) -> dict[str, int]:
     removed: dict[str, int] = {}
     try:
         # 先子表后主表（无外键，仅语义顺序：事件/IC 属于因子）
-        for table in ("factor_events", "factor_ic", "factors"):
+        for table in ("factor_admission_ledger", "factor_events", "factor_ic", "factors"):
             cursor = conn.execute(f"DELETE FROM {table}")  # noqa: S608 -- 表名来自模块常量
             removed[table] = int(cursor.rowcount)
         conn.commit()
         return removed
     finally:
         conn.close()
+
+
+# ── 跨批次候选检验账本（add-fdr-candidate-ledger / issue #355 使能层） ──
+
+_LEDGER_COLUMNS = (
+    "batch_id",
+    "source",
+    "expression",
+    "p_value",
+    "p_adj",
+    "q",
+    "n_hypotheses",
+    "admitted",
+    "factor_id",
+    "rejected_gate",
+)
+
+
+def record_admission_ledger(
+    entries: list[dict[str, Any]], *, db_path: str | Path | None = None
+) -> int:
+    """批量写入候选检验账本（单事务；返回行数）。空列表 → 0（零写入）。
+
+    每 entry 键 = ``_LEDGER_COLUMNS``；``admitted`` 为布尔（存 0/1）；未达闸③的
+    候选 ``p_value``/``p_adj``/``q``/``n_hypotheses`` 为 None（不计入跨批家族）。
+    """
+    if not entries:
+        return 0
+    init_library(db_path)
+    conn = _connect(db_path)
+    try:
+        now = _now_iso()
+        rows = [
+            (
+                str(e.get("batch_id") or ""),
+                str(e.get("source") or ""),
+                str(e.get("expression") or ""),
+                e.get("p_value"),
+                e.get("p_adj"),
+                e.get("q"),
+                e.get("n_hypotheses"),
+                1 if e.get("admitted") else 0,
+                e.get("factor_id"),
+                e.get("rejected_gate"),
+                now,
+            )
+            for e in entries
+        ]
+        columns = ", ".join(_LEDGER_COLUMNS)
+        placeholders = ", ".join("?" for _ in _LEDGER_COLUMNS)
+        conn.executemany(
+            f"INSERT INTO factor_admission_ledger ({columns}, created_at) "  # noqa: S608 - 列名来自模块常量
+            f"VALUES ({placeholders}, ?)",
+            rows,
+        )
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+
+def list_ledger_entries(db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    """账本全量（按写入序 id 升序）；``admitted`` 还原为布尔、空库返回 []。"""
+    init_library(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute("SELECT * FROM factor_admission_ledger ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["admitted"] = bool(item.get("admitted"))
+        out.append(item)
+    return out
+
+
+def ledger_summary(db_path: str | Path | None = None) -> dict[str, Any]:
+    """库级读数：总行数 / 已验证数（p 非空 = 跨批家族面）/ 已入库数 / 分批明细。
+
+    分批按写入序（首行出现序）稳定输出；读数不改变任何准入结论（执行层待裁决，
+    issue #355 方向 1/2/3）。
+    """
+    entries = list_ledger_entries(db_path)
+    batches: dict[str, dict[str, Any]] = {}
+    for e in entries:
+        bucket = batches.setdefault(
+            str(e["batch_id"]),
+            {
+                "batch_id": e["batch_id"],
+                "source": e["source"],
+                "size": 0,
+                "tested": 0,
+                "admitted": 0,
+            },
+        )
+        bucket["size"] += 1
+        if e["p_value"] is not None:
+            bucket["tested"] += 1
+        if e["admitted"]:
+            bucket["admitted"] += 1
+    return {
+        "total": len(entries),
+        "tested": sum(1 for e in entries if e["p_value"] is not None),
+        "admitted": sum(1 for e in entries if e["admitted"]),
+        "batches": list(batches.values()),
+    }
 
 
 def list_events(

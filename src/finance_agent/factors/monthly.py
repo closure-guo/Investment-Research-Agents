@@ -310,7 +310,13 @@ def run_factor_proposal_monthly(
     ]
     positions, admissible, preflight_failures = _preflight(candidates)
     # 同批一次过闸（闸③ BH-FDR 口径 = 同批次候选；逐条预检已隔离单条异常）
-    results = admit_candidates(admissible, panel, seed=seed, db_path=db_path) if admissible else []
+    results = (
+        admit_candidates(
+            admissible, panel, seed=seed, db_path=db_path, ledger_source="monthly_broad"
+        )
+        if admissible
+        else []
+    )
 
     outcomes: dict[int, dict[str, Any]] = {
         position: {"expression": candidates[position]["expression"], "gate": None, "reason": error}
@@ -352,7 +358,9 @@ def run_factor_proposal_monthly(
     ]
     deep_positions, deep_admissible, deep_failures = _preflight(deep_candidates)
     deep_results = (
-        admit_candidates(deep_admissible, panel, seed=seed, db_path=db_path)
+        admit_candidates(
+            deep_admissible, panel, seed=seed, db_path=db_path, ledger_source="monthly_deep"
+        )
         if deep_admissible
         else []
     )

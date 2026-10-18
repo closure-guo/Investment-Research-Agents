@@ -296,3 +296,32 @@ def test_register_builtins_is_idempotent(tmp_path) -> None:
         duplicate = next(gate for gate in after.gates if not gate.passed)
         assert str(duplicate.reason) == "STRUCTURAL_DUPLICATE"
         assert duplicate.detail["duplicate_of"] == before.factor_id
+
+
+def test_builtin_registration_writes_admission_ledger(tmp_path) -> None:
+    """add-fdr-candidate-ledger：builtin 批经 admit_candidates 单点记账——
+    逐候选一行（同 batch_id/source），入库行 p 值非空，闸②拒收行 p 值 NULL。"""
+    from finance_agent.factors.library import ledger_summary, list_ledger_entries
+
+    db = str(tmp_path / "factor_library.db")
+    register_builtins(panel=_strong_panel(), seed=_STRONG_SEED, db_path=db)
+
+    entries = list_ledger_entries(db_path=db)
+    assert len(entries) == len(BUILTIN_FACTORS)
+    assert {e["source"] for e in entries} == {"builtin"}
+    assert len({e["batch_id"] for e in entries}) == 1
+    by_expr = {e["expression"]: e for e in entries}
+    # 闸②拒收（reversal_5）：未做置换检验 → p 值 NULL、携带拒收闸口
+    reversal = next(e for e in entries if e["rejected_gate"] == str(GATE_SINGLE_FACTOR))
+    assert reversal["p_value"] is None
+    # 入库行：p 值非空且带同批族读数
+    admitted = [e for e in entries if e["admitted"]]
+    assert admitted, "强面板下应有入库候选"
+    for e in admitted:
+        assert e["p_value"] is not None and 0.0 < e["p_value"] <= 1.0
+        assert e["n_hypotheses"] == len(BUILTIN_FACTORS) - 1  # 闸③ 只覆盖到闸③的在途候选
+        assert e["factor_id"] is not None
+    summary = ledger_summary(db_path=db)
+    assert summary["total"] == len(BUILTIN_FACTORS)
+    assert summary["tested"] == len(admitted)
+    assert by_expr  # 表达式逐字落账（防错位）
