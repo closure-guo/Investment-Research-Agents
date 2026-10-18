@@ -18,6 +18,7 @@ from finance_agent.outcome.regime.model import (
     init_regime_db,
     latest_regime,
     list_regime_history,
+    reset_regime_db,
     upsert_regime_daily,
 )
 
@@ -187,6 +188,31 @@ class TestReads:
 
         recent = list_regime_history(limit=2, db_path=db)
         assert [row["trade_date"] for row in recent] == ["2026-10-14", "2026-10-15"]
+
+
+class TestReset:
+    """E2E ``regime_reset`` 造数复位（delta add-crowding-regime-positioning T8）。"""
+
+    def test_reset_deletes_all_rows_and_is_idempotent(self, tmp_path):
+        """清空全部行并返回删除数；空库再清返回 0（入口幂等建表，不抛）。"""
+        db = tmp_path / "regime.db"
+        _upsert(db, "2026-10-13")
+        _upsert(db, "2026-10-14")
+
+        assert reset_regime_db(db_path=db) == 2
+        assert latest_regime(db_path=db) is None
+        assert list_regime_history(db_path=db) == []
+
+        assert reset_regime_db(db_path=db) == 0  # 幂等：空库不抛
+        # 复位后可重新写入（E2E 每例 reset → seed 的节奏）
+        _upsert(db, "2026-10-15")
+        assert latest_regime(db_path=db)["trade_date"] == "2026-10-15"
+
+    def test_reset_on_absent_file_creates_empty_db(self, tmp_path):
+        """库文件尚不存在 → 复位同样成功（幂等建表），不落到调用方 CWD。"""
+        db = tmp_path / "absent.db"
+        assert reset_regime_db(db_path=db) == 0
+        assert db.is_file()
 
 
 class TestDefaultDbPath:

@@ -154,3 +154,19 @@ def list_regime_history(
     finally:
         conn.close()
     return [dict(row) for row in reversed(rows)]
+
+
+def reset_regime_db(db_path: str | Path | None = None) -> int:
+    """清空 ``regime_daily``（E2E ``regime_reset`` 造数复位用）；返回删除行数。
+
+    与 ``screening.store.reset_screening_db`` 同款纪律：入口幂等建表（库文件不存在
+    时建成空表，不抛），库路径缺省**调用期**读 ``REGIME_DB_PATH``。
+    """
+    init_regime_db(db_path)
+    conn = _connect(db_path)
+    try:
+        cursor = conn.execute("DELETE FROM regime_daily")
+        conn.commit()
+        return int(cursor.rowcount)
+    finally:
+        conn.close()

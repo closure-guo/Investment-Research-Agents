@@ -843,10 +843,16 @@ if TESTING:
         PaperBroker.order_id_for 同源派生））与 broker_reset（bool：清账户三表
         orders/positions/cash）造执行台账页确定性状态（delta add-broker-console
         T1.2）；库路径于调用期读 EXECUTION_DB_PATH（E2E 指向独立测试库）。
+        顶层可选 regime（list：逐行按 ``regime_daily`` DDL 列名造数（含
+        ``cap_source``，缺省字段如实落 NULL），经 upsert_regime_daily 写入）与
+        regime_reset（bool：清 ``regime_daily``）造选股页市场温度计三态/空态
+        （delta add-crowding-regime-positioning T8）；库路径于调用期读
+        REGIME_DB_PATH（E2E 指向独立测试库 data/test-e2e-regime.db，绝不落到
+        开发库 data/regime.db）。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
-        # track_record / snapshot / screening / memory / factors / broker 造数块不受
-        # chat_history 前置约束
+        # track_record / snapshot / screening / memory / factors / broker / regime
+        # 造数块不受 chat_history 前置约束
         if (
             "chat_history" not in req
             and not isinstance(req.get("track_record"), dict)
@@ -861,6 +867,8 @@ if TESTING:
             and not req.get("factors_reset")
             and not isinstance(req.get("broker"), dict)
             and not req.get("broker_reset")
+            and not isinstance(req.get("regime"), list)
+            and not req.get("regime_reset")
         ):
             return {"status": "ok", "mode": "testing"}
         # add-paper-broker：战绩造数复位（清 equity_curve + paper_equity 两表）。双曲线
@@ -1145,6 +1153,36 @@ if TESTING:
         broker_seed = req.get("broker")
         if isinstance(broker_seed, dict):
             _seed_broker_account(broker_seed)
+        # 市场温度计造数（delta add-crowding-regime-positioning T8）：可选先 reset
+        # （清 regime_daily 全表）再写行——行字段与 regime_daily DDL 列名逐字一致
+        # （含 cap_source），经 upsert_regime_daily（生产同源写入口；trade_date 唯一
+        # → 同日覆盖）落库；缺省字段如实落 NULL（不编造）。库路径调用期读
+        # REGIME_DB_PATH（model._default_db_path env 口径，E2E 指向独立测试库
+        # data/test-e2e-regime.db，绝不落到开发库 data/regime.db）。
+        if req.get("regime_reset"):
+            from finance_agent.outcome.regime.model import reset_regime_db
+
+            reset_regime_db()
+        regime_seed = req.get("regime")
+        if isinstance(regime_seed, list):
+            from finance_agent.outcome.regime.indicators import (
+                INDICATOR_KEYS as _REGIME_INDICATOR_KEYS,
+            )
+            from finance_agent.outcome.regime.model import (
+                PCTILE_COLUMNS as _REGIME_PCTILE_COLUMNS,
+            )
+            from finance_agent.outcome.regime.model import (
+                upsert_regime_daily as _seed_regime_daily,
+            )
+
+            for regime_row in regime_seed:
+                _seed_regime_daily(
+                    str(regime_row["trade_date"]),
+                    {key: regime_row.get(key) for key in _REGIME_INDICATOR_KEYS},
+                    {key: regime_row.get(key) for key in _REGIME_PCTILE_COLUMNS},
+                    computed_at=str(regime_row.get("computed_at") or _now()),
+                    cap_source=regime_row.get("cap_source"),
+                )
         # track_record-only（含 {} 空 dict）造数后即返回占位响应，不落会话
         if "chat_history" not in req:
             return {"status": "ok", "mode": "testing"}

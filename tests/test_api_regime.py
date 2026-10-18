@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from datetime import date, timedelta
 from pathlib import Path
@@ -211,3 +212,88 @@ class TestEndpoint:
 
         assert resp.status_code == 200
         assert resp.json() == {"available": False, "reason": "corrupt"}
+
+
+# ── seed 扩展（T8：E2E 温度计造数，TESTING=1） ─────────────────────────────
+
+
+@pytest.fixture
+def testing_client(monkeypatch):
+    """TESTING=1 下 reload 出带 /api/test/seed 的客户端（仓库既有模式）。"""
+    monkeypatch.setenv("TESTING", "1")
+    import finance_agent.api as api_module
+
+    importlib.reload(api_module)
+    try:
+        yield TestClient(api_module.app)
+    finally:
+        monkeypatch.delenv("TESTING", raising=False)
+        importlib.reload(api_module)
+
+
+# 行字段与 ``regime_daily`` DDL 列名逐字一致（含 cap_source 新列）
+_SEED_ROW = {
+    "trade_date": "2026-10-16",
+    "small_cap_share": 0.08,
+    "up_count": 2500,
+    "down_count": 2300,
+    "flat_count": 200,
+    "limit_up_count": 60,
+    "limit_down_count": 5,
+    "total_amount": 8.0e11,
+    "small_cap_share_pctile": 0.85,
+    "total_amount_pctile": 0.42,
+    "computed_at": "2026-10-16T15:35:00",
+    "cap_source": "spot",
+}
+
+
+class TestSeedExtension:
+    """``/api/test/seed`` 的 regime 造数块（E2E 构造温度计三态的前提）。"""
+
+    def test_seed_regime_rows_roundtrip(self, testing_client, _regime_db):
+        """``regime: [rows]`` 写 env 指向的库（未被 chat_history 早退吞掉）。"""
+        resp = testing_client.post("/api/test/seed", json={"regime": [dict(_SEED_ROW)]})
+
+        assert resp.status_code == 200
+        # 占位响应（未创建会话）；行真写入与否由下方断言证明
+        assert resp.json() == {"status": "ok", "mode": "testing"}
+
+        row = latest_regime(db_path=_regime_db)
+        assert row is not None
+        assert row["trade_date"] == _SEED_ROW["trade_date"]
+        assert row["small_cap_share"] == pytest.approx(0.08)
+        assert row["flat_count"] == 200  # 平家数列透传（不折算）
+        assert row["small_cap_share_pctile"] == pytest.approx(0.85)
+        assert row["computed_at"] == "2026-10-16T15:35:00"
+        assert row["cap_source"] == "spot"
+
+        body = TestClient(app).get("/api/regime").json()
+        assert body["available"] is True
+        assert body["as_of"] == "2026-10-16"
+        assert body["state"] == "elevated" and body["multiplier"] == 0.5
+        assert body["cap_source"] == "spot"
+
+    def test_seed_regime_multiple_rows_latest_wins(self, testing_client, _regime_db):
+        """多行造数（曲线/分位窗口前提）：latest 取最大交易日，history 升序。"""
+        older = {**_SEED_ROW, "trade_date": "2026-10-14", "small_cap_share_pctile": 0.5}
+        testing_client.post("/api/test/seed", json={"regime": [dict(older), dict(_SEED_ROW)]})
+
+        body = TestClient(app).get("/api/regime").json()
+        assert body["as_of"] == "2026-10-16"
+        assert [h["trade_date"] for h in body["history"]] == ["2026-10-14", "2026-10-16"]
+
+    def test_seed_regime_reset_clears_rows(self, testing_client, _regime_db):
+        """``regime_reset`` 清空表（同样不受 chat_history 早退约束）。"""
+        testing_client.post("/api/test/seed", json={"regime": [dict(_SEED_ROW)]})
+        assert latest_regime(db_path=_regime_db) is not None
+
+        resp = testing_client.post("/api/test/seed", json={"regime_reset": True})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok", "mode": "testing"}
+        assert latest_regime(db_path=_regime_db) is None
+        assert TestClient(app).get("/api/regime").json() == {
+            "available": False,
+            "reason": "missing",
+        }
