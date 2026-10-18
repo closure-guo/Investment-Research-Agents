@@ -183,6 +183,12 @@ def resolve_reports_path(file_name: str) -> Path:
 # 决策日志表(幂等建表,decision_log 与 sessions 同库;decision-outcome-tracking)
 # cohort 跑批记账表(delta add-forward-paper-trading-cohort;独立于 predictions)
 from finance_agent.outcome.cohort.model import init_cohort_runs  # noqa: E402
+from finance_agent.outcome.events.model import (  # noqa: E402
+    get_watchlist_item,
+    init_events_db,
+    list_watchlist,
+    mark_watchlist_analyzing,
+)
 from finance_agent.outcome.regime.payload import build_regime_payload  # noqa: E402
 from finance_agent.outcome.store import (  # noqa: E402
     DECISION_STATUSES,
@@ -232,6 +238,7 @@ def _init_stores() -> None:
         ("predictions", init_predictions),
         ("track_record", init_track_record_tables),
         ("cohort_runs", init_cohort_runs),
+        ("events", init_events_db),
     ):
         try:
             init_fn()
@@ -3543,6 +3550,130 @@ async def screening_analyze() -> Any:
         "started": [item for item in snapshot if item["state"] == "running"],
         "queued": [item for item in snapshot if item["state"] == "queued"],
         "removed": removals,
+    }
+
+
+# ── 事件观察清单（delta add-event-driven-lane T5：只读清单 + 深度分析接线） ──
+
+
+def _watchlist_evidence(raw: Any) -> Any:
+    """证据 JSON 文本 → 解析后的列表；损坏如实返回 ``None``（不伪装成 []、不编造）。"""
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(str(raw))
+    except ValueError:
+        _logger.warning("观察清单证据 JSON 损坏，按 null 返回: %.80s", raw)
+        return None
+    return parsed
+
+
+def _event_watchlist_payload(row: dict[str, Any]) -> dict[str, Any]:
+    """清单行（库列名）→ API 载荷（前端契约字段名）。"""
+    return {
+        "id": row.get("id"),
+        "forecast_key": row.get("forecast_key"),
+        "source": row.get("source"),
+        "status": row.get("status"),
+        "session_id": row.get("session_id"),
+        "created_at": row.get("created_at"),
+        "code": row.get("code"),
+        "name": row.get("name"),
+        "report_period": row.get("report_period"),
+        "forecast_type": row.get("forecast_type"),
+        "change_low": row.get("change_low"),
+        "change_high": row.get("change_high"),
+        "announce_date": row.get("announce_date"),
+        "available_at": row.get("available_at"),
+        "verdict": row.get("verdict"),
+        "reason": row.get("reason"),
+        "evidence": _watchlist_evidence(row.get("evidence_json")),
+        "model": row.get("model"),
+        "prompt_fingerprint": row.get("prompt_fingerprint"),
+        "triaged_at": row.get("triaged_at"),
+    }
+
+
+@app.get("/api/events/watchlist")
+async def events_watchlist(source: str | None = None) -> dict[str, Any]:
+    """事件观察清单（只读）：预告要素 / 分诊结论与理由 / 证据引用 / 公告日 / 状态 / session。
+
+    ``?source=`` 过滤清单来源（缺省全量）；空库 → 200 + 空列表（不 500）。
+    **零写入**：本端点不创建/修改任何业务状态（分诊与清单落库只在日批通道）。
+    """
+    rows = await asyncio.to_thread(list_watchlist, source=source)
+    return {"items": [_event_watchlist_payload(row) for row in rows]}
+
+
+@app.post("/api/events/watchlist/{item_id}/analyze")
+async def events_watchlist_analyze(item_id: int) -> Any:
+    """发起深度分析（复用既有筛选队列，`source=event` 语义）：
+
+    - 建会话段与 ``/api/screening/analyze`` **逐字同款**（create_session +
+      append_chat + set_pipeline_anchor + update_session_for_clarify +
+      append_session_event + ``queue.enqueue``）——复用 ``_get_analyze_queue()``
+      单例，同并发上限，MUST NOT 另建分析/并发通道；
+    - 重复点击（条已有 ``session_id``）→ 幂等返回既有状态（``already_started=true``），
+      MUST NOT 重复入队；
+    - 未知 id → 404；成功后条目置 ``analyzing`` 并关联 session。
+    """
+    item = await asyncio.to_thread(get_watchlist_item, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"未知观察清单条目: {item_id}")
+    queue = _get_analyze_queue()
+    existing_session = item.get("session_id")
+    if existing_session:
+        # 幂等：重复点击不重复建会话、不重复入队，返回既有状态
+        snapshot = queue.snapshot()
+        queue_state = next(
+            (e["state"] for e in snapshot if e["session_id"] == existing_session), None
+        )
+        return {
+            "id": item_id,
+            "session_id": existing_session,
+            "status": item.get("status"),
+            "queue_state": queue_state,
+            "already_started": True,
+        }
+
+    symbol = str(item.get("code") or "")
+    display_name = f"{symbol} 事件分析"
+    session_id = await asyncio.to_thread(
+        create_session,
+        stock_code="",
+        stock_name="",
+        display_name=display_name,
+        status="clarifying",
+        session_type="analysis",
+    )
+    await asyncio.to_thread(append_chat, session_id, "user", f"对 {symbol} 进行深度分析")
+    await asyncio.to_thread(set_pipeline_anchor, session_id)
+    await asyncio.to_thread(
+        update_session_for_clarify,
+        session_id,
+        stock_code=symbol,
+        stock_name="",
+        status="running",
+    )
+    append_session_event(
+        session_id,
+        {
+            "type": "session_created",
+            "session_id": session_id,
+            "display_name": display_name,
+            "timestamp": _now(),
+        },
+    )
+    queue.enqueue(symbol, session_id)
+    await asyncio.to_thread(mark_watchlist_analyzing, item_id, session_id=session_id)
+    snapshot = queue.snapshot()
+    queue_state = next((e["state"] for e in snapshot if e["session_id"] == session_id), None)
+    return {
+        "id": item_id,
+        "session_id": session_id,
+        "status": "analyzing",
+        "queue_state": queue_state,
+        "already_started": False,
     }
 
 
