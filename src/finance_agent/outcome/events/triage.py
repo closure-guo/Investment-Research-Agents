@@ -268,6 +268,10 @@ def triage_forecasts(
     - ``snapshot_ctx_by_key``：调用方注入的**逐行**快照要素，键 = ``forecast_key(row)``
       （调用方按各行 ``available_at`` 时点化取数；缺 → 该条无快照字段）；
     - 结果按输入序归位；落库在主线程顺序执行（单连接逐条 UPSERT，幂等）；
+    - **全批降级 fail-loud**（评审 I3）：``degraded == triaged 且 triaged > 0``
+      （模板系统性缺失/网关整体不可用等）→ 抛 ``RuntimeError``，批次按失败处置——
+      与 ``screening/pipeline`` 的 L3 全降级护栏同纪律（防「全 in_line 兜底」冒充成功）；
+      单条偶发失败仍降级 ``in_line``、不阻断批次（既有语义不变）；
     - 返回 ``{"triaged", "skipped", "outperform", "in_line", "risk", "degraded",
       "model", "prompt_fingerprint", "warnings"}``。
     """
@@ -331,5 +335,13 @@ def triage_forecasts(
         "prompt_fingerprint": prompt_fingerprint,
         "warnings": warnings,
     }
+    # 全批降级 = 系统性故障（模板缺失/网关整体不可用）→ fail-loud（评审 I3，照
+    # screening/pipeline L3 护栏先例）：MUST NOT 以「全 in_line 兜底」冒充成功；
+    # 单条偶发失败（degraded < triaged）仍按降级语义返回，不阻断批次。
+    if result["triaged"] > 0 and result["degraded"] == result["triaged"]:
+        raise RuntimeError(
+            f"事件分诊全部降级（{result['degraded']}/{result['triaged']}），"
+            "疑似分诊模板系统性缺失或 LLM 网关整体不可用：批次按 failed 处理"
+        )
     _emit_trace_metadata(result)
     return result

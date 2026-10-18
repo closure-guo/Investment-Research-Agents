@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+import finance_agent.outcome.events.triage as triage_module
 from finance_agent.llm.errors import RateLimitError
 from finance_agent.outcome.events.model import forecast_key, list_untriaged, upsert_forecasts
 from finance_agent.outcome.events.triage import (
@@ -180,15 +181,24 @@ class TestTriageBatch:
         ],
     )
     def test_rejections_degrade_to_in_line(self, tmp_path, payload):
+        """批内单条合同违约 → 降级 in_line（degraded < triaged，不阻断批次）。"""
         db = tmp_path / "events.db"
-        upsert_forecasts([_forecast_row()], db_path=db)
-        result = triage_forecasts(
-            list_untriaged(db_path=db), client=_StubClient([payload]), db_path=db
+        upsert_forecasts(
+            [
+                _forecast_row(),
+                _forecast_row(code="000001", announce_date="2025-04-16"),
+            ],
+            db_path=db,
         )
+        result = triage_forecasts(
+            list_untriaged(db_path=db),
+            client=_StubClient([payload, _OK_PAYLOAD]),
+            db_path=db,
+        )
+        assert result["triaged"] == 2
         assert result["in_line"] == 1 and result["degraded"] == 1
-        row = _triage_rows(db)[0]
-        assert row["verdict"] == "in_line"
-        assert row["reason"] == DEGRADED_REASON
+        degraded_row = next(row for row in _triage_rows(db) if row["verdict"] == "in_line")
+        assert degraded_row["reason"] == DEGRADED_REASON
         assert result["warnings"][0]["reason"]
 
     def test_single_llm_error_does_not_block_batch(self, tmp_path):
@@ -214,10 +224,18 @@ class TestTriageBatch:
         assert len(_triage_rows(db)) == 3  # 19/20 类比：其余记录照常产出
 
     def test_parse_error_degrades(self, tmp_path):
+        """批内单条解析失败 → 降级 in_line（degraded < triaged，不阻断批次）。"""
         db = tmp_path / "events.db"
-        upsert_forecasts([_forecast_row()], db_path=db)
-        client = _StubClient([EventTriageResponseError("不是 JSON", raw_text="{bad")])
+        upsert_forecasts(
+            [
+                _forecast_row(),
+                _forecast_row(code="000001", announce_date="2025-04-16"),
+            ],
+            db_path=db,
+        )
+        client = _StubClient([EventTriageResponseError("不是 JSON", raw_text="{bad"), _OK_PAYLOAD])
         result = triage_forecasts(list_untriaged(db_path=db), client=client, db_path=db)
+        assert result["triaged"] == 2
         assert result["in_line"] == 1 and result["degraded"] == 1
 
     def test_as_of_guard_skips_future_available_at(self, tmp_path):
@@ -249,21 +267,36 @@ class TestTriageBatch:
         assert "- close: 1500.0" in prompts["600519"]
         assert "- close:" not in prompts["000001"]  # 无该行上下文 → 不注入快照字段
 
-    def test_prompt_build_failure_degrades_not_raises(self, tmp_path, monkeypatch):
-        """prompt 组装失败同样按 in_line 降级（与 ``_triage_one``「一律降级」docstring 一致）。"""
+    def test_prompt_build_failure_degrades_without_blocking_batch(self, tmp_path, monkeypatch):
+        """批内单条 prompt 组装失败按 in_line 降级（degraded < triaged，不阻断批次）。
+
+        I3 起：**全批**降级（100%）才是系统性故障并上抛；单条失败语义不变。
+        """
         db = tmp_path / "events.db"
-        upsert_forecasts([_forecast_row()], db_path=db)
+        upsert_forecasts(
+            [
+                _forecast_row(),
+                _forecast_row(code="000001", announce_date="2025-04-16"),
+            ],
+            db_path=db,
+        )
+        real = triage_module.build_triage_prompt
 
-        def _boom(*args, **kwargs):
-            raise RuntimeError("prompt 模板缺失")
+        def _boom_for_first(forecast, *, snapshot_ctx=None):
+            if forecast.get("code") == "600519":
+                raise RuntimeError("prompt 模板缺失")
+            return real(forecast, snapshot_ctx=snapshot_ctx)
 
-        monkeypatch.setattr("finance_agent.outcome.events.triage.build_triage_prompt", _boom)
+        monkeypatch.setattr(
+            "finance_agent.outcome.events.triage.build_triage_prompt", _boom_for_first
+        )
         result = triage_forecasts(
             list_untriaged(db_path=db), client=_StubClient([_OK_PAYLOAD]), db_path=db
         )
-        assert result["triaged"] == 1 and result["degraded"] == 1 and result["in_line"] == 1
+        assert result["triaged"] == 2
+        assert result["degraded"] == 1 and result["in_line"] == 1
         assert result["warnings"][0]["error"] == "RuntimeError"
-        assert _triage_rows(db)[0]["reason"] == DEGRADED_REASON
+        assert any(row["reason"] == DEGRADED_REASON for row in _triage_rows(db))
 
     def test_batch_concurrency_peak_never_exceeds_bound(self, tmp_path):
         """行为断言：并发峰值 ≤ max_workers=8（桩计数峰值）。"""
@@ -343,3 +376,36 @@ def _triage_rows(db) -> list[dict]:
         return [dict(r) for r in conn.execute("SELECT * FROM event_triage").fetchall()]
     finally:
         conn.close()
+
+
+class TestAllDegradedFailLoud:
+    """I3（评审）：全批降级 = 系统性故障 → 上抛（照 pipeline L3 护栏先例）；单条失败语义不变。"""
+
+    def test_all_degraded_raises_runtime_error(self, tmp_path):
+        """全批降级（degraded == triaged 且 triaged > 0，如模板系统性缺失/网关整体不可用）→ 上抛。"""
+        db = tmp_path / "events.db"
+        rows = [
+            _forecast_row(code="600519", announce_date="2025-04-15"),
+            _forecast_row(code="000001", announce_date="2025-04-16"),
+        ]
+        upsert_forecasts(rows, db_path=db)
+        client = _StubClient([RateLimitError("限流"), RateLimitError("限流")])
+
+        with pytest.raises(RuntimeError, match="全.*降级|降级.*全"):
+            triage_forecasts(list_untriaged(db_path=db), client=client, db_path=db)
+
+    def test_single_failure_still_degrades_without_raise(self, tmp_path):
+        """单条偶发失败：降级 in_line、不阻断批次（既有语义保持不变）。"""
+        db = tmp_path / "events.db"
+        rows = [
+            _forecast_row(code="600519", announce_date="2025-04-15"),
+            _forecast_row(code="000001", announce_date="2025-04-16"),
+        ]
+        upsert_forecasts(rows, db_path=db)
+        client = _StubClient([RateLimitError("限流"), _OK_PAYLOAD])
+
+        result = triage_forecasts(list_untriaged(db_path=db), client=client, db_path=db)
+
+        assert result["triaged"] == 2
+        assert result["degraded"] == 1
+        assert result["outperform"] == 1
