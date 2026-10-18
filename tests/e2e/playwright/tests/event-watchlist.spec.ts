@@ -99,7 +99,13 @@ const FORECAST_C = {
 const keyOf = (forecast: { code: string; report_period: string; source_record_id: string }) =>
   `${forecast.code}|${forecast.report_period}|${forecast.source_record_id}`
 
-/** 三条预告（三态分诊结论各一）+ 对应清单行（earnings 来源） */
+/**
+ * 三条预告（三态分诊结论各一）+ 对应清单行（earnings 来源）。
+ *
+ * 三态为**展示契约造数**，非 earnings 通道可达态：真实日批只把 ``outperform``
+ * 写入观察清单（outcome/events/watchlist.py「``in_line``/``risk`` 一律不入」），
+ * 此处 ``in_line``/``risk`` 清单行仅用于钉住三态徽章与要素卡的渲染映射。
+ */
 const EVENTS_SEED = {
   forecasts: [FORECAST_A, FORECAST_B, FORECAST_C],
   triage: [

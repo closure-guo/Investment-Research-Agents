@@ -26,8 +26,14 @@ const BATCH_DATE = '2026-10-13'
 const FAILED_DATE = '2026-10-14'
 
 // API 造数显式走 IPv4：Windows 上 localhost 可能先解析到 ::1，而 vite dev server
-// 绑 0.0.0.0（IPv4），APIRequestContext 只试 ::1 时会 ECONNREFUSED（首轮实测偶发）
-const API_BASE = 'http://127.0.0.1:5173'
+// 绑 0.0.0.0（IPv4），APIRequestContext 只试 ::1 时会 ECONNREFUSED（首轮实测偶发）。
+// 端口取 config use.baseURL 并把 localhost 换 127.0.0.1（同 daily-ops/market-regime/
+// event-watchlist 处置）：默认套件（5173）下与既有硬编码逐字相同，隔离 config（5174）
+// 下不再误打到 5173 上可能存在的其它服务，两套件通用。
+function apiBase(): string {
+  const base = test.info().project.use.baseURL ?? 'http://localhost:5173'
+  return base.replace('//localhost', '//127.0.0.1')
+}
 
 // 池行口径：consecutive_days 正整数、l3_verdict ∈ keep/drop、l3_reason 非空、
 // factor_contribs 可 JSON 序列化（后端 _pool_row_payload fail loud 校验）
@@ -57,12 +63,12 @@ const POOL = [
 ]
 
 async function resetScreening(request: APIRequestContext) {
-  const resp = await request.post(`${API_BASE}/api/test/seed`, { data: { screening_reset: true } })
+  const resp = await request.post(`${apiBase()}/api/test/seed`, { data: { screening_reset: true } })
   expect(resp.ok()).toBeTruthy()
 }
 
 async function seedPool(request: APIRequestContext) {
-  const resp = await request.post(`${API_BASE}/api/test/seed`, {
+  const resp = await request.post(`${apiBase()}/api/test/seed`, {
     data: {
       screening: {
         batch: {
@@ -136,7 +142,7 @@ test('hover 综合分 → 浮层展示因子贡献（|contribution| 降序）', 
 
 test('批次失败 → 横幅可见且标注最近成功批次日期（池仍展示）', async ({ page, request }) => {
   await seedPool(request)
-  const failed = await request.post(`${API_BASE}/api/test/seed`, {
+  const failed = await request.post(`${apiBase()}/api/test/seed`, {
     data: {
       screening: {
         batch: {
@@ -162,7 +168,7 @@ test('批次失败 → 横幅可见且标注最近成功批次日期（池仍展
 })
 
 test('降级批次 → 披露横幅可见 + 成交额列语义（add-screening-empty-library-fallback）', async ({ page, request }) => {
-  const seeded = await request.post(`${API_BASE}/api/test/seed`, {
+  const seeded = await request.post(`${apiBase()}/api/test/seed`, {
     data: {
       screening: {
         batch: {
@@ -233,10 +239,12 @@ test('点击批量分析 → 池内标的全量入队，显示排队/运行徽�
     removed: unknown[]
   }
   expect(payload.removed).toEqual([])
-  expect([...payload.started, ...payload.queued].map((item) => item.symbol).sort()).toEqual([
-    '000001',
-    '600519',
-  ])
+  // 队列是进程内共享单例：其它 spec（event-watchlist.spec.ts 第 3 例）可能已入队同源
+  // 标的，整快照精确相等会串扰（低频）。改断言「本页两标的都在 started/queued 中」
+  // （不排除并存条目），守卫强度不降——时效性路径仍由上面 removed === [] 把守。
+  expect([...payload.started, ...payload.queued].map((item) => item.symbol)).toEqual(
+    expect.arrayContaining(['000001', '600519']),
+  )
 
   // 入队即渲染徽标（并发上限 2：2 只标的均为 running/queued，必有徽标）
   await expect(page.getByTestId('screening-queue-badge-600519')).toBeVisible()
