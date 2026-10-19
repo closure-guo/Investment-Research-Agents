@@ -410,7 +410,7 @@ class TestRequestCapabilityInference:
         assert profile.capability.tool_choice_required is True
 
     def test_request_deepseek_keeps_generic(self):
-        """非 glm 模型维持通用档（与 env 分支一致，不自作主张扩 deepseek）。"""
+        """非 glm 模型的工具档维持通用（不把 required/tools 能力扩给自定义端点）。"""
         profile = resolve_profile(
             purpose="deep",
             llm_config={
@@ -421,3 +421,66 @@ class TestRequestCapabilityInference:
             _env={},
         )
         assert profile.capability.tool_choice_required is False
+
+
+class TestDeepSeekThinkingCapability:
+    """DeepSeek 思考模型能力随模型走，不随端点前缀漂移。
+
+    生产配置：``LLM_MODEL=openai/deepseek-v4.1-flash`` +
+    ``LLM_BASE_URL=https://opencode.ai/zen/go/v1``。旧实现只对 glm 做
+    模型特化，该组合落 openai-compatible 中性档
+    （``reasoning_must_echo_on_tool=False``），gateway 清洗会剥掉工具轮的
+    ``reasoning_content``，DeepSeek 端点返回 400："The reasoning_content in
+    the thinking mode must be passed back to the API"。
+    """
+
+    ENV = {
+        "LLM_MODEL": "openai/deepseek-v4.1-flash",
+        "LLM_BASE_URL": "https://opencode.ai/zen/go/v1",
+        "LLM_API_KEY": "oc_sk_test",
+    }
+
+    def test_env_openai_prefixed_deepseek_echoes_reasoning(self):
+        profile = resolve_profile(purpose="deep", _env=self.ENV)
+        assert profile.capability.reasoning_field == "reasoning_content"
+        assert profile.capability.reasoning_must_echo_on_tool is True
+
+    def test_echo_only_does_not_expand_other_capabilities(self):
+        """opencode 端点实测不支持 tool_choice=required（#394），只扩 reasoning 契约。"""
+        profile = resolve_profile(purpose="deep", _env=self.ENV)
+        assert profile.capability.tools == "single"
+        assert profile.capability.tool_choice_required is False
+
+    def test_request_openai_prefixed_deepseek_echoes_reasoning(self):
+        profile = resolve_profile(
+            purpose="deep",
+            llm_config={
+                "model": "openai/deepseek-v4.1-flash",
+                "baseUrl": "https://opencode.ai/zen/go/v1",
+                "apiKey": "oc_sk_test",
+            },
+            _env={},
+        )
+        assert profile.capability.reasoning_must_echo_on_tool is True
+
+    def test_tool_turn_survives_message_sanitize(self):
+        """复现 400 前置条件：解析后的 capability 清洗工具轮消息必须保留 reasoning。"""
+        from finance_agent.llm.adapters.litellm_adapter import sanitize_messages_for_profile
+
+        profile = resolve_profile(purpose="deep", _env=self.ENV)
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": "{}"},
+                    }
+                ],
+                "reasoning_content": "思考",
+            }
+        ]
+        out = sanitize_messages_for_profile(messages, profile.capability)
+        assert out[0]["reasoning_content"] == "思考"

@@ -175,15 +175,31 @@ def _merge_probe_facts(profile: ModelProfile) -> ModelProfile:
     return merge_probe_into_profile(profile, report)
 
 
+# DeepSeek 思考模型经第三方 OpenAI 兼容网关（opencode 等）接入时的能力档：
+# 工具轮 MUST 回传 reasoning_content（端点缺字段直接 400），但工具/JSON 能力
+# 仍是端点事实而非模型族事实——opencode 实测不支持 tool_choice=required
+# （#394），故不从 deepseek-official preset 整体继承，只覆盖 reasoning 契约。
+_DEEPSEEK_THINKING_CAP = dataclasses.replace(
+    _PRESETS["openai-compatible"].capability,
+    reasoning_field="reasoning_content",
+    reasoning_must_echo_on_tool=True,
+)
+
+
 def _capability_for_model(model: str) -> Capability:
     """按模型名推断请求能力（#302：env 与 request 分支共享的单一实现）。
 
     glm 系 → ark-glm 实测能力档（tool_choice=required 支持，生产 ReAct
-    force_tool 轮依赖）；其余维持 openai-compatible 通用档。kimi 无 required
+    force_tool 轮依赖）；deepseek 系 → 通用工具档 + 思考回传契约（模型族
+    语义：无论官方端点还是 openai/ 前缀网关，思考模式工具轮都必须回传
+    reasoning_content）；其余维持 openai-compatible 通用档。kimi 无 required
     能力档，通用档即正确语义（guard 拒绝 required 是事实而非缺陷）。
     """
-    if "glm" in model.lower():
+    lower = model.lower()
+    if "glm" in lower:
         return _PRESETS["ark-glm"].capability
+    if "deepseek" in lower:
+        return _DEEPSEEK_THINKING_CAP
     return _PRESETS["openai-compatible"].capability
 
 
