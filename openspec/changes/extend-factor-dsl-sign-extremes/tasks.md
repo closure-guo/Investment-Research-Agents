@@ -31,6 +31,6 @@
 
 ## 收口
 
-- [x] `uv run pytest tests/factors ...` 全绿（469）；ruff / mypy 干净
+- [x] `uv run pytest tests/factors tests/test_replay_factor_harvest.py tests/test_api_factors.py tests/test_api_screening.py -q` 全绿；ruff / mypy 干净
 - [x] `openspec validate extend-factor-dsl-sign-extremes --strict` 通过
 - [ ] 验证报告 + PR；sync + archive 在验证通过后执行

@@ -117,13 +117,15 @@ OPERATOR_MAPPINGS: dict[str, OperatorMapping] = {
         "Max",
         "ts_max",
         "equivalent",
-        f"滚动窗口最大值（窗口含当日，Rolling 子类 L951）；{_WARMUP}",
+        f"滚动窗口最大值（窗口含当日，Rolling 子类 L951）；{_WARMUP}；序列内部含 NaN 时"
+        "差异超出热身期（pyqlib 部分窗口值 vs 本系统 NaN）",
     ),
     "Min": OperatorMapping(
         "Min",
         "ts_min",
         "equivalent",
-        f"滚动窗口最小值（窗口含当日，Rolling 子类 L999）；{_WARMUP}",
+        f"滚动窗口最小值（窗口含当日，Rolling 子类 L999）；{_WARMUP}；序列内部含 NaN 时"
+        "差异超出热身期（pyqlib 部分窗口值 vs 本系统 NaN）",
     ),
     # ── 后移引用（extend-factor-dsl-ref：missing → equivalent） ──
     "Ref": OperatorMapping(

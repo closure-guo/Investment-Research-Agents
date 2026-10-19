@@ -163,7 +163,7 @@ class TestRunFactorHarvest:
         client = _StubClient(
             {
                 "tsmean": {"qlib_expression": "Mean($close, 5)"},
-                "rollmax": {"untranslatable": True, "reason": "滚动最大值本系统无对应算子"},
+                "rollmax": {"untranslatable": True, "reason": "公式需要滚动回归，本系统无对应算子"},
                 # Max/Min 自 extend-factor-dsl-sign-extremes 起可映射（ts_max/ts_min）；
                 # 翻译器拒译样本改用仍缺的滚动偏度
                 "badop": {"qlib_expression": "Skew($close, 20)"},

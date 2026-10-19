@@ -6,7 +6,7 @@
 {"proposals": [{"expression": "ts_mean(close, 5)", "hypothesis": "收盘价的短期均值回复……", "category": "价量", "alignment_score": 0.8}]}
 每个 proposals 元素必须包含：
 - expression：DSL 表达式。算子一律函数形态 `op(a, b)`，无中缀运算符。
-  - 可用算子：ts_mean / ts_std / ts_corr / ts_rank / delta / rank / zscore / add / sub / mul / div / max / min / abs / log / ref / ts_sum / sqrt
+  - 可用算子：ts_mean / ts_std / ts_corr / ts_rank / delta / rank / zscore / add / sub / mul / div / max / min / abs / log / ref / ts_sum / sqrt / sign / ts_max / ts_min
   - 可用字段（前复权口径）：open / high / low / close / volume / amount
   - 窗口参数必须是正整数数字字面量（如 `ts_mean(close, 5)`）
   - 复杂度硬约束：AST 深度 ≤ 8、数字字面量总数（自由参数）≤ 3、字段种类 ≤ 3
