@@ -18,4 +18,4 @@
 
 - [x] `uv run pytest tests/factors -q` 全绿（403）；ruff / mypy 干净
 - [x] `openspec validate fix-pool-increment-orientation --strict` 通过
-- [ ] sync + archive + PR（验证通过后执行）
+- [x] sync + archive + PR（验证通过后执行）——闸④口径入主库 `specs/factor-library`；变更包移入 `changes/archive/2026-10-19-fix-pool-increment-orientation`

@@ -5,7 +5,7 @@ TBD - created by archiving change add-factor-library-and-monitor. Update Purpose
 ## Requirements
 ### Requirement: 五道闸准入管线
 
-候选因子 SHALL 依次通过以下闸口方可置为 `active`，任一闸口失败即拒收并记录失败闸口与原因：(1) 可计算性——在快照全市场上因子值缺失率 ≤ 20%；(2) 单因子检验——|RankIC| 均值显著且 |ICIR| ≥ 0.3；(3) 多重检验校正——同批次候选做置换检验并以 BH-FDR（q=0.1）控制；(4) 池级组合增量——加入候选后 active 池等权组合的样本外 IR 增量 > 0，且与池内任一因子 |IC 相关性| ≤ 0.7；(5) 样本外复核——训练/验证按时间切分，切分口径与 decision-backtest 的时点截断契约一致。
+候选因子 SHALL 依次通过以下闸口方可置为 `active`，任一闸口失败即拒收并记录失败闸口与原因：(1) 可计算性——在快照全市场上因子值缺失率 ≤ 20%；(2) 单因子检验——|RankIC| 均值显著且 |ICIR| ≥ 0.3；(3) 多重检验校正——同批次候选做置换检验并以 BH-FDR（q=0.1）控制；(4) 池级组合增量——加入候选后 active 池**符号归一化等权组合**的样本外 IR 增量 > 0，且与池内任一因子 |IC 相关性| ≤ 0.7；其中「符号归一化」= 组合内各因子（池因子与候选同规则）SHALL 按**训练段 RankIC 符号**定向后等权参与（训练段与闸⑤同一时点切分与边界剔除口径；符号不可定的池因子 SHALL 不参与组合，符号不可定的候选按原向参与并由闸②⑤兜底）；定向符号 SHALL 记入闸④ `detail` 供审计（候选符号各拒绝路径皆记；池定向清单在增量路径记录）；(5) 样本外复核——训练/验证按时间切分，切分口径与 decision-backtest 的时点截断契约一致。
 
 #### Scenario: 噪声因子拦截
 
@@ -19,6 +19,13 @@ TBD - created by archiving change add-factor-library-and-monitor. Update Purpose
 - **GIVEN** active 池已含因子 A，候选因子 B 与 A 的 IC 相关性为 0.92 且 B 单因子 ICIR = 0.5
 - **WHEN** 执行闸④
 - **THEN** B 被拒收，原因码 `REDUNDANT_WITH_POOL`，并记录相关对象 A
+
+#### Scenario: 稳定负向因子按训练段符号定向准入
+
+- **GIVEN** 候选因子在训练段与验证段的 RankIC 均值同为负且 |ICIR| 均 ≥ 0.3（强反转形态），空池
+- **WHEN** 执行闸④
+- **THEN** 该因子按训练段符号（−1）定向参与组合，验证段增量 > 0 → 闸④通过（`detail.orientation == -1`）
+- **AND** 若训练段符号与验证段符号相反，闸④增量 ≤ 0 以 `NO_POOL_INCREMENT` 先拒（空池下定向增量 = 训练符号 × 验证段 IR；闸⑤的「两段同号」门槛原样保留，对经闸④者继续兜底）
 
 ### Requirement: 双层查重
 
