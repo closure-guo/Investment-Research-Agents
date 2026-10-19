@@ -934,9 +934,25 @@ export interface FactorEvent {
   created_at: string
 }
 
+export interface FactorStyleExposure {
+  /** 与各 builtin 风格代理的 IC 序列相关；不可算的风格为 null（不臆造 0） */
+  correlations: Record<string, number | null>
+  /** |ρ| 最大的风格（无可用读数 → null） */
+  dominant: string | null
+  dominant_correlation: number | null
+  /** |主导 ρ| ≥ threshold（披露标注，不构成准入裁决） */
+  flagged: boolean
+  /** 主导风格相关所用共同 IC 日数 */
+  n_days: number
+  threshold: number
+  basket: string[]
+}
+
 export interface FactorDetail extends FactorRow {
   ic_series: FactorIcPoint[]
   events: FactorEvent[]
+  /** 风格暴露披露（add-factor-style-exposure）；面板不可得 → null（前端如实展示「数据不足」） */
+  style_exposure: FactorStyleExposure | null
 }
 
 // ── 因子研发监控契约（delta add-factor-research-monitor：GET /api/factor-research/status） ──

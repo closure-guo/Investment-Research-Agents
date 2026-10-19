@@ -49,6 +49,10 @@ from finance_agent.factors.library import (  # noqa: E402
     list_factors,
     list_ic_series,
 )
+from finance_agent.factors.style_exposure import (  # noqa: E402
+    compute_style_exposure,
+    style_exposure_payload,
+)
 from finance_agent.factors.tools import IC_WINDOW as FACTOR_IC_WINDOW  # noqa: E402
 from finance_agent.graph import build_5layer_graph  # noqa: E402
 from finance_agent.langfuse_tracing import get_langfuse  # noqa: E402
@@ -3671,7 +3675,34 @@ def _factor_detail_payload(factor_id: int) -> dict[str, Any] | None:
         {"trade_date": trade_date, "rank_ic": rank_ic} for trade_date, rank_ic in ic_series
     ]
     detail["events"] = [_factor_event_payload(event) for event in events]
+    detail["style_exposure"] = _factor_style_exposure_payload(row)
     return detail
+
+
+def _factor_style_exposure_payload(row: dict[str, Any]) -> dict[str, Any] | None:
+    """风格暴露披露（只读诊断，add-factor-style-exposure）。
+
+    在准入面板上现算因子与 builtin 风格代理篮子的 IC 相关。面板不可得/表达式不可求值
+    → **返回 None**（前端如实展示「数据不足」，MUST NOT 用 0 或虚构值冒充）。
+    """
+    try:
+        from finance_agent.factors.dsl import parse as dsl_parse
+        from finance_agent.factors.eval_engine import (
+            evaluate as dsl_evaluate,
+        )
+        from finance_agent.factors.eval_engine import (
+            forward_returns,
+            rank_ic_series,
+        )
+        from finance_agent.factors.monthly import _panel_from_snapshot
+
+        panel = _panel_from_snapshot(None)
+        fwd = forward_returns(panel.fields["close"])
+        factor_ic = rank_ic_series(dsl_evaluate(dsl_parse(str(row["expression"])), panel), fwd)
+        return style_exposure_payload(compute_style_exposure(factor_ic, panel, fwd=fwd))
+    except (OSError, ValueError) as exc:  # 面板不可得/深度不足/表达式不可求值 → 诚实置空
+        _logger.warning("因子风格暴露不可计算 factor_id=%s: %s", row.get("id"), exc)
+        return None
 
 
 @app.get("/api/factors")

@@ -42,9 +42,15 @@ _LLM_EXPRESSION = "ts_rank(close,20)"
 
 @pytest.fixture(autouse=True)
 def _factors_db(tmp_path, monkeypatch):
-    """因子库路径指向 tmp（library._default_db_path 调用期读 env）。"""
+    """因子库路径指向 tmp（library._default_db_path 调用期读 env）。
+
+    快照库路径同样注入 tmp（add-factor-style-exposure：详情端点的风格暴露披露会经
+    ``_panel_from_snapshot`` 触碰 SNAPSHOT_DB_PATH——不隔离会打到生产快照库，
+    空 tmp 库 → 该块诚实置 None，与前端「数据不足」空态一致）。
+    """
     path = tmp_path / "factor_library.db"
     monkeypatch.setenv("FACTOR_LIBRARY_DB_PATH", str(path))
+    monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "snapshot.db"))
     return path
 
 
@@ -173,6 +179,16 @@ def test_detail_returns_expression_ic_series_and_events(_factors_db) -> None:
     assert events[-1]["to_status"] == "active"
     assert events[-1]["detail"]["reason"] == "ADMITTED"
     assert events[-1]["created_at"]  # 闸门结论事件时间
+
+
+def test_detail_style_exposure_null_without_snapshot(_factors_db) -> None:
+    """详情含 style_exposure 键；快照库为空 → 诚实 None（MUST NOT 用 0/虚构冒充）。"""
+    llm_id, _retired_id = _seed_library()
+
+    resp = TestClient(app).get(f"{_FACTORS}/{llm_id}")
+
+    assert resp.status_code == 200
+    assert resp.json()["style_exposure"] is None
 
 
 def test_detail_series_empty_for_factor_without_ic(_factors_db) -> None:

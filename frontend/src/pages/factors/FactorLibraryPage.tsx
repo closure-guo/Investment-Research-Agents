@@ -22,7 +22,9 @@ import type { FactorDetail, FactorLastEvent, FactorListResponse, FactorRow } fro
  * - 衰减标记：事件历史出现过 degraded（衰减监控降级史，退役后标记仍在）→
  *   StatusBadge degraded；否则「—」；
  * - 行展开懒取 ``GET /api/factors/{id}``：完整表达式 + IC 序列 + 事件历史
- *   （准入/降级/退役及时间）；
+ *   （准入/降级/退役及时间）+ **风格暴露披露**（add-factor-style-exposure：与 builtin
+ *   风格代理的 IC 相关；仅披露不裁决——风格是合法收益源，页面须同时展示读数与
+ *   「非独立 alpha」标注；面板不可得 → 如实「数据不足」）；
  * - 空态如实：库空是「等待 builtin 注册或提案过闸」的常态，MUST NOT 以加载中或
  *   错误态冒充；筛掉全部行是另一回事（无匹配文案，不冒充库空）。
  *
@@ -163,6 +165,59 @@ const COLUMNS: readonly ShellTableColumn<FactorTableRow>[] = [
 ]
 
 /** 行展开详情：懒取 GET /api/factors/{id}（完整表达式 / IC 序列 / 事件历史）。 */
+/** builtin 风格代理 → 展示短语（未知名原值如实，不臆造映射） */
+const STYLE_LABELS: Record<string, string> = {
+  momentum_20: '动量',
+  reversal_5: '反转',
+  turnover_proxy: '量比（换手代理）',
+  volatility_20: '波动率',
+  size_proxy: '规模代理（成交额）',
+}
+
+function FactorStyleExposureBlock({ factorId, exposure }: {
+  factorId: number
+  exposure: FactorDetail['style_exposure']
+}) {
+  return (
+    <div data-testid={`factor-detail-style-${factorId}`}>
+      <div className="mb-1 font-medium text-foreground">
+        风格暴露（与 builtin 风格代理的 IC 相关）
+      </div>
+      {!exposure || exposure.dominant === null || exposure.dominant_correlation === null ? (
+        <div className="text-muted-foreground" data-testid={`factor-style-unavailable-${factorId}`}>
+          数据不足，无法计算（需与风格代理的共同 IC ≥ 30 日）
+        </div>
+      ) : (
+        <>
+          <div className="text-muted-foreground">
+            主导：
+            <span className="text-foreground">
+              {STYLE_LABELS[exposure.dominant] ?? exposure.dominant}
+            </span>{' '}
+            ρ={exposure.dominant_correlation.toFixed(2)}（{exposure.n_days} 日）
+            {exposure.flagged && (
+              <span
+                className="ml-1"
+                style={{ color: 'var(--warning, #b45309)' }}
+                data-testid={`factor-style-flag-${factorId}`}
+              >
+                · 与标准风格高度重合
+              </span>
+            )}
+          </div>
+          <div className="tabular-nums text-muted-foreground">
+            {Object.entries(exposure.correlations).map(([name, rho]) => (
+              <span key={name} className="mr-3 inline-block">
+                {STYLE_LABELS[name] ?? name} {rho === null ? '—' : rho.toFixed(2)}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function FactorDetailPanel({ factorId }: { factorId: number }) {
   // null = 加载中；error = 取数失败（与「无 IC 记录」的空序列严格区分）
   const [detail, setDetail] = useState<FactorDetail | null>(null)
@@ -227,6 +282,7 @@ function FactorDetailPanel({ factorId }: { factorId: number }) {
           </div>
         )}
       </div>
+      <FactorStyleExposureBlock factorId={factorId} exposure={detail.style_exposure} />
       <div data-testid={`factor-detail-events-${factorId}`}>
         <div className="mb-1 font-medium text-foreground">事件历史</div>
         {detail.events.length === 0 ? (
