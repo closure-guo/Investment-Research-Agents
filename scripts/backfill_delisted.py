@@ -22,6 +22,10 @@
   （``write_snapshot_rows_bulk`` 为 INSERT OR REPLACE，幂等）；
 - 缺失明细（``history_missing``/``window_missing``）随非 dry-run 运行落
   ``snapshot_meta["delist_backfill_missing"]``（JSON，持久留痕供运维与后续变更读取）；
+- **日批行覆盖守卫**（issue #404）：写前查窗口内 ``prev_close`` 非空的日批行，这些
+  日期**跳过不覆盖**（保留日批状态位/前收盘）——``write_snapshot_rows_bulk`` 为
+  INSERT OR REPLACE，不设守卫会把日批行冲成回填形状；命中明细进摘要
+  ``daily_overlap`` 与 ``snapshot_meta``；
 - 回填行不含状态位/前收盘/涨跌幅（同既有回填通道），**不得**接入
   ``compute_rebase_factors``/停牌合成链；正式日频数据以 ``market_snapshot_daily`` 为准。
 
@@ -205,6 +209,34 @@ def _window_is_fully_covered(coverage: dict[str, Any] | None, *, anchor: str) ->
     return str(coverage["min"]) <= anchor
 
 
+def _daily_overlap_dates(db_path: str | Path, code: str, start: str, end: str) -> list[str]:
+    """窗口内已有**日批行**（``prev_close`` 非空）的交易日，升序（#404 覆盖守卫）。
+
+    ``prev_close`` 是日批链独有的字段：回填行显式置 NULL（见 ``_history_rows``），
+    故非空即「该日已有正式日频数据」。库/表不可读 → ``[]``（按无日批行处理，取数
+    方向安全；与其它覆盖查询同纪律）。
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    try:
+        conn = _connect(path)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT trade_date FROM market_snapshot "
+            "WHERE code = ? AND trade_date >= ? AND trade_date <= ? "
+            "AND prev_close IS NOT NULL ORDER BY trade_date",
+            (code, start, end),
+        ).fetchall()
+    except sqlite3.Error:  # 空文件/异库无该表 → 视为无日批行
+        return []
+    finally:
+        conn.close()
+    return [str(row[0]) for row in rows]
+
+
 def _persist_missing_summary(db_path: str | Path, summary: dict[str, Any]) -> None:
     """缺失/覆盖明细落 ``snapshot_meta["delist_backfill_missing"]``（持久留痕）。
 
@@ -216,6 +248,8 @@ def _persist_missing_summary(db_path: str | Path, summary: dict[str, Any]) -> No
         "history_missing_count": summary["history_missing_count"],
         "window_missing": list(summary["window_missing"]),
         "partial_overlap": list(summary["partial_overlap"]),
+        "daily_overlap": list(summary["daily_overlap"]),
+        "symbols_daily_overlap": summary["symbols_daily_overlap"],
         "skipped_resumed": summary["skipped_resumed"],
         "updated_at": datetime.now().isoformat(),
     }
@@ -277,6 +311,10 @@ def run_backfill_delisted(
         # 部分覆盖（窗口内有行但未触及窗口头）→ 已重取（INSERT OR REPLACE 幂等）；
         # 与 ``skipped_resumed``（整窗覆盖）如实区分，不谎报覆盖
         "partial_overlap": [],
+        # 日批行覆盖守卫（#404）：窗口内已有日批行（prev_close 非空）的日期被跳过，
+        # 明细 = [{"code","dates","count"}]；symbols_daily_overlap = 命中票数
+        "daily_overlap": [],
+        "symbols_daily_overlap": 0,
         "dry_run": dry_run,
     }
     calendar = _snapshot_calendar(resolved_db)
@@ -318,6 +356,23 @@ def run_backfill_delisted(
             logger.warning("退市股无可用行（日期不可解析/空帧）: %s", code)
             print(f"[{index}/{total}] {code}: 无历史可得（日期不可解析/空帧，如实标注）")
             continue
+        # #404 日批行覆盖守卫：已有日批行的日期不覆盖（回填行会冲掉状态位/前收盘）
+        overlap_dates = _daily_overlap_dates(resolved_db, code, start, end)
+        if overlap_dates:
+            overlap_set = set(overlap_dates)
+            rows = [row for row in rows if row.get("trade_date") not in overlap_set]
+            summary["daily_overlap"].append(
+                {"code": code, "dates": overlap_dates, "count": len(overlap_dates)}
+            )
+            summary["symbols_daily_overlap"] += 1
+            print(
+                f"[{index}/{total}] {code}: 保留日批行 {len(overlap_dates)} 日"
+                f"（{overlap_dates[0]}..{overlap_dates[-1]}）"
+            )
+        if not rows:
+            print(f"[{index}/{total}] {code}: 全部为日批重叠日，跳过写入")
+            continue
+
         written = len(rows) if dry_run else write_snapshot_rows_bulk(rows, db_path=resolved_db)
         summary["rows_written"] += written
         summary["symbols_ok"] += 1
@@ -392,6 +447,7 @@ def main(argv: list[str] | None = None) -> int:
         f"symbols_ok={summary['symbols_ok']} rows_written={summary['rows_written']} "
         f"skipped_resumed={summary['skipped_resumed']} "
         f"partial_overlap={len(summary['partial_overlap'])} "
+        f"daily_overlap={len(summary['daily_overlap'])} "
         f"history_missing={summary['history_missing_count']} "
         f"window_missing={len(summary['window_missing'])}" + (" [dry-run]" if args.dry_run else "")
     )
