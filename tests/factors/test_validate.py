@@ -1296,3 +1296,48 @@ def test_pool_increment_orients_negative_pool_factor(tmp_path):
     result = check_pool_increment(ic, values, list_active_factors(db_path=db), panel, db_path=db)
     assert result.detail["pool_orientations"] == [{"factor_id": pool_id, "orientation": -1}]
     assert result.detail["ir_pool"] is not None and result.detail["ir_pool"] > 0.0
+
+
+def test_pool_increment_pool_orientation_ignores_stale_stored_ic(tmp_path):
+    """review C1 回归：池因子仅存验证段落库 IC（近日入库形态）→ 方向仍由面板训练段现算。
+
+    旧实现取落库 IC 定向：验证段落库序列与训练段交集为空 → orientation=0 → 池因子被
+    静默踢出组合（闸④退化为单因子判定）。修复后定向与候选同规则（面板现算）。
+    """
+    panel = _signal_panel()
+    db = _empty_db(tmp_path)
+    pool_id = add_factor(
+        expression="sub(0, ts_mean(volume, 5))",
+        hypothesis="测试用：负向量化因子（镜像），落库 IC 仅覆盖验证段。",
+        category="价量",
+        status="active",
+        ast_json=serialize(parse("sub(0, ts_mean(volume, 5))")),
+        db_path=db,
+    )
+    # 只在最后 15 个交易日（验证段）落库 IC——训练段零覆盖
+    for trade_date in panel.fields["close"].index[-15:]:
+        record_ic(pool_id, trade_date, 0.05, db_path=db)
+    ic, values = _ic_values("ts_mean(close, 5)", panel)
+    result = check_pool_increment(ic, values, list_active_factors(db_path=db), panel, db_path=db)
+    assert result.detail["pool_orientations"] == [{"factor_id": pool_id, "orientation": -1}]
+    assert result.detail["ir_pool"] is not None and result.detail["ir_pool"] > 0.0
+
+
+def test_pool_increment_all_pool_orientations_undetermined_equals_empty_pool(tmp_path):
+    """池非空但方向全部不可定（零值因子）→ 等价空池：ir_pool=None、审计字段如实记录。"""
+    panel = _signal_panel()
+    db = _empty_db(tmp_path)
+    pool_id = add_factor(
+        expression="sub(close, close)",
+        hypothesis="测试用：零值因子（方向不可定），按契约不参与组合。",
+        category="价量",
+        status="active",
+        ast_json=serialize(parse("sub(close, close)")),
+        db_path=db,
+    )
+    ic, values = _ic_values("ts_mean(volume, 5)", panel)
+    result = check_pool_increment(ic, values, list_active_factors(db_path=db), panel, db_path=db)
+    assert result.detail["pool_orientations"] == [{"factor_id": pool_id, "orientation": 0}]
+    assert result.detail["pool_size"] == 1
+    assert result.detail["ir_pool"] is None
+    assert result.detail["orientation"] == 1
