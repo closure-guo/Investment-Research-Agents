@@ -30,6 +30,7 @@ from finance_agent.factors.harvest import (
     run_factor_harvest,
     transcribe_candidate,
 )
+from finance_agent.llm.errors import OutputTruncatedError
 
 
 def _candidate(name: str, description: str = "d", formulation: str = "f") -> dict:
@@ -352,6 +353,37 @@ class TestTranscriptionRetry(_HarvestFixtures):
             )
         assert client.calls == 1  # 网关级异常不重试（fail loud 语义不变）
         assert not state_path.exists()
+
+    def test_output_truncated_is_per_candidate_error_not_batch_abort(self, tmp_path):
+        """单候选输出截断（思考模型 reasoning 吃满预算）→ 留痕 transcription_error，不杀整批。
+
+        与网关不可用（RateLimit/连接）区分：后者仍 fail loud；前者是单条输出不可用，
+        按损耗回收先例记录状态，后续可经 ``retry_statuses={"transcription_error"}`` 重放。
+        """
+        cand_path = self._write_candidates(tmp_path, [_candidate("a"), _candidate("b")])
+        state_path = tmp_path / "harvest_state.json"
+
+        class _TruncatedThenGood:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete_json(self, prompt, *, purpose, metadata):
+                self.calls += 1
+                if metadata["factor_name"] == "a":
+                    raise OutputTruncatedError("续写仍 finish_reason=length：输出被截断")
+                return {"qlib_expression": "Mean($close, 5)"}
+
+        client = _TruncatedThenGood()
+        summary = run_factor_harvest(
+            candidates_path=cand_path, state_path=state_path, client=client, panel=_panel()
+        )
+
+        assert summary["transcription_errors"] == 1
+        assert summary["transcribed"] == 1  # b 照常裁决（不阻断整批）
+        processed = self._read_state(state_path)
+        assert processed["a"]["status"] == "transcription_error"
+        assert "截断" in processed["a"]["detail"]
+        assert processed["b"]["status"] == "rejected"
 
     def test_llm_config_error_not_retried_and_fails_loud(self, tmp_path):
         """LLM 配置类 ValueError（resolver 家族）不在重试面内——fail loud、不写状态。
