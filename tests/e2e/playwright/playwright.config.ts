@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
+import './test-env'
 
 /**
  * F2 E2E 门禁基础设施：双 webServer 拉起前后端

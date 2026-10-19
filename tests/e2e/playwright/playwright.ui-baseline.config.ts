@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import './test-env'
 
 /**
  * 打底前全页面视觉基线专属 E2E 配置（unify-ui-design-system T1）

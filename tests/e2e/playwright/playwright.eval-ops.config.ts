@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import './test-env'
 
 /**
  * 评估运维分区专属 E2E 配置（eval-ops-console.spec.ts 套件）

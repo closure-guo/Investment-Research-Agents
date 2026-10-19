@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import './test-env'
 
 /**
  * 隔离配置：避免占用用户已在运行的 8000/5173 服务。
