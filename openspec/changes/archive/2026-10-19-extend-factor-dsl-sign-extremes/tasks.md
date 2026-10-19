@@ -36,4 +36,4 @@
 - [x] `uv run pytest tests/factors tests/test_replay_factor_harvest.py tests/test_api_factors.py tests/test_api_screening.py -q` 全绿；ruff / mypy 干净
 - [x] `openspec validate extend-factor-dsl-sign-extremes --strict` 通过
 - [x] 验证报告（含 review 修复：factor_proposal 清单同步 + NaN 口径声明）
-- [ ] sync + archive + PR（验证通过后执行）
+- [x] sync + archive 于 2026-10-19 执行（PR 随分支 extend-factor-dsl-sign-extremes 提交）
