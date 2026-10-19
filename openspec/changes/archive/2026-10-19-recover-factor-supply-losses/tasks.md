@@ -54,4 +54,4 @@
 - [x] `uv run pytest tests/factors tests/test_replay_factor_harvest.py tests/test_api_factors.py tests/test_api_screening.py -q` 全绿；ruff 干净；mypy 改动模块无问题
 - [x] `openspec validate recover-factor-supply-losses --strict` 通过
 - [x] 验证报告（含 review 修复记录）
-- [ ] sync + archive + PR（验证通过后执行）
+- [x] sync + archive 于 2026-10-19 执行（主规范 3 条 MODIFIED 落库；PR 随分支 recover-factor-supply-losses 提交）
