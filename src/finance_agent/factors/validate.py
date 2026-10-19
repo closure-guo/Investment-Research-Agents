@@ -503,17 +503,19 @@ def check_pool_increment(
     （E5 逐字），**组合内各因子（池与候选同规则）按训练段 RankIC 符号定向后参与**
     （fix-pool-increment-orientation：与生产选股 L2 的带符号 IC 权重模型对齐——原无方向
     等权组合会把稳定负向因子系统性当成「拖累」拒收，而 L2 对负方向因子自动反向加权；
-    定向只用训练段、不借用验证段信息——随机因子的训练段符号来自噪声，定向不改变其中位数，
-    「噪声因子拦截」性质不变；符号不可定的池因子不参与组合（训练段有效样本 <
-    ``MIN_REDUNDANCY_SAMPLES`` 或中位符号 0）、符号不可定的候选按原向参与，由 ②⑤ 兜底；
+    定向只用训练段、不借用验证段信息——随机因子的训练段符号来自噪声，**闸④单闸**通过率
+    不变（约 50%）；**闸②→⑤整链**的噪声入库率变化见 delta proposal 的口径决策项
+    （旧实现的「验证段 IR > 0」实际充当单边方向过滤，归一化后消失）；符号不可定的池因子
+    不参与组合（训练段有效样本 < ``MIN_REDUNDANCY_SAMPLES`` 或 IC 均值符号 0）、符号不可定
+    的候选按原向参与，由 ②⑤ 兜底；
     池因子方向与候选同规则现算（冗余检查的落库/现算 IC 与之口径独立——定向只取符号））。
     输入契约：``candidate_ic`` SHALL 为 ``rank_ic_series(candidate_values, fwd)``
     （生产调用方 ``admit_candidates`` 恒满足；IC 与值不同源时定向语义未定义）；增量 = IR(池+候选) − IR(池) 在**验证段**（与闸⑤同一
     ``train_validation_split`` 切分）上比较：候选与池组合同受验证段日期与同一远期
     收益约束，``≤ 0`` → ``NO_POOL_INCREMENT``；验证段共同有效日 <
     ``MIN_OOS_IR_SAMPLES``（IR 不稳）→ 同码拒收且 ``detail["reason"] =
-    "insufficient_oos_dates"``。**空池时增量 = 验证段 IR(候选)**（= 传入
-    ``candidate_ic`` 的 ICIR，与闸②重复但保留判定）。训练段增量（同口径剔除末端
+    "insufficient_oos_dates"``。**空池时增量 = 验证段 IR(候选，定向后)**（=
+    ``|candidate_ic 的 ICIR|``；负向候选在定向后同值取正）。训练段增量（同口径剔除末端
     horizon 日后）仅记入 ``detail["increment_train"]`` 供审计，不参与判定；
     ``detail`` 另记两段 ``ir_pool``/``ir_pool_with_candidate`` 与切分边界。
     IR = mean/std（std=0 → 0，与闸②同口径）。判定量以 ``detail["increment"]: float``
@@ -576,7 +578,7 @@ def check_pool_increment(
         )
         pool_orientations.append({"factor_id": factor_id, "orientation": orientation})
         if orientation == 0:
-            continue  # 方向不可定（训练段样本不足/中位符号 0）的池因子不参与组合
+            continue  # 方向不可定（训练段样本不足/IC 均值符号 0）的池因子不参与组合
         pool_values.append(frame if orientation == 1 else frame * -1)
     if pool_values:
         pool_ic_series = _composite_ic(pool_values, fwd).dropna()
