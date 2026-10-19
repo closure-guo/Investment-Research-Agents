@@ -3706,6 +3706,8 @@ async def factor_library_detail(factor_id: int) -> dict[str, Any]:
 # 无任意命令/脚本字段。快照缺失/损坏/陈旧 = 控制通道无存活证据 → 409 拒绝（不留
 # 无人受理的请求）。
 FACTOR_RESEARCH_STALE_AFTER_S = 180  # 3× 采集周期（契约 ≤60s）；阈值单源
+FACTOR_RESEARCH_LAUNCHER_FRESH_AFTER_S = 300  # 2× 启动器节拍（120s）+ 余量
+FACTOR_RESEARCH_LAUNCHER_HONOR_ETA_S = 180  # 离线受理的披露上界（与陈旧阈值同值）
 
 
 def _factor_research_snapshot_payload() -> dict[str, Any]:
@@ -3739,6 +3741,46 @@ def _factor_research_snapshot_payload() -> dict[str, Any]:
     return payload
 
 
+def _factor_research_launcher_payload() -> dict[str, Any]:
+    """启动器心跳：透传 + 派生 ``available`` / ``age_seconds`` / ``fresh``。"""
+    path = Path(
+        os.environ.get("FACTOR_RESEARCH_LAUNCHER_PATH", "data/factor_research/launcher.json")
+    )
+    if not path.is_file():
+        return {"available": False, "reason": "missing"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("launcher heartbeat is not an object")
+        epoch = data.get("checked_at_epoch")
+        if epoch is None:
+            raise ValueError("no checked_at_epoch")
+        epoch = float(epoch)
+    except (OSError, ValueError, TypeError):
+        return {"available": False, "reason": "corrupt"}
+    age = max(0, int(time.time() - epoch))
+    payload = dict(data)
+    payload.update(
+        {
+            "available": True,
+            "age_seconds": age,
+            "fresh": age <= FACTOR_RESEARCH_LAUNCHER_FRESH_AFTER_S,
+        }
+    )
+    return payload
+
+
+def _factor_research_honor(
+    snapshot: dict[str, Any], launcher: dict[str, Any]
+) -> tuple[str, int | None]:
+    """控制受理能力：快照新鲜 → live；启动器新鲜且代理就绪 → launcher；否则 unavailable。"""
+    if snapshot.get("available") and not snapshot.get("stale"):
+        return "live", 0
+    if launcher.get("available") and launcher.get("fresh") and launcher.get("agent_ok") is True:
+        return "launcher", FACTOR_RESEARCH_LAUNCHER_HONOR_ETA_S
+    return "unavailable", None
+
+
 def _read_control_file(path: Path) -> dict[str, Any]:
     """控制文件读取：缺失/不可解析/字段非法 → ``desired_running=None``（如实不猜）。"""
     try:
@@ -3755,8 +3797,10 @@ def _read_control_file(path: Path) -> dict[str, Any]:
     }
 
 
-def _factor_research_control_block(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """control 块：期望态 + requested_at + ``pending``（期望与新鲜快照实态不一致）。
+def _factor_research_control_block(
+    snapshot: dict[str, Any], launcher: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """control 块：期望态 + pending + honor（受理能力与 ETA 的单一判定源）。
 
     陈旧/不可用快照 → 实态不可证 → ``pending`` 恒假（MUST NOT 据陈旧数据判「切换中」）。
     """
@@ -3771,12 +3815,18 @@ def _factor_research_control_block(snapshot: dict[str, Any]) -> dict[str, Any]:
     ):
         running = bool((snapshot.get("supervisor") or {}).get("running"))
         pending = control["desired_running"] != running
-    return {**control, "pending": pending}
+    honor, eta = _factor_research_honor(snapshot, launcher or {})
+    return {**control, "pending": pending, "honor": honor, "honor_eta_seconds": eta}
 
 
 def _factor_research_status_payload() -> dict[str, Any]:
     snapshot = _factor_research_snapshot_payload()
-    return {**snapshot, "control": _factor_research_control_block(snapshot)}
+    launcher = _factor_research_launcher_payload()
+    return {
+        **snapshot,
+        "launcher": launcher,
+        "control": _factor_research_control_block(snapshot, launcher),
+    }
 
 
 class FactorResearchControlRequest(BaseModel):
@@ -3805,7 +3855,11 @@ def _factor_research_control_update(desired_running: bool) -> dict[str, Any]:
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
-    return {"control": _factor_research_control_block(_factor_research_snapshot_payload())}
+    return {
+        "control": _factor_research_control_block(
+            _factor_research_snapshot_payload(), _factor_research_launcher_payload()
+        )
+    }
 
 
 @app.get("/api/factor-research/status")

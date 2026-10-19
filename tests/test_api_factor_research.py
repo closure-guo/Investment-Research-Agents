@@ -44,7 +44,22 @@ def _control_path(tmp_path, monkeypatch):
     return path
 
 
-_NO_CONTROL = {"desired_running": None, "requested_at": None, "pending": False}
+@pytest.fixture(autouse=True)
+def _launcher_path(tmp_path, monkeypatch):
+    """启动器心跳路径指向 tmp（调用期读 env；delta add-factor-research-selfheal）。"""
+    path = tmp_path / "launcher.json"
+    monkeypatch.setenv("FACTOR_RESEARCH_LAUNCHER_PATH", str(path))
+    return path
+
+
+_NO_CONTROL = {
+    "desired_running": None,
+    "requested_at": None,
+    "pending": False,
+    "honor": "unavailable",
+    "honor_eta_seconds": None,
+}
+_NO_LAUNCHER = {"available": False, "reason": "missing"}
 
 
 def _snapshot(age_s: int = 40) -> dict:
@@ -80,18 +95,41 @@ def _snapshot(age_s: int = 40) -> dict:
     }
 
 
+def _launcher(age_s: int = 40, agent_ok: bool = True) -> dict:
+    """启动器心跳 fixture（形状与 ``--launcher-tick`` 契约一致）。"""
+    epoch = int(time.time() - age_s)
+    return {
+        "checked_at": datetime.fromtimestamp(epoch, tz=_TZ).isoformat(),
+        "checked_at_epoch": epoch,
+        "agent_pid": 4321,
+        "agent_ok": agent_ok,
+        "snapshot_age_s": 12,
+        "detail": None,
+    }
+
+
 def test_missing_file_reports_missing():
     """文件缺失 → 200 + available=false + reason=missing（第一档「未接入」状态）。"""
     resp = TestClient(app).get(_ENDPOINT)
     assert resp.status_code == 200
-    assert resp.json() == {"available": False, "reason": "missing", "control": _NO_CONTROL}
+    assert resp.json() == {
+        "available": False,
+        "reason": "missing",
+        "control": _NO_CONTROL,
+        "launcher": _NO_LAUNCHER,
+    }
 
 
 def test_corrupt_text_reports_corrupt(_status_path):
     _status_path.write_text("not json at all", encoding="utf-8")
     resp = TestClient(app).get(_ENDPOINT)
     assert resp.status_code == 200
-    assert resp.json() == {"available": False, "reason": "corrupt", "control": _NO_CONTROL}
+    assert resp.json() == {
+        "available": False,
+        "reason": "corrupt",
+        "control": _NO_CONTROL,
+        "launcher": _NO_LAUNCHER,
+    }
 
 
 def test_non_object_json_reports_corrupt(_status_path):
@@ -100,6 +138,7 @@ def test_non_object_json_reports_corrupt(_status_path):
         "available": False,
         "reason": "corrupt",
         "control": _NO_CONTROL,
+        "launcher": _NO_LAUNCHER,
     }
 
 
@@ -110,6 +149,7 @@ def test_missing_timestamp_reports_corrupt(_status_path):
         "available": False,
         "reason": "corrupt",
         "control": _NO_CONTROL,
+        "launcher": _NO_LAUNCHER,
     }
 
 
@@ -183,7 +223,7 @@ def test_endpoint_read_only(_status_path):
 def test_status_control_block_null_when_control_file_missing(_status_path):
     _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
     body = TestClient(app).get(_ENDPOINT).json()
-    assert body["control"] == _NO_CONTROL
+    assert body["control"] == {**_NO_CONTROL, "honor": "live", "honor_eta_seconds": 0}
 
 
 def test_status_control_block_pending_reflects_desired_vs_actual(_status_path, _control_path):
@@ -224,12 +264,58 @@ def test_status_control_block_pending_false_when_stale(_status_path, _control_pa
 def test_status_control_block_invalid_control_file_null(_status_path, _control_path):
     """控制文件损坏 / 字段类型非法 → desired=null（如实不猜）。"""
     _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    fresh_idle = {**_NO_CONTROL, "honor": "live", "honor_eta_seconds": 0}
     _control_path.write_text("not json", encoding="utf-8")
-    assert TestClient(app).get(_ENDPOINT).json()["control"] == _NO_CONTROL
+    assert TestClient(app).get(_ENDPOINT).json()["control"] == fresh_idle
     _control_path.write_text(json.dumps({"desired_running": "true"}), encoding="utf-8")
-    assert TestClient(app).get(_ENDPOINT).json()["control"] == _NO_CONTROL
+    assert TestClient(app).get(_ENDPOINT).json()["control"] == fresh_idle
     _control_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")  # 合法 JSON 但非对象
-    assert TestClient(app).get(_ENDPOINT).json()["control"] == _NO_CONTROL
+    assert TestClient(app).get(_ENDPOINT).json()["control"] == fresh_idle
+
+
+# ── launcher 块与 control.honor（delta add-factor-research-selfheal）──
+
+
+def test_fresh_snapshot_honor_live_without_launcher(_status_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    body = TestClient(app).get(_ENDPOINT).json()
+    assert body["launcher"] == _NO_LAUNCHER
+    assert body["control"]["honor"] == "live"
+    assert body["control"]["honor_eta_seconds"] == 0
+
+
+def test_stale_snapshot_with_fresh_launcher_honor_launcher(_status_path, _launcher_path):
+    _status_path.write_text(json.dumps(_snapshot(age_s=400)), encoding="utf-8")
+    _launcher_path.write_text(json.dumps(_launcher(age_s=60)), encoding="utf-8")
+    body = TestClient(app).get(_ENDPOINT).json()
+    assert body["launcher"]["available"] is True
+    assert body["launcher"]["fresh"] is True
+    assert 60 <= body["launcher"]["age_seconds"] <= 65
+    assert body["control"]["honor"] == "launcher"
+    assert body["control"]["honor_eta_seconds"] == 180
+    assert body["control"]["pending"] is False
+
+
+def test_stale_launcher_unavailable(_status_path, _launcher_path):
+    _status_path.write_text(json.dumps(_snapshot(age_s=400)), encoding="utf-8")
+    _launcher_path.write_text(json.dumps(_launcher(age_s=600)), encoding="utf-8")
+    body = TestClient(app).get(_ENDPOINT).json()
+    assert body["launcher"]["fresh"] is False
+    assert body["control"]["honor"] == "unavailable"
+
+
+def test_launcher_agent_not_ok_unavailable(_status_path, _launcher_path):
+    _status_path.write_text(json.dumps(_snapshot(age_s=400)), encoding="utf-8")
+    _launcher_path.write_text(json.dumps(_launcher(agent_ok=False)), encoding="utf-8")
+    assert TestClient(app).get(_ENDPOINT).json()["control"]["honor"] == "unavailable"
+
+
+def test_launcher_corrupt_reported(_launcher_path):
+    _launcher_path.write_text("not json", encoding="utf-8")
+    assert TestClient(app).get(_ENDPOINT).json()["launcher"] == {
+        "available": False,
+        "reason": "corrupt",
+    }
 
 
 # ── PUT /api/factor-research/control（spec「控制请求端点」）──
