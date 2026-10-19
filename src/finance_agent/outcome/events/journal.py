@@ -229,7 +229,13 @@ def entry_candidates(
     异常跳过并计入 ``errors``（不阻断整批）。``calendar``（市场交易日历，升序）用于
     识别停牌缺口日（该交易日无 kline 行 → 留痕 ``deferred:suspended@<日期>``）。
     """
-    summary = {"entered": 0, "deferred": 0, "not_due": 0, "errors": 0}
+    summary = {
+        "entered": 0,
+        "deferred": 0,
+        "not_due": 0,
+        "errors": 0,
+        "window_truncated": 0,
+    }
     for forecast in list_outperform_without_journal(db_path=db_path):
         try:
             _enter_one(
@@ -268,10 +274,26 @@ def _enter_one(
         summary["not_due"] += 1
         return
     span = max((pd.Timestamp(as_of) - pd.Timestamp(anchor)).days, 30)
+    requested_days = _kline_days(span + 30)
     frame = _fetch_kline(kline_client, code, span_days=span + 30)
     if frame is None:
         summary["errors"] += 1
         logger.warning("入场取数失败，保持未入场（下次重试）: %s", code)
+        return
+    # N5：窗口被 _KLINE_MAX_DAYS 截断且未覆盖 anchor → 无法区分「窗户外停牌」与
+    # 「窗口未覆盖」，按未就绪处理；MUST NOT 把窗口首行当次一交易日入场，也
+    # MUST NOT 把窗口外交易日误判为停牌。
+    frame_start = str(frame["日期"].iloc[0]) if not frame.empty else ""
+    if requested_days >= _KLINE_MAX_DAYS and frame_start > anchor:
+        summary["window_truncated"] += 1
+        logger.warning(
+            "kline 窗口未覆盖可得时点（%s anchor=%s frame_start=%s days=%s），"
+            "按未就绪处理，不判停牌",
+            code,
+            anchor,
+            frame_start,
+            requested_days,
+        )
         return
     later = frame[frame["日期"] > anchor]
     if later.empty:

@@ -242,6 +242,35 @@ class TestTriageDaily:
         assert "999" not in prompts["600519"]  # MUST NOT 前视取未来快照
         assert summary["snapshot_ctx_missing"] == 1
 
+    def test_triage_daily_honors_explicit_snapshot_db_path(self, monkeypatch, _events_env) -> None:
+        """N6：显式传 ``snapshot_db_path`` 时读该库，不得串读 env 指向的另一库。"""
+        from finance_agent.outcome.events.model import upsert_forecasts
+
+        db = _events_env / "events.db"
+        upsert_forecasts([_forecast_row("2025-04-15")], db_path=db)
+        env_snap = _events_env / "snap.db"
+        explicit_snap = _events_env / "other-snap.db"
+        write_snapshot_rows(
+            "2025-04-15",
+            [{"code": "600519", "close_raw": 7.0, "pct_chg": 0.1, "amount": 1.0}],
+            db_path=str(env_snap),
+        )
+        write_snapshot_rows(
+            "2025-04-15",
+            [{"code": "600519", "close_raw": 42.0, "pct_chg": 1.0, "amount": 2.0}],
+            db_path=str(explicit_snap),
+        )
+        stub = _PromptCapturingTriageClient()
+        monkeypatch.setattr(events_job, "GatewayTriageClient", lambda: stub)
+
+        summary = events_job.run_earnings_triage_daily(
+            db_path=db, snapshot_db_path=explicit_snap, as_of="2025-04-16"
+        )
+
+        assert "- close: 42.0" in stub.calls[0]["prompt"]
+        assert "7.0" not in stub.calls[0]["prompt"]
+        assert summary["snapshot_ctx_missing"] == 0
+
     def test_snapshot_absent_degrades_to_forecast_only(self, monkeypatch, _events_env) -> None:
         """无快照覆盖退化路径：不注入快照字段，照常分诊并在批次摘要计数留痕。"""
         from finance_agent.outcome.events.model import upsert_forecasts

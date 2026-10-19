@@ -145,12 +145,17 @@ def run_earnings_fetch_daily(*, client: Any = None, today: date | None = None) -
     return summary
 
 
-def _snapshot_day_at_or_before(asof: str) -> str | None:
-    """``≤ asof`` 的最近快照日（无覆盖 → None；非规范日期 → 上抛，由调用方按缺失处置）。"""
+def _snapshot_day_at_or_before(
+    asof: str, *, snapshot_db_path: str | Path | None = None
+) -> str | None:
+    """``≤ asof`` 的最近快照日（无覆盖 → None；非规范日期 → 上抛，由调用方按缺失处置）。
+
+    ``snapshot_db_path`` 给定 → 读该库；缺省读 env ``SNAPSHOT_DB_PATH``（生产同源）。
+    """
     from finance_agent.data.snapshot import latest_snapshot_date
 
     next_day = (date.fromisoformat(asof) + timedelta(days=1)).isoformat()
-    return latest_snapshot_date(before=next_day)
+    return latest_snapshot_date(before=next_day, db_path=snapshot_db_path)
 
 
 def _snapshot_fields(snapshot_row: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -169,7 +174,7 @@ def _snapshot_fields(snapshot_row: Mapping[str, Any] | None) -> dict[str, Any] |
 
 
 def _snapshot_context(
-    rows: Sequence[Mapping[str, Any]],
+    rows: Sequence[Mapping[str, Any]], *, snapshot_db_path: str | Path | None = None
 ) -> tuple[dict[str, dict[str, Any]], int]:
     """逐行时点化快照要素 → ``(forecast_key → ctx, 缺失计数)``。
 
@@ -192,12 +197,15 @@ def _snapshot_context(
         if code and asof:
             try:
                 if asof not in day_by_asof:
-                    day_by_asof[asof] = _snapshot_day_at_or_before(asof)
+                    day_by_asof[asof] = _snapshot_day_at_or_before(
+                        asof, snapshot_db_path=snapshot_db_path
+                    )
                 day = day_by_asof[asof]
                 if day is not None:
                     if day not in rows_by_day:
                         rows_by_day[day] = {
-                            str(item.get("code") or ""): item for item in read_universe(day)
+                            str(item.get("code") or ""): item
+                            for item in read_universe(day, db_path=snapshot_db_path)
                         }
                     fields = _snapshot_fields(rows_by_day[day].get(code))
             except Exception:  # noqa: BLE001 -- 快照不可用不阻断分诊（输入预算退化）
@@ -216,6 +224,7 @@ def run_earnings_triage_daily(
     client: Any = None,
     as_of: str | None = None,
     db_path: str | Path | None = None,
+    snapshot_db_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """分诊日批：未分诊（时点截断）→ 逐行时点快照 → LLM 分诊 → 观察清单。"""
     as_of = as_of or date.today().isoformat()
@@ -228,7 +237,7 @@ def run_earnings_triage_daily(
             "snapshot_ctx_missing": 0,
             "as_of": as_of,
         }
-    snapshot_ctx, snapshot_missing = _snapshot_context(rows)
+    snapshot_ctx, snapshot_missing = _snapshot_context(rows, snapshot_db_path=snapshot_db_path)
     client = client or GatewayTriageClient()
     result = triage_forecasts(
         rows,
