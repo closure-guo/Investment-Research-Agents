@@ -145,6 +145,36 @@ class TestEntryCandidates:
         assert row["note"] is None
         assert client.calls[0]["adjust"] == "hfq"  # 与执行链同源口径（SETTLEMENT_ADJUST）
 
+    def test_truncated_kline_window_does_not_enter_or_mark_suspension(self, tmp_path) -> None:
+        """N5：kline 窗口被 ``_KLINE_MAX_DAYS`` 截断且未覆盖 anchor → 不按窗口首行入场。
+
+        旧行为会把窗口首行（2023-01-03）当作 anchor（2020-01-02）的次一交易日入场，
+        并把窗口外交易日误判为停牌（``deferred:suspended@...``）。截断窗口下无法
+        区分「真停牌」与「窗口未覆盖」，按未就绪处理（不产生记账、不写停牌注记）。
+        """
+        db = tmp_path / "events.db"
+        _seed_forecast(db, announce="2020-01-02")
+        client = _FakeKlineClient(
+            {
+                _CODE: _rows(
+                    [
+                        ("2023-01-03", 100.0, 101.0),
+                        ("2023-01-04", 101.0, 102.0),
+                    ]
+                )
+            }
+        )
+        summary = entry_candidates(
+            as_of="2025-04-17",
+            kline_client=client,
+            snapshot_db_path=None,
+            db_path=db,
+            calendar=["2020-01-02", "2020-01-03", "2023-01-03", "2023-01-04"],
+        )
+        assert summary["entered"] == 0
+        assert summary["window_truncated"] == 1
+        assert list_open_journal(db_path=db) == []
+
     def test_entry_defers_when_suspended_with_note(self, tmp_path) -> None:
         db = tmp_path / "events.db"
         snap = tmp_path / "snap.db"
