@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import './test-env'
 
 /**
  * 战绩页专属 E2E 配置（track-record-*.spec.ts 套件 + paper-broker.spec.ts;

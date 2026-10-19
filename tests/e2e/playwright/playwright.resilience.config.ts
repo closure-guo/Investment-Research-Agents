@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import './test-env'
 
 /**
  * harden-react-path-resilience E2E 配置（pipeline 场景）

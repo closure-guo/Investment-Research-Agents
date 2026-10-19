@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import './test-env'
 
 /**
  * 思考-搜索-思考 时间序列专用 E2E 配置（agent-turn-box-display delta 复现测试）
