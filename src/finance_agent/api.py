@@ -3838,9 +3838,11 @@ class FactorResearchControlRequest(BaseModel):
 
 
 def _factor_research_control_update(desired_running: bool) -> dict[str, Any]:
-    """写控制文件（原子 tmp + replace）；通道无存活证据 → 409，MUST NOT 落文件。"""
+    """写控制文件（原子 tmp + replace）；无任何受理能力 → 409，MUST NOT 落文件。"""
     snapshot = _factor_research_snapshot_payload()
-    if not snapshot.get("available") or snapshot.get("stale"):
+    launcher = _factor_research_launcher_payload()
+    honor, _eta = _factor_research_honor(snapshot, launcher)
+    if honor == "unavailable":
         raise HTTPException(status_code=409, detail="control_unavailable")
     now = datetime.now().astimezone()
     payload = {

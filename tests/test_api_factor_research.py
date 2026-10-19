@@ -411,3 +411,43 @@ def test_control_path_read_at_call_time(tmp_path, monkeypatch):
     monkeypatch.setenv("FACTOR_RESEARCH_CONTROL_PATH", str(second))
     client.put(_CONTROL_ENDPOINT, json={"desired_running": True})
     assert second.exists()
+
+
+# ── PUT 受理门：快照 OR 启动器（delta add-factor-research-selfheal）──
+
+
+def test_control_put_accepted_when_snapshot_stale_but_launcher_fresh(
+    _status_path, _control_path, _launcher_path
+):
+    """研究侧离线但启动器可用 → 仍受理（honor=launcher），请求等待下一节拍执行。"""
+    _status_path.write_text(json.dumps(_snapshot(age_s=400)), encoding="utf-8")
+    _launcher_path.write_text(json.dumps(_launcher(age_s=30)), encoding="utf-8")
+
+    resp = TestClient(app).put(_CONTROL_ENDPOINT, json={"desired_running": True})
+
+    assert resp.status_code == 200
+    assert resp.json()["control"]["honor"] == "launcher"
+    assert resp.json()["control"]["honor_eta_seconds"] == 180
+    on_disk = json.loads(_control_path.read_text(encoding="utf-8"))
+    assert on_disk["desired_running"] is True
+
+
+def test_control_put_rejected_when_launcher_agent_not_ok(
+    _status_path, _control_path, _launcher_path
+):
+    _status_path.write_text(json.dumps(_snapshot(age_s=400)), encoding="utf-8")
+    _launcher_path.write_text(json.dumps(_launcher(agent_ok=False)), encoding="utf-8")
+
+    resp = TestClient(app).put(_CONTROL_ENDPOINT, json={"desired_running": True})
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "control_unavailable"
+    assert not _control_path.exists()
+
+
+def test_control_put_rejected_when_launcher_stale(_status_path, _control_path, _launcher_path):
+    _status_path.write_text(json.dumps(_snapshot(age_s=400)), encoding="utf-8")
+    _launcher_path.write_text(json.dumps(_launcher(age_s=600)), encoding="utf-8")
+
+    assert TestClient(app).put(_CONTROL_ENDPOINT, json={"desired_running": True}).status_code == 409
+    assert not _control_path.exists()
