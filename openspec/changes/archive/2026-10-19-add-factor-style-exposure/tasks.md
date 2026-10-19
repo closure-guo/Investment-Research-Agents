@@ -20,4 +20,4 @@
 ## 收口
 - [x] `uv run pytest tests/factors tests/test_api_factors.py` 全绿；前端 build/单测绿；ruff（改动面）干净
 - [x] `openspec validate add-factor-style-exposure --strict` 通过；E2E 门禁走 CI stub
-- [ ] PR + sync + archive（验证通过后执行）
+- [x] PR + sync + archive（验证通过后执行）
