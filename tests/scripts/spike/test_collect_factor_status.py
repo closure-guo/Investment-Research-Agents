@@ -386,3 +386,36 @@ class TestCandidatesFile:
         state = wd / "factor_research_logs" / ".collector_state.json"
         cfs.collect_once(wd, out, state, now_epoch=1_800_000_000.0, session_alive=lambda: True)
         assert (tmp_path / "candidates.json").is_file()
+
+
+class TestAgentMeta:
+    """快照 agent 块（delta add-factor-research-selfheal）。"""
+
+    def test_agent_meta_passthrough(self, tmp_path):
+        wd = _make_workdir(tmp_path, pid=os.getpid())
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        meta = {
+            "last_action": "started",
+            "last_action_at": "2026-10-19T10:00:00+08:00",
+            "last_error": None,
+        }
+        snap = cfs.collect_once(
+            wd,
+            out,
+            state,
+            now_epoch=1_800_000_000.0,
+            session_alive=lambda: True,
+            agent_meta=meta,
+        )
+        assert snap["agent"] == meta
+        assert json.loads(out.read_text(encoding="utf-8"))["agent"] == meta
+
+    def test_agent_null_for_standalone_collector(self, tmp_path):
+        wd = _make_workdir(tmp_path, pid=os.getpid())
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        snap = cfs.collect_once(
+            wd, out, state, now_epoch=1_800_000_000.0, session_alive=lambda: True
+        )
+        assert snap["agent"] is None

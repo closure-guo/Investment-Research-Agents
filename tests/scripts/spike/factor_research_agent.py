@@ -48,6 +48,7 @@ logger = logging.getLogger("factor_research_agent")
 
 DEFAULT_WORKDIR = "/root/rdagent-work"
 DEFAULT_CONTROL = "/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/control.json"
+DEFAULT_LAUNCHER = "/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/launcher.json"
 DEFAULT_INTERVAL_S = 15
 LAUNCH_SCRIPT = "/root/launch-fin-factor.sh"
 PIDFILE_NAME = "factor_research.pid"
@@ -346,13 +347,31 @@ def singleton_lock(workdir: str | Path) -> Iterator[None]:
                 fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+_ACTION_ERRORS = {
+    "start-failed": "看护未在启动窗口内就位（检查 launch 脚本与环境）",
+    "stop-failed": "看护进程未在停止窗口内退出（已落残留标记，后续周期继续清扫）",
+}
+
+
+def _agent_meta(action: str, now: datetime | None = None) -> dict[str, Any]:
+    """快照 agent 块：最近一次调和动作 + 可判读失败摘要（失败原因由动作标签派生）。"""
+    at = (now or datetime.now().astimezone()).isoformat()
+    return {
+        "last_action": action,
+        "last_action_at": at,
+        "last_error": _ACTION_ERRORS.get(action),
+    }
+
+
 def run_tick(
     workdir: str | Path, control_path: str | Path, out_path: str | Path, state_path: str | Path
 ) -> tuple[str, dict[str, Any]]:
     """一次完整周期：锁内「先调和后采集」（快照即刻反映动作结果）。"""
     with tick_lock(workdir):
         action = reconcile_once(workdir, control_path)
-        snapshot = cfs.collect_once(Path(workdir), Path(out_path), Path(state_path))
+        snapshot = cfs.collect_once(
+            Path(workdir), Path(out_path), Path(state_path), agent_meta=_agent_meta(action)
+        )
     return action, snapshot
 
 
@@ -396,6 +415,43 @@ def ensure_daemon(
     return agent_pid(workdir)
 
 
+def launcher_tick(
+    workdir: str | Path,
+    control_path: str | Path,
+    out_path: str | Path,
+    state_path: str | Path,
+    launcher_path: str | Path,
+    interval: int = DEFAULT_INTERVAL_S,
+) -> dict[str, Any]:
+    """启动器节拍：确保代理守护存活 + 原子写心跳。
+
+    MUST NOT 写控制文件 / MUST NOT 直接启停看护（启动器只证明「手在场」，不表达意图）。
+    心跳写失败不影响已完成的代理存活保证（调用方按返回码如实上报）。
+    """
+    pid = ensure_daemon(workdir, control_path, out_path, state_path, interval)
+    snapshot_age_s: int | None = None
+    try:
+        snap = json.loads(Path(out_path).read_text(encoding="utf-8"))
+        epoch = snap.get("collected_at_epoch")
+        if isinstance(epoch, (int, float)) and not isinstance(epoch, bool):
+            snapshot_age_s = max(0, int(time.time() - float(epoch)))
+    except (OSError, ValueError, TypeError):
+        snapshot_age_s = None
+    now = datetime.now().astimezone()
+    payload = {
+        "checked_at": now.isoformat(),
+        "checked_at_epoch": int(now.timestamp()),
+        "agent_pid": pid,
+        "agent_ok": pid is not None,
+        "snapshot_age_s": snapshot_age_s,
+        "detail": None
+        if pid is not None
+        else "代理守护无法拉起（见 factor_research_logs/agent.log）",
+    }
+    cfs.atomic_write_json(Path(launcher_path), payload)
+    return payload
+
+
 # ── 入口 ──────────────────────────────────────────────────────────────────
 
 
@@ -419,6 +475,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="增量状态文件（默认 <workdir>/factor_research_logs/.collector_state.json）",
     )
+    parser.add_argument(
+        "--launcher",
+        default=os.environ.get("FACTOR_RESEARCH_LAUNCHER_PATH") or DEFAULT_LAUNCHER,
+        help="启动器心跳路径（默认取 env FACTOR_RESEARCH_LAUNCHER_PATH 或标准宿主桥路径）",
+    )
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_S)
     parser.add_argument(
         "--pidfile",
@@ -429,6 +490,9 @@ def main(argv: list[str] | None = None) -> int:
     modes.add_argument("--loop", action="store_true", help="守护循环（默认）")
     modes.add_argument("--reconcile-once", action="store_true", help="立即调和一次（脚本用）")
     modes.add_argument("--ensure-daemon", action="store_true", help="确保守护存活（脚本用）")
+    modes.add_argument(
+        "--launcher-tick", action="store_true", help="启动器节拍：确保守护 + 写心跳（脚本用）"
+    )
     modes.add_argument("--set-intent", choices=("running", "stopped"), help="写期望态（脚本用）")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -441,6 +505,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.state
         else workdir / "factor_research_logs" / ".collector_state.json"
     )
+
+    if args.launcher_tick:
+        try:
+            payload = launcher_tick(
+                workdir, control_path, out_path, state_path, Path(args.launcher), args.interval
+            )
+        except OSError as exc:
+            print(f"FAILED to write launcher heartbeat: {exc}", file=sys.stderr)
+            return 1
+        print(f"launcher tick: agent_ok={payload['agent_ok']} pid={payload['agent_pid']}")
+        return 0 if payload["agent_ok"] else 1
 
     if args.set_intent is not None:
         payload = set_intent(control_path, args.set_intent == "running")
