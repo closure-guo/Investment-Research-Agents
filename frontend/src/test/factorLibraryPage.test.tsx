@@ -75,6 +75,21 @@ const BUILTIN_ROW: FactorRow = {
 
 const LLM_DETAIL: FactorDetail = {
   ...LLM_ROW,
+  style_exposure: {
+    correlations: {
+      momentum_20: 0.43,
+      reversal_5: -0.62,
+      turnover_proxy: 1.0,
+      volatility_20: -0.38,
+      size_proxy: -0.19,
+    },
+    dominant: 'turnover_proxy',
+    dominant_correlation: 1.0,
+    flagged: true,
+    n_days: 229,
+    threshold: 0.7,
+    basket: ['momentum_20', 'reversal_5', 'turnover_proxy', 'volatility_20', 'size_proxy'],
+  },
   ic_series: [
     { trade_date: '2026-10-08', rank_ic: 0.033 },
     { trade_date: '2026-10-09', rank_ic: 0.049 },
@@ -256,9 +271,40 @@ describe('因子库页（delta add-factor-library-page T2.2）', () => {
     expect(events.textContent).toContain('准入通过')
     expect(events.textContent).toContain('2026')
 
+    // 风格暴露披露：主导风格 + ρ + 重合标注（仅披露不裁决）
+    const style = detail.getByTestId(`factor-detail-style-${LLM_ID}`)
+    expect(style.textContent).toContain('风格暴露')
+    expect(style.textContent).toContain('量比（换手代理）')
+    expect(style.textContent).toContain('ρ=1.00')
+    expect(style.textContent).toContain('229 日')
+    expect(detail.getByTestId(`factor-style-flag-${LLM_ID}`).textContent).toContain(
+      '与标准风格高度重合'
+    )
+
     // 再次点击收起
     fireEvent.click(screen.getByTestId(`page-shell-row-expand-${LLM_ID}`))
     expect(screen.queryByTestId(`page-shell-row-detail-${LLM_ID}`)).toBeNull()
+  })
+
+  it('风格暴露数据不足（style_exposure=null）→ 如实展示，不臆造 0', async () => {
+    mockFactorsApi()
+    const detailWithoutStyle = { ...LLM_DETAIL, style_exposure: null }
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === `/api/factors/${LLM_ID}`) {
+        return jsonResponse(detailWithoutStyle)
+      }
+      return originalFetch(input as RequestInfo)
+    }) as unknown as typeof fetch
+    render(<FactorLibraryPage onBack={() => {}} />)
+    await screen.findByTestId('page-shell-table')
+    fireEvent.click(screen.getByTestId(`page-shell-row-expand-${LLM_ID}`))
+    const detail = within(await screen.findByTestId(`page-shell-row-detail-${LLM_ID}`))
+    expect(detail.getByTestId(`factor-style-unavailable-${LLM_ID}`).textContent).toContain(
+      '数据不足'
+    )
+    globalThis.fetch = originalFetch
   })
 
   it('空态如实：库空 → 说明等待 builtin 注册或提案过闸，不显示表格/骨架屏/错误态', async () => {

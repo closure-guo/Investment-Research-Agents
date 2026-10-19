@@ -172,6 +172,13 @@ test('行展开 → 完整表达式 + IC 序列 + 事件历史（含时间）', 
   await expect(events).toContainText('状态变更 candidate → active')
   await expect(events).toContainText('准入通过') // 闸门结论（ADMITTED）
   await expect(events).toContainText('2026') // 事件时间
+
+  // 风格暴露披露（add-factor-style-exposure）：块恒在；快照库可得 → 主导风格读数，
+  // 不可得 → 如实「数据不足」（两种诚实状态都接受，MUST NOT 臆造读数）
+  const style = page.getByTestId(`factor-detail-style-${llmId}`)
+  await expect(style).toBeVisible()
+  await expect(style).toContainText('风格暴露（与 builtin 风格代理的 IC 相关）')
+  await expect(style).toContainText(/数据不足|主导/)
 })
 
 test('空库 → 空态如实（无表格 / 无骨架屏）', async ({ page }) => {
