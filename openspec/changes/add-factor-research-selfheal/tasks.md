@@ -1,6 +1,6 @@
 # Tasks: add-factor-research-selfheal
 
-- [ ] 研究侧自愈启动器可用：Windows 计划任务（登录时 + 每 2 分钟）幂等确保 distro/代理存活并写心跳
+- [x] 研究侧自愈启动器可用：Windows 计划任务（登录时 + 每 2 分钟）幂等确保 distro/代理存活并写心跳
   （`launcher.json`），不触碰控制文件与看护
 - [x] `--launcher-tick` 幂等：代理已在跑不重复拉起（单例锁）；心跳原子写；心跳写失败不影响代理存活
 - [x] 快照新增 `agent` 块（`last_action` / `last_action_at` / `last_error`）；独立采集器写 `agent: null`
@@ -15,7 +15,7 @@
 - [x] E2E `factor-research-monitor.spec.ts` 增补：stale+launcher 可点与文案、双离线禁用、
   start-failed 文案、fresh 回归；fixture 与 `FACTOR_RESEARCH_LAUNCHER_PATH` 环境注入齐备；
   E2E 门禁全绿（12/12）
-- [ ] 人工验证（真栈）：kill 代理自愈 / `wsl --terminate rdagent` 自愈 / 研究侧全死时点开自动拉起 /
-  开着重启继续 / 关着重启保持停止；报告落 `tests/validation/`
+- [x] 人工验证（真栈）：kill 代理自愈 / `wsl --terminate rdagent` 自愈 / 研究侧全死时点开自动拉起 /
+  开着重启继续 / 关着重启保持停止；报告落 `tests/validation/2026-10-19-add-factor-research-selfheal-validation.md`
 - [x] 运维文档：`tests/scripts/spike/README.md` 更新（计划任务注册/卸载、心跳排障、回滚步骤）
 - [ ] sync + archive（tasks 全勾 + 验证通过 + 人工验证报告齐备）
