@@ -11,9 +11,10 @@
 等价基准 = formulation 语义（窗口含当日的滚动统计量定义）；实现级口径差异
 （pyqlib 0.9.7 `min_periods=1` 热身期、除零/对数边界）在映射表逐条声明。
 
-本模块为 spike 工具（design.md Non-Goals：不进生产代码）。运行方式：
-``uv run pytest tests/scripts/spike/test_qlib_translate.py -q``
-（tests/scripts 不在默认套件内；运行输出随 spike 验证报告留档）。
+本模块原在 ``tests/scripts/spike/``（spike 期建制），``recover-factor-supply-losses``
+起移入 ``tests/factors/``——**进入默认套件与 CI 门禁**（此前该契约族不在门禁内，
+回归无拦截；翻译器已是生产供给线组件，见模块 docstring）。运行方式：
+``uv run pytest tests/factors/test_qlib_translate.py -q``。
 """
 
 from __future__ import annotations
@@ -158,10 +159,77 @@ class TestUntranslatable:
         assert not result.translatable
         assert any("窗口" in blocker for blocker in result.blockers)
 
-    def test_negative_literal_refused(self):
-        result = translate_qlib_expression("-1 * $close")
+    def test_negative_constant_rewritten(self):
+        """recover-factor-supply-losses：负数常量翻案为严格等价重排（原「翻译器 v1 保守拒绝」）。"""
+        cases = {
+            "-1 * $close": "sub(0,close)",
+            "$close * -2": "sub(0,mul(close,2))",
+            "$close - -1": "add(close,1)",
+            "-1 - $close": "sub(0,add(1,close))",
+            "-2 / $close": "sub(0,div(2,close))",
+            "$close / -2": "sub(0,div(close,2))",
+            "-2 * -3": "mul(2,3)",
+            "Abs(-1)": "abs(sub(0,1))",
+        }
+        for source, expected in cases.items():
+            result = translate_qlib_expression(source)
+            assert result.translatable, (source, result.blockers)
+            assert result.dsl_expression == expected, source
+            parse(result.dsl_expression)  # 重排产物须过生产解析器
+
+    def test_negative_constant_call_forms_rewritten(self):
+        """Add/Sub/Mul/Div **调用形态**与中缀同表（review 修复：生产候选 parkinson20 族
+        以 `Mul(-1, Power(...))` 调用形态出现，旧实现绕过重排、多计 1 个自由参数）。"""
+        cases = {
+            "Mul(-1, $close)": "sub(0,close)",
+            "Sub($close, -2)": "add(close,2)",
+            "Add(-1, $close)": "sub(close,1)",
+            "Div($close, -1)": "sub(0,div(close,1))",  # 无 k=1 特例（inf 语义，见 _rewrite_negation）
+            "Div($close, -2)": "sub(0,div(close,2))",
+            "Mul(-1, -1)": "mul(1,1)",
+        }
+        for source, expected in cases.items():
+            result = translate_qlib_expression(source)
+            assert result.translatable, (source, result.blockers)
+            assert result.dsl_expression == expected, source
+
+    def test_negative_constant_rewrite_numerically_equivalent(self):
+        """严格等价义务：重排产物与原始语义数值一致（含 NaN 传播；矩阵覆盖中缀与调用形态）。"""
+        import pandas as pd
+
+        from finance_agent.factors.eval_engine import MarketPanel, evaluate
+
+        frame = pd.DataFrame({"a": [1.0, -2.0, 0.0, float("nan")], "b": [2.0, 4.0, -1.0, 3.0]})
+        panel = MarketPanel(fields={"close": frame})
+        cases = {
+            "-1 * $close": -frame,
+            "$close * -2": -2.0 * frame,
+            "$close / -2": -(frame / 2.0),
+            "$close - -1": frame + 1.0,
+            "-1 - $close": -1.0 - frame,
+            "-2 * -3 * $close": 6.0 * frame,
+            "Mul(-1, $close)": -frame,
+            "Sub($close, -2)": frame + 2.0,
+        }
+        for source, expected in cases.items():
+            result = translate_qlib_expression(source)
+            assert result.translatable, (source, result.blockers)
+            actual = evaluate(parse(result.dsl_expression), panel)
+            pd.testing.assert_frame_equal(actual, expected)
+
+    def test_negative_window_still_refused(self):
+        """红线不动：负窗口（前瞻引用）仍在拒收面内。"""
+        result = translate_qlib_expression("Ref($close, -1)")
         assert not result.translatable
-        assert any("负数" in blocker for blocker in result.blockers)
+        assert any("窗口" in blocker for blocker in result.blockers)
+
+    def test_delta_scenario_negative_constant_literal(self):
+        """delta spec 场景逐字：`-1 * ($close / Ref($close, 1) - 1)` → 零 blocker 重排。"""
+        result = translate_qlib_expression("-1 * ($close / Ref($close, 1) - 1)")
+        assert result.translatable
+        assert result.dsl_expression == "sub(0,sub(div(close,ref(close,1)),1))"
+        assert result.blockers == ()
+        assert any("负数常量重排" in entry for entry in result.used_mappings)  # 审计留痕
 
     def test_unknown_operator_refused(self):
         result = translate_qlib_expression("Foo($close, 3)")
@@ -181,10 +249,21 @@ class TestUntranslatable:
         assert result.blockers
 
     def test_complexity_overflow_refused(self):
-        """深度 7 > 上限 6（6 层嵌套 Mean）——超出 DSL 复杂度硬约束拒绝。"""
-        result = translate_qlib_expression("Mean(Mean(Mean(Mean(Mean(Mean($close,2),2),2),2),2),2)")
+        """深度 9 > 上限 8（8 层嵌套 Abs，零自由参数）——超出 DSL 复杂度硬约束拒绝。"""
+        result = translate_qlib_expression("Abs(" * 8 + "$close" + ")" * 8)
         assert not result.translatable
         assert any("复杂度" in blocker for blocker in result.blockers)
+        assert any("深度 9 > 上限 8" in blocker for blocker in result.blockers)
+
+    def test_depth_7_supply_line_form_translatable(self):
+        """recover-factor-supply-losses：深度 7 供给线形态（Amihud 流动性族）现可翻译。"""
+        result = translate_qlib_expression(
+            "Mean(Abs(($close - Ref($close,1)) / Ref($close,1)) / $amount, 20)"
+        )
+        assert result.translatable, result.blockers
+        assert result.dsl_expression == (
+            "ts_mean(div(abs(div(sub(close,ref(close,1)),ref(close,1))),amount),20)"
+        )
 
     def test_depth_5_now_translatable(self):
         """raise-factor-dsl-depth-cap：深度 5 自然形态（滚动统计量套价量差值）现可翻译。"""

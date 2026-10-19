@@ -9,7 +9,8 @@
 - 增量解析：跨周期累积本会话因子名（去重保序）、会话切换重置。
 
 运行方式：``uv run pytest tests/scripts/spike/test_collect_factor_status.py -q``
-（tests/scripts 不在默认套件内，同 test_qlib_translate.py 先例）。
+（tests/scripts 不在默认套件内；生产性契约测试已移入 tests/factors/——
+recover-factor-supply-losses 的翻译器契约为先例）。
 """
 
 from __future__ import annotations
