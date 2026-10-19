@@ -1,0 +1,27 @@
+"""启动器脚本守护测试（delta add-factor-research-selfheal）。
+
+不变式：
+- distro 入口只走 `--launcher-tick`（确保守护 + 心跳），MUST NOT 写意图/直接启停看护；
+- Windows 注册脚本幂等（同名 -Force 覆盖）且可卸载。
+"""
+
+from pathlib import Path
+
+SPIKE = Path(__file__).parent
+REPO = SPIKE.parents[2]
+
+
+def test_ensure_script_uses_launcher_tick_and_never_sets_intent():
+    text = (SPIKE / "ensure-factor-research.sh").read_text(encoding="utf-8")
+    assert "--launcher-tick" in text
+    assert "--set-intent" not in text
+    assert "--reconcile-once" not in text
+    assert "/root/factor_research_agent.py" in text
+
+
+def test_register_script_is_idempotent_and_targets_ensure_entry():
+    text = (REPO / "scripts" / "register-factor-research-task.ps1").read_text(encoding="utf-8")
+    assert "Register-ScheduledTask" in text
+    assert "-Force" in text
+    assert "-Unregister" in text
+    assert "ensure-factor-research.sh" in text
