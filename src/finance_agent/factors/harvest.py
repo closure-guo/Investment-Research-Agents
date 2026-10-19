@@ -35,6 +35,7 @@ from finance_agent.factors import qlib_translate
 from finance_agent.factors.eval_engine import MarketPanel
 from finance_agent.factors.external import run_factor_external_import
 from finance_agent.llm.contracts import extract_json
+from finance_agent.llm.errors import OutputTruncatedError
 from finance_agent.llm.gateway import complete_text
 from finance_agent.llm.types import Purpose
 from finance_agent.prompts.loader import load_prompt
@@ -176,8 +177,9 @@ def _transcribe_with_retry(
 
     重试面**仅** ``TranscriptionResponseError``（非法 JSON / 载荷合同缺字段，见
     ``transcribe_candidate``）——「模型输出不合合同」类故障，退避不做（转译调用廉价、
-    次数有界）。其余异常（LLM 网关 ``LLMError`` 族、resolver 配置类 ``ValueError``
-    子类）不在捕获面内：直接上抛，维持「网关不可用 fail loud」语义。
+    次数有界）。``OutputTruncatedError`` 由调用方按单候选 ``transcription_error``
+    留痕（不阻断批次）；其余异常（LLM 网关不可用类 ``LLMError``、resolver 配置类
+    ``ValueError`` 子类）不在捕获面内：直接上抛，维持「网关不可用 fail loud」语义。
     重试耗尽 → 抛 ``_ContractExhaustedError``（携带实际次数；调用方留痕）。
     """
     attempt = 0
@@ -299,6 +301,28 @@ def run_factor_harvest(
 
         try:
             transcription, attempts = _transcribe_with_retry(candidate, llm)
+        except OutputTruncatedError as exc:
+            # 单候选输出被截断（思考模型 reasoning 吃满输出预算）→ 留痕后继续，
+            # 不按网关不可用处理（RateLimit/连接类仍 fail loud）。状态命中
+            # transcription_error 可经 retry_statuses 重放。
+            logger.warning("transcription output truncated factor=%s: %s", name, exc)
+            verdicts[name] = _with_retried_from(
+                {
+                    "status": "transcription_error",
+                    "detail": f"输出截断：{exc}",
+                    "attempts": 1,
+                    "at": _now(),
+                },
+                previous_status,
+            )
+            payload.append(
+                {
+                    "expression": formulation,
+                    "hypothesis": (f"[RD-Agent/{name}] 转译失败：输出截断（模型输出预算耗尽）"),
+                    "category": DEFAULT_CATEGORY,
+                }
+            )
+            continue
         except _ContractExhaustedError as exc:
             verdicts[name] = _with_retried_from(
                 {
