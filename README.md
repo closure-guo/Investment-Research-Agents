@@ -6,15 +6,14 @@
 
 ## 架构
 
-<a href="docs/assets/architecture-overview.html">
+<a href="docs/assets/system-flow.html">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-overview.dark.png">
-    <img src="docs/assets/architecture-overview.png" alt="五层多 Agent 运行时架构图">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/system-flow.dark.png">
+    <img src="docs/assets/system-flow.png" alt="研究到战绩的全链路一图流">
   </picture>
 </a>
 
-> 运行时架构图由 [Archify](https://github.com/tt-a1i/archify) 生成（图源 [architecture-overview.json](docs/assets/architecture-overview.json)）；克隆仓库后本地打开 [architecture-overview.html](docs/assets/architecture-overview.html) 可交互浏览（缩放、搜索、明暗主题、导览路径）。
-> 图拓扑由 build_5layer_graph() 生成，Mermaid 源码见 [graph.mmd](docs/assets/graph.mmd)
+> 全链路一图流由 [Archify](https://github.com/tt-a1i/archify) 生成（图源 [system-flow.json](docs/assets/system-flow.json)，交互版 [system-flow.html](docs/assets/system-flow.html) 支持缩放、搜索、明暗主题与导览路径）。用户输入与选股日批（15:40 出精选池，18:00 批量入链）汇入同一张 LangGraph 图：PREP 数据准备 → L1 四分析师并行 → L2 多空辩论×2 → L3 Trader（价位门禁）→ L4 风控辩论×2 → L5 基金经理审批产出报告；决策落库观点池后 D+1 开盘 paper 撮合，收盘结算入战绩，记忆层回灌下一次分析。因子供给线（RD-Agent → 转译 → 五道闸 → 因子库）与 20 个日批/月批任务的触发时刻标在图上，八个 SQLite 库、多源数据面与 LLM 网关治理见说明卡；节点级完整拓扑的文字版见 [graph.mmd](docs/assets/graph.mmd)。
 
 五层架构：
 
@@ -27,17 +26,6 @@
 | 可观测性 | Langfuse        | LLM 调用链路追踪 + Prompt 版本管理 + 引用校验评分                 |
 
 > L2 Agent 5 层：4 分析师并行 -> Bull/Bear 辩论 -> Trader -> Risk Management 辩论 -> Fund Manager（详见 [ADR-0011](docs/adr/0011-five-layer-architecture.md)）
-
-节点级完整链路（LangGraph，14 节点 / 16 边）：
-
-<a href="docs/assets/pipeline-workflow.html">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/pipeline-workflow.dark.png">
-    <img src="docs/assets/pipeline-workflow.png" alt="五层 Agent 节点级链路图（LangGraph）">
-  </picture>
-</a>
-
-> 链路图由 [Archify](https://github.com/tt-a1i/archify) 生成（图源 [pipeline-workflow.json](docs/assets/pipeline-workflow.json)），按泳道分组（数据准备 / Layer I–II 分析与辩论 / Layer III–IV 决策与风控 / Layer V 审批与产出）：fetch_data → validate_financials → compute_metrics → 四分析师并行 → verify_citations → 多空辩论×2 轮 → research_manager → trader → validate_trade_prices → 风控辩论×2 轮 → risk_judge → fund_manager → generate_report → END；克隆仓库后本地打开 [pipeline-workflow.html](docs/assets/pipeline-workflow.html) 可交互浏览。
 
 ## 功能特性
 

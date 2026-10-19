@@ -4,13 +4,13 @@ flowchart TD
 
     subgraph PREP[数据准备]
         check_cache["① check_cache<br/>查缓存"]
-        fetch_data["② fetch_data<br/>AKShare 拉取"]
+        fetch_data["② fetch_data<br/>多源回退拉取"]
         validate_financials["③ validate_financials<br/>勾稽校验"]
         compute_metrics["④ compute_metrics<br/>指标计算 + 技术指标 + 风控"]
     end
 
     subgraph LayerI[Layer I: Analyst Team]
-        analysts_entry["analysts_entry"]
+        analysts_entry["analysts_entry<br/>记忆检索 memory_recall_entry"]
         technical_analyst["technical_analyst<br/>技术面分析"]
         macro_analyst["macro_analyst<br/>宏观分析"]
         fundamental_analyst["fundamental_analyst<br/>基本面分析"]
@@ -30,6 +30,7 @@ flowchart TD
     end
 
     trader["⑥ trader<br/>交易决策"]
+    validate_trade_prices["⑦ validate_trade_prices<br/>价位/理由校验"]
 
     subgraph LayerIV[Layer IV: Risk Management]
         risk_r1_entry["R1 Entry"]
@@ -43,11 +44,12 @@ flowchart TD
         risk_judge["risk_judge<br/>最终决策"]
     end
 
-    fund_manager["⑦ fund_manager<br/>审批"]
-    generate_report["⑧ generate_report<br/>报告生成"]
-    generate_file["⑨ generate_file<br/>文件导出"]
+    fund_manager["⑧ fund_manager<br/>审批"]
+    generate_report["⑨ generate_report<br/>报告生成"]
+    generate_file["⑩ generate_file<br/>文件导出"]
     END([END])
     END_ERR([终止: 校验失败])
+    END_GATE([终止: 价位门禁阻断])
 
     %% PREP 边
     check_cache -->|"MISS 首次"| fetch_data
@@ -69,7 +71,7 @@ flowchart TD
 
     %% Citation 条件路由
     verify_citations -->|"PASS → render"| debate_r1_entry
-    verify_citations -->|"FAIL → retry"| analysts_entry
+    verify_citations -->|"FAIL → retry（默认停用）"| analysts_entry
 
     %% Layer II Debate
     debate_r1_entry -->|"Send"| bull_r1
@@ -83,9 +85,11 @@ flowchart TD
 
     %% Layer III
     research_manager --> trader
+    trader --> validate_trade_prices
+    validate_trade_prices -->|"FAIL ✗ 打回"| trader
+    validate_trade_prices -->|"PASS ✓"| risk_r1_entry
 
     %% Layer IV Risk
-    trader --> risk_r1_entry
     risk_r1_entry -->|"Send"| aggressive_r1
     risk_r1_entry -->|"Send"| conservative_r1
     risk_r1_entry -->|"Send"| neutral_r1
@@ -100,9 +104,10 @@ flowchart TD
     neutral_r2 --> risk_judge
 
     %% Layer V + Report
-    risk_judge --> fund_manager
+    risk_judge -->|"gate PASS"| fund_manager
+    risk_judge -->|"gate FAIL ✗"| END_GATE
     fund_manager -->|"approve/reject"| generate_report
-    fund_manager -->|"return 退回"| trader
+    fund_manager -->|"return 退回（上限 1 次）"| trader
     generate_report --> generate_file
     generate_file --> END
 
@@ -111,7 +116,10 @@ flowchart TD
     style LayerII fill:#fff3e0
     style LayerIV fill:#fce4ec
     style verify_citations fill:#ff9800,color:#fff
+    style validate_trade_prices fill:#ff9800,color:#fff
+    style risk_judge fill:#ffb74d
     style fund_manager fill:#ab47bc,color:#fff
     style generate_report fill:#ef9a9a
     style generate_file fill:#ef9a9a
     style END_ERR fill:#ef5350,color:#fff
+    style END_GATE fill:#ef5350,color:#fff
