@@ -11,9 +11,13 @@
    不可翻译/超复杂度逐条留 blocker；
 4. **过闸**：``run_factor_external_import``（与外部导入/月批**同一五道闸**，
    ``source="external"``，逐条裁决留事件史含闸口读数 ``detail``）；
-5. **幂等**：已处理候选记状态文件（``harvest_state.json``，``FACTOR_RESEARCH_HARVEST_STATE_PATH``
+5. **幂等 / 重放**：已处理候选记状态文件（``harvest_state.json``，``FACTOR_RESEARCH_HARVEST_STATE_PATH``
    可覆盖），不重复导入；LLM 网关不可用/编排级异常一律上抛（job 记 failed——fail loud，
-   MUST NOT 静默跳过或伪造候选）。
+   MUST NOT 静默跳过或伪造候选）；转译响应**不合载荷合同**（非法 JSON / 缺字段）按
+   ``TRANSCRIPTION_MAX_ATTEMPTS`` 重试（网关级异常不重试）；调用方指定 ``retry_statuses``
+   时，状态命中该集合的已处理候选**重放**（重新走转译 → 翻译 → 过闸，新裁决覆盖旧记录并
+   保留 ``retried_from``）——重放是显式运维动作（``scripts/replay_factor_harvest.py``），
+   日批缺省不启用（recover-factor-supply-losses）。
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +49,9 @@ DEFAULT_STATE_PATH = "data/factor_research/harvest_state.json"
 # 单批上限（闸③ BH-FDR 分辨率覆盖 K ≤ 100；留裕度，超量候选顺延下一批）
 DEFAULT_BATCH_LIMIT = 60
 DEFAULT_CATEGORY = "外部"
+# 转译合同失败重试上限（共 3 次尝试；与「提案输出合同」修复重试上限同款——
+# recover-factor-supply-losses：2026-10-19 实测 2 条候选因 LLM 响应非 JSON 一次性落账）
+TRANSCRIPTION_MAX_ATTEMPTS: int = 3
 
 
 class TranscriptionResponseError(ValueError):
@@ -120,7 +127,12 @@ def build_transcription_prompt(candidate: Mapping[str, Any]) -> str:
 def transcribe_candidate(
     candidate: Mapping[str, Any], client: TranscriptionLLMClient
 ) -> Transcription:
-    """单条候选转译（LLM）→ 二值裁决；响应不合合同 → ``TranscriptionResponseError``。"""
+    """单条候选转译（LLM）→ 二值裁决；响应不合合同 → ``TranscriptionResponseError``。
+
+    载荷合同失败（``parse_transcription_payload`` 的 ``ValueError``）在本函数边界
+    归一为 ``TranscriptionResponseError``——重试面因此精确等于「模型输出不合合同」，
+    **不吞**网关/配置侧 ``ValueError`` 家族（见 ``_transcribe_with_retry``）。
+    """
     name = str(candidate.get("name"))
     prompt = build_transcription_prompt(candidate)
     payload = client.complete_json(
@@ -128,7 +140,61 @@ def transcribe_candidate(
         purpose=PURPOSE_TAG,
         metadata={"factor_name": name, "source": "rdagent_harvest"},
     )
-    return parse_transcription_payload(payload)
+    try:
+        return parse_transcription_payload(payload)
+    except ValueError as exc:
+        raise TranscriptionResponseError(str(exc), raw_text="") from exc
+
+
+class _ContractExhaustedError(Exception):
+    """转译合同失败重试耗尽（携带实际尝试次数与原始异常，供审计留痕）。"""
+
+    def __init__(self, attempts: int, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.attempts = attempts
+        self.cause = cause
+
+
+def _recorded_status(entry: Any) -> str | None:
+    """状态文件条目 → 已记录状态字符串（非 dict / 缺 status → ``None``，防御手改半截文件）。"""
+    if isinstance(entry, dict) and entry.get("status") is not None:
+        return str(entry["status"])
+    return None
+
+
+def _with_retried_from(verdict: dict[str, Any], previous_status: str | None) -> dict[str, Any]:
+    """重放审计：重放产生的新裁决保留来源状态（``retried_from``）。"""
+    if previous_status is not None:
+        verdict["retried_from"] = previous_status
+    return verdict
+
+
+def _transcribe_with_retry(
+    candidate: Mapping[str, Any], client: TranscriptionLLMClient
+) -> tuple[Transcription, int]:
+    """转译（含合同失败重试）→ ``(裁决, 尝试次数)``。
+
+    重试面**仅** ``TranscriptionResponseError``（非法 JSON / 载荷合同缺字段，见
+    ``transcribe_candidate``）——「模型输出不合合同」类故障，退避不做（转译调用廉价、
+    次数有界）。其余异常（LLM 网关 ``LLMError`` 族、resolver 配置类 ``ValueError``
+    子类）不在捕获面内：直接上抛，维持「网关不可用 fail loud」语义。
+    重试耗尽 → 抛 ``_ContractExhaustedError``（携带实际次数；调用方留痕）。
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return transcribe_candidate(candidate, client), attempt
+        except TranscriptionResponseError as exc:
+            if attempt >= TRANSCRIPTION_MAX_ATTEMPTS:
+                raise _ContractExhaustedError(attempt, exc) from exc
+            logger.warning(
+                "transcription contract failure (attempt %s/%s) factor=%s: %s",
+                attempt,
+                TRANSCRIPTION_MAX_ATTEMPTS,
+                candidate.get("name"),
+                exc,
+            )
 
 
 def _now() -> str:
@@ -173,10 +239,16 @@ def run_factor_harvest(
     db_path: str | Path | None = None,
     snapshot_db_path: str | Path | None = None,
     limit: int = DEFAULT_BATCH_LIMIT,
+    retry_statuses: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """收割批入口（job 零参数调用）：候选文件 → 转译 → 翻译 → 五道闸 → 状态回填。
 
     无新候选 → 零摘要（非错误）。LLM 网关不可用/面板不可得 → 上抛（fail loud）。
+
+    ``retry_statuses``：按状态重放（recover-factor-supply-losses）——状态文件中
+    已处理候选的状态命中该集合时重新进入本批（新裁决覆盖旧记录并保留
+    ``retried_from``）；重放候选先于未处理候选进入限批截断。缺省 ``None`` =
+    现幂等行为（已处理候选不重复导入），日批 job 即该形态。
     """
     cand_file = _candidates_path(candidates_path)
     st_file = _state_path(state_path)
@@ -187,10 +259,23 @@ def run_factor_harvest(
         else []
     )
     processed: dict[str, Any] = dict(_load_json(st_file).get("processed") or {})
-    pending = [c for c in all_candidates if str(c.get("name")) not in processed][: max(limit, 0)]
+    retry_set = set(retry_statuses or ())
+    replay = (
+        [
+            candidate
+            for candidate in all_candidates
+            if _recorded_status(processed.get(str(candidate.get("name")))) in retry_set
+        ]
+        if retry_set
+        else []
+    )
+    fresh = [c for c in all_candidates if str(c.get("name")) not in processed]
+    pending = (replay + fresh)[: max(limit, 0)]
+    replay_names = {str(c.get("name")) for c in replay}
 
     summary: dict[str, Any] = {
         "proposed": len(pending),
+        "replayed": sum(1 for c in pending if str(c.get("name")) in replay_names),
         "transcribed": 0,
         "untranslatable": 0,
         "transcription_errors": 0,
@@ -210,25 +295,39 @@ def run_factor_harvest(
         name = str(candidate["name"])
         description = str(candidate.get("description") or "").strip()
         formulation = str(candidate.get("formulation") or "").strip()
+        previous_status = _recorded_status(processed.get(name)) if name in replay_names else None
+
         try:
-            transcription = transcribe_candidate(candidate, llm)
-        except (TranscriptionResponseError, ValueError) as exc:
-            verdicts[name] = {"status": "transcription_error", "detail": str(exc), "at": _now()}
+            transcription, attempts = _transcribe_with_retry(candidate, llm)
+        except _ContractExhaustedError as exc:
+            verdicts[name] = _with_retried_from(
+                {
+                    "status": "transcription_error",
+                    "detail": str(exc.cause),
+                    "attempts": exc.attempts,
+                    "at": _now(),
+                },
+                previous_status,
+            )
             payload.append(
                 {
                     "expression": formulation,
-                    "hypothesis": f"[RD-Agent/{name}] 转译失败：{exc}",
+                    "hypothesis": f"[RD-Agent/{name}] 转译失败：{exc.cause}",
                     "category": DEFAULT_CATEGORY,
                 }
             )
             continue
         if transcription.qlib_expression is None:
-            verdicts[name] = {
-                "status": "untranslatable",
-                "stage": "llm",
-                "detail": transcription.reason,
-                "at": _now(),
-            }
+            verdicts[name] = _with_retried_from(
+                {
+                    "status": "untranslatable",
+                    "stage": "llm",
+                    "detail": transcription.reason,
+                    "attempts": attempts,
+                    "at": _now(),
+                },
+                previous_status,
+            )
             payload.append(
                 {
                     "expression": formulation,
@@ -240,13 +339,17 @@ def run_factor_harvest(
         qlib_expression = transcription.qlib_expression
         translated = qlib_translate.translate_qlib_expression(qlib_expression)
         if not translated.translatable:
-            verdicts[name] = {
-                "status": "untranslatable",
-                "stage": "translator",
-                "detail": "；".join(translated.blockers),
-                "qlib_expression": qlib_expression,
-                "at": _now(),
-            }
+            verdicts[name] = _with_retried_from(
+                {
+                    "status": "untranslatable",
+                    "stage": "translator",
+                    "detail": "；".join(translated.blockers),
+                    "qlib_expression": qlib_expression,
+                    "attempts": attempts,
+                    "at": _now(),
+                },
+                previous_status,
+            )
             payload.append(
                 {
                     "expression": qlib_expression,  # 预检失败 → errors 桶（gate=None）
@@ -258,12 +361,16 @@ def run_factor_harvest(
                 }
             )
             continue
-        verdicts[name] = {
-            "status": "pending_gate",
-            "expression": translated.dsl_expression,
-            "qlib_expression": qlib_expression,
-            "at": _now(),
-        }
+        verdicts[name] = _with_retried_from(
+            {
+                "status": "pending_gate",
+                "expression": translated.dsl_expression,
+                "qlib_expression": qlib_expression,
+                "attempts": attempts,
+                "at": _now(),
+            },
+            previous_status,
+        )
         payload.append(
             {
                 "expression": translated.dsl_expression,
@@ -306,6 +413,16 @@ def run_factor_harvest(
                 verdict["reason"] = rejection.get("reason")
                 verdict["detail"] = rejection.get("detail")
 
+    for name, verdict in verdicts.items():
+        previous = processed.get(name)
+        if (
+            isinstance(previous, dict)
+            and "qlib_expression" not in verdict
+            and previous.get("qlib_expression")
+        ):
+            # 重放覆盖不得丢失历次转译产物：复译链路（确定性翻译重放）依赖状态内的
+            # qlib_expression；一次转译失败的重放若抹掉它，该候选只能再烧一次 LLM 调用。
+            verdict["qlib_expression"] = previous["qlib_expression"]
     processed.update(verdicts)
     _write_json(st_file, {"updated_at": _now(), "processed": processed})
     logger.info(

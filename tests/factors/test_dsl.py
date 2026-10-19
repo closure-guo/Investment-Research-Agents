@@ -356,8 +356,8 @@ def test_parse_error_is_value_error():
 
 
 def test_complexity_caps_verbatim():
-    """三条上限逐字：深度 6 / 自由参数 3 / 字段种类 3；错误类型为 ValueError 子类。"""
-    assert MAX_AST_DEPTH == 6
+    """三条上限逐字：深度 8 / 自由参数 3 / 字段种类 3；错误类型为 ValueError 子类。"""
+    assert MAX_AST_DEPTH == 8
     assert MAX_FREE_PARAMS == 3
     assert MAX_FIELDS == 3
     assert issubclass(FactorComplexityError, ValueError)
@@ -369,13 +369,24 @@ def test_parse_enforce_complexity_is_keyword_only():
         parse("close", False)  # type: ignore[call-arg]
 
 
-def test_depth_boundary_6_passes_7_rejected():
-    """spec 场景：深度恰 6 通过；深度 7 → 拒收且消息含「深度 7 > 上限 6」逐字要素。"""
-    ok = parse("log(abs(rank(zscore(ts_mean(close, 10)))))")
-    assert ast_depth(ok) == 6
+def test_depth_boundary_8_passes_9_rejected():
+    """spec 场景：深度恰 8 通过；深度 9 → 拒收且消息含「深度 9 > 上限 8」逐字要素。"""
+    ok = parse("abs(abs(log(abs(rank(zscore(ts_mean(close, 10)))))))")
+    assert ast_depth(ok) == 8
     with pytest.raises(FactorComplexityError) as excinfo:
-        parse("sqrt(log(abs(rank(zscore(ts_mean(close, 10))))))")
-    assert "深度 7 > 上限 6" in str(excinfo.value)
+        parse("abs(abs(abs(log(abs(rank(zscore(ts_mean(close, 10))))))))")
+    assert "深度 9 > 上限 8" in str(excinfo.value)
+
+
+def test_depth_7_supply_line_forms_now_allowed():
+    """recover-factor-supply-losses 立项证据：深度 7-8 供给线形态（Amihud 流动性族）通过。
+
+    深度 7 例：``ts_mean(div(abs(div(sub(close,ref(close,1)),ref(close,1))),amount),20)``
+    （实测深度 7、自由参数 3、字段种类 2）——2026-10-19 收割状态归因中「仅深度轴超限」族。
+    """
+    node = parse("ts_mean(div(abs(div(sub(close,ref(close,1)),ref(close,1))),amount),20)")
+    assert ast_depth(node) == 7
+    assert parse(serialize(node)) == node
 
 
 def test_depth_6_natural_forms_now_allowed():
@@ -448,25 +459,25 @@ def test_count_fields_deduplicates_repeated_names():
 def test_all_three_violations_listed_in_one_message():
     """三条约束同时违反 → 消息含全部违规项（实现钉住「不短路，全部列出」）。"""
     expr = (
-        "sqrt(abs(add(add(add(ts_mean(close, 1), ts_mean(volume, 2)), ts_mean(open, 3)), "
-        "add(ts_mean(high, 4), low))))"
+        "abs(abs(sqrt(abs(add(add(add(ts_mean(close, 1), ts_mean(volume, 2)), ts_mean(open, 3)), "
+        "add(ts_mean(high, 4), low))))))"
     )
     with pytest.raises(FactorComplexityError) as excinfo:
         parse(expr)
     message = str(excinfo.value)
-    assert "深度 7 > 上限 6" in message
+    assert "深度 9 > 上限 8" in message
     assert "自由参数 4 > 上限 3" in message
     assert "字段种类 5 > 上限 3" in message
 
 
 def test_enforce_complexity_false_bypasses_caps():
     """D7：``enforce_complexity=False`` 旁路三条上限（仅供工具/验证）——默认路径同式拒收。"""
-    expr = "sqrt(log(abs(rank(zscore(ts_mean(close, 10))))))"
+    expr = "abs(abs(abs(log(abs(rank(zscore(ts_mean(close, 10))))))))"
     with pytest.raises(FactorComplexityError):
         parse(expr)
     node = parse(expr, enforce_complexity=False)
-    assert ast_depth(node) == 7
-    assert serialize(node) == "sqrt(log(abs(rank(zscore(ts_mean(close,10))))))"
+    assert ast_depth(node) == 9
+    assert serialize(node) == "abs(abs(abs(log(abs(rank(zscore(ts_mean(close,10))))))))"
 
 
 # ── Task 3: 规范化（D5）与子树同构（D6） ─────────────────────────────────────
@@ -602,15 +613,15 @@ def test_pathological_nesting_raises_complexity_error_not_recursion_error():
     expr = "abs(" * 2000 + "close" + ")" * 2000
     with pytest.raises(FactorComplexityError) as excinfo:
         parse(expr)
-    assert str(excinfo.value) == "复杂度超限：表达式嵌套过深（> 上限 6 层）"
+    assert str(excinfo.value) == "复杂度超限：表达式嵌套过深（> 上限 8 层）"
 
 
 def test_normal_depth_violation_message_stays_verbatim():
-    """对照钉住：正常深度 7 超限路径消息逐字不变（嵌套转译不得污染该路径）。"""
+    """对照钉住：正常深度 9 超限路径消息逐字不变（嵌套转译不得污染该路径）。"""
     with pytest.raises(FactorComplexityError) as excinfo:
-        parse("sqrt(log(abs(rank(zscore(ts_mean(close, 10))))))")
+        parse("abs(abs(abs(log(abs(rank(zscore(ts_mean(close, 10))))))))")
     message = str(excinfo.value)
-    assert "深度 7 > 上限 6" in message
+    assert "深度 9 > 上限 8" in message
     assert "嵌套过深" not in message
 
 

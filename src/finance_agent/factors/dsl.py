@@ -101,12 +101,14 @@ WINDOW_ARG_INDEX: dict[str, int] = {
 }
 
 # 复杂度上限（解析期硬约束；默认路径超限即拒收）
-# 深度上限 4 → 5 → 6（raise-factor-dsl-depth-cap + extend-factor-dsl-coverage）：
+# 深度上限 4 → 5 → 6 → 8（raise-factor-dsl-depth-cap + extend-factor-dsl-coverage +
+# recover-factor-supply-losses）：
 # ref 使价量比值/差值子树普遍达深度 3；「滚动统计量套一层比值/差值」自然形态深度 5、
 # 「外层统计量再套一层」（CLV 平滑、VWAP 偏离、Parkinson 波动率）深度 6——上限 4 曾截断
-# 9/32 条外部候选、5 曾截断 4/32（复跑读数机械归因）。7+ 当前无解锁对象（amihud 另受
-# 自由参数上限约束）。
-MAX_AST_DEPTH: int = 6
+# 9/32 条外部候选、5 曾截断 4/32（复跑读数机械归因）。6→8 的解锁对象（2026-10-19 收割状态
+# 逐条归因）：仅深度轴超限 3 条（illiq20/illiq_20d 深度 7、klow_5d 深度 8），其余复杂度拒收
+# 受自由参数轴约束（本上限不动）。9+ 当前无解锁对象。
+MAX_AST_DEPTH: int = 8
 MAX_FREE_PARAMS: int = 3
 MAX_FIELDS: int = 3
 
@@ -130,8 +132,8 @@ class FactorComplexityError(ValueError):
     """复杂度硬约束超限（深度 / 自由参数 / 字段种类）。
 
     消息**不短路**：一次列出全部违规项，形如
-    ``复杂度超限：深度 7 > 上限 6；自由参数 4 > 上限 3``
-    （spec 场景要求的「深度 7 > 上限 6」子串逐字保留）。
+    ``复杂度超限：深度 9 > 上限 8；自由参数 4 > 上限 3``
+    （spec 场景要求的「深度 9 > 上限 8」子串逐字保留）。
     """
 
 
@@ -385,7 +387,7 @@ def parse(expr: str, *, enforce_complexity: bool = True) -> AstNode:
 
     错误契约恒为 ``ValueError`` 家族：深嵌套触发解释器递归栈溢出
     （``RecursionError``）时转译为 ``FactorComplexityError``（消息形如
-    「表达式嵌套过深（> 上限 6 层）」），不泄漏 ``RecursionError``；该转译与
+    「表达式嵌套过深（> 上限 8 层）」），不泄漏 ``RecursionError``；该转译与
     ``enforce_complexity`` 取值无关——``False`` 旁路只跳过上限检查，不豁免
     解释器物理栈限。
     """

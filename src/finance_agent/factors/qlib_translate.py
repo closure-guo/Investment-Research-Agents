@@ -30,9 +30,9 @@ MUST NOT 输出语义近似的猜测翻译。
 - `Div` = `np.divide`（L418；x/0 → ±inf）、`Log` = `np.log`（L167；x=0 → −inf）、
   `Abs` = `np.abs`（L122）、`Add/Sub/Mul` = `np.*`（L358+）。
 
-本模块为 spike 工具（design.md Non-Goals：不进生产代码）；翻译产出即 DSL 候选，
-经 `scripts/import_external_factors.py` 过同一五道闸；「不可翻译」候选按其外部
-表达式形态计入通道 `errors` 桶（gate=None），裁决清单随报告留档。
+本模块为**生产供给线组件**：收割桥（``factors/harvest.py``）与外部导入通道直接调用；
+翻译产出即 DSL 候选，经 ``scripts/import_external_factors.py`` 过同一五道闸；「不可翻译」
+候选按其外部表达式形态计入通道 ``errors`` 桶（gate=None），裁决清单随报告留档。
 """
 
 from __future__ import annotations
@@ -377,7 +377,7 @@ class _Parser:
                 self._advance()
                 return _NegNumber(-nxt.value, token.pos)
             raise TranslateSyntaxError(
-                "一元负号仅支持数字字面量（负数常量本 DSL 不可表达）", token.pos
+                "一元负号仅支持数字字面量（对表达式取反请改用 0 - x 或 Sub(0, x) 形态）", token.pos
             )
         return self._parse_atom()
 
@@ -429,6 +429,7 @@ class _Parser:
 # ── 构建：中间 AST → DSL AST（映射裁决 + 审计记录） ────────────────────────
 
 _BINOP_TO_QLIB: dict[str, str] = {"+": "Add", "-": "Sub", "*": "Mul", "/": "Div"}
+_QLIB_TO_BINOP: dict[str, str] = {name: symbol for symbol, name in _BINOP_TO_QLIB.items()}
 
 
 def _record(used: list[str], seen: set[str], entry: str) -> None:
@@ -437,13 +438,68 @@ def _record(used: list[str], seen: set[str], entry: str) -> None:
         used.append(entry)
 
 
+# 负数常量重排审计条目（recover-factor-supply-losses：翻译器 v1 保守拒绝翻案）
+_NEG_REWRITE_NOTE = (
+    "负数常量重排 → 减法形态 [equivalent] 严格等价（-1 * x → sub(0,x)、x - (-k) → add(x,k)、"
+    "(-a)*(-b) → mul(a,b)；中缀与 Add/Sub/Mul/Div 调用形态同表；负窗口（前瞻引用）仍拒收）"
+)
+
+
+def _abs_num(node: _NegNumber) -> _Num:
+    """``_NegNumber(-k)`` → ``_Num(k)``（k ≥ 0；``-0`` 归一为 0）。"""
+    return _Num(abs(node.value), node.pos)
+
+
+def _rewrite_negation(node: _BinOp) -> _CallNode | None:
+    """负数常量二元重排表（严格等价；design.md §1；中缀与调用形态共用）。
+
+    未命中（两侧均非常量负数）→ ``None``（走原映射路径）。全部规则为代数恒等式：
+    数值逐格一致（含 NaN 传播与 ±inf；唯一位级差异为符号零 ``±0.0``——本 DSL 除零
+    一律 NaN、排序按数值比较，不可观测）。**Div 不做 k=1 特例**：``sub(0,x)`` 会传播
+    ±inf，而本引擎 ``div`` 把非有限结果掩为 NaN——``sub(0,div(A,1))`` 才是与
+    ``A/(-1)`` 在同语义下一致的形式。
+    """
+    left, right, op, pos = node.left, node.right, node.op, node.pos
+    qlib_op = _BINOP_TO_QLIB[op]  # 符号（"*"）→ Qlib 名（"Mul"）
+    if isinstance(left, _NegNumber) and isinstance(right, _NegNumber):
+        a, b = _abs_num(left), _abs_num(right)
+        if qlib_op == "Sub":  # (−a) − (−b) = b − a
+            return _CallNode("Sub", (b, a), pos)
+        if qlib_op == "Add":  # (−a) + (−b) = −(a + b)
+            return _CallNode("Sub", (_Num(0, pos), _CallNode("Add", (a, b), pos)), pos)
+        # Mul: (−a)·(−b) = a·b；Div: (−a)/(−b) = a/b
+        return _CallNode(qlib_op, (a, b), pos)
+    if isinstance(right, _NegNumber):
+        k = _abs_num(right)
+        if qlib_op == "Sub":  # A − (−k) = A + k
+            return _CallNode("Add", (left, k), pos)
+        if qlib_op == "Add":  # A + (−k) = A − k
+            return _CallNode("Sub", (left, k), pos)
+        # Mul: A·(−k) = −(A·k)（k=1 特例省一个自由参数）；Div: A/(−k) = −(A/k)
+        if qlib_op == "Mul" and k.value == 1:
+            return _CallNode("Sub", (_Num(0, pos), left), pos)
+        inner = _CallNode(qlib_op, (left, k), pos)
+        return _CallNode("Sub", (_Num(0, pos), inner), pos)
+    if isinstance(left, _NegNumber):
+        k = _abs_num(left)
+        if qlib_op == "Add":  # (−k) + A = A − k
+            return _CallNode("Sub", (right, k), pos)
+        if qlib_op == "Sub":  # (−k) − A = −(k + A)
+            return _CallNode("Sub", (_Num(0, pos), _CallNode("Add", (k, right), pos)), pos)
+        # Mul: (−k)·A = −(k·A)（k=1 特例）；Div: (−k)/A = −(k/A)
+        if qlib_op == "Mul" and k.value == 1:
+            return _CallNode("Sub", (_Num(0, pos), right), pos)
+        inner = _CallNode(qlib_op, (k, right), pos)
+        return _CallNode("Sub", (_Num(0, pos), inner), pos)
+    return None
+
+
 def _build(node: _Node, blockers: list[str], used: list[str], seen: set[str]) -> AstNode | None:
     """中间 AST → DSL AST；blockers/used 就地累积。任一叶子/算子不可映射 → None。"""
     if isinstance(node, _NegNumber):
-        blockers.append(
-            f"负数常量 {node.value}：本 DSL 数字字面量非负（可用 sub 重排表达，翻译器 v1 保守拒绝）"
-        )
-        return None
+        # recover-factor-supply-losses：负数常量以 0−k 严格等价表达（v1 曾保守拒绝）
+        _record(used, seen, _NEG_REWRITE_NOTE)
+        return Call(op="sub", args=(Number(0), Number(abs(node.value))))
     if isinstance(node, _Num):
         return Number(node.value)
     if isinstance(node, _FieldNode):
@@ -458,13 +514,25 @@ def _build(node: _Node, blockers: list[str], used: list[str], seen: set[str]) ->
         _record(used, seen, f"字段 {key} → {mapping.dsl_field} [equivalent] {mapping.note}")
         return Field(mapping.dsl_field)
     if isinstance(node, _BinOp):
+        rewritten = _rewrite_negation(node)
+        if rewritten is not None:
+            _record(used, seen, _NEG_REWRITE_NOTE)
+            return _build_call(rewritten, blockers, used, seen)
         return _build_call(
             _CallNode(_BINOP_TO_QLIB[node.op], (node.left, node.right), node.pos),
             blockers,
             used,
             seen,
         )
-    # _CallNode
+    # _CallNode：Add/Sub/Mul/Div 调用形态与中缀同走负数重排表
+    # （生产实测：`Mul(-1, Power(...))` 调用形态曾绕过重排、多计 1-2 个自由参数——
+    #   parkinson20/lowvol20 族据此被闸在复杂度上限外）
+    symbol = _QLIB_TO_BINOP.get(node.name)
+    if symbol is not None and len(node.args) == 2:
+        rewritten = _rewrite_negation(_BinOp(symbol, node.args[0], node.args[1], node.pos))
+        if rewritten is not None:
+            _record(used, seen, _NEG_REWRITE_NOTE)
+            return _build_call(rewritten, blockers, used, seen)
     return _build_call(node, blockers, used, seen)
 
 
