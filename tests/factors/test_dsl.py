@@ -62,6 +62,9 @@ SPEC_OPS = {
     "ref",
     "ts_sum",
     "sqrt",
+    "sign",
+    "ts_max",
+    "ts_min",
 }
 SPEC_FIELDS = {"open", "high", "low", "close", "volume", "amount"}
 SPEC_ARITY = {
@@ -83,9 +86,22 @@ SPEC_ARITY = {
     "ref": 2,
     "ts_sum": 2,
     "sqrt": 1,
+    "sign": 1,
+    "ts_max": 2,
+    "ts_min": 2,
 }
 # 每个算子一份合法样例（window 位置一律正整数数字字面量）
-_WINDOW_OPS = {"ts_mean", "ts_std", "ts_rank", "delta", "ts_corr", "ref", "ts_sum"}
+_WINDOW_OPS = {
+    "ts_mean",
+    "ts_std",
+    "ts_rank",
+    "delta",
+    "ts_corr",
+    "ref",
+    "ts_sum",
+    "ts_max",
+    "ts_min",
+}
 _OP_SAMPLES = {
     "ts_mean": "ts_mean(close, 5)",
     "ts_std": "ts_std(close, 5)",
@@ -105,6 +121,9 @@ _OP_SAMPLES = {
     "ref": "ref(close, 5)",
     "ts_sum": "ts_sum(volume, 5)",
     "sqrt": "sqrt(close)",
+    "sign": "sign(close)",
+    "ts_max": "ts_max(close, 5)",
+    "ts_min": "ts_min(close, 5)",
 }
 
 
@@ -124,10 +143,10 @@ def _assert_parse_error(expr: str, *, contains: Sequence[str] = (), pos: int | N
 # ── Task 1: 枚举逐字 ─────────────────────────────────────────────────────────
 
 
-def test_ops_enumeration_verbatim_18_names():
-    """算子枚举逐字（spec 列表：初版 15 + ref + ts_sum + sqrt）；元数表与 D2 逐条一致。"""
+def test_ops_enumeration_verbatim_21_names():
+    """算子枚举逐字（spec 列表：初版 15 + ref/ts_sum/sqrt + sign/ts_max/ts_min）；元数表与 D2 逐条一致。"""
     assert OPS == SPEC_OPS
-    assert len(OPS) == 18
+    assert len(OPS) == 21
     assert ARITY == SPEC_ARITY
     assert FIELDS == SPEC_FIELDS
     assert len(FIELDS) == 6
@@ -644,3 +663,28 @@ def test_normalized_flat_form_is_not_a_parseable_source_form():
     message = str(excinfo.value)
     assert "需要 2 个参数" in message
     assert "实际 3 个" in message
+
+
+# ── extend-factor-dsl-sign-extremes：sign / ts_max / ts_min ─────────────────
+
+
+def test_sign_and_ts_extremes_parse_roundtrip():
+    """新算子解析 + round-trip：sign（1 参）、ts_max/ts_min（2 参，window 位 1）。"""
+    for expr in (
+        "sign(close)",
+        "ts_max(close, 20)",
+        "ts_min(low, 5)",
+        "div(sub(close, ts_min(low, 20)), sub(ts_max(high, 20), ts_min(low, 20)))",
+    ):
+        node = parse(expr)
+        assert parse(serialize(node)) == node
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["ts_max(close, 0)", "ts_max(close, 2.5)", "ts_min(close, x)", "ts_max(close)", "sign()"],
+)
+def test_new_ops_window_and_arity_forms_refused(bad: str):
+    """窗口形态（正整数数字字面量）与元数照旧硬校验。"""
+    with pytest.raises(DSLParseError):
+        parse(bad)

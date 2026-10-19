@@ -5,7 +5,9 @@ TBD - created by archiving change add-factor-dsl. Update Purpose after archive.
 ## Requirements
 ### Requirement: 因子表达式可解析契约
 
-系统 SHALL 提供因子 DSL 解析器，将字符串表达式解析为 AST；支持的算子集合 SHALL 显式枚举（初版：`ts_mean/ts_std/ts_corr/ts_rank/delta/rank/zscore/add/sub/mul/div/max/min/abs/log`；扩展：`ref`（沿日期轴后移 N 期，前 N 行为 NaN）、`ts_sum`（N 期滚动求和）、`sqrt`（逐元素平方根，负值 → NaN），窗口参数须为正整数数字字面量），行情字段 SHALL 限定价量六字段：`open/high/low/close/volume/amount`（均前复权口径）；任何不在枚举内的算子或字段 SHALL 在解析期报错。
+系统 SHALL 提供因子 DSL 解析器，将字符串表达式解析为 AST；支持的算子集合 SHALL 显式枚举（初版：`ts_mean/ts_std/ts_corr/ts_rank/delta/rank/zscore/add/sub/mul/div/max/min/abs/log`；扩展：`ref`（沿日期轴后移 N 期，前 N 行为 NaN）、`ts_sum`（N 期滚动求和）、`sqrt`（逐元素平方根，负值 → NaN）、`sign`（逐元素符号：正 → 1、负 → −1、零 → 0，NaN 传播）、`ts_max`/`ts_min`（N 期滚动最大/最小，窗口含当日，窗口不足或窗口含 NaN → NaN），窗口参数须为正整数数字字面量），行情字段 SHALL 限定价量六字段：`open/high/low/close/volume/amount`（均前复权口径）；任何不在枚举内的算子或字段 SHALL 在解析期报错。
+
+(Previously: 扩展集合为 `ref`/`ts_sum`/`sqrt` 三项——无符号与滚动极值算子。)
 
 #### Scenario: 合法表达式解析
 
@@ -40,6 +42,14 @@ TBD - created by archiving change add-factor-dsl. Update Purpose after archive.
 - **WHEN** 调用解析器并求值
 - **THEN** 解析产出根节点 `sqrt`、子树 `ts_sum(volume, 5)`
 - **AND** 求值时 `ts_sum` 为 5 期滚动求和（前 4 行 NaN、逐标的独立），`sqrt` 对负值产出 NaN
+
+#### Scenario: 符号与滚动极值解析与求值
+
+- **GIVEN** 面板含标的 A 的收盘价序列 `[10, 11, 11, 9]`
+- **WHEN** 解析并求值 `sign(sub(close, ref(close, 1)))` 与 `ts_max(close, 3)`
+- **THEN** `sign` 逐元素产出 `[NaN, 1, 0, -1]`（差值为 NaN/正/零/负；NaN 传播）
+- **AND** `ts_max(close, 3)` 产出 `[NaN, NaN, 11, 11]`（窗口含当日、前 2 行窗口不足为 NaN、逐标的独立）；`ts_min` 同口径取最小
+- **AND** `ts_max(close, 0)` / `ts_max(close, 2.5)` / `ts_max(close, x)` 抛出 `DSLParseError`（窗口须正整数数字字面量）
 
 ### Requirement: 复杂度硬约束
 

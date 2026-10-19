@@ -156,15 +156,17 @@ class TestRunFactorHarvest:
         candidates = [
             _candidate("tsmean", description="5 日均价", formulation="mean(C,5)"),
             _candidate("rollmax", description="20 日滚动最大", formulation="max_i(C)"),
-            _candidate("badop", description="滚动最大 qlib 形态", formulation="max"),
+            _candidate("badop", description="滚动偏度 qlib 形态", formulation="skew"),
         ]
         cand_path = self._write_candidates(tmp_path, candidates)
         state_path = tmp_path / "harvest_state.json"
         client = _StubClient(
             {
                 "tsmean": {"qlib_expression": "Mean($close, 5)"},
-                "rollmax": {"untranslatable": True, "reason": "滚动最大值本系统无对应算子"},
-                "badop": {"qlib_expression": "Max($close, 20)"},
+                "rollmax": {"untranslatable": True, "reason": "公式需要滚动回归，本系统无对应算子"},
+                # Max/Min 自 extend-factor-dsl-sign-extremes 起可映射（ts_max/ts_min）；
+                # 翻译器拒译样本改用仍缺的滚动偏度
+                "badop": {"qlib_expression": "Skew($close, 20)"},
             }
         )
         summary = run_factor_harvest(

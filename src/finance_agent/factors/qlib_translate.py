@@ -21,8 +21,9 @@ MUST NOT 输出语义近似的猜测翻译。
   **滚动秩而非截面排名**，与本系统 `ts_rank`（窗口内当前值 pct 秩、并列平均秩）
   formulation 等价；
 - `Delta` = `series - series.shift(N)`（L1204）；
-- `Max/Min` = **滚动**窗口算子（Rolling 子类，L951/L999）——与本系统逐元素二元
-  `max/min` 同名不同义 → not_equivalent（拒绝机械替换）；
+- `Max/Min` = **滚动**窗口算子（Rolling 子类，L951/L999）——映射 `ts_max`/`ts_min`
+  （extend-factor-dsl-sign-extremes 起 equivalent）；本系统逐元素二元 `max/min` 为另一族
+  （同名不同义的歧义由映射目标名消解）；
 - `Sum` = Rolling 求和（L847）——与本系统 `ts_sum` formulation 等价（热身期口径差同其他滚动算子）；
 - `Power` = NpPairOperator（L338，可变指数）——本 DSL 无幂算子；**特例**：`Power(x, 0.5)`
   ≡ `sqrt(x)`（0.5 次幂 = 平方根，负值两侧均 NaN）→ 特例映射启用；其余指数拒绝。
@@ -109,18 +110,22 @@ OPERATOR_MAPPINGS: dict[str, OperatorMapping] = {
         "equivalent",
         "逐元素除法；除零：pyqlib ±inf/NaN（np.divide）vs 本系统一律 NaN（边界口径声明）",
     ),
-    # ── 同名不同义（拒绝机械替换） ──
+    # ── 滚动极值（extend-factor-dsl-sign-extremes：not_equivalent → equivalent） ──
+    # 历史：本 DSL 曾只有逐元素二元 max/min（同名不同义拒收）；ts_max/ts_min 落地后
+    # 与 pyqlib Rolling 极值 formulation 等价，映射目标名显式区分两族（max/min 仍逐元素）。
     "Max": OperatorMapping(
         "Max",
-        None,
-        "not_equivalent",
-        "pyqlib 为滚动窗口最大值（Rolling 子类，L951）；本系统 max 为逐元素二元算子——同名不同义，拒绝机械替换",
+        "ts_max",
+        "equivalent",
+        f"滚动窗口最大值（窗口含当日，Rolling 子类 L951）；{_WARMUP}；序列内部含 NaN 时"
+        "差异超出热身期（pyqlib 部分窗口值 vs 本系统 NaN）",
     ),
     "Min": OperatorMapping(
         "Min",
-        None,
-        "not_equivalent",
-        "pyqlib 为滚动窗口最小值（Rolling 子类，L999）；本系统 min 为逐元素二元算子——同名不同义，拒绝机械替换",
+        "ts_min",
+        "equivalent",
+        f"滚动窗口最小值（窗口含当日，Rolling 子类 L999）；{_WARMUP}；序列内部含 NaN 时"
+        "差异超出热身期（pyqlib 部分窗口值 vs 本系统 NaN）",
     ),
     # ── 后移引用（extend-factor-dsl-ref：missing → equivalent） ──
     "Ref": OperatorMapping(
@@ -147,7 +152,10 @@ OPERATOR_MAPPINGS: dict[str, OperatorMapping] = {
     "WMA": OperatorMapping("WMA", None, "missing", "加权移动平均——本 DSL 无"),
     "EMA": OperatorMapping("EMA", None, "missing", "指数移动平均——本 DSL 无"),
     "Cov": OperatorMapping("Cov", None, "missing", "滚动协方差——本 DSL 无"),
-    "Sign": OperatorMapping("Sign", None, "missing", "符号函数——本 DSL 无"),
+    # extend-factor-dsl-sign-extremes：missing → equivalent
+    "Sign": OperatorMapping(
+        "Sign", "sign", "equivalent", "符号函数（正 1/负 −1/零 0；NaN 传播两侧一致）"
+    ),
     "Power": OperatorMapping(
         "Power",
         None,

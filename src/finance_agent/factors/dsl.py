@@ -62,6 +62,10 @@ OPS: frozenset[str] = frozenset(
         # extend-factor-dsl-coverage：滚动求和（VWAP 偏离族）与逐元素平方根（Parkinson 族）
         "ts_sum",
         "sqrt",
+        # extend-factor-dsl-sign-extremes：符号（OBV/上涨天数族）与滚动极值（价格位置族）
+        "sign",
+        "ts_max",
+        "ts_min",
     }
 )
 
@@ -87,6 +91,9 @@ ARITY: dict[str, int] = {
     "ref": 2,
     "ts_sum": 2,
     "sqrt": 1,
+    "sign": 1,
+    "ts_max": 2,
+    "ts_min": 2,
 }
 
 # window 参数所在位置（D2）：必须为正整数数字字面量
@@ -98,6 +105,8 @@ WINDOW_ARG_INDEX: dict[str, int] = {
     "ts_corr": 2,
     "ref": 1,
     "ts_sum": 1,
+    "ts_max": 1,
+    "ts_min": 1,
 }
 
 # 复杂度上限（解析期硬约束；默认路径超限即拒收）

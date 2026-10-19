@@ -515,3 +515,38 @@ def test_rank_ic_series_empty_intersection_returns_empty_series():
     ic = rank_ic_series(factor, fwd, min_samples=1)
     assert ic.empty
     assert str(ic.dtype) == "float64"
+
+
+# ── extend-factor-dsl-sign-extremes：sign / ts_max / ts_min ─────────────────
+
+
+def test_sign_semantics():
+    """sign：正 1 / 负 −1 / 零 0 / NaN 传播（np.sign 逐元素）。"""
+    close = _frame({"A": [10.0, 11.0, 11.0, 9.0, _NAN]})
+    panel = _panel(close=close)
+    result = _eval("sign(sub(close, ref(close, 1)))", panel)
+    _assert_frame(result, _frame({"A": [_NAN, 1.0, 0.0, -1.0, _NAN]}))
+
+
+def test_ts_max_min_window_includes_current_and_warmup_nan():
+    """ts_max/ts_min：窗口含当日；前 window−1 行 NaN；逐标的独立。"""
+    close = _frame({"A": [10.0, 11.0, 9.0, 12.0], "B": [5.0, 4.0, 6.0, 3.0]})
+    panel = _panel(close=close)
+    _assert_frame(
+        _eval("ts_max(close, 3)", panel),
+        _frame({"A": [_NAN, _NAN, 11.0, 12.0], "B": [_NAN, _NAN, 6.0, 6.0]}),
+    )
+    _assert_frame(
+        _eval("ts_min(close, 3)", panel),
+        _frame({"A": [_NAN, _NAN, 9.0, 9.0], "B": [_NAN, _NAN, 4.0, 3.0]}),
+    )
+
+
+def test_ts_max_nan_in_window_propagates():
+    """窗口含 NaN → NaN（min_periods=window 满窗非 NaN 要求，与 ts_mean 同族）。"""
+    close = _frame({"A": [10.0, _NAN, 11.0, 12.0, 13.0]})
+    panel = _panel(close=close)
+    _assert_frame(
+        _eval("ts_max(close, 3)", panel),
+        _frame({"A": [_NAN, _NAN, _NAN, _NAN, 13.0]}),
+    )
