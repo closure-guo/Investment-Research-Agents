@@ -165,7 +165,7 @@ MUST NOT 直接触碰研发进程。
 - **AND** 响应 `control.honor="launcher"`、`honor_eta_seconds=180`
 - **AND** 下一启动器节拍（≤2 分钟）拉起研究侧后，代理按该期望态调和并在 ≤3 分钟内写出首个快照
 
-#### Scenario: 双无证据拒绝
+#### Scenario: 通道无证据拒绝
 
 - **GIVEN** 快照缺失/损坏/陈旧，且启动器心跳缺失/损坏/不新鲜或 `agent_ok=false`
 - **WHEN** `PUT` `desired_running=true`

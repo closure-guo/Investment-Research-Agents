@@ -104,7 +104,7 @@ MUST NOT 显示骨架屏或错误提示冒充。页面 SHALL 提供研发看护�
 - **THEN** 页面展示「连续短命会话」告警（含最近 3 次时长），提示疑似凭证/配额问题
 - **AND** 告警 MUST NOT 阻断开关与既有展示
 
-#### Scenario: 研究侧与启动器均离线禁用
+#### Scenario: 控制通道未接入禁用
 
 - **GIVEN** 快照缺失/损坏/陈旧，且 `control.honor="unavailable"`（启动器亦无证据）
 - **WHEN** 打开监控页

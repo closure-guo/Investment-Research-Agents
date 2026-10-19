@@ -18,4 +18,4 @@
 - [x] 人工验证（真栈）：kill 代理自愈 / `wsl --terminate rdagent` 自愈 / 研究侧全死时点开自动拉起 /
   开着重启继续 / 关着重启保持停止；报告落 `tests/validation/2026-10-19-add-factor-research-selfheal-validation.md`
 - [x] 运维文档：`tests/scripts/spike/README.md` 更新（计划任务注册/卸载、心跳排障、回滚步骤）
-- [ ] sync + archive（tasks 全勾 + 验证通过 + 人工验证报告齐备）
+- [x] sync + archive（tasks 全勾 + 验证通过 + 人工验证报告齐备）
