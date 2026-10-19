@@ -499,19 +499,39 @@ def check_pool_increment(
     ``correlation``（ρ）与 ``expression``；共同样本 < ``MIN_REDUNDANCY_SAMPLES``
     → 该对象跳过（2 点相关恒 ±1，不可信）。冗余比对用全样本 IC 序列（口径不变）。
 
-    增量（**样本外，评审修正 fix 2**）：池等权组合 = 池各因子逐日横截面 zscore 后
-    等权平均（E5 逐字）；增量 = IR(池+候选) − IR(池) 在**验证段**（与闸⑤同一
+    增量（**样本外，评审修正 fix 2**）：池组合 = 池各因子逐日横截面 zscore 后等权平均
+    （E5 逐字），**组合内各因子（池与候选同规则）按训练段 RankIC 符号定向后参与**
+    （fix-pool-increment-orientation：与生产选股 L2 的带符号 IC 权重模型对齐——原无方向
+    等权组合会把稳定负向因子系统性当成「拖累」拒收，而 L2 对负方向因子自动反向加权；
+    定向只用训练段、不借用验证段信息——随机因子的训练段符号来自噪声，**闸④单闸**通过率
+    不变（约 50%）；**闸②→⑤整链**的噪声入库率变化见 delta proposal 的口径决策项
+    （旧实现的「验证段 IR > 0」实际充当单边方向过滤，归一化后消失）；符号不可定的池因子
+    不参与组合（训练段有效样本 < ``MIN_REDUNDANCY_SAMPLES`` 或 IC 均值符号 0）、符号不可定
+    的候选按原向参与，由 ②⑤ 兜底；
+    池因子方向与候选同规则现算（冗余检查的落库/现算 IC 与之口径独立——定向只取符号））。
+    输入契约：``candidate_ic`` SHALL 为 ``rank_ic_series(candidate_values, fwd)``
+    （生产调用方 ``admit_candidates`` 恒满足；IC 与值不同源时定向语义未定义）；增量 = IR(池+候选) − IR(池) 在**验证段**（与闸⑤同一
     ``train_validation_split`` 切分）上比较：候选与池组合同受验证段日期与同一远期
     收益约束，``≤ 0`` → ``NO_POOL_INCREMENT``；验证段共同有效日 <
     ``MIN_OOS_IR_SAMPLES``（IR 不稳）→ 同码拒收且 ``detail["reason"] =
-    "insufficient_oos_dates"``。**空池时增量 = 验证段 IR(候选)**（= 传入
-    ``candidate_ic`` 的 ICIR，与闸②重复但保留判定）。训练段增量（同口径剔除末端
+    "insufficient_oos_dates"``。**空池时增量 = 验证段 IR(候选，定向后)**（=
+    ``|candidate_ic 的 ICIR|``；负向候选在定向后同值取正）。训练段增量（同口径剔除末端
     horizon 日后）仅记入 ``detail["increment_train"]`` 供审计，不参与判定；
     ``detail`` 另记两段 ``ir_pool``/``ir_pool_with_candidate`` 与切分边界。
     IR = mean/std（std=0 → 0，与闸②同口径）。判定量以 ``detail["increment"]: float``
     给出——E8 保种排序依赖它（编排写入 ``pool_increment``）。
     """
     fwd = forward_returns(panel.fields["close"])
+    # 与闸⑤同一时点切分（切点不跨日）；训练段剔除末端 horizon 日（边界泄漏同口径）。
+    # 前移到冗余检查之前：方向归一化（下）只依赖训练段切分；冗余路径 detail 亦带定向审计。
+    common_dates = candidate_values.index.intersection(fwd.index)
+    train_dates, val_dates = train_validation_split(common_dates)
+    train_ic_dates = _purge_boundary_dates(train_dates)
+    val_index = pd.Index(val_dates)
+    train_index = pd.Index(train_ic_dates)
+    candidate_orientation = _sign(
+        _ic_stats(candidate_ic.loc[candidate_ic.index.intersection(train_index)])[0]
+    )
     redundancy_checked: list[int] = []
     redundancy_skipped: list[int] = []
     for row in pool:
@@ -535,19 +555,34 @@ def check_pool_increment(
                     "pool_size": len(pool),
                     "redundancy_checked": redundancy_checked,
                     "redundancy_skipped": redundancy_skipped,
+                    "orientation": candidate_orientation,
+                    "orientation_basis": "train_segment_ic_sign",
                 },
             )
 
-    # 与闸⑤同一时点切分（切点不跨日）；训练段剔除末端 horizon 日（边界泄漏同口径）
-    common_dates = candidate_values.index.intersection(fwd.index)
-    train_dates, val_dates = train_validation_split(common_dates)
-    train_ic_dates = _purge_boundary_dates(train_dates)
-    val_index = pd.Index(val_dates)
-    train_index = pd.Index(train_ic_dates)
-    if pool:
-        pool_values = [evaluate(parse(str(row["expression"])), panel) for row in pool]
+    # 方向归一化（fix-pool-increment-orientation）：训练段符号定向（口径见 docstring）。
+    # 池因子方向与候选**同规则**：同一面板、同一训练段现算 IC 取符号——不取落库 IC
+    # （review C1：近日入库因子的落库 IC 只覆盖验证段，训练段交集为空会把它们静默踢出
+    #  组合，闸④退化为单因子判定；实跑复现「同一候选随落库覆盖不同而一次拒一次收」）。
+    candidate_oriented = (
+        candidate_values if candidate_orientation == 0 else candidate_values * candidate_orientation
+    )
+    pool_orientations: list[dict[str, Any]] = []
+    pool_values: list[pd.DataFrame] = []
+    for row in pool:
+        factor_id = int(row["id"])
+        frame = evaluate(parse(str(row["expression"])), panel)
+        train_ic = rank_ic_series(frame.loc[train_index], fwd.loc[train_index]).dropna()
+        orientation = (
+            _sign(_ic_stats(train_ic)[0]) if train_ic.size >= MIN_REDUNDANCY_SAMPLES else 0
+        )
+        pool_orientations.append({"factor_id": factor_id, "orientation": orientation})
+        if orientation == 0:
+            continue  # 方向不可定（训练段样本不足/IC 均值符号 0）的池因子不参与组合
+        pool_values.append(frame if orientation == 1 else frame * -1)
+    if pool_values:
         pool_ic_series = _composite_ic(pool_values, fwd).dropna()
-        combined_ic_series = _composite_ic([*pool_values, candidate_values], fwd).dropna()
+        combined_ic_series = _composite_ic([*pool_values, candidate_oriented], fwd).dropna()
         shared = pool_ic_series.index.intersection(combined_ic_series.index)
         val_shared = shared.intersection(val_index)
         train_shared = shared.intersection(train_index)
@@ -555,14 +590,24 @@ def check_pool_increment(
         ir_combined = _ic_stats(combined_ic_series.loc[val_shared])[2]
         ir_pool_train = _ic_stats(pool_ic_series.loc[train_shared])[2]
         ir_combined_train = _ic_stats(combined_ic_series.loc[train_shared])[2]
+    elif pool:
+        # 池因子方向全部不可定 → 等价空池（审计：pool_orientations 如实记录全 0）
+        combined_ic_series = _composite_ic([candidate_oriented], fwd).dropna()
+        val_shared = combined_ic_series.index.intersection(val_index)
+        train_shared = combined_ic_series.index.intersection(train_index)
+        ir_pool = None
+        ir_pool_train = None
+        ir_combined = _ic_stats(combined_ic_series.loc[val_shared])[2]
+        ir_combined_train = _ic_stats(combined_ic_series.loc[train_shared])[2]
     else:
-        valid = candidate_ic.dropna()
+        oriented_ic = candidate_ic if candidate_orientation >= 0 else candidate_ic * -1
+        valid = oriented_ic.dropna()
         val_shared = valid.index.intersection(val_index)
         train_shared = valid.index.intersection(train_index)
         ir_pool = None
         ir_pool_train = None
-        ir_combined = _ic_stats(candidate_ic.loc[val_shared])[2]
-        ir_combined_train = _ic_stats(candidate_ic.loc[train_shared])[2]
+        ir_combined = _ic_stats(oriented_ic.loc[val_shared])[2]
+        ir_combined_train = _ic_stats(oriented_ic.loc[train_shared])[2]
     increment = ir_combined - (ir_pool if ir_pool is not None else 0.0)
     increment_train = ir_combined_train - (ir_pool_train if ir_pool_train is not None else 0.0)
     n_val_days = int(val_shared.size)
@@ -572,6 +617,9 @@ def check_pool_increment(
     detail: dict[str, Any] = {
         "increment": float(increment),
         "increment_train": float(increment_train),
+        "orientation": candidate_orientation,
+        "orientation_basis": "train_segment_ic_sign",
+        "pool_orientations": pool_orientations,
         "ir_pool": ir_pool,
         "ir_pool_with_candidate": float(ir_combined),
         "ir_pool_train": ir_pool_train,
