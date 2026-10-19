@@ -1,0 +1,542 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Finance Analysis Agent — 研究到战绩的全链路",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/assets/system-flow.html",
+    "viewBox": [
+      1340,
+      660
+    ],
+    "views": [
+      {
+        "id": "main-chain",
+        "label": "主链",
+        "focus": [
+          "frontend",
+          "api",
+          "prep",
+          "layer1",
+          "layer2",
+          "layer3",
+          "layer4",
+          "layer5"
+        ],
+        "note": "输入股票代码后，同一张 LangGraph 图按 PREP → 五层 Agent 顺序执行，产出决策与报告。"
+      },
+      {
+        "id": "closed-loop",
+        "label": "决策闭环",
+        "focus": [
+          "layer5",
+          "pool",
+          "execution",
+          "settle",
+          "memory",
+          "layer1"
+        ],
+        "note": "决策落库进观点池，D+1 开盘 paper 撮合，收盘结算入战绩，记忆层回灌下一次分析。"
+      },
+      {
+        "id": "supply",
+        "label": "因子供给",
+        "focus": [
+          "factor_line",
+          "factor_lib",
+          "screening",
+          "layer1"
+        ],
+        "note": "RD-Agent 候选经 LLM 转译与五道闸准入进因子库，选股日批产出精选池，18:00 批量入链。"
+      },
+      {
+        "id": "runtime",
+        "label": "运行支撑",
+        "focus": [
+          "llm",
+          "prep",
+          "layer1",
+          "layer2",
+          "layer3",
+          "layer4",
+          "layer5"
+        ],
+        "note": "全部 Agent 经 LLM 网关收口；数据面多源回退与八库 SQLite 见下方说明卡。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "frontend",
+      "type": "frontend",
+      "label": "React 前端",
+      "sublabel": "输入 · SSE 渲染 · 报告展示",
+      "pos": [
+        30,
+        56
+      ],
+      "size": [
+        166,
+        62
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "FastAPI 后端",
+      "sublabel": "SSE 流式 · 单 worker",
+      "tag": "进程内调度",
+      "pos": [
+        30,
+        170
+      ],
+      "size": [
+        166,
+        62
+      ]
+    },
+    {
+      "id": "prep",
+      "type": "backend",
+      "label": "PREP 数据准备",
+      "sublabel": "缓存 · 拉取 · 勾稽 · 指标",
+      "pos": [
+        30,
+        320
+      ],
+      "size": [
+        170,
+        76
+      ]
+    },
+    {
+      "id": "layer1",
+      "type": "backend",
+      "label": "L1 · 分析师 ×4",
+      "sublabel": "记忆检索 → 四路并行",
+      "pos": [
+        250,
+        320
+      ],
+      "size": [
+        170,
+        76
+      ]
+    },
+    {
+      "id": "layer2",
+      "type": "backend",
+      "label": "L2 · 多空辩论 ×2",
+      "sublabel": "Bull/Bear → 研究结论",
+      "pos": [
+        470,
+        320
+      ],
+      "size": [
+        170,
+        76
+      ]
+    },
+    {
+      "id": "layer3",
+      "type": "backend",
+      "label": "L3 · Trader",
+      "sublabel": "方案 + 价位门禁",
+      "pos": [
+        690,
+        320
+      ],
+      "size": [
+        160,
+        76
+      ]
+    },
+    {
+      "id": "layer4",
+      "type": "backend",
+      "label": "L4 · 风控辩论 ×2",
+      "sublabel": "激进/保守/中性 → 裁定",
+      "pos": [
+        900,
+        320
+      ],
+      "size": [
+        170,
+        76
+      ]
+    },
+    {
+      "id": "layer5",
+      "type": "backend",
+      "label": "L5 · 基金经理",
+      "sublabel": "审批（退回≤1）→ 报告",
+      "pos": [
+        1120,
+        320
+      ],
+      "size": [
+        180,
+        76
+      ]
+    },
+    {
+      "id": "factor_line",
+      "type": "backend",
+      "label": "因子研发线",
+      "sublabel": "RD-Agent → 转译 → 五道闸",
+      "tag": "15:55 收割",
+      "pos": [
+        390,
+        56
+      ],
+      "size": [
+        170,
+        62
+      ]
+    },
+    {
+      "id": "factor_lib",
+      "type": "database",
+      "label": "因子库",
+      "sublabel": "candidate → active · IC",
+      "tag": "15:45 衰减",
+      "pos": [
+        615,
+        56
+      ],
+      "size": [
+        170,
+        62
+      ]
+    },
+    {
+      "id": "screening",
+      "type": "backend",
+      "label": "选股日批 · 精选池",
+      "sublabel": "硬过滤 → 打分 → 粗筛",
+      "tag": "15:40",
+      "pos": [
+        660,
+        170
+      ],
+      "size": [
+        170,
+        62
+      ]
+    },
+    {
+      "id": "llm",
+      "type": "external",
+      "label": "LLM 网关",
+      "sublabel": "ProfileResolver → LiteLLM",
+      "tag": "deepseek-v4.1-flash",
+      "pos": [
+        1000,
+        56
+      ],
+      "size": [
+        210,
+        62
+      ]
+    },
+    {
+      "id": "pool",
+      "type": "database",
+      "label": "观点池 · 预测台账",
+      "sublabel": "open → settled",
+      "pos": [
+        1120,
+        470
+      ],
+      "size": [
+        180,
+        70
+      ]
+    },
+    {
+      "id": "execution",
+      "type": "backend",
+      "label": "执行链 · paper 撮合",
+      "sublabel": "信号 → 权重 → 风控门禁 → 订单",
+      "tag": "16:10",
+      "pos": [
+        860,
+        470
+      ],
+      "size": [
+        170,
+        70
+      ]
+    },
+    {
+      "id": "settle",
+      "type": "backend",
+      "label": "结算 · 战绩",
+      "sublabel": "止损/目标/超期 → 战绩",
+      "tag": "16:00 · 16:30",
+      "pos": [
+        600,
+        470
+      ],
+      "size": [
+        170,
+        70
+      ]
+    },
+    {
+      "id": "memory",
+      "type": "backend",
+      "label": "记忆层",
+      "sublabel": "已结算战果 + 确认条款",
+      "tag": "月批 09:00",
+      "pos": [
+        340,
+        470
+      ],
+      "size": [
+        170,
+        70
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "frontend-to-api",
+      "from": "frontend",
+      "to": "api",
+      "label": "POST /analysis · SSE",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        250,
+        144
+      ]
+    },
+    {
+      "id": "api-to-prep",
+      "from": "api",
+      "to": "prep",
+      "label": "LangGraph invoke",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        250,
+        252
+      ]
+    },
+    {
+      "id": "prep-to-layer1",
+      "from": "prep",
+      "to": "layer1",
+      "label": "Send ×4",
+      "labelAt": [
+        224,
+        308
+      ]
+    },
+    {
+      "id": "layer1-to-layer2",
+      "from": "layer1",
+      "to": "layer2",
+      "label": "引用校验",
+      "labelAt": [
+        445,
+        308
+      ]
+    },
+    {
+      "id": "layer2-to-layer3",
+      "from": "layer2",
+      "to": "layer3",
+      "label": "研究结论",
+      "labelAt": [
+        665,
+        308
+      ]
+    },
+    {
+      "id": "layer3-to-layer4",
+      "from": "layer3",
+      "to": "layer4",
+      "label": "TradeDecision",
+      "labelAt": [
+        875,
+        308
+      ]
+    },
+    {
+      "id": "layer4-to-layer5",
+      "from": "layer4",
+      "to": "layer5",
+      "label": "风控结论",
+      "labelAt": [
+        1095,
+        308
+      ]
+    },
+    {
+      "id": "layer5-to-pool",
+      "from": "layer5",
+      "to": "pool",
+      "label": "决策落库",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        1245,
+        430
+      ]
+    },
+    {
+      "id": "pool-to-execution",
+      "from": "pool",
+      "to": "execution",
+      "label": "open 决策",
+      "labelAt": [
+        1075,
+        505
+      ]
+    },
+    {
+      "id": "execution-to-settle",
+      "from": "execution",
+      "to": "settle",
+      "label": "成交",
+      "labelAt": [
+        815,
+        505
+      ]
+    },
+    {
+      "id": "settle-to-memory",
+      "from": "settle",
+      "to": "memory",
+      "label": "已结算结果",
+      "labelAt": [
+        555,
+        505
+      ]
+    },
+    {
+      "id": "memory-to-layer1",
+      "from": "memory",
+      "to": "layer1",
+      "label": "记忆回灌",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        370,
+        458
+      ],
+      "via": [
+        [
+          425,
+          440
+        ],
+        [
+          335,
+          440
+        ]
+      ]
+    },
+    {
+      "id": "factor_line-to-factor_lib",
+      "from": "factor_line",
+      "to": "factor_lib",
+      "label": "过闸入库",
+      "labelAt": [
+        587,
+        44
+      ]
+    },
+    {
+      "id": "factor_lib-to-screening",
+      "from": "factor_lib",
+      "to": "screening",
+      "label": "active 因子",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        870,
+        158
+      ]
+    },
+    {
+      "id": "screening-to-layer1",
+      "from": "screening",
+      "to": "layer1",
+      "label": "批量分析 · 18:00",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        500,
+        256
+      ],
+      "via": [
+        [
+          745,
+          270
+        ],
+        [
+          335,
+          270
+        ]
+      ]
+    },
+    {
+      "id": "llm-to-layer3",
+      "from": "llm",
+      "to": "layer3",
+      "label": "全链调用收口",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        960,
+        278
+      ],
+      "via": [
+        [
+          1105,
+          292
+        ],
+        [
+          770,
+          292
+        ]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "因子供给线",
+      "items": [
+        "RD-Agent 候选 → LLM 转译 → 五道闸准入",
+        "因子库 candidate→active · IC 台账",
+        "15:45 衰减监控 · 15:50 内置注册",
+        "选股 L1→L2→L3 出精选池 · 18:00 入链"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "执行与结算",
+      "items": [
+        "D+1 开盘执行；仅买入 delta，卖出由 flat 触发",
+        "逐单门禁：ST/停牌/一字板/仓位/T+1/整手",
+        "结算回写观点池；16:30 盯市累积净值与 β/α"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "支撑面与调度",
+      "items": [
+        "八库 SQLite：会话/缓存/快照/因子/选股/执行/事件/拥挤度",
+        "数据面多源回退：腾讯/东财/新浪 · AKShare",
+        "LLM 收口 ProfileResolver→LiteLLM · Langfuse",
+        "APScheduler 20 任务驱动；三反馈环兜底"
+      ]
+    }
+  ]
+}
