@@ -28,10 +28,17 @@ const CONTROL_PATH = path.resolve(
   fileURLToPath(new URL('.', import.meta.url)),
   '../../../../data/test-e2e-factor-research-control.json'
 )
+const LAUNCHER_PATH = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  '../../../../data/test-e2e-factor-research-launcher.json'
+)
 
 // 防御：fixture 路径必须测试隔离，绝不落到生产 data/factor_research/status.json 与控制文件
 if (!STATUS_PATH.includes('test-e2e') || !CONTROL_PATH.includes('test-e2e')) {
   throw new Error(`fixture 路径未隔离: ${STATUS_PATH} / ${CONTROL_PATH}`)
+}
+if (!LAUNCHER_PATH.includes('test-e2e')) {
+  throw new Error(`launcher fixture 路径未隔离: ${LAUNCHER_PATH}`)
 }
 
 function isoAt(epoch: number): string {
@@ -49,6 +56,12 @@ function readControl(): { desired_running?: unknown } | null {
 
 function removeControl() {
   rmSync(CONTROL_PATH, { force: true })
+}
+
+/** 控制文件写入（PUT 之外的人工前置态：如「已请求但尚未生效」）。 */
+function writeControl(payload: Record<string, unknown>) {
+  mkdirSync(path.dirname(CONTROL_PATH), { recursive: true })
+  writeFileSync(CONTROL_PATH, JSON.stringify(payload), 'utf-8')
 }
 
 /** 合法快照 fixture：形状与采集器契约（factor-research-monitor spec）一致。 */
@@ -96,9 +109,35 @@ function removeSnapshot() {
   rmSync(STATUS_PATH, { force: true })
 }
 
+/** 启动器心跳 fixture（默认新鲜 + 代理就绪；delta add-factor-research-selfheal）。 */
+function writeLauncher({ ageS = 30, agentOk = true }: { ageS?: number; agentOk?: boolean } = {}) {
+  const epoch = Math.floor(Date.now() / 1000) - ageS
+  mkdirSync(path.dirname(LAUNCHER_PATH), { recursive: true })
+  writeFileSync(
+    LAUNCHER_PATH,
+    JSON.stringify({
+      checked_at: isoAt(epoch),
+      checked_at_epoch: epoch,
+      agent_pid: 4321,
+      agent_ok: agentOk,
+      snapshot_age_s: 12,
+      detail: null,
+    })
+  )
+}
+
+function removeLauncher() {
+  rmSync(LAUNCHER_PATH, { force: true })
+}
+
+test.beforeEach(() => {
+  removeLauncher()
+})
+
 test.afterAll(() => {
   removeSnapshot()
   removeControl()
+  removeLauncher()
 })
 
 test('1. 运行中：看护徽章/pid/循环·步骤·进度/因子/日志尾/历史表/累计计数', async ({ page }) => {
@@ -244,7 +283,9 @@ test('7. 陈旧数据：开关禁用 + 明示理由（控制通道无存活证�
   await expect(page.getByTestId('factor-research-stale-banner')).toBeVisible()
   const sw = page.getByTestId('factor-research-control-switch')
   await expect(sw).toBeDisabled()
-  await expect(page.getByTestId('factor-research-control-state')).toContainText('数据已陈旧')
+  await expect(page.getByTestId('factor-research-control-state')).toContainText(
+    '研究侧与启动器均离线'
+  )
 })
 
 test('8. 快照缺失：空态照旧 + 控制条开关禁用「控制通道未接入」', async ({ page }) => {
@@ -255,4 +296,78 @@ test('8. 快照缺失：空态照旧 + 控制条开关禁用「控制通道未�
   const sw = page.getByTestId('factor-research-control-switch')
   await expect(sw).toBeDisabled()
   await expect(page.getByTestId('factor-research-control-state')).toContainText('控制通道未接入')
+})
+
+// ── 自愈启动器与离线可开（delta add-factor-research-selfheal）──
+
+test('9. 离线可开：陈旧快照 + 启动器心跳 → 开关可点并明示自动拉起', async ({ page }) => {
+  const epoch = Math.floor(Date.now() / 1000) - 400
+  writeSnapshot(snapshotBody({ collected_at: isoAt(epoch), collected_at_epoch: epoch }))
+  removeControl()
+  writeLauncher()
+
+  await page.goto('/factor-research')
+
+  const sw = page.getByTestId('factor-research-control-switch')
+  await expect(sw).toBeEnabled()
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('≤3 分钟')
+  await expect(page.getByTestId('factor-research-stale-banner')).toContainText(
+    '启动器正在按节拍尝试恢复'
+  )
+
+  await sw.click() // 意图为 null → 位置为关 → 点击 = 开启
+  await expect.poll(() => readControl()?.desired_running, { timeout: 10_000 }).toBe(true)
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('等待启动器拉起')
+})
+
+test('10. 双离线：陈旧快照 + 无心跳 → 开关禁用并明示理由', async ({ page }) => {
+  const epoch = Math.floor(Date.now() / 1000) - 400
+  writeSnapshot(snapshotBody({ collected_at: isoAt(epoch), collected_at_epoch: epoch }))
+  removeControl()
+
+  await page.goto('/factor-research')
+
+  const sw = page.getByTestId('factor-research-control-switch')
+  await expect(sw).toBeDisabled()
+  await expect(page.getByTestId('factor-research-control-state')).toContainText(
+    '研究侧与启动器均离线'
+  )
+})
+
+test('11. 启动失败：pending + start-failed → 展示原因而非切换中', async ({ page }) => {
+  writeSnapshot(
+    snapshotBody({
+      supervisor: { running: false, pid: null, started_at: null },
+      agent: {
+        last_action: 'start-failed',
+        last_action_at: isoAt(Math.floor(Date.now() / 1000) - 30),
+        last_error: '看护未在启动窗口内就位（检查 launch 脚本与环境）',
+      },
+    })
+  )
+  writeControl({ desired_running: true, requested_at: isoAt(Math.floor(Date.now() / 1000)) })
+
+  await page.goto('/factor-research')
+
+  const state = page.getByTestId('factor-research-control-state')
+  await expect(state).toContainText('启动失败')
+  await expect(state).toContainText('看护未在启动窗口内就位')
+  await expect(state).not.toContainText('切换中')
+})
+
+test('12. 连续短命会话：最近 3 次均 <120 秒 → 告警', async ({ page }) => {
+  const now = Math.floor(Date.now() / 1000)
+  writeSnapshot(
+    snapshotBody({
+      sessions: [
+        { log_file: 's3.log', started_at: isoAt(now - 3600), ended_at: isoAt(now - 3577), duration_s: 23 },
+        { log_file: 's2.log', started_at: isoAt(now - 4200), ended_at: isoAt(now - 4176), duration_s: 24 },
+        { log_file: 's1.log', started_at: isoAt(now - 4800), ended_at: isoAt(now - 4775), duration_s: 25 },
+      ],
+    })
+  )
+
+  await page.goto('/factor-research')
+
+  await expect(page.getByTestId('factor-research-short-sessions')).toContainText('连续短命会话')
 })

@@ -101,9 +101,10 @@ export default defineConfig({
       // 那边承载 paper_equity 双曲线造数，互不影响）
       // FACTOR_RESEARCH_STATUS_PATH 同理（delta add-factor-research-monitor T4）：因子研发
       // 监控 E2E 的 fixture 快照由 spec 直接写文件，绝不能落到生产快照
-      // data/factor_research/status.json（采集器运行时产物）
+      // data/factor_research/status.json（采集器运行时产物）；LAUNCHER_PATH 同纪律
+      // （delta add-factor-research-selfheal：心跳 fixture 也不得落生产 launcher.json）
       command: 'uv run uvicorn finance_agent.api:app --port 8000',
-      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
+      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json', FACTOR_RESEARCH_LAUNCHER_PATH: 'data/test-e2e-factor-research-launcher.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
       url: 'http://localhost:8000/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
