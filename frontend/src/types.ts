@@ -974,6 +974,28 @@ export interface FactorResearchTotals {
   workspace_tasks: number
 }
 
+export interface FactorResearchAgent {
+  /** 最近一次期望态调和动作（控制文件缺失/损坏 → no_intent；一致 → noop） */
+  last_action: 'no_intent' | 'noop' | 'started' | 'stopped' | 'start-failed' | 'stop-failed' | null
+  last_action_at: string | null
+  /** start-failed / stop-failed 时的可判读摘要 */
+  last_error: string | null
+}
+
+export interface FactorResearchLauncher {
+  available: boolean
+  reason?: 'missing' | 'corrupt'
+  checked_at?: string | null
+  checked_at_epoch?: number | null
+  age_seconds?: number
+  /** age_seconds ≤ 300 */
+  fresh?: boolean
+  agent_pid?: number | null
+  agent_ok?: boolean
+  snapshot_age_s?: number | null
+  detail?: string | null
+}
+
 export interface FactorResearchControl {
   /** 期望态（控制文件缺失/不可解析 → null，如实不猜） */
   desired_running: boolean | null
@@ -981,6 +1003,10 @@ export interface FactorResearchControl {
   requested_at: string | null
   /** 期望与新鲜快照实态不一致（切换中）；陈旧/不可用快照恒 false */
   pending: boolean
+  /** 控制受理能力（后端单源判定） */
+  honor: 'live' | 'launcher' | 'unavailable'
+  /** 离线受理的预计拉起上界（秒；live=0，unavailable=null） */
+  honor_eta_seconds: number | null
 }
 
 export interface FactorResearchStatusResponse {
@@ -995,6 +1021,10 @@ export interface FactorResearchStatusResponse {
   current_session?: FactorResearchCurrentSession | null
   sessions?: FactorResearchSession[]
   totals?: FactorResearchTotals | null
+  /** 代理调和动作块（独立采集器路径可能为 null） */
+  agent?: FactorResearchAgent | null
+  /** 启动器心跳块（delta add-factor-research-selfheal） */
+  launcher?: FactorResearchLauncher | null
   /** 控制块（delta add-factor-research-control；快照不可用/陈旧时同样返回） */
   control?: FactorResearchControl | null
 }
