@@ -177,6 +177,16 @@ def _ts_sum(frame: pd.DataFrame, window: int) -> pd.DataFrame:
     return frame.rolling(window, min_periods=window).sum()
 
 
+def _ts_max(frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    """窗口最大值（窗口含当日；min_periods=window：窗口不足或含 NaN → NaN）。"""
+    return frame.rolling(window, min_periods=window).max()
+
+
+def _ts_min(frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    """窗口最小值（窗口含当日；min_periods=window：窗口不足或含 NaN → NaN）。"""
+    return frame.rolling(window, min_periods=window).min()
+
+
 _WINDOW_OPS: dict[str, Callable[[pd.DataFrame, int], pd.DataFrame]] = {
     "ts_mean": _ts_mean,
     "ts_std": _ts_std,
@@ -184,6 +194,8 @@ _WINDOW_OPS: dict[str, Callable[[pd.DataFrame, int], pd.DataFrame]] = {
     "delta": _delta,
     "ref": _ref,
     "ts_sum": _ts_sum,
+    "ts_max": _ts_max,
+    "ts_min": _ts_min,
 }
 
 
@@ -216,6 +228,11 @@ def _div(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
 def _log(frame: pd.DataFrame) -> pd.DataFrame:
     """自然对数；非正 → NaN（NaN 传播）。"""
     return _wrap(np.log(frame.where(frame > 0)), frame)
+
+
+def _sign(frame: pd.DataFrame) -> pd.DataFrame:
+    """逐元素符号：正 1 / 负 −1 / 零 0；NaN 传播（np.sign 同）。"""
+    return _wrap(np.sign(frame), frame)
 
 
 def _sqrt(frame: pd.DataFrame) -> pd.DataFrame:
@@ -253,6 +270,7 @@ _ELEMENTWISE_OPS: dict[str, Callable[..., pd.DataFrame]] = {
     "abs": lambda frame: frame.abs(),
     "log": _log,
     "sqrt": _sqrt,
+    "sign": _sign,
 }
 
 

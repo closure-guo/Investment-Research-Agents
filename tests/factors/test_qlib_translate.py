@@ -129,13 +129,44 @@ class TestUntranslatable:
         assert result.dsl_expression is None
         assert any("Quantile" in blocker for blocker in result.blockers)
 
-    def test_same_name_semantics_differ_refuses_guess(self):
-        """同名算子语义不同（Max 滚动 vs 逐元素）→ 拒绝机械替换并留档差异。"""
-        result = translate_qlib_expression("Max($close, 20)")
+    def test_missing_operator_refuses_guess(self):
+        """映射表无对应算子（Skew）→ 拒收并留档差异说明。
+
+        Max/Min 曾是「同名不同义」拒收面（本 DSL max/min 为逐元素二元）；
+        extend-factor-dsl-sign-extremes 起 ts_max/ts_min 落地、映射翻转（见下例），
+        拒收纪律由 missing 族继续钉住。
+        """
+        result = translate_qlib_expression("Skew($close, 20)")
         assert not result.translatable
-        assert result.dsl_expression is None  # 不输出 max(close,20) 猜测翻译
-        assert any("Max" in blocker for blocker in result.blockers)
-        assert any("Max" in entry and "逐元素" in entry for entry in result.used_mappings)
+        assert result.dsl_expression is None
+        assert any("Skew" in blocker for blocker in result.blockers)
+
+    def test_rolling_extremes_and_sign_strict_equivalence(self):
+        """extend-factor-dsl-sign-extremes：Max/Min→ts_max/ts_min、Sign→sign（映射翻转）。"""
+        cases = {
+            "Max($close, 20)": "ts_max(close,20)",
+            "Min($low, 5)": "ts_min(low,5)",
+            "Sign($close - Ref($close, 1))": "sign(sub(close,ref(close,1)))",
+        }
+        for source, expected in cases.items():
+            result = translate_qlib_expression(source)
+            assert result.translatable, (source, result.blockers)
+            assert result.dsl_expression == expected, source
+            parse(result.dsl_expression)
+        assert any(
+            "Max" in entry and "ts_max" in entry
+            for entry in translate_qlib_expression("Max($close, 20)").used_mappings
+        )
+
+    def test_klow_style_rolling_extremes_composite_translatable(self):
+        """价格位置族（pos20/klow）：滚动极值组合形态可翻译且过复杂度复验。"""
+        result = translate_qlib_expression(
+            "($close - Min($low, 20)) / (Max($high, 20) - Min($low, 20))"
+        )
+        assert result.translatable, result.blockers
+        assert result.dsl_expression == (
+            "div(sub(close,ts_min(low,20)),sub(ts_max(high,20),ts_min(low,20)))"
+        )
 
     def test_multiple_blockers_listed(self):
         """Quantile 阻塞、Ref 已可翻译——完整清单只列真阻塞项（extend-factor-dsl-ref 翻转）。"""
@@ -309,8 +340,14 @@ class TestMappingTableAudit:
         assert OPERATOR_MAPPINGS["Ref"].dsl_name == "ref"
         assert OPERATOR_MAPPINGS["Sum"].status == "equivalent"  # extend-factor-dsl-coverage 翻转
         assert OPERATOR_MAPPINGS["Sum"].dsl_name == "ts_sum"
-        assert OPERATOR_MAPPINGS["Max"].status == "not_equivalent"
-        assert OPERATOR_MAPPINGS["Min"].status == "not_equivalent"
+        assert (
+            OPERATOR_MAPPINGS["Max"].status == "equivalent"
+        )  # extend-factor-dsl-sign-extremes 翻转
+        assert OPERATOR_MAPPINGS["Max"].dsl_name == "ts_max"
+        assert OPERATOR_MAPPINGS["Min"].status == "equivalent"
+        assert OPERATOR_MAPPINGS["Min"].dsl_name == "ts_min"
+        assert OPERATOR_MAPPINGS["Sign"].status == "equivalent"
+        assert OPERATOR_MAPPINGS["Sign"].dsl_name == "sign"
         assert OPERATOR_MAPPINGS["Mean"].status == "equivalent"
         assert OPERATOR_MAPPINGS["Power"].status == "missing"  # 可变指数无对应；0.5 走特例分支
 
