@@ -20,6 +20,14 @@ import { defineConfig } from '@playwright/test'
  * daily-ops.spec.ts 时 seed/screening_reset 会清 screening 五表——不指向独立库会
  * 落到开发库 data/screening.db（与默认 config 同文件 data/test-e2e-screening.db，
  * .gitignore 既有条目覆盖）。
+ *
+ * REGIME_DB_PATH（delta add-crowding-regime-positioning T8）：本 config 下跑
+ * market-regime.spec.ts 时 seed/regime_reset 会清 regime_daily 全表——同款纪律
+ * 指向独立库（data/test-e2e-regime.db，与默认 config 同文件）。
+ *
+ * EVENTS_DB_PATH（delta add-event-driven-lane T8）：本 config 下跑
+ * event-watchlist.spec.ts 时 seed/events_reset 会清事件线四表——同款纪律指向独立库
+ * （data/test-e2e-events.db，与默认 config 同文件；.gitignore 既有条目覆盖）。
  */
 export default defineConfig({
   testDir: './tests',
@@ -49,6 +57,10 @@ export default defineConfig({
         EXECUTION_DB_PATH: 'data/test-e2e-execution.db',
         // 选股 E2E 造数库（同默认 config 口径；screening_reset 清五表）
         SCREENING_DB_PATH: 'data/test-e2e-screening.db',
+        // 市场温度计 E2E 造数库（同默认 config 口径；regime_reset 清 regime_daily）
+        REGIME_DB_PATH: 'data/test-e2e-regime.db',
+        // 事件观察 E2E 造数库（同默认 config 口径；events_reset 清事件线四表）
+        EVENTS_DB_PATH: 'data/test-e2e-events.db',
         // 隔离报告落盘目录，避免 E2E 副作用污染 reports/
         REPORTS_DIR: 'tmp/e2e-reports-8001',
       },

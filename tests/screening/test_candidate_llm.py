@@ -380,9 +380,9 @@ def test_run_triage_persists_in_one_batch_call(tmp_path, monkeypatch) -> None:
     calls: list[tuple] = []
     real = store.record_triage_decisions
 
-    def spy(trade_date, decisions, db_path=None):
-        calls.append((trade_date, tuple(decisions)))
-        return real(trade_date, decisions, db_path=db_path)
+    def spy(trade_date, decisions, db_path=None, *, pool="main"):
+        calls.append((trade_date, tuple(decisions), pool))
+        return real(trade_date, decisions, db_path=db_path, pool=pool)
 
     monkeypatch.setattr(store, "record_triage_decisions", spy)
     symbols = [f"6005{index:02d}" for index in range(5)]
@@ -395,8 +395,9 @@ def test_run_triage_persists_in_one_batch_call(tmp_path, monkeypatch) -> None:
         db_path=str(tmp_path / "screening.db"),
     )
     assert len(calls) == 1  # 单次批量写，非逐行 N 次
-    trade_date, decisions = calls[0]
+    trade_date, decisions, pool = calls[0]
     assert trade_date == "2026-10-13"
+    assert pool == "main"  # 缺省档位 = 主档（既有调用路径逐字节不变，评审 C1）
     assert [decision.symbol for decision in decisions] == symbols  # 输入序全量
     assert (
         len(list_triage_decisions(trade_date="2026-10-13", db_path=str(tmp_path / "screening.db")))

@@ -34,6 +34,7 @@ from finance_agent.data.snapshot import (
     get_security_master,
     init_snapshot_db,
     latest_snapshot_date,
+    norm_code,
     read_bars,
     read_universe,
     reset_snapshot_db,
@@ -89,7 +90,16 @@ def test_init_creates_tables_and_is_idempotent(tmp_path):
         master_cols = {
             row[1] for row in conn.execute("PRAGMA table_info(security_master)").fetchall()
         }
-        assert master_cols == {"code", "name", "list_date", "updated_at"}
+        # add-microcap-lane-guardrails：security_master 扩 delist_date/delist_source
+        # （退市日 + 语义来源审计，见 metrics.md §1.16）
+        assert master_cols == {
+            "code",
+            "name",
+            "list_date",
+            "delist_date",
+            "delist_source",
+            "updated_at",
+        }
 
         indexes = {
             row[0]
@@ -446,6 +456,12 @@ def test_norm_code_normalizes_numeric_and_string_forms():
     assert _norm_code(None) == ""
 
 
+def test_norm_code_public_alias_for_cross_module_consumers():
+    """公开别名：跨模块消费方（outcome/regime）走 ``norm_code``，不负下划线私有名。"""
+    assert norm_code is _norm_code
+    assert norm_code("1") == "000001"
+
+
 def test_text_and_num_reject_missing_and_non_finite():
     """FIX-3：_text 对 None/NaN/pd.NA/空串返回 None；_num 对 inf/-inf 返回 None。"""
     assert _text(None) is None
@@ -681,7 +697,13 @@ def test_security_master_upsert_roundtrip(tmp_path):
     master = get_security_master(db_path=db)
     assert set(master) == {"600519", "000001"}
     assert master["600519"]["name"] == "贵州茅台A"
-    assert master["000001"] == {"name": "平安银行", "list_date": "1991-04-03"}
+    assert master["000001"] == {
+        "name": "平安银行",
+        "list_date": "1991-04-03",
+        # add-microcap-lane-guardrails：主表形状扩 delist_date/delist_source（存续标的为 None）
+        "delist_date": None,
+        "delist_source": None,
+    }
     assert _count(db, "security_master") == 2
 
     upsert_security_master(  # 新值缺失 → COALESCE 保留旧值

@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 from finance_agent.execution.portfolio import (
+    ADJUSTMENT_REGIME_SCALE,
     ADJUSTMENT_SINGLE_CAP_CLIP,
     ADJUSTMENT_TOTAL_CAP_SCALE_DOWN,
     TargetPosition,
@@ -227,3 +228,77 @@ def test_default_caps_single_source_from_constraints():
         single_cap=constraints.MAX_SINGLE_POSITION,
         total_cap=constraints.MAX_TOTAL_POSITION,
     )
+
+
+# ── 市场状态总仓位系数（add-crowding-regime-positioning） ─────────────────────
+
+
+def test_regime_multiplier_scales_weights_and_records_regime_scale():
+    """系数 0.5：总仓缩减之后全体乘 0.5（4 票等权 1/4 → 1/8）+ 逐票 REGIME_SCALE。"""
+    signals = [_signal(f"60000{i}.SH") for i in range(1, 5)]
+    result = aggregate_targets(signals, single_cap=1.0, total_cap=1.0, regime_multiplier=0.5)
+    assert [p.weight for p in result] == [pytest.approx(0.125)] * 4
+    assert all(p.adjustments == (ADJUSTMENT_REGIME_SCALE,) for p in result)
+    assert sum(p.weight for p in result) == pytest.approx(0.5)
+
+
+def test_zero_multiplier_flattens_all_targets():
+    """系数 0 → 全 0 权重（flat 目标）；逐票 REGIME_SCALE；排序退化为 symbol 升序。"""
+    signals = [_signal("600002.SH"), _signal("600001.SH")]
+    result = aggregate_targets(signals, single_cap=1.0, total_cap=1.0, regime_multiplier=0.0)
+    assert [p.symbol for p in result] == ["600001.SH", "600002.SH"]
+    assert all(p.weight == 0.0 for p in result)
+    assert all(p.adjustments == (ADJUSTMENT_REGIME_SCALE,) for p in result)
+
+
+def test_multiplier_one_matches_default_exactly_without_adjustments():
+    """系数 1.0 与不传时逐项一致（含不追加调整码）——默认行为逐字节不变。"""
+    signals = [_signal("600001.SH", strength=0.6), _signal("600002.SH", strength=0.4)]
+    default = aggregate_targets(signals, method="strength", single_cap=1.0, total_cap=1.0)
+    explicit = aggregate_targets(
+        signals, method="strength", single_cap=1.0, total_cap=1.0, regime_multiplier=1.0
+    )
+    assert explicit == default
+    assert all(p.adjustments == () for p in explicit)
+
+
+def test_regime_scale_applied_after_total_cap_scale_down():
+    """应用顺序：单票 clip → 总仓缩减 → 系数缩放（spec 场景 96%→80%→×0.5=40%）。
+
+    手算承接 test_total_cap_scale_down_spec_scenario_96_to_80：缩减后
+    (1/6, 2/15×3, 7/60×2) 各乘 0.5 → (1/12, 1/15×3, 7/120×2)，Σ=0.4。
+    """
+    signals = [
+        _signal("600002.SH", strength=0.16),
+        _signal("600001.SH", strength=0.24),
+        _signal("600004.SH", strength=0.14),
+        _signal("600003.SH", strength=0.16),
+        _signal("600005.SH", strength=0.16),
+        _signal("600006.SH", strength=0.14),
+    ]
+    result = aggregate_targets(signals, method="strength", regime_multiplier=0.5)
+    assert _weights(result) == [
+        ("600001.SH", pytest.approx(1.0 / 12.0, rel=1e-12)),
+        ("600002.SH", pytest.approx(1.0 / 15.0, rel=1e-12)),
+        ("600003.SH", pytest.approx(1.0 / 15.0, rel=1e-12)),
+        ("600005.SH", pytest.approx(1.0 / 15.0, rel=1e-12)),
+        ("600004.SH", pytest.approx(7.0 / 120.0, rel=1e-12)),
+        ("600006.SH", pytest.approx(7.0 / 120.0, rel=1e-12)),
+    ]
+    assert result[0].adjustments == (
+        ADJUSTMENT_SINGLE_CAP_CLIP,
+        ADJUSTMENT_TOTAL_CAP_SCALE_DOWN,
+        ADJUSTMENT_REGIME_SCALE,
+    )
+    assert all(
+        p.adjustments == (ADJUSTMENT_TOTAL_CAP_SCALE_DOWN, ADJUSTMENT_REGIME_SCALE)
+        for p in result[1:]
+    )
+    assert sum(p.weight for p in result) == pytest.approx(0.4, abs=1e-9)
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.5, float("nan")])
+def test_out_of_range_multiplier_rejected(bad):
+    """系数取值域 [0, 1]（spec）：越界拒收，不静默夹取。"""
+    with pytest.raises(ValueError, match="regime_multiplier"):
+        aggregate_targets([_signal("600001.SH")], regime_multiplier=bad)

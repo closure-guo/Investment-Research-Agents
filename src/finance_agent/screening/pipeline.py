@@ -39,6 +39,7 @@ import pandas as pd
 
 from finance_agent.data.snapshot import (
     SnapshotNotFreshError,
+    count_delisted_masters,
     get_all_meta,
     latest_snapshot_date,
     read_universe,
@@ -52,6 +53,7 @@ from finance_agent.screening.candidate_llm import (
     TriageLLMClient,
     run_triage,
 )
+from finance_agent.screening.constraints import FilterThresholds
 from finance_agent.screening.filters import build_candidate_record, filter_universe
 from finance_agent.screening.ranker import (
     Candidate,
@@ -62,6 +64,9 @@ from finance_agent.screening.ranker import (
 )
 from finance_agent.screening.store import (
     DEFAULT_MIN_DAYS,
+    POOL_MAIN,
+    POOL_MICROCAP,
+    POOLS,
     consecutive_days_in_top,
     eligible_for_selection,
     latest_successful_batch,
@@ -79,6 +84,27 @@ POOL_MIN_DAYS = DEFAULT_MIN_DAYS
 # 缺省面板回看交易日数（覆盖 L2 内置因子最长 20 日窗口 + 流动性 20 日窗口；
 # 未来引入更长回看因子时调大本常量即可）
 DEFAULT_PANEL_LOOKBACK_DAYS = 60
+
+# ── 小票通道前置门禁（add-microcap-lane-guardrails；口径 metrics.md §1.16） ────────
+# frontier_gate 取值（记录字段）：ready = 两前置齐备（可执行候选，仍不下单）；
+# observation_only:missing=<要点列表> = 缺前置并披露缺失项
+FRONTIER_GATE_READY = "ready"
+FRONTIER_GATE_OBSERVATION_PREFIX = "observation_only:missing="
+# 缺失要点码（逗号分隔顺序 = 下列声明顺序）
+FRONTIER_MISSING_DELIST_POOL = "delist_pool"
+FRONTIER_MISSING_REGIME_DATA = "regime_data"
+# 拥挤度数据新鲜度阈值（自然日；同 metrics.md §1.14 陈旧口径「>7 日」）
+REGIME_MAX_AGE_DAYS = 7
+# 小票通道建议执行约束（批次**记录字段**；v1 观察通道不接执行链，见 spec）
+MICROCAP_EXEC_CONSTRAINTS: dict[str, float | int] = {
+    "suggested_single_cap": constraints.MICROCAP_SUGGESTED_SINGLE_CAP,
+    "slippage_tier_bump": constraints.MICROCAP_SLIPPAGE_TIER_BUMP,
+}
+
+
+def microcap_exec_constraints() -> dict[str, float | int]:
+    """建议执行约束记录字段（每次调用返回副本，调用方改动不污染常量单源）。"""
+    return dict(MICROCAP_EXEC_CONSTRAINTS)
 
 
 # ── 小工具 ──────────────────────────────────────────────────────────────────
@@ -222,6 +248,10 @@ def run_screening_batch(
     snapshot_db_path: str | Path | None = None,
     library_db_path: str | Path | None = None,
     seed: int = 20261013,
+    thresholds: FilterThresholds | None = None,
+    pool: str = POOL_MAIN,
+    frontier_gate: str | None = None,
+    exec_constraints: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """日批入口（S1）：快照确认 → L1 → L2 → L3 → 精选池，fail-closed 落库。
 
@@ -231,11 +261,20 @@ def run_screening_batch(
     ``snapshot_db_path``/``library_db_path`` 同上（缺省走各模块 env 口径）；
     ``seed`` 保留（本管道确定，无消费点）。
 
+    档位参数（add-microcap-lane-guardrails，默认值 = 既有主档行为**逐字节不变**）：
+    ``thresholds`` 显式传入时用于 L1 两个消费点（``build_candidate_record`` /
+    ``filter_universe``），``None`` → 各函数调用期读 ``DEFAULT_THRESHOLDS``（同变更前）；
+    ``pool`` 标注批次档位（``main``/``microcap``，读写按 ``(trade_date, pool)`` 隔离）；
+    ``frontier_gate`` 门禁记录字段与 ``exec_constraints`` 建议执行约束记录字段
+    （仅小票通道非空，由 ``run_microcap_lane_daily`` 传入；主档恒 None）。
+
     批次内部失败**不抛出**：批次行记 failed + error 文案并返回结果 dict（调用方
     据 ``status`` 判定）；仅「快照库为空且 as_of 未指定」（无 trade_date 可落批
     次行）与非规范 ``as_of`` 直接抛错。
     """
     _ = seed  # 签名保留：管道全确定（无 RNG），仅记录设计口径
+    if pool not in POOLS:
+        raise ValueError(f"非法批次 pool {pool!r}；允许: {list(POOLS)}")
     started_at = _now_iso()
     latest = latest_snapshot_date(snapshot_db_path)
     if as_of is None:
@@ -259,6 +298,9 @@ def run_screening_batch(
             started_at=started_at,
             finished_at=_now_iso(),
             selection_mode="factor",  # 快照新鲜度未过：选择路径未判定，按默认标注
+            pool=pool,
+            frontier_gate=frontier_gate,
+            exec_constraints=exec_constraints,
             db_path=db_path,
         )
         return {
@@ -270,6 +312,9 @@ def run_screening_batch(
             "l3_keep": 0,
             "pool_size": 0,
             "selection_mode": "factor",
+            "pool": pool,
+            "frontier_gate": frontier_gate,
+            "exec_constraints": exec_constraints,
         }
 
     l1_passed = 0
@@ -294,10 +339,15 @@ def run_screening_batch(
                 amounts=amounts.get(str(row.get("code") or "").strip(), []),
                 calendar=calendar,
                 as_of=trade_date,
+                thresholds=thresholds,
             )
             for row in rows
         ]
-        passed = [decision.code for decision in filter_universe(records) if decision.passed]
+        passed = [
+            decision.code
+            for decision in filter_universe(records, thresholds=thresholds)
+            if decision.passed
+        ]
         l1_passed = len(passed)
         # ③ L2：active 因子 × 近 60 日 IC → Top-N（全量落库；当日榜原子替换——
         # 同日重跑换小集合时旧行不得残留，否则虚增 consecutive_days_in_top）。
@@ -330,7 +380,7 @@ def run_screening_batch(
                 as_of=trade_date,
                 top_n=L2_TOP_N,
             )
-        rewrite_day_l2_board(trade_date, candidates, db_path=db_path)
+        rewrite_day_l2_board(trade_date, candidates, db_path=db_path, pool=pool)
         l2_top = len(candidates)
         # ④ L3：quick profile 粗筛（事件注入；单只失败降级不阻断）
         client: TriageLLMClient = (
@@ -347,6 +397,7 @@ def run_screening_batch(
             client=client,
             trade_date=trade_date,
             db_path=db_path,
+            pool=pool,
         )
         decisions = triage_result.decisions
         l3_keep = sum(1 for decision in decisions if decision.verdict == "keep")
@@ -362,7 +413,11 @@ def run_screening_batch(
             if decision.verdict != "keep":
                 continue
             if not eligible_for_selection(
-                decision.symbol, trade_date, min_days=POOL_MIN_DAYS, db_path=db_path
+                decision.symbol,
+                trade_date,
+                min_days=POOL_MIN_DAYS,
+                db_path=db_path,
+                pool=pool,
             ):
                 continue
             candidate = by_symbol[decision.symbol]
@@ -372,7 +427,7 @@ def run_screening_batch(
                     "composite_score": candidate.composite_score,
                     "rank": candidate.rank,
                     "consecutive_days": consecutive_days_in_top(
-                        candidate.symbol, trade_date, db_path=db_path
+                        candidate.symbol, trade_date, db_path=db_path, pool=pool
                     ),
                     "l3_verdict": decision.verdict,
                     "l3_reason": decision.reason,
@@ -391,6 +446,9 @@ def run_screening_batch(
             l3_keep=l3_keep,
             pool_rows=pool_rows,
             selection_mode=selection_mode,
+            pool=pool,
+            frontier_gate=frontier_gate,
+            exec_constraints=exec_constraints,
             db_path=db_path,
         )
         return {
@@ -402,6 +460,9 @@ def run_screening_batch(
             "l3_keep": l3_keep,
             "pool_size": pool_size,
             "selection_mode": selection_mode,
+            "pool": pool,
+            "frontier_gate": frontier_gate,
+            "exec_constraints": exec_constraints,
         }
     except Exception as exc:  # noqa: BLE001 -- fail-closed：任一步失败 → 批次 failed + 零池
         error = f"{type(exc).__name__}: {exc}"
@@ -416,6 +477,9 @@ def run_screening_batch(
             l2_top=l2_top,
             l3_keep=l3_keep,
             selection_mode=selection_mode,
+            pool=pool,
+            frontier_gate=frontier_gate,
+            exec_constraints=exec_constraints,
             db_path=db_path,
         )
         return {
@@ -427,6 +491,9 @@ def run_screening_batch(
             "l3_keep": l3_keep,
             "pool_size": 0,
             "selection_mode": selection_mode,
+            "pool": pool,
+            "frontier_gate": frontier_gate,
+            "exec_constraints": exec_constraints,
         }
 
 
@@ -446,10 +513,136 @@ def run_screening_daily() -> dict[str, Any]:
     return result
 
 
+# ── 小票通道（add-microcap-lane-guardrails T5；observation_only） ───────────────
+
+
+def evaluate_frontier_gate(
+    *,
+    snapshot_db_path: str | Path | None = None,
+    regime_db_path: str | Path | None = None,
+    today: str | None = None,
+) -> dict[str, Any]:
+    """小票通道前置门禁（两判据，纯代码检查；口径 metrics.md §1.16）。
+
+    - ``delist_ready`` = ``security_master`` 含 ≥1 条 ``delist_date`` 非空记录
+      （退市清单已落库且池构建逻辑有回归在案）；
+    - ``regime_ready`` = ``regime_daily`` 最新行日期距 ``today``（缺省 = 当天）
+      ≤ ``REGIME_MAX_AGE_DAYS``（7）自然日（复用 ``latest_regime``；无行/不可解析/
+      未来日期 → 不新鲜，fail-closed）；
+    - 两判据齐备 → ``frontier_gate="ready"``；缺任一 →
+      ``"observation_only:missing=<要点列表>"``（要点按声明顺序逗号分隔）。
+
+    返回 ``{"frontier_gate", "missing", "delist_ready", "regime_ready", "regime_date"}``。
+    """
+    # 延迟 import（评审 F6）：screening 不得模块级依赖 outcome（层次反向）；
+    # 本函数是 screening 侧唯一消费 regime 的点，import 只在此发生。
+    from finance_agent.outcome.regime.model import latest_regime
+
+    gate_today = _canonical_date(today or date.today().isoformat(), "today")
+    missing: list[str] = []
+
+    delist_ready = count_delisted_masters(snapshot_db_path) >= 1
+    if not delist_ready:
+        missing.append(FRONTIER_MISSING_DELIST_POOL)
+
+    regime_row = latest_regime(regime_db_path)
+    regime_date = str(regime_row.get("trade_date") or "") if regime_row else None
+    regime_ready = False
+    if regime_date:
+        try:
+            age = (date.fromisoformat(gate_today) - date.fromisoformat(regime_date)).days
+        except ValueError:
+            age = None
+        regime_ready = age is not None and 0 <= age <= REGIME_MAX_AGE_DAYS
+    if not regime_ready:
+        missing.append(FRONTIER_MISSING_REGIME_DATA)
+
+    frontier_gate = (
+        FRONTIER_GATE_READY if not missing else FRONTIER_GATE_OBSERVATION_PREFIX + ",".join(missing)
+    )
+    return {
+        "frontier_gate": frontier_gate,
+        "missing": missing,
+        "delist_ready": delist_ready,
+        "regime_ready": regime_ready,
+        "regime_date": regime_date,
+    }
+
+
+def run_microcap_lane_daily(
+    as_of: str | None = None,
+    *,
+    panel: MarketPanel | None = None,
+    events_by_symbol: dict[str, list[dict]] | None = None,
+    triage_client: TriageLLMClient | None = None,
+    db_path: str | Path | None = None,
+    snapshot_db_path: str | Path | None = None,
+    library_db_path: str | Path | None = None,
+    regime_db_path: str | Path | None = None,
+    gate_today: str | None = None,
+    seed: int = 20261013,
+) -> dict[str, Any]:
+    """小票通道日批（observation_only）：``MICROCAP_THRESHOLDS`` 跑同一 L1→L2→L3 链。
+
+    - 档位：L1 用 ``constraints.MICROCAP_THRESHOLDS``（流动性下限 1000 万；其余同主档），
+      主档 ``DEFAULT_THRESHOLDS`` 路径不受影响；
+    - 批次：落 ``pool="microcap"``（与同日主档批次行并存，读侧默认只见主档）；
+    - 门禁：先评 ``evaluate_frontier_gate`` → ``frontier_gate`` 记录字段
+      （``ready`` / ``observation_only:missing=<要点>``）；
+    - **v1 MUST NOT 产生订单**：不接执行链（``orders_placed`` 恒 0），
+      单票上限 5% / 滑点提升一档仅为建议约束**记录字段**；
+    - 失败语义与主档一致（批次 failed 落库并返回；ops 包装 ``run_microcap_lane`` 上抛）。
+    """
+    gate = evaluate_frontier_gate(
+        snapshot_db_path=snapshot_db_path, regime_db_path=regime_db_path, today=gate_today
+    )
+    result = run_screening_batch(
+        as_of,
+        panel=panel,
+        events_by_symbol=events_by_symbol,
+        triage_client=triage_client,
+        db_path=db_path,
+        snapshot_db_path=snapshot_db_path,
+        library_db_path=library_db_path,
+        seed=seed,
+        thresholds=constraints.MICROCAP_THRESHOLDS,
+        pool=POOL_MICROCAP,
+        frontier_gate=gate["frontier_gate"],
+        exec_constraints=microcap_exec_constraints(),
+    )
+    result.update(
+        {
+            "pool": POOL_MICROCAP,
+            "frontier_gate": gate["frontier_gate"],
+            "frontier_missing": gate["missing"],
+            # 记录字段（建议执行约束）：v1 仅记录，不接执行链
+            "suggested_single_cap": constraints.MICROCAP_SUGGESTED_SINGLE_CAP,
+            "slippage_tier_bump": constraints.MICROCAP_SLIPPAGE_TIER_BUMP,
+            "exec_constraints": microcap_exec_constraints(),
+            "orders_placed": 0,
+        }
+    )
+    return result
+
+
+def run_microcap_lane() -> dict[str, Any]:
+    """ops 日批入口（add-microcap-lane-guardrails）：封装 ``run_microcap_lane_daily``。
+
+    与主档 ``run_screening_daily`` 同纪律：批次 ``status="failed"`` → 上抛
+    ``RuntimeError``（``run_job`` 记 failed 运行行），成功 → 摘要原样透传
+    （含 ``pool``/``frontier_gate``/记录字段，见 ``run_microcap_lane_daily``）。
+    """
+    result = run_microcap_lane_daily()
+    if isinstance(result, dict) and result.get("status") == "failed":
+        raise RuntimeError(str(result.get("error") or "小票通道日批失败"))
+    return result
+
+
 def latest_successful_pool(*, db_path: str | Path | None = None) -> dict[str, Any] | None:
     """最近成功批次 + 其当日精选池；无成功批次 → None（前端回退空态/旧日期标注）。
 
     返回 ``{"batch": {...}, "pool": [池行...]}``；池行含解析后的 ``factor_contribs``。
+    主档口径（``pool='main'``，既有页面/接口不变）。
     """
     batch = latest_successful_batch(db_path)
     if batch is None:

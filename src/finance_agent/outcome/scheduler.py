@@ -30,6 +30,16 @@ paper 仿真执行(add-execution-chain-driver):工作日 16:10 触发 ``run_exec
 排在 paper 结算(16:20)之前保证当日成交当日入账;快照不可用时返回跳过摘要
 (job 记 ok),经同一 ``_with_retry`` 入口。
 
+业绩预告事件线(add-event-driven-lane):工作日 16:05 抓取（``run_earnings_fetch_daily``）/
+16:15 分诊（``run_earnings_triage_daily``）/ 16:25 结算（``run_event_settle_daily``），
+按时刻序插在既有日批链空档；经同一 ``_with_retry`` 入口（单飞锁 + 运行历史 + 3 次退避）；
+抓取失败上抛 → 记 failed（不静默），结算参考价缺失在 job 内保持 open + 留痕。
+
+拥挤度日批(add-crowding-regime-positioning):工作日 15:35 触发 ``run_regime_daily``
+(快照 15:30 之后、选股 15:40 之前;读快照库 + 一次 spot 抓取建流通市值 caps →
+四指标 + 历史分位落 ``data/regime.db``,同日重跑幂等),经同一 ``_with_retry``
+入口;快照/caps 不可用时返回跳过摘要(job 记 ok)不产伪行,执行链据此降级。
+
 月批(add-monthly-batch-scheduling):每月 1 日 09:00 触发 ``run_memory_extract_monthly``
 (已结算决策近窗口 → 候选条款落 pending),10:00 触发 ``run_factor_proposal_monthly``
 (快照面板 → LLM 提案批 → 五道闸准入);粒度经 ``SCHEDULES`` 的 ``day_of_month`` 键
@@ -59,6 +69,12 @@ from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.cohort.runner import run_cohort_batch
+from finance_agent.outcome.events.job import (
+    run_cb_daily,
+    run_earnings_fetch_daily,
+    run_earnings_triage_daily,
+    run_event_settle_daily,
+)
 from finance_agent.outcome.ops.jobs import (
     SCHEDULES,
     CohortDisabled,
@@ -66,10 +82,11 @@ from finance_agent.outcome.ops.jobs import (
     run_job,
 )
 from finance_agent.outcome.ops.model import finish_job_run, get_cohort_settings
+from finance_agent.outcome.regime.job import run_regime_daily
 from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
-from finance_agent.screening.pipeline import run_screening_daily
+from finance_agent.screening.pipeline import run_microcap_lane, run_screening_daily
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +166,15 @@ def _snapshot_job() -> None:
     _with_retry("market_snapshot_daily", "market snapshot", run_market_snapshot_batch)
 
 
+def _regime_daily_job() -> None:
+    """add-crowding-regime-positioning：拥挤度指标日批（15:35，快照之后、选股之前）。
+
+    读快照库 + 一次 spot 抓取（流通市值）→ 四指标 + 历史分位落 ``regime.db``；
+    快照不可用/caps 缺失 → 返回跳过摘要（job 记 ok，原因码入摘要），不产伪行。
+    """
+    _with_retry("regime_daily", "regime daily", run_regime_daily)
+
+
 def _screening_job() -> None:
     """add-screening-batch-scheduling：选股日批（15:40，快照之后、因子监控之前）。
 
@@ -189,6 +215,33 @@ def _settle_job() -> None:
     _with_retry("decision_settle_daily", "prediction settle", settle_open_predictions)
 
 
+def _earnings_fetch_job() -> None:
+    """add-event-driven-lane：业绩预告抓取日批（16:05，判定之后、仿真执行之前）。
+
+    东财业绩预告按报告期幂等落库（窗口 EVENTS_FETCH_PERIODS，首跑回填近一年）；
+    抓取失败上抛 → ``run_job`` 记 failed + 原因（不以零条新增冒充成功）。
+    """
+    _with_retry("earnings_fetch_daily", "earnings fetch daily", run_earnings_fetch_daily)
+
+
+def _earnings_triage_job() -> None:
+    """add-event-driven-lane：预告分诊日批（16:15，抓取之后、paper 结算之前）。
+
+    扫未分诊（``available_at <= 当日``，时点截断）→ LLM 分诊（单条失败降级 in_line
+    不阻断批次）→ 构建事件观察清单；零未分诊记录时零 LLM 调用。
+    """
+    _with_retry("earnings_triage_daily", "earnings triage daily", run_earnings_triage_daily)
+
+
+def _event_settle_job() -> None:
+    """add-event-driven-lane：事件记账结算日批（16:25，paper 结算之后、盯市之前）。
+
+    入场（公告日次一交易日开盘；停牌/一字板顺延留痕）+ 到期结算（参考价缺失保持
+    open + 留痕重试，MUST NOT 折算 0）；两步摘要入运行历史。
+    """
+    _with_retry("event_settle_daily", "event settle daily", run_event_settle_daily)
+
+
 def _paper_execute_job() -> None:
     """add-execution-chain-driver：执行链日批（16:10，settle 之后、paper 结算之前）。
 
@@ -220,6 +273,26 @@ def _metrics_job() -> None:
 def _integrity_job() -> None:
     """add-track-record-stage-c：快照哈希完整性校验（16:40，篡改告警）。"""
     _with_retry("integrity_check", "integrity check", integrity_check)
+
+
+def _microcap_lane_job() -> None:
+    """add-microcap-lane-guardrails：小票通道日批（16:45，完整性校验之后、cohort 之前）。
+
+    独立档位（流动性下限 1000 万）跑同一 L1→L2→L3 链 → ``pool='microcap'`` 批次行 +
+    前置门禁记录字段（退市池就绪 / regime 新鲜）；批次 failed 上抛（run_job 记 failed）。
+    **v1 不接执行链、不产生订单**（observation_only）。
+    """
+    _with_retry("microcap_screening_daily", "microcap screening daily", run_microcap_lane)
+
+
+def _cb_daily_job() -> None:
+    """add-convertible-bond-coverage：转债日批（16:50，小票通道之后、cohort 之前）。
+
+    标的/行情/强赎/下修落库 → 条款事件入观察清单（``source=cbb``，规则化标注，零 LLM）；
+    核心源失败上抛（run_job 记 failed + 原因），次要源失败记摘要留痕不阻断。
+    **仅观察通道**：不接执行链、不产生订单。
+    """
+    _with_retry("cb_daily", "cb daily", run_cb_daily)
 
 
 def _cohort_job() -> None:
@@ -302,6 +375,16 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-crowding-regime-positioning：拥挤度日批（15:35）——快照（15:30）之后、
+    # 选股（15:40）之前；读快照库 + 一次 spot 抓取（流通市值），零 LLM 调用；
+    # 快照/caps 不可用返回跳过摘要（job 记 ok），不产伪行。
+    scheduler.add_job(
+        _regime_daily_job,
+        _cron_for("regime_daily"),
+        id="regime_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     # add-screening-batch-scheduling：选股日批（15:40）——快照（15:30）之后、
     # 因子监控（15:45）与结算链（16:00 起）之前；读快照库，L3 走 quick LLM。
     scheduler.add_job(
@@ -345,6 +428,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-event-driven-lane：业绩预告抓取（16:05）——判定（16:00）之后、仿真执行
+    # （16:10）之前；幂等 upsert，失败上抛记 failed。
+    scheduler.add_job(
+        _earnings_fetch_job,
+        _cron_for("earnings_fetch_daily"),
+        id="earnings_fetch_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     # add-execution-chain-driver：执行链日批（16:10）——决策 → 信号 → 目标 →
     # 门禁 → paper 下单；排在 paper 结算（16:20）之前，当日成交当日入账。
     scheduler.add_job(
@@ -354,12 +446,30 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-event-driven-lane：预告分诊（16:15）——抓取（16:05）之后、paper 结算（16:20）
+    # 之前；未分诊为空时零 LLM 调用。
+    scheduler.add_job(
+        _earnings_triage_job,
+        _cron_for("earnings_triage_daily"),
+        id="earnings_triage_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     # add-paper-broker：paper 仿真账户日结算（16:20）——快照收盘价 mark 持仓；
     # 排在 decision settle（16:00）与 daily marking（16:30）之间，三条链互不依赖。
     scheduler.add_job(
         _paper_settle_job,
         _cron_for("paper_settle_daily"),
         id="paper_settle_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-event-driven-lane：事件结算（16:25）——paper 结算之后、盯市（16:30）之前；
+    # 记账入场（T+1 开盘口径）+ 到期结算（参考价缺失保持 open + 留痕）。
+    scheduler.add_job(
+        _event_settle_job,
+        _cron_for("event_settle_daily"),
+        id="event_settle_daily",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
@@ -384,6 +494,25 @@ def start_scheduler() -> BackgroundScheduler | None:
         _integrity_job,
         _cron_for("integrity_check"),
         id="integrity_check",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-microcap-lane-guardrails：小票通道日批（16:45）——完整性校验（16:40）之后、
+    # cohort（18:00）之前；独立档位 + 前置门禁（observation_only，不产生订单）。
+    scheduler.add_job(
+        _microcap_lane_job,
+        _cron_for("microcap_screening_daily"),
+        id="microcap_screening_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-convertible-bond-coverage：转债日批（16:50）——小票通道（16:45）之后、
+    # cohort（18:00）之前；标的/行情/强赎/下修落库 + 条款事件入观察清单（零 LLM，
+    # 仅观察通道：不接执行链、不产生订单）。
+    scheduler.add_job(
+        _cb_daily_job,
+        _cron_for("cb_daily"),
+        id="cb_daily",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
@@ -417,10 +546,13 @@ def start_scheduler() -> BackgroundScheduler | None:
     scheduler.start()
     _scheduler = scheduler
     logger.info(
-        "decision settle scheduler 已启动(market snapshot 15:30;factor decay monitor 15:45;"
+        "decision settle scheduler 已启动(market snapshot 15:30;regime 15:35;"
+        "factor decay monitor 15:45;"
         "factor builtin register 15:50;factor harvest 15:55;"
-        "decision settle 16:00;paper execute 16:10;paper settle 16:20);"
+        "decision settle 16:00;earnings fetch 16:05;paper execute 16:10;"
+        "earnings triage 16:15;paper settle 16:20;event settle 16:25);"
         "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"
+        "microcap screening 16:45;cb daily 16:50;"
         "monthly: memory extract day-1 09:00 / factor proposal day-1 10:00;"
         "cohort batch %02d:%02d(开关关闭时记 skipped-disabled,零 LLM 调用)",
         cohort["hour"],

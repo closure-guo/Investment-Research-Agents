@@ -33,7 +33,7 @@ from evals.screening.forward import (
 from finance_agent.execution.matching import MatchingConfig
 from finance_agent.factors.eval_engine import MarketPanel
 from finance_agent.screening.pipeline import L2_TOP_N
-from finance_agent.screening.store import list_l2_candidates
+from finance_agent.screening.store import POOL_MAIN, list_l2_candidates
 
 VARIANT_FACTOR = "factor"
 VARIANT_RANDOM = "random"
@@ -139,7 +139,8 @@ def build_ablation_variants(
     """
     normalized = _canonical_pool_dates(pool_dates)
     rows_by_date = {
-        pool_date: list_l2_candidates(pool_date, db_path=db_path) for pool_date in normalized
+        pool_date: list_l2_candidates(pool_date, db_path=db_path, pool=POOL_MAIN)
+        for pool_date in normalized
     }
     universe = {
         pool_date: [str(row["symbol"]) for row in rows] for pool_date, rows in rows_by_date.items()

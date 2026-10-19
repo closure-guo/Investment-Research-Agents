@@ -258,12 +258,20 @@ def test_ops_registry_contains_factor_decay_monitor():
     """注册表四处对齐；``factor_decay_monitor`` 15:45 mon-fri、按时刻序排在快照后。
 
     add-screening-batch-scheduling 扩容（8→9）后：快照 15:30 → 选股 15:40 → 因子衰减
-    15:45——邻接断言按新时刻序更新（断言意图不变：注册表按触发时刻升序）。
+    15:45；add-crowding-regime-positioning（14→15）在快照之后插入拥挤度 15:35——
+    邻接断言按新时刻序更新（断言意图不变：注册表按触发时刻升序）。
     """
     assert "factor_decay_monitor" in JOB_IDS
     assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-    assert JOB_IDS.index("screening_daily") == JOB_IDS.index("market_snapshot_daily") + 1
-    assert JOB_IDS.index("factor_decay_monitor") == JOB_IDS.index("screening_daily") + 1
+    assert JOB_IDS.index("market_snapshot_daily") == 0
+    # 邻接（非仅大小）：拥挤度紧邻快照之后（15:30 → 15:35），中间不得插入他任务
+    assert JOB_IDS.index("regime_daily") == JOB_IDS.index("market_snapshot_daily") + 1
+    assert (
+        JOB_IDS.index("market_snapshot_daily")
+        < JOB_IDS.index("regime_daily")
+        < JOB_IDS.index("screening_daily")
+        < JOB_IDS.index("factor_decay_monitor")
+    )
     assert SCHEDULES["factor_decay_monitor"] == {
         "day_of_week": "mon-fri",
         "hour": 15,

@@ -71,11 +71,18 @@ export default defineConfig({
   webServer: [
     {
       // 后端：TESTING=1（/api/test/seed 的 track_record_reset / screening_reset 可用），
-      // 五个库路径全部指向专属测试库，REPORTS_DIR 指向专属空目录（/downloads 空态前提）。
+      // 六个库路径全部指向专属测试库，REPORTS_DIR 指向专属空目录（/downloads 空态前提）。
       // CACHE_DB_PATH（src/finance_agent/data/cache.py 调用期读 env）是第五个库：
       // 设置中心「缓存管理」「数据监控」两分区展示 cache.db 统计，若不隔离会读到
       // 开发/生产进程写入的条目（首轮实测：17 条 / 360 KB 外部数据入镜），
       // 截图随外部进程写入与跨日过期而变化 → 必须隔离。
+      // REGIME_DB_PATH（delta add-crowding-regime-positioning T8）是第六个库：
+      // 选股页首屏渲染市场温度计卡片（GET /api/regime），不隔离会读到开发库
+      // data/regime.db 的当日行（随日批/跨日变化）；指向专属**空库** → 卡片呈
+      // 确定的「温度计未接入（missing）」空态，供视觉基线复现。
+      // EVENTS_DB_PATH（delta add-event-driven-lane T8）是第七个库：选股页首屏还渲染
+      // 事件观察区块（GET /api/events/watchlist），不隔离会读到开发库 data/events.db
+      // 的既有清单（随日批变化）；指向专属**空库** → 区块呈确定的「清单为空」空态。
       command: 'uv run uvicorn finance_agent.api:app --port 8006',
       env: {
         TESTING: '1',
@@ -84,6 +91,8 @@ export default defineConfig({
         SCREENING_DB_PATH: 'data/test-e2e-ui-baseline-screening.db',
         EXECUTION_DB_PATH: 'data/test-e2e-ui-baseline-execution.db',
         CACHE_DB_PATH: 'data/test-e2e-ui-baseline-cache.db',
+        REGIME_DB_PATH: 'data/test-e2e-ui-baseline-regime.db',
+        EVENTS_DB_PATH: 'data/test-e2e-ui-baseline-events.db',
         REPORTS_DIR: 'tmp/e2e-reports-8006',
       },
       url: 'http://localhost:8006/api/health',

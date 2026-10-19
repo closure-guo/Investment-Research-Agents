@@ -13,8 +13,9 @@
 5. D1 rebase：``compute_rebase_factors`` → 逐票 ``apply_rebase``，并同步更新
    内存 prev 行的 ``close_qfq``（本轮合成停牌行要承载复权后的基准）；
 6. ``build_snapshot_rows``（D2 合成 + D3 状态位）→ ``write_snapshot_rows``（幂等）；
-7. master 刷新：名单为空或每周一 → ``fetch_listing_info`` + upsert；拉取失败只
-   WARN，不失败整批；
+7. master 刷新：名单为空或每周一 → ``fetch_listing_info`` + upsert，并在**同一分支**
+   同频抓取退市清单（``fetch_delist_lists`` + ``upsert_delisted_masters``，
+   add-microcap-lane-guardrails）；任一拉取失败只 WARN，不失败整批；
 8. 成功 meta：``last_success_date`` / ``last_attempt_at`` / ``trade_calendar``
    （本次拉到才写）与清 ``last_error``/``last_error_date`` 合并为**一次**
    ``set_meta_many(..., delete_keys=...)``（单事务「先删后写」，无中间态）；
@@ -46,6 +47,7 @@ from finance_agent.data.snapshot import (
     latest_snapshot_date,
     read_universe,
     set_meta_many,
+    upsert_delisted_masters,
     upsert_security_master,
     write_snapshot_rows,
 )
@@ -133,6 +135,7 @@ def run_market_snapshot_batch(
         written = write_snapshot_rows(trade_date, rows, db_path=db_path)
 
         master_state = "skipped"
+        delist_state = "skipped"
         if not master or date.fromisoformat(trade_date).weekday() == 0:
             listing = client.fetch_listing_info()
             if listing:
@@ -140,6 +143,19 @@ def run_market_snapshot_batch(
                 master_state = "refreshed"
             else:
                 logger.warning("主表刷新失败(trade_date=%s)：沿用既有名单", trade_date)
+            # add-microcap-lane-guardrails：退市清单与上市清单**同频**刷新（同一分支）。
+            # 失败只 WARN 不失败整批——缺退市数据时小票通道门禁保持 observation_only，
+            # 快照/主档日批照常可用（口径见 metrics.md §1.16）。
+            try:
+                delisted = client.fetch_delist_lists()
+            except Exception as e:  # noqa: BLE001 - 明细类数据缺失不拖垮日批
+                logger.warning("退市清单拉取异常(trade_date=%s)：本次跳过: %s", trade_date, e)
+                delisted = []
+            if delisted:
+                upsert_delisted_masters(delisted, db_path=db_path)
+                delist_state = "refreshed"
+            else:
+                logger.warning("退市清单拉取失败/空(trade_date=%s)：沿用既有退市数据", trade_date)
 
         meta = {
             "last_success_date": trade_date,
@@ -157,6 +173,7 @@ def run_market_snapshot_batch(
             "rebased": len(factors),
             "suspended": sum(1 for row in rows if row.get("is_suspended") == 1),
             "master": master_state,
+            "delist_master": delist_state,
             "calendar": calendar_state,
             "spot_source": spot_source,
         }

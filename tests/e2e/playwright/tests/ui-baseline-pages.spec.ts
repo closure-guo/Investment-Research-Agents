@@ -23,7 +23,9 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from '@
  *   （防止「CDN 未加载完 → 图标缺失」的偶发差异）；
  * - 侧栏：等 /api/sessions 返回（骨架 → 「暂无历史会话」）且 framer-motion 入场
  *   动画落定（JS 驱动动画不受截图 animations:'disabled' 覆盖）；
- * - 每页各自锚点（见 CAPTURES），等真实数据到达后的稳定终态；
+ * - 每页各自锚点（见 CAPTURES），等真实数据到达后的稳定终态；/track-record 另经
+ *   settle 钩子等成绩单区块（GET /api/scorecards）落定、断言其族空态文案，并把窗口
+ *   钉回顶部（App 外壳的 scroll-to-bottom 竞态会让 sticky 侧栏在成图中位移）；
  * - 无 waitForTimeout、无 route mock（stub 由后端 TESTING=1 承担）。
  *
  * 矩阵（页面 × 主题 → 基线文件名，共 7 × 2 = 14 张）：
@@ -33,7 +35,9 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from '@
  *   /settings       settings-llm-light/dark.png       设置中心默认分区（LLM 配置）
  *                   settings-cache-light/dark.png     缓存管理分区（settings-nav-cache）
  *                   settings-monitor-light/dark.png   数据监控分区（settings-nav-monitor）
- *   /screening      screening-light/dark.png          空选股池（先 screening_reset）
+ *   /screening      screening-light/dark.png          空选股池（先 screening_reset；
+ *                                                      温度计专属空库 → 「未接入」空态；
+ *                                                      事件观察专属空库 → 「清单为空」空态）
  *
  * Mask（唯一一处，非跳过页面）：
  * - /track-record 总览「截至」卡显示后端 _track_as_of（北京时间当天，跨日必变）→
@@ -62,6 +66,8 @@ type Capture = {
   anchor: (page: Page) => Locator
   /** 进页就绪后的额外交互（设置中心切分区） */
   act?: (page: Page) => Promise<void>
+  /** 截图前等新增异步区块落定（可选；见 track-record 成绩单区块：晚于总览锚点到达） */
+  settle?: (page: Page) => Promise<void>
   /** 截图前复位数据前提（经 /api/test/seed 真实接口） */
   reset?: (request: APIRequestContext) => Promise<void>
   /** 文档化 mask（见文件头：仅 track-record 的当天日期） */
@@ -141,6 +147,28 @@ const CAPTURES: Capture[] = [
     url: '/track-record',
     anchor: (page) => page.getByTestId('track-record-summary'),
     reset: resetTrackRecord,
+    // add-strategy-family-scorecards 增补（2026-10-18 基线重采）：成绩单区块自带
+    // GET /api/scorecards 取数，晚于总览锚点到达——只等总览会在「加载中…」与终态之间
+    // 抢跑（区块高度随状态变化 → fullPage 截图整体高度不稳）。故截图前显式等该区块落定，
+    // 并把「reset 后必为确定态」钉死：两族数据面（predictions/paper_equity）均被
+    // track_record_reset 清空 → 默认选中族走族空态「暂无样本」——其中不含 as_of 日期、
+    // 容量金额等随时间/外部变化的读数，故无需额外 mask（四种原因码文案由前端 REASON_LABEL
+    // 常量表渲染，无本地化/时间成分）。
+    settle: async (page) => {
+      await expect(page.getByTestId('scorecard-family-tabs')).toBeVisible()
+      await expect(page.getByTestId('scorecard-empty')).toHaveText('暂无样本')
+      // 捕获口径钉死（2026-10-18 基线重采时复现，证据见 task-6-report.md）：
+      // ① 竞态——App 外壳挂载即调度一次 scroll-to-bottom（frontend/src/App.tsx
+      //    的 scrollToBottom；deps=[messages] 使其在非聊天页也执行一次），滚动目标是
+      //    当时刻的 document.body.scrollHeight，本页高度又随异步区块（成绩单/指数对比等）
+      //    到达而增长 → 同一版本实测 scrollY 会落在 222 或 300 两态；
+      // ② 成像——本页侧栏为 sticky，fullPage 截图在「文档全高」视口下绘制，成图中侧栏
+      //    整体随 scrollY 等量下移（实测 scrollY +300 → 侧栏下移 300px，可复现），
+      //    于是滚动竞态直接变成基线假红。
+      // 故截图前把窗口钉回顶部并断言生效：基线口径固定为「页面顶部态」，不再随竞态漂移。
+      await page.evaluate(() => window.scrollTo(0, 0))
+      expect(await page.evaluate(() => window.scrollY)).toBe(0)
+    },
     masks: (page) => [page.getByTestId('track-record-summary').getByText(/^\d{4}-\d{2}-\d{2}$/)],
   },
   {
@@ -169,6 +197,29 @@ const CAPTURES: Capture[] = [
     url: '/screening',
     anchor: (page) => page.getByTestId('screening-empty'),
     reset: resetScreening,
+    // add-crowding-regime-positioning T8 增补（2026-10-18 基线重采）：市场温度计区块
+    // 是滚动容器首子节点，自带 GET /api/regime 取数，晚于 screening-empty 锚点到达——
+    // 只等锚点会在「加载中…」与终态之间抢跑（同一版本像素随状态漂移）。专属库
+    // REGIME_DB_PATH=data/test-e2e-ui-baseline-regime.db 为**空库** → 该区块必为确定的
+    // missing 空态「温度计未接入：暂无市场状态数据」，不含日期/金额等随时间变化的
+    // 读数，故无需额外 mask（mask 与容差均未改动）。此处把前提钉死：若未来造数写入
+    // 该库，显式失败而不是让基线悄悄漂移。
+    settle: async (page) => {
+      await expect(page.getByTestId('market-regime-card')).toBeVisible()
+      await expect(page.getByTestId('regime-empty')).toHaveText(
+        '温度计未接入：暂无市场状态数据（等待日批采集）'
+      )
+      // add-event-driven-lane T8 增补（2026-10-18 基线二次重采）：事件观察区块紧随
+      // 温度计之后，自带 GET /api/events/watchlist 取数，同样晚于 screening-empty 锚点
+      // 到达（区块高度随「加载中…/清单行/空态」变化 → fullPage 成图整体高度不稳）。
+      // 专属库 EVENTS_DB_PATH=data/test-e2e-ui-baseline-events.db 为**空库** → 必为
+      // 确定的空态文案（无日期/金额类读数，故无需额外 mask；mask 与容差均未改动）。
+      // 同款钉死前提：若未来造数写入该库，此处显式失败而不是让基线悄悄漂移。
+      await expect(page.getByTestId('event-watchlist-card')).toBeVisible()
+      await expect(page.getByTestId('event-watchlist-empty')).toHaveText(
+        '事件观察清单为空：暂无通过分诊的事件（等待日批抓取与分诊）'
+      )
+    },
   },
 ]
 
@@ -180,6 +231,7 @@ test.describe('打底前页面视觉基线（unify-ui-design-system T1）', () =
         await gotoWithTheme(page, capture.url, theme)
         if (capture.act) await capture.act(page)
         await expect(capture.anchor(page)).toBeVisible()
+        if (capture.settle) await capture.settle(page)
         await expect(page).toHaveScreenshot(`${capture.name}-${theme}.png`, {
           fullPage: true,
           animations: 'disabled',

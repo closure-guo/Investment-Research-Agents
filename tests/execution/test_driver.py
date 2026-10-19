@@ -41,6 +41,7 @@ from finance_agent.execution.store import (
     list_signals,
     write_position,
 )
+from finance_agent.outcome.regime.model import upsert_regime_daily
 from finance_agent.outcome.track_record.model import init_predictions, insert_prediction
 
 _AS_OF = "2026-10-14"
@@ -173,6 +174,14 @@ def test_decision_to_position_closed_loop(tmp_path):
         "skipped_symbols": [],
         "skipped_backlog": 0,
         "skipped_unapproved": 0,
+        # regime 未接入（未传 regime_db_path，conftest 已隔离 REGIME_DB_PATH）：
+        # 缺失披露式降级，系数 1.0 不影响本用例手算结果
+        "regime": {
+            "state": None,
+            "multiplier": 1.0,
+            "source_date": None,
+            "no_regime_data": True,
+        },
     }
     signals = list_signals(db_path=exe_db)
     assert len(signals) == 1
@@ -304,6 +313,12 @@ def test_missing_snapshot_still_converts_decisions_to_signals(tmp_path):
         "skipped_symbols": [],
         "skipped_backlog": 0,
         "skipped_unapproved": 0,
+        "regime": {
+            "state": None,
+            "multiplier": 1.0,
+            "source_date": None,
+            "no_regime_data": True,
+        },
     }
     signals = list_signals(db_path=exe_db)
     assert len(signals) == 1 and signals[0].decision_id == prediction_id
@@ -458,6 +473,12 @@ def test_empty_library_returns_zero_summary(tmp_path):
         "skipped_symbols": [],
         "skipped_backlog": 0,
         "skipped_unapproved": 0,
+        "regime": {
+            "state": None,
+            "multiplier": 1.0,
+            "source_date": None,
+            "no_regime_data": True,
+        },
     }
 
 
@@ -553,3 +574,168 @@ def test_malformed_rationale_skipped_without_blocking_batch(tmp_path):
     assert summary["skipped_symbols"] == ["600000.SH"]
     signals = list_signals(db_path=exe_db)
     assert [s.decision_id for s in signals] == [good_id]
+
+
+# ── 11. 市场状态总仓位系数（add-crowding-regime-positioning） ─────────────────
+
+_NO_REGIME_DATA = {
+    "state": None,
+    "multiplier": 1.0,
+    "source_date": None,
+    "no_regime_data": True,
+}
+
+
+def _seed_regime_row(regime_db: Path, trade_date: str, *, small_pctile: float = 0.85) -> None:
+    """造一行 regime 指标：默认 pctile 0.85 → elevated（系数 0.5，默认配置）。"""
+    upsert_regime_daily(
+        trade_date,
+        {
+            "small_cap_share": 0.1,
+            "up_count": 1,
+            "down_count": 1,
+            "flat_count": 0,
+            "limit_up_count": 0,
+            "limit_down_count": 0,
+            "total_amount": 100.0,
+        },
+        {"small_cap_share_pctile": small_pctile, "total_amount_pctile": 0.5},
+        computed_at="2026-10-16T15:35:00",
+        db_path=regime_db,
+    )
+
+
+def _closed_loop_setup(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """闭环造数（同 §1）：1 条买入观点 + 600519 快照（amount 最小 → 滑点 0.002）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_prediction(), db_path=dec_db)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+    return dec_db, exe_db, snap_db
+
+
+def test_regime_elevated_halves_target_weight_and_records_summary(tmp_path, monkeypatch):
+    """spec 场景「系数缩放」：elevated 0.5 → 目标权重减半 + 逐票 REGIME_SCALE + 摘要记状态。
+
+    手算：equity = 1,000,000；目标权重 20% × 0.5 = 10% → 目标市值 100,000；
+    目标股数 = floor(100,000 / 10.00 / 100) × 100 = 10,000；成交价 10.02（滑点 0.002）；
+    成交额 = 100,200.00；佣金 = max(5, 100,200 × 0.00025 = 25.05) = 25.05
+    → 扣款 100,225.05 → 余额 899,774.95。
+
+    逐票 ``REGIME_SCALE`` 经 ``aggregate_targets`` 出口观测（订单表不存调整码，
+    spy 调真实实现后捕获返回值——同时钉住「driver 透传系数」）。
+    """
+    import finance_agent.execution.driver as driver_module
+
+    dec_db, exe_db, snap_db = _closed_loop_setup(tmp_path)
+    regime_db = tmp_path / "regime.db"
+    today = date.today().isoformat()
+    _seed_regime_row(regime_db, today)
+    captured: list = []
+    real_aggregate = driver_module.aggregate_targets
+
+    def spy(signals, **kwargs):
+        result = real_aggregate(signals, **kwargs)
+        captured.append(result)
+        return result
+
+    monkeypatch.setattr(driver_module, "aggregate_targets", spy)
+    summary = run_execution_daily(
+        db_path=dec_db,
+        execution_db_path=exe_db,
+        snapshot_db_path=snap_db,
+        regime_db_path=regime_db,
+    )
+
+    assert summary["regime"] == {
+        "state": "elevated",
+        "multiplier": 0.5,
+        "source_date": today,
+    }
+    assert captured and captured[0], "聚合必须被调用且产出目标"
+    assert all("REGIME_SCALE" in position.adjustments for position in captured[0])
+
+    orders = list_orders(db_path=exe_db)
+    assert len(orders) == 1
+    assert (orders[0]["side"], orders[0]["qty"]) == ("buy", 10000)
+    assert orders[0]["fill_price"] == 10.02 and orders[0]["fee"] == 25.05
+    assert PaperBroker(exe_db).query_cash() == 899_774.95
+
+
+def test_missing_regime_row_degrades_with_disclosure(tmp_path):
+    """spec 场景「状态数据缺失披露式降级」：无 regime 行 → 1.0 + ``no_regime_data``，
+    聚合结果与基线一致（20,000 股）。"""
+    dec_db, exe_db, snap_db = _closed_loop_setup(tmp_path)
+
+    summary = run_execution_daily(
+        db_path=dec_db,
+        execution_db_path=exe_db,
+        snapshot_db_path=snap_db,
+        regime_db_path=tmp_path / "empty-regime.db",
+    )
+
+    assert summary["regime"] == _NO_REGIME_DATA
+    orders = list_orders(db_path=exe_db)
+    assert len(orders) == 1 and orders[0]["qty"] == 20000
+    assert PaperBroker(exe_db).query_cash() == 799_549.90
+
+
+def test_stale_regime_row_degrades_with_disclosure(tmp_path):
+    """陈旧（> 7 自然日）→ 同缺失处理：系数 1.0 + ``no_regime_data``。"""
+    dec_db, exe_db, snap_db = _closed_loop_setup(tmp_path)
+    regime_db = tmp_path / "regime.db"
+    stale_date = (date.today() - timedelta(days=10)).isoformat()
+    _seed_regime_row(regime_db, stale_date, small_pctile=0.99)
+
+    summary = run_execution_daily(
+        db_path=dec_db,
+        execution_db_path=exe_db,
+        snapshot_db_path=snap_db,
+        regime_db_path=regime_db,
+    )
+
+    assert summary["regime"] == _NO_REGIME_DATA
+    assert list_orders(db_path=exe_db)[0]["qty"] == 20000
+
+
+def test_corrupt_regime_db_degrades_without_failing_job(tmp_path):
+    """regime 库损坏（非 SQLite 文件）→ 同缺失处理并留痕；日批照常完成（MUST NOT 失败）。"""
+    dec_db, exe_db, snap_db = _closed_loop_setup(tmp_path)
+    regime_db = tmp_path / "corrupt-regime.db"
+    regime_db.write_bytes(b"not a sqlite database")
+
+    summary = run_execution_daily(
+        db_path=dec_db,
+        execution_db_path=exe_db,
+        snapshot_db_path=snap_db,
+        regime_db_path=regime_db,
+    )
+
+    assert summary["regime"] == _NO_REGIME_DATA
+    assert summary["orders_placed"] == 1
+    assert list_orders(db_path=exe_db)[0]["qty"] == 20000
+
+
+def test_corrupt_regime_config_degrades_without_failing_job(tmp_path, monkeypatch):
+    """regime 配置损坏（ValueError）→ 同缺失处理（披露式降级），执行日批不得失败。"""
+    dec_db, exe_db, snap_db = _closed_loop_setup(tmp_path)
+    regime_db = tmp_path / "regime.db"
+    today = date.today().isoformat()
+    _seed_regime_row(regime_db, today)
+    bad_config = tmp_path / "bad-regime.json"
+    bad_config.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("REGIME_CONFIG_PATH", str(bad_config))
+
+    summary = run_execution_daily(
+        db_path=dec_db,
+        execution_db_path=exe_db,
+        snapshot_db_path=snap_db,
+        regime_db_path=regime_db,
+    )
+
+    assert summary["regime"] == _NO_REGIME_DATA
+    assert list_orders(db_path=exe_db)[0]["qty"] == 20000

@@ -69,6 +69,10 @@ export default defineConfig({
     // paper_equity 双曲线种子）→ 同迁入 track-record 专属 config（testMatch 显式收录，
     // 后端带 SESSIONS_DB_PATH + EXECUTION_DB_PATH 双隔离）
     'paper-broker.spec.ts',
+    // add-strategy-family-scorecards：策略族成绩单 spec 同属战绩页造数面（每例
+    // track_record_reset 清共享库的 predictions/paper_equity）→ 归入 track-record
+    // 专属 config（那边 testMatch 显式收录）；文件名无 track-record- 前缀，故此处单列
+    'strategy-scorecard.spec.ts',
     // eval-ops 手动补跑用例在服务端同步执行 20-60s（AKShare 重试退避），与本套件并行时
     // 独占单进程后端+共享 SQLite 写窗口致流式用例随机红（issue #252，trace 实证）——
     // 迁入 playwright.eval-ops.config.ts 专属端口对（8005/5178）物理隔离，默认套件恢复并行门禁
@@ -103,8 +107,12 @@ export default defineConfig({
       // 监控 E2E 的 fixture 快照由 spec 直接写文件，绝不能落到生产快照
       // data/factor_research/status.json（采集器运行时产物）；LAUNCHER_PATH 同纪律
       // （delta add-factor-research-selfheal：心跳 fixture 也不得落生产 launcher.json）
+      // REGIME_DB_PATH 同理（delta add-crowding-regime-positioning T8）：市场温度计 E2E 的
+      // seed/regime_reset 会清 regime_daily 全表，绝不能落到开发库 data/regime.db
+      // EVENTS_DB_PATH 同理（delta add-event-driven-lane T8）：事件观察区块 E2E 的
+      // seed/events_reset 会清事件线四表，绝不能落到开发库 data/events.db
       command: 'uv run uvicorn finance_agent.api:app --port 8000',
-      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json', FACTOR_RESEARCH_LAUNCHER_PATH: 'data/test-e2e-factor-research-launcher.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
+      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', REGIME_DB_PATH: 'data/test-e2e-regime.db', EVENTS_DB_PATH: 'data/test-e2e-events.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json', FACTOR_RESEARCH_LAUNCHER_PATH: 'data/test-e2e-factor-research-launcher.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
       url: 'http://localhost:8000/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
