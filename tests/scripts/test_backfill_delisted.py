@@ -4,7 +4,9 @@
 (c) 源无历史可得 → 计数 + 代码明细（如实标注，不伪造）；(d) ``list_date`` 缺失 →
 窗口不可得明细、不取数；(e) ``--dry-run`` 只计数不写库；(f) 断点续跑跳过；
 (g) ``--limit`` 截断；(h) 宿主机写护栏沿用（拒绝时退 2、命令指向本脚本）；
-(i) 主表无退市标的 → 退 2（禁止静默空跑）。
+(i) 主表无退市标的 → 退 2（禁止静默空跑）；
+(j) 窗口内已有日批行（``prev_close`` 非空）不被回填覆盖 → ``daily_overlap`` 留痕
+（issue #404）。
 
 stub client 注入 ``fetch_symbol_history_raw_qfq``；tmp 快照库经 ``upsert_delisted_masters``
 造主表。
@@ -77,7 +79,7 @@ def _head_frame() -> pd.DataFrame:
 
 
 def _row(code: str) -> dict:
-    """运行期日批形状的行（字段齐备），用于构造「部分覆盖」场景。"""
+    """运行期日批形状的行（字段齐备 + 状态位/前收盘非空），用于覆盖守卫场景。"""
     return {
         "code": code,
         "name": "退市样本",
@@ -87,7 +89,31 @@ def _row(code: str) -> dict:
         "amount": 1_000_000.0,
         "high": 10.1,
         "low": 9.9,
+        "pct_chg": 5.0,
+        "prev_close": 10.0,
+        "is_st": 1,
+        "is_suspended": 1,
+        "limit_up_sealed": 1,
+        "limit_down_sealed": 0,
+        "listed_days": 9000,
+        "list_date": "1998-01-01",
     }
+
+
+def _snapshot_row(db: Path, code: str, trade_date: str) -> dict:
+    """读单行关键字段（断言日批状态位是否被回填覆盖）。"""
+    conn = _connect(db)
+    try:
+        row = conn.execute(
+            "SELECT prev_close, pct_chg, is_st, is_suspended, limit_up_sealed, amount "
+            "FROM market_snapshot WHERE code = ? AND trade_date = ?",
+            (code, trade_date),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    keys = ["prev_close", "pct_chg", "is_st", "is_suspended", "limit_up_sealed", "amount"]
+    return dict(zip(keys, row, strict=True))
 
 
 def _seed_master(db: Path, *, codes: tuple[str, ...] = (_DELISTED, _LIVE)) -> None:
@@ -200,9 +226,10 @@ class TestRunBackfillDelisted:
         assert second["partial_overlap"] == []
 
     def test_single_window_row_is_not_skipped(self, tmp_path):
-        """F1（先红）：窗口内仅 1 行（如运行期日批行）→ 不得算覆盖，必须重取。
+        """F1（先红）：窗口内仅 1 行（运行期日批行）→ 不得算覆盖，必须重取。
 
         旧判据（「窗口内有行且字段齐备」）会让整票被跳过、``skipped_resumed`` 谎报覆盖。
+        #404：重取也不得覆盖该日批行的状态位/前收盘（``daily_overlap`` 留痕）。
         """
         db = tmp_path / "snap.db"
         _seed_master(db, codes=(_DELISTED,))
@@ -216,8 +243,45 @@ class TestRunBackfillDelisted:
         assert summary["skipped_resumed"] == 0
         assert summary["symbols_ok"] == 1
         assert summary["partial_overlap"] == [_DELISTED], "部分覆盖如实标注（不谎报覆盖）"
-        # INSERT OR REPLACE 幂等：既有日批行被覆盖，窗口行补齐
+        assert summary["daily_overlap"] == [
+            {"code": _DELISTED, "dates": ["2020-06-29"], "count": 1}
+        ]
+        # 窗口行补齐，但既有日批行原样保留（不被回填行 INSERT OR REPLACE 覆盖）
         assert _market_rows(db, _DELISTED) == _WINDOW_DATES
+        daily = _snapshot_row(db, _DELISTED, "2020-06-29")
+        assert daily["prev_close"] == 10.0
+        assert daily["pct_chg"] == 5.0
+        assert daily["is_st"] == 1
+        assert daily["is_suspended"] == 1
+        assert daily["limit_up_sealed"] == 1
+        # 非重叠日仍由回填行补齐（回填行不带日批状态位）
+        filled = _snapshot_row(db, _DELISTED, "2020-06-24")
+        assert filled["prev_close"] is None
+        assert filled["is_suspended"] == 0
+
+    def test_all_daily_overlap_days_are_not_overwritten(self, tmp_path):
+        """#404：窗口内所有日期均为日批行 → 不写入、不覆盖，``daily_overlap`` 全量留痕。"""
+        db = tmp_path / "snap.db"
+        _seed_master(db, codes=(_DELISTED,))
+        for i, day in enumerate(_WINDOW_DATES):
+            row = _row(_DELISTED)
+            if i == 0:  # 让整窗覆盖判据不成立（complete=False）→ 必须取数走守卫
+                row["amount"] = None
+            write_snapshot_rows(day, [row], db_path=db)
+        client = FakeDelistedClient()
+
+        summary = run_backfill_delisted(client=client, db_path=db, sleep_seconds=0)
+
+        assert client.calls == [(_DELISTED, "19980101", "20200630")]
+        assert summary["rows_written"] == 0
+        assert summary["symbols_ok"] == 0
+        assert summary["daily_overlap"] == [
+            {"code": _DELISTED, "dates": list(_WINDOW_DATES), "count": 5}
+        ]
+        for day in _WINDOW_DATES:
+            assert _snapshot_row(db, _DELISTED, day)["prev_close"] == 10.0
+        payload = json.loads(get_meta("delist_backfill_missing", db_path=db))
+        assert payload["daily_overlap"] == summary["daily_overlap"]
 
     def test_calendar_anchor_allows_skip_when_head_is_first_trading_day(self, tmp_path):
         """F1：窗口起点非交易日 → 锚点 = 日历中首个 ≥ 起点的交易日（头部触及即覆盖）。"""
@@ -304,6 +368,7 @@ class TestMissingSummaryPersistence:
         assert payload["history_missing"] == [_NO_HISTORY]
         assert payload["window_missing"] == [_WINDOW_MISSING]
         assert payload["history_missing_count"] == 1
+        assert payload["daily_overlap"] == []
         assert payload["updated_at"]
 
     def test_meta_key_updated_on_next_run(self, tmp_path):
