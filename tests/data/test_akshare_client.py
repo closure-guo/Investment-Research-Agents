@@ -93,6 +93,42 @@ class TestFetchBalanceSheet:
         stock_arg = args[1].get("stock", args[0][0] if args[0] else "")
         assert "sz000858" in stock_arg
 
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_bj_920_segment_uses_bj_prefix(self, mock_ak, client):
+        """北交所 92 新号段报表链 → bj（issue #397）；sh/sz 会拿到空响应。"""
+        mock_ak.stock_financial_report_sina.return_value = pd.DataFrame(
+            {"报告日": ["20241231", "20231231"], "资产总计": [100.0, 90.0]}
+        )
+        client.fetch_balance_sheet("920002")
+        args = mock_ak.stock_financial_report_sina.call_args
+        stock_arg = args[1].get("stock", args[0][0] if args[0] else "")
+        assert stock_arg == "bj920002"
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_900_segment_remains_sh(self, mock_ak, client):
+        """沪 B 900xxx 不得被 92 分支一刀切带走（仍为 sh）。"""
+        mock_ak.stock_financial_report_sina.return_value = pd.DataFrame(
+            {"报告日": ["20241231", "20231231"], "资产总计": [100.0, 90.0]}
+        )
+        client.fetch_balance_sheet("900901")
+        args = mock_ak.stock_financial_report_sina.call_args
+        stock_arg = args[1].get("stock", args[0][0] if args[0] else "")
+        assert stock_arg == "sh900901"
+
+
+class TestAddPrefix:
+    """`_add_prefix` 前缀矩阵（报表链四消费方共享，issue #397）。"""
+
+    def test_prefix_matrix(self):
+        from finance_agent.data.akshare_client import _add_prefix
+
+        assert _add_prefix("920002") == "bj920002"
+        assert _add_prefix("920008") == "bj920008"
+        assert _add_prefix("900901") == "sh900901"
+        assert _add_prefix("600519") == "sh600519"
+        assert _add_prefix("000858") == "sz000858"
+        assert _add_prefix("bj920002") == "bj920002"  # 已带前缀幂等，不重复拼接
+
 
 class TestFetchIncomeStatement:
     @patch("finance_agent.data.akshare_client.ak")

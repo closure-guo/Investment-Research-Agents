@@ -215,9 +215,11 @@ _TENCENT_BATCH_TIMEOUT_S = 20
 
 
 def _add_prefix(code: str) -> str:
-    """给股票代码加 sh/sz 前缀。"""
-    if code.startswith(("sh", "sz")):
+    """给股票代码加 sh/sz/bj 前缀（报表链消费方共享；issue #397）。"""
+    if code.startswith(("sh", "sz", "bj")):
         return code
+    if code.startswith("92"):  # 北交所 92 新号段（须先于 9 分支，900xxx 沪 B 仍走 sh）
+        return f"bj{code}"
     if code.startswith(("6", "9")):
         return f"sh{code}"
     return f"sz{code}"
