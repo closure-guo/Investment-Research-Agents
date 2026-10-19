@@ -171,28 +171,67 @@ export function FactorResearchPage({
   const stale = data?.stale === true
   const collectedAt = data?.collected_at ? formatSessionTime(data.collected_at) : '—'
 
-  // ── 控制面派生（开关位置 = 快照实态；通道存活证据 = 新鲜快照）──
+  // ── 控制面派生（快照实态优先；离线时以持久化意图为可信位置）──
   const control = data?.control ?? null
-  const running = supervisor?.running === true
+  const launcher = data?.launcher ?? null
+  const agentInfo = data?.agent ?? null
+  const honor = control?.honor ?? 'unavailable'
+  const snapshotLive = data !== null && data.available === true && !stale
+  const running = snapshotLive ? supervisor?.running === true : control?.desired_running === true
   const pending = control?.pending === true
-  const channelReady = data !== null && data.available === true && !stale
-  const switchDisabled = submitting || pending || channelBlocked || !channelReady
+  // honor 由后端判定；live 额外要求快照确实新鲜（防御后端/夹具不一致）
+  const reachable = (honor === 'live' && snapshotLive) || honor === 'launcher'
+  const switchDisabled = submitting || pending || channelBlocked || !reachable
+
+  const requestedAt = control?.requested_at ? formatSessionTime(control.requested_at) : null
+  const awaitingLauncher =
+    honor === 'launcher' &&
+    control?.requested_at != null &&
+    data?.collected_at != null &&
+    Date.parse(control.requested_at) > Date.parse(data.collected_at)
 
   let controlStateText: string
   if (data === null) {
     controlStateText = '—'
   } else if (data.available !== true) {
-    controlStateText =
-      data.reason === 'corrupt' ? '控制通道未接入（快照损坏）' : '控制通道未接入（采集器未接入）'
+    if (honor === 'launcher') {
+      controlStateText = '研究侧启动中（等待首个快照）——启动器已确认代理存活'
+    } else if (data.reason === 'corrupt') {
+      controlStateText = '控制通道未接入（快照损坏）'
+    } else {
+      controlStateText = '控制通道未接入（采集器未接入）'
+    }
   } else if (stale) {
-    controlStateText = '控制通道暂不可用（数据已陈旧）'
+    if (honor === 'launcher') {
+      controlStateText = awaitingLauncher
+        ? `已请求（${requestedAt}），等待启动器拉起`
+        : `研究侧离线（最近采集 ${collectedAt}）——将在 ≤3 分钟内自动拉起`
+    } else {
+      controlStateText = '控制通道暂不可用（研究侧与启动器均离线）'
+    }
   } else if (pending) {
-    controlStateText = control?.requested_at
-      ? `切换中…（${formatSessionTime(control.requested_at)} 发起，等待研发侧受理）`
-      : '切换中…（等待研发侧受理）'
+    const failedAction =
+      agentInfo?.last_action === 'start-failed' || agentInfo?.last_action === 'stop-failed'
+        ? agentInfo.last_action
+        : null
+    if (failedAction !== null) {
+      const label = failedAction === 'start-failed' ? '启动失败' : '停止失败'
+      const at = agentInfo?.last_action_at ? formatSessionTime(agentInfo.last_action_at) : '—'
+      controlStateText = `${label}（${at}）：${agentInfo?.last_error ?? '原因未记录'}；代理将自动重试`
+    } else {
+      controlStateText = control?.requested_at
+        ? `切换中…（${formatSessionTime(control.requested_at)} 发起，等待研发侧受理）`
+        : '切换中…（等待研发侧受理）'
+    }
   } else {
     controlStateText = running ? '已开启' : '已关闭'
   }
+
+  const recentDurations = (data?.sessions ?? [])
+    .filter((s) => s.duration_s !== null)
+    .slice(0, 3)
+    .map((s) => s.duration_s as number)
+  const shortSessions = recentDurations.length === 3 && recentDurations.every((d) => d < 120)
 
   const onSwitchClick = () => {
     if (switchDisabled) return
@@ -356,6 +395,20 @@ export function FactorResearchPage({
               >
                 <i className="fas fa-exclamation-triangle"></i>
                 数据已陈旧（最近采集 {collectedAt}）——采集器可能已停止，以下为最后一次快照
+                {honor === 'launcher' && launcher?.checked_at != null && (
+                  <>；启动器正在按节拍尝试恢复（最近检查 {formatSessionTime(launcher.checked_at)}）</>
+                )}
+              </div>
+            )}
+
+            {shortSessions && (
+              <div
+                data-testid="factor-research-short-sessions"
+                className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs"
+                style={{ background: 'var(--status-warning-default)', color: 'white' }}
+              >
+                <i className="fas fa-exclamation-triangle"></i>
+                连续短命会话：最近 3 次均在 {recentDurations.join(' / ')} 秒内结束——疑似凭证或配额问题（研发侧将退避重试）
               </div>
             )}
 

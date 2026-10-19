@@ -94,3 +94,48 @@ wsl -d rdagent -u root -- bash /root/status-factor-research.sh
   期望=实态 → 零动作；文件缺失/损坏 → **不干预**（fail-safe）；
 - 手动 `start/stop` 脚本会同步写期望态（否则代理会把「手动停止」按旧意图扳回去）；
 - 代理与看护都是**手动常驻**（distro 重启后需重新 `start`；不做开机自启——与看护同级运维前提）。
+  → 2026-10-19 起由「自愈启动器」接管代理存活，见下一节（看护启停仍由控制意图决定）。
+
+## 2026-10-19：自愈启动器与离线可开（delta add-factor-research-selfheal）
+
+**失效形态**：2026-10-18 23:59 WSL 虚拟机停机 → 代理/看护/采集全消失，`status.json` 定格 19 小时；
+页面进入「数据已陈旧 + 控制通道不可用」，而能拉起研究侧的只有人工登录 distro 跑脚本。
+
+**机制**：Windows 计划任务（登录时 + 每 2 分钟）→ `wsl -d rdagent -u root -e bash
+/root/ensure-factor-research.sh` → 代理 `--launcher-tick`：确保代理守护存活（单例锁复用
+`--ensure-daemon` 语义）+ 原子写心跳 `data/factor_research/launcher.json`，随即退出。
+**启动器不碰控制文件、不直接启停看护**（意图唯一写入面与启停单一实现不变）。
+
+**部署**：
+
+```bash
+# 1) 推 distro 入口与更新后的代理/采集器（去 CRLF）
+wsl -d rdagent -u root -- bash -c "tr -d '\\r' > /root/ensure-factor-research.sh" < tests/scripts/spike/ensure-factor-research.sh
+wsl -d rdagent -u root -- bash -c "tr -d '\\r' > /root/factor_research_agent.py"   < tests/scripts/spike/factor_research_agent.py
+wsl -d rdagent -u root -- bash -c "tr -d '\\r' > /root/collect_factor_status.py"  < tests/scripts/spike/collect_factor_status.py
+wsl -d rdagent -u root -- chmod +x /root/ensure-factor-research.sh
+
+# 2) 生成首个心跳（不动看护、不改意图）
+wsl -d rdagent -u root -e bash /root/ensure-factor-research.sh   # 期望输出 launcher tick: agent_ok=True pid=<n>
+
+# 3) 注册/更新计划任务（幂等；-Unregister 卸载）
+powershell -ExecutionPolicy Bypass -File scripts/register-factor-research-task.ps1
+```
+
+**心跳契约**：`checked_at` / `checked_at_epoch` / `agent_pid` / `agent_ok` / `snapshot_age_s` / `detail`；
+新鲜阈值 **300 秒**（2× 节拍 + 余量），`agent_ok=true` 且新鲜 → 后端 `control.honor="launcher"`
+（离线受理，ETA 披露 180 秒）；心跳缺失/损坏/过期 → `honor="unavailable"`（页面如实禁用）。
+
+**排障**：
+
+| 现象 | 检查 |
+|---|---|
+| `launcher.json` 不更新 | `Get-ScheduledTask finance-agent-factor-research-launcher` 状态；任务历史；`wsl -d rdagent -u root -e bash /root/ensure-factor-research.sh` 手动跑一次 |
+| 心跳有但 `agent_ok=false` | `detail` 字段 + `/root/rdagent-work/factor_research_logs/agent.log`（代理拉不起来） |
+| 页面「研究侧离线——≤3 分钟内自动拉起」但一直不起 | 确认计划任务在跑；`wsl -d rdagent -u root -- tail -50 /root/rdagent-work/factor_research_logs/agent.log` |
+| 页面「启动失败（原因）」 | 快照 `agent.last_action=start-failed` + `last_error`（key 过期/launch 脚本缺失等），修好后代理下轮自动重试 |
+
+**回滚**：`powershell -ExecutionPolicy Bypass -File scripts/register-factor-research-task.ps1 -Unregister`
+→ 心跳停止 → `honor` 退回 `live`（页面与上一版一致）。控制文件、快照纯新增字段，旧读方忽略即可，
+零迁移。
+

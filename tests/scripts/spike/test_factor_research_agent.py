@@ -430,3 +430,91 @@ def test_tick_reflects_started_supervisor_in_snapshot(tmp_path, monkeypatch):
     action, snapshot = agent.run_tick(workdir, control, out, state)
     assert action == "started"
     assert snapshot["supervisor"]["running"] is True
+
+
+# ── agent 块：调和动作留痕（delta add-factor-research-selfheal）──
+
+
+def test_run_tick_reports_action_in_snapshot(tmp_path, monkeypatch):
+    workdir = _seed_workdir(tmp_path)
+    control = _write_control(tmp_path, True)
+    out = tmp_path / "status.json"
+    state = workdir / "factor_research_logs" / ".collector_state.json"
+    monkeypatch.setattr(agent, "reconcile_once", lambda w, c: "started")
+
+    action, snap = agent.run_tick(workdir, control, out, state)
+
+    assert action == "started"
+    assert snap["agent"]["last_action"] == "started"
+    assert isinstance(snap["agent"]["last_action_at"], str)
+    assert snap["agent"]["last_error"] is None
+
+
+def test_run_tick_start_failed_carries_error(tmp_path, monkeypatch):
+    workdir = _seed_workdir(tmp_path)
+    control = _write_control(tmp_path, True)
+    out = tmp_path / "status.json"
+    state = workdir / "factor_research_logs" / ".collector_state.json"
+    monkeypatch.setattr(agent, "reconcile_once", lambda w, c: "start-failed")
+
+    _, snap = agent.run_tick(workdir, control, out, state)
+
+    assert snap["agent"]["last_action"] == "start-failed"
+    assert snap["agent"]["last_error"]
+
+
+# ── launcher_tick：心跳 + 不动意图（delta add-factor-research-selfheal）──
+
+
+def test_launcher_tick_writes_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent, "ensure_daemon", lambda *a, **k: 4321)
+    out = tmp_path / "status.json"
+    out.write_text(json.dumps({"collected_at_epoch": int(time.time()) - 90}), encoding="utf-8")
+    launcher = tmp_path / "launcher.json"
+
+    payload = agent.launcher_tick(
+        tmp_path, tmp_path / "control.json", out, tmp_path / "state.json", launcher, 15
+    )
+
+    assert payload["agent_pid"] == 4321
+    assert payload["agent_ok"] is True
+    assert 89 <= payload["snapshot_age_s"] <= 95
+    on_disk = json.loads(launcher.read_text(encoding="utf-8"))
+    assert on_disk == payload
+    assert isinstance(on_disk["checked_at_epoch"], int)
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_launcher_tick_never_writes_control_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent, "ensure_daemon", lambda *a, **k: 1)
+    control = tmp_path / "control.json"
+    control.write_text('{"desired_running": false}', encoding="utf-8")
+    before = control.read_bytes()
+
+    agent.launcher_tick(
+        tmp_path,
+        control,
+        tmp_path / "status.json",
+        tmp_path / "state.json",
+        tmp_path / "launcher.json",
+        15,
+    )
+
+    assert control.read_bytes() == before
+
+
+def test_launcher_tick_reports_agent_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent, "ensure_daemon", lambda *a, **k: None)
+
+    payload = agent.launcher_tick(
+        tmp_path,
+        tmp_path / "control.json",
+        tmp_path / "status.json",
+        tmp_path / "state.json",
+        tmp_path / "launcher.json",
+        15,
+    )
+
+    assert payload["agent_ok"] is False
+    assert payload["agent_pid"] is None
+    assert payload["detail"]

@@ -353,11 +353,14 @@ def collect_once(
     candidates_out: Path | None = None,
     now_epoch: float | None = None,
     session_alive=None,
+    agent_meta: dict | None = None,
 ) -> dict:
     """采集一次并原子落盘；返回快照（单字段失败不阻断整体，如实置空）。
 
     ``candidates_out``（缺省 = 状态文件同目录 ``candidates.json``）：harvest 桥的
     候选文件——因子块（name/description/formulation）全局去重追加。
+    ``agent_meta``（delta add-factor-research-selfheal）：代理调和动作块（由代理传入；
+    独立采集器不传 → 写 ``agent: null``，如实表示「无调和留痕」）。
     """
     now_epoch = time.time() if now_epoch is None else now_epoch
     alive_probe = session_alive or _rdagent_session_alive
@@ -442,6 +445,7 @@ def collect_once(
             "candidates": candidates,
             "workspace_tasks": tasks,
         },
+        "agent": agent_meta,
     }
     atomic_write_json(out_path, snapshot)
     with contextlib.suppress(OSError):
