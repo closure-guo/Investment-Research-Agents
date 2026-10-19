@@ -25,12 +25,15 @@
 
 ## T5 重放实测（判据）
 
-- [ ] 生产状态副本 + 临时库：`--statuses untranslatable --limit 40` 重放
-- [ ] 读数：LLM 拒译族 21 条的转译恢复数 + 恢复族闸② |ICIR| 分布
-- [ ] 读数落档 → 验证报告 `tests/validation/2026-10-19-extend-factor-dsl-sign-extremes-validation.md`
+- [x] 生产状态副本 + 临时库：`--statuses untranslatable --limit 40` 重放（零生产写入）
+- [x] 读数：**10/40 恢复可测、0 入库**——max_ret 族 0.269–0.281；**max_ret_5d 过闸②③
+      死于闸④**（验证段 IR −0.383，首条闸②通过者）；sign 族受阻自由参数轴（obv5/pos20 恰差 1 参数）
+- [x] 读数落档 → 验证报告 `tests/validation/2026-10-19-extend-factor-dsl-sign-extremes-validation.md`
+      （含镜像因子语义新决策项）
 
 ## 收口
 
 - [x] `uv run pytest tests/factors tests/test_replay_factor_harvest.py tests/test_api_factors.py tests/test_api_screening.py -q` 全绿；ruff / mypy 干净
 - [x] `openspec validate extend-factor-dsl-sign-extremes --strict` 通过
-- [ ] 验证报告 + PR；sync + archive 在验证通过后执行
+- [x] 验证报告（含 review 修复：factor_proposal 清单同步 + NaN 口径声明）
+- [ ] sync + archive + PR（验证通过后执行）
