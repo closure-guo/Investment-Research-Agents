@@ -499,8 +499,13 @@ def check_pool_increment(
     ``correlation``（ρ）与 ``expression``；共同样本 < ``MIN_REDUNDANCY_SAMPLES``
     → 该对象跳过（2 点相关恒 ±1，不可信）。冗余比对用全样本 IC 序列（口径不变）。
 
-    增量（**样本外，评审修正 fix 2**）：池等权组合 = 池各因子逐日横截面 zscore 后
-    等权平均（E5 逐字）；增量 = IR(池+候选) − IR(池) 在**验证段**（与闸⑤同一
+    增量（**样本外，评审修正 fix 2**）：池组合 = 池各因子逐日横截面 zscore 后等权平均
+    （E5 逐字），**组合内各因子（池与候选同规则）按训练段 RankIC 符号定向后参与**
+    （fix-pool-increment-orientation：与生产选股 L2 的带符号 IC 权重模型对齐——原无方向
+    等权组合会把稳定负向因子系统性当成「拖累」拒收，而 L2 对负方向因子自动反向加权；
+    定向只用训练段、不借用验证段信息——随机因子的训练段符号来自噪声，定向不改变其中位数，
+    「噪声因子拦截」性质不变；符号不可定的池因子不参与组合、符号不可定的候选按原向参与，
+    由 ②⑤ 兜底）；增量 = IR(池+候选) − IR(池) 在**验证段**（与闸⑤同一
     ``train_validation_split`` 切分）上比较：候选与池组合同受验证段日期与同一远期
     收益约束，``≤ 0`` → ``NO_POOL_INCREMENT``；验证段共同有效日 <
     ``MIN_OOS_IR_SAMPLES``（IR 不稳）→ 同码拒收且 ``detail["reason"] =
@@ -514,9 +519,11 @@ def check_pool_increment(
     fwd = forward_returns(panel.fields["close"])
     redundancy_checked: list[int] = []
     redundancy_skipped: list[int] = []
+    pool_ic_by_id: dict[int, pd.Series] = {}
     for row in pool:
         factor_id = int(row["id"])
         pool_ic = _pool_ic_series(row, panel, fwd, db_path=db_path)
+        pool_ic_by_id[factor_id] = pool_ic
         correlation = _aligned_pearson(candidate_ic, pool_ic)
         if correlation is None:
             redundancy_skipped.append(factor_id)
@@ -544,10 +551,31 @@ def check_pool_increment(
     train_ic_dates = _purge_boundary_dates(train_dates)
     val_index = pd.Index(val_dates)
     train_index = pd.Index(train_ic_dates)
-    if pool:
-        pool_values = [evaluate(parse(str(row["expression"])), panel) for row in pool]
+    # 方向归一化（fix-pool-increment-orientation）：训练段符号定向（口径见 docstring）
+    candidate_orientation = _sign(
+        _ic_stats(candidate_ic.loc[candidate_ic.index.intersection(train_index)])[0]
+    )
+    candidate_oriented = (
+        candidate_values if candidate_orientation == 0 else candidate_values * candidate_orientation
+    )
+    pool_orientations: list[dict[str, Any]] = []
+    pool_values: list[pd.DataFrame] = []
+    for row in pool:
+        factor_id = int(row["id"])
+        stored_ic = pool_ic_by_id.get(factor_id)
+        orientation = (
+            _sign(_ic_stats(stored_ic.loc[stored_ic.index.intersection(train_index)])[0])
+            if stored_ic is not None
+            else 0
+        )
+        pool_orientations.append({"factor_id": factor_id, "orientation": orientation})
+        if orientation == 0:
+            continue  # 方向不可定的池因子不参与组合（与 L2 权重 0 = 不参与同义）
+        frame = evaluate(parse(str(row["expression"])), panel)
+        pool_values.append(frame if orientation == 1 else frame * -1)
+    if pool_values:
         pool_ic_series = _composite_ic(pool_values, fwd).dropna()
-        combined_ic_series = _composite_ic([*pool_values, candidate_values], fwd).dropna()
+        combined_ic_series = _composite_ic([*pool_values, candidate_oriented], fwd).dropna()
         shared = pool_ic_series.index.intersection(combined_ic_series.index)
         val_shared = shared.intersection(val_index)
         train_shared = shared.intersection(train_index)
@@ -555,14 +583,24 @@ def check_pool_increment(
         ir_combined = _ic_stats(combined_ic_series.loc[val_shared])[2]
         ir_pool_train = _ic_stats(pool_ic_series.loc[train_shared])[2]
         ir_combined_train = _ic_stats(combined_ic_series.loc[train_shared])[2]
+    elif pool:
+        # 池因子方向全部不可定 → 等价空池（审计：pool_orientations 如实记录全 0）
+        combined_ic_series = _composite_ic([candidate_oriented], fwd).dropna()
+        val_shared = combined_ic_series.index.intersection(val_index)
+        train_shared = combined_ic_series.index.intersection(train_index)
+        ir_pool = None
+        ir_pool_train = None
+        ir_combined = _ic_stats(combined_ic_series.loc[val_shared])[2]
+        ir_combined_train = _ic_stats(combined_ic_series.loc[train_shared])[2]
     else:
-        valid = candidate_ic.dropna()
+        original_ic = candidate_ic if candidate_orientation >= 0 else candidate_ic * -1
+        valid = original_ic.dropna()
         val_shared = valid.index.intersection(val_index)
         train_shared = valid.index.intersection(train_index)
         ir_pool = None
         ir_pool_train = None
-        ir_combined = _ic_stats(candidate_ic.loc[val_shared])[2]
-        ir_combined_train = _ic_stats(candidate_ic.loc[train_shared])[2]
+        ir_combined = _ic_stats(original_ic.loc[val_shared])[2]
+        ir_combined_train = _ic_stats(original_ic.loc[train_shared])[2]
     increment = ir_combined - (ir_pool if ir_pool is not None else 0.0)
     increment_train = ir_combined_train - (ir_pool_train if ir_pool_train is not None else 0.0)
     n_val_days = int(val_shared.size)
@@ -572,6 +610,9 @@ def check_pool_increment(
     detail: dict[str, Any] = {
         "increment": float(increment),
         "increment_train": float(increment_train),
+        "orientation": candidate_orientation,
+        "orientation_basis": "train_segment_ic_sign",
+        "pool_orientations": pool_orientations,
         "ir_pool": ir_pool,
         "ir_pool_with_candidate": float(ir_combined),
         "ir_pool_train": ir_pool_train,

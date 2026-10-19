@@ -972,7 +972,12 @@ def test_check_pool_increment_accepts_positive_increment(tmp_path):
 
 
 def test_check_pool_increment_empty_pool_uses_candidate_ir(tmp_path):
-    """空池语义：增量 = IR(候选)（与闸②重复但保留判定）；负 IR 候选被拒。"""
+    """空池语义：增量 = IR(候选)（定向后，与闸② |ICIR| 同向重复但保留判定）。
+
+    fix-pool-increment-orientation 起「负 IR 必拒」旧语义由符号归一化取代：**真实**镜像
+    候选（IC 与值取自同一表达式）按训练段符号定向后同样通过——旧用例拆开 IC 与值
+    （IC 取负、值不变）的构造不再是生产可达形态（admit_candidates 恒以 ic = IC(values) 调用）。
+    """
     db = _empty_db(tmp_path)
     panel = _pool_panel()
     candidate_ic = _factor_ic("volume", panel)
@@ -982,15 +987,16 @@ def test_check_pool_increment_empty_pool_uses_candidate_ir(tmp_path):
     assert passed.passed is True
     assert passed.detail["pool_size"] == 0
     assert passed.detail["ir_pool"] is None
+    assert passed.detail["orientation"] == 1
     assert passed.detail["increment"] == pytest.approx(passed.detail["ir_pool_with_candidate"])
     assert passed.detail["increment"] > 0.0
 
-    rejected = check_pool_increment(
-        -candidate_ic.abs(), evaluate(parse("amount"), panel), [], panel, db_path=db
-    )
-    assert rejected.passed is False
-    assert rejected.reason == "NO_POOL_INCREMENT"
-    assert rejected.detail["increment"] <= 0.0
+    mirror_values = evaluate(parse("sub(0, volume)"), panel)
+    mirror_ic = rank_ic_series(mirror_values, forward_returns(panel.fields["close"]))
+    mirror = check_pool_increment(mirror_ic, mirror_values, [], panel, db_path=db)
+    assert mirror.passed is True
+    assert mirror.detail["orientation"] == -1
+    assert mirror.detail["increment"] == pytest.approx(passed.detail["increment"], rel=1e-9)
 
 
 def test_check_pool_increment_judges_on_validation_segment(tmp_path):
@@ -1231,3 +1237,62 @@ def test_check_out_of_sample_too_short_fails_closed():
     result = check_out_of_sample(values, fwd)
     assert result.passed is False
     assert result.reason == "OOS_FAILED"
+
+
+# ── fix-pool-increment-orientation：闸④组合方向归一化 ──────────────────────
+
+
+def _ic_values(expression: str, panel: MarketPanel):
+    values = evaluate(parse(expression), panel)
+    fwd = forward_returns(panel.fields["close"])
+    return rank_ic_series(values, fwd), values
+
+
+def test_pool_increment_orients_stable_negative_candidate(tmp_path):
+    """稳定负向候选（空池）按训练段符号定向：increment = |验证段 IR| > 0。"""
+    panel = _signal_panel()
+    ic, values = _ic_values("sub(0, ts_mean(volume, 5))", panel)
+    result = check_pool_increment(ic, values, [], panel, db_path=_empty_db(tmp_path))
+    assert result.passed
+    assert result.detail["orientation"] == -1
+    assert result.detail["increment"] > 0.0
+    assert result.detail["pool_orientations"] == []
+
+
+def test_pool_increment_mirror_symmetry(tmp_path):
+    """镜像对称：正/负向同强度因子的定向增量相等（门槛未放松，只是方向归一）。"""
+    panel = _signal_panel()
+    pos_ic, pos_values = _ic_values("ts_mean(volume, 5)", panel)
+    neg_ic, neg_values = _ic_values("sub(0, ts_mean(volume, 5))", panel)
+    pos = check_pool_increment(pos_ic, pos_values, [], panel, db_path=_empty_db(tmp_path))
+    neg = check_pool_increment(neg_ic, neg_values, [], panel, db_path=_empty_db(tmp_path))
+    assert pos.passed and neg.passed
+    assert (pos.detail["orientation"], neg.detail["orientation"]) == (1, -1)
+    assert neg.detail["increment"] == pytest.approx(pos.detail["increment"], rel=1e-9)
+
+
+def test_pool_increment_undetermined_orientation_fails_closed(tmp_path):
+    """方向不可定（IC 全 NaN：零值因子）→ 按原向参与，增量不可正 → 拒收。"""
+    panel = _signal_panel()
+    ic, values = _ic_values("sub(close, close)", panel)
+    result = check_pool_increment(ic, values, [], panel, db_path=_empty_db(tmp_path))
+    assert not result.passed
+    assert result.detail["orientation"] == 0
+
+
+def test_pool_increment_orients_negative_pool_factor(tmp_path):
+    """池内含稳定负向因子：按训练段符号 −1 定向进组合（detail 留痕、组合 IR 取正）。"""
+    panel = _signal_panel()
+    db = _empty_db(tmp_path)
+    pool_id = add_factor(
+        expression="sub(0, ts_mean(volume, 5))",
+        hypothesis="测试用：负向量化因子（镜像），经训练段定向进入池组合。",
+        category="价量",
+        status="active",
+        ast_json=serialize(parse("sub(0, ts_mean(volume, 5))")),
+        db_path=db,
+    )
+    ic, values = _ic_values("ts_mean(close, 5)", panel)
+    result = check_pool_increment(ic, values, list_active_factors(db_path=db), panel, db_path=db)
+    assert result.detail["pool_orientations"] == [{"factor_id": pool_id, "orientation": -1}]
+    assert result.detail["ir_pool"] is not None and result.detail["ir_pool"] > 0.0
