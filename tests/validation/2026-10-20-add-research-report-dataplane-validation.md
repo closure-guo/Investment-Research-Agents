@@ -102,7 +102,7 @@
 
 ## 6. 未完成 / 遗留
 
-1. **prompt 未发布**：`fundamental_analyst.md`（一致预期消费）与 `report_extraction.md`（抽取合同）已改本地权威源，但 Langfuse/容器未运行，`scripts/deploy_prompts.py` 未执行——eval 门禁前必须先发布（tasks 5.3 / 8.5）。
+1. **prompt 已发布（2026-10-20 补记）**：`fundamental_analyst.md`（一致预期消费）与 `report_extraction.md`（抽取合同）已经 `scripts/deploy_prompts.py` 发布到 Langfuse production；复跑预检两文件均显示「与 Langfuse production 内容一致」。同批 `risk_judge` / `trader` 因 Langfuse 侧存量不一致被预检排除，与本 delta 无关。（tasks 5.3 / 8.5 已勾）
 2. **新浪仅四类**：实测新浪研报频道无券商晨报独立分类；晨报交叉只依赖东财单源（已写入 spec）。
 3. **新浪计数按页截断**（40 条/页）：只能做「有/无」交叉，不能做精确对账（spec 已明确）。
 4. **全量历史回填**（2024-01 起）未跑：本次只抽验两个月；正式启用前建议在容器内跑全量（约 20 个月 × 五类，受 ≥1s 限流约束）。

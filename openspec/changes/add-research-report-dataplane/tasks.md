@@ -36,7 +36,7 @@
 
 - [x] 5.1 覆盖状态查询函数：三态（无覆盖/断更/失败）+ 最新研报日期/近30日条数（TDD：600845 型断更样例返回断更态）
 - [x] 5.2 `_build_fundamental_context` 一致预期段：快照优先→按需直拉→缺失标注；无覆盖显式「无分析师覆盖」禁零值占位
-- [ ] 5.3 `fundamental_analyst.md` prompt 扩条（一致预期消费+防锚定），权威源修改后跑 `deploy_prompts.py` 发布（eval 门禁依赖）（**未完成**：prompt 权威源已改，deploy_prompts.py 待 Langfuse/容器恢复后执行）
+- [x] 5.3 `fundamental_analyst.md` prompt 扩条（一致预期消费+防锚定），权威源修改后跑 `deploy_prompts.py` 发布（eval 门禁依赖）（2026-10-20 已发布，复跑预检显示与 Langfuse production 内容一致）
 
 ## 6. 验证收口
 
@@ -59,4 +59,4 @@
 - [x] 8.2 LLM 抽取：`report_extraction` purpose + prompt 合同 + 确定性评级归一化 + 输出预算（TDD：抽取落库/已有不重复/失败降级/看空→卖出）
 - [x] 8.3 按标的合并 + 分析师上下文注入（TDD：多篇聚合、无记录不注入）
 - [x] 8.4 实跑：两份真实 PDF 抽取 + 合并读数（目标价/评级分布）补入验证报告
-- [ ] 8.5 prompt 发布：`report_extraction.md` 与 `fundamental_analyst.md` 经 `deploy_prompts.py` 发布（待 Langfuse/容器恢复）
+- [x] 8.5 prompt 发布：`report_extraction.md` 与 `fundamental_analyst.md` 经 `deploy_prompts.py` 发布（2026-10-20 已发布；同批 risk_judge/trader 因 Langfuse 侧存量不一致被预检排除，与本 delta 无关）
