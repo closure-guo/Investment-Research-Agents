@@ -259,8 +259,7 @@ def run_earnings_triage_daily(
             rows = [
                 row
                 for row in all_rows
-                if not str(row.get("available_at") or "")
-                or str(row.get("available_at")) >= since
+                if not str(row.get("available_at") or "") or str(row.get("available_at")) >= since
             ]
             skipped_historical = len(all_rows) - len(rows)
     if not rows:
