@@ -199,7 +199,7 @@ class TestCohortJobRegistration:
         mock_sched_cls.return_value = sched
         assert start_scheduler() is sched
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 24, (
+        assert len(ids) == 25, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
@@ -219,6 +219,7 @@ class TestCohortJobRegistration:
             "decision_settle_daily",
             "paper_execute_daily",
             "paper_settle_daily",
+            "auto_pool_analysis_daily",
             "daily_marking",
             "metrics_snapshot",
             "integrity_check",
@@ -544,7 +545,7 @@ class TestMisfireHardening:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 24, (
+        assert len(ids) == 25, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；

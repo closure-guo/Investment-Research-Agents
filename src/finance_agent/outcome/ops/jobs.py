@@ -64,6 +64,7 @@ from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
 from finance_agent.screening.pipeline import run_microcap_lane, run_screening_daily
+from finance_agent.screening.pool_analysis import run_pool_analysis_daily
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,9 @@ JOB_IDS: tuple[str, ...] = (
     # 16:15 分诊插在仿真执行（16:10）之后
     "earnings_triage_daily",
     "paper_settle_daily",
+    # 自动选股分析（add-auto-pool-analysis-daily-brief）：16:22——选股 15:40 完成、
+    # paper 结算 16:20 之后；只建会话并入队，不阻塞调度线程
+    "auto_pool_analysis_daily",
     # 16:25 事件结算插在 paper 结算（16:20）之后
     "event_settle_daily",
     "daily_marking",
@@ -119,6 +123,7 @@ JOB_LABELS: dict[str, str] = {
     "earnings_triage_daily": "预告分诊",
     "event_settle_daily": "事件结算",
     "paper_settle_daily": "paper 结算",
+    "auto_pool_analysis_daily": "自动选股分析",
     "daily_marking": "盯市",
     "metrics_snapshot": "指标快照",
     "integrity_check": "完整性校验",
@@ -150,6 +155,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "earnings_triage_daily": run_earnings_triage_daily,
     "event_settle_daily": run_event_settle_daily,
     "paper_settle_daily": run_paper_settle_daily,
+    "auto_pool_analysis_daily": run_pool_analysis_daily,
     "daily_marking": run_daily_marking,
     "metrics_snapshot": persist_metrics_snapshot,
     "integrity_check": integrity_check,
@@ -245,6 +251,14 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 20,
+        "timezone": "Asia/Shanghai",
+    },
+    # 自动选股分析（add-auto-pool-analysis-daily-brief）：16:22——选股 15:40 完成、
+    # paper 结算 16:20 之后；任务只准备会话并入队，分析在 AnalyzeQueue 后台执行
+    "auto_pool_analysis_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 22,
         "timezone": "Asia/Shanghai",
     },
     # 事件结算（add-event-driven-lane）：16:25——paper 结算之后、盯市（16:30）之前；

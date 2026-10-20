@@ -26,6 +26,10 @@ from pydantic import BaseModel, ConfigDict, StrictBool, field_validator
 
 _logger = logging.getLogger("finance_agent.api")
 
+# 主事件循环引用：调度线程（APScheduler）需要把自动选股分析的入队动作投递回
+# uvicorn 主循环，才能复用 AnalyzeQueue 的 _promote/_watch 与 SSE/journal 通道。
+_MAIN_LOOP: asyncio.AbstractEventLoop | None = None
+
 load_dotenv()  # 加载 .env，须在 finance_agent 模块导入前执行（llm.py 等在 import 时读取环境变量）
 
 # 默认 LLM 模型（无环境变量 LLM_MODEL 时的回退值）。
@@ -67,6 +71,9 @@ from finance_agent.screening.freshness import screening_freshness_removals  # no
 from finance_agent.screening.pipeline import (  # noqa: E402
     latest_successful_pool,
 )
+from finance_agent.screening.pool_analysis import (  # noqa: E402
+    prepare_pool_analysis_batch,
+)
 from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
 from finance_agent.screening.ranker import recent_ic_stats  # noqa: E402
 from finance_agent.screening.store import (  # noqa: E402
@@ -107,6 +114,8 @@ from finance_agent.timeline_builder import apply_chat_event  # noqa: E402
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """启动时清扫悬挂 running 会话：后端重启后 PipelineRunner 内存态已丢失，置 failed 供前端恢复展示。"""
+    global _MAIN_LOOP
+    _MAIN_LOOP = asyncio.get_running_loop()
     PipelineRunner.mark_swept_failed()
     # cohort 运维配置引导(delta add-eval-ops-console):env → ops_config 表的一次性种子,
     # 已有表值不覆盖(界面改过的值重启保持)。旁路铁律:引导失败只记 ERROR,不阻断启动。
@@ -128,6 +137,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
+        _MAIN_LOOP = None
         # 旁路铁律:退出时必须尝试关闭 scheduler;关闭失败记 ERROR 不阻断 API 关停
         try:
             stop_scheduler(_scheduler)
@@ -3526,6 +3536,42 @@ def _screening_freshness_removals(
     WARNING 及以上**：spec 要求的重校验被跳过着对运维必须可见，不得静默通过。
     """
     return screening_freshness_removals(pool_rows, batch_date)
+
+
+def _enqueue_pool_analysis(symbol: str, session_id: str) -> bool:
+    """把自动批次的一个标的投递到主循环的 AnalyzeQueue（线程安全）。
+
+    调度器 job 在 APScheduler 线程里运行，``AnalyzeQueue._promote`` 需要运行中的
+    事件循环；用 ``call_soon_threadsafe`` 把入队动作送回 uvicorn 主循环，才能复用
+    ``_start_screening_analysis`` 的 ``PipelineRunner.start(loop=...)`` 与 SSE/journal。
+    """
+    loop = _MAIN_LOOP
+    if loop is None or loop.is_closed():
+        return False
+    loop.call_soon_threadsafe(_get_analyze_queue().enqueue, symbol, session_id)
+    return True
+
+
+def submit_pool_analysis_batch(
+    *, max_symbols: int | None = None, timeout: float = 120.0
+) -> dict[str, Any]:
+    """调度线程入口：在 uvicorn 主循环上准备并投递自动分析批次。
+
+    只等待「建会话 + 入队」完成（通常 <1s/标的），不等待分析本身；分析由
+    ``AnalyzeQueue`` 在后台补位执行并复用既有 SSE/journal。
+    """
+    loop = _MAIN_LOOP
+    if loop is None or loop.is_closed():
+        raise RuntimeError("主事件循环不可用：自动选股分析只能在后端进程内触发")
+
+    async def _run() -> dict[str, Any]:
+        return await asyncio.to_thread(
+            prepare_pool_analysis_batch,
+            max_symbols=max_symbols,
+            enqueue=_enqueue_pool_analysis,
+        )
+
+    return asyncio.run_coroutine_threadsafe(_run(), loop).result(timeout=timeout)
 
 
 @app.post("/api/screening/analyze")

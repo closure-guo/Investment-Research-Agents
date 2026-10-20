@@ -93,6 +93,7 @@ from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
 from finance_agent.screening.pipeline import run_microcap_lane, run_screening_daily
+from finance_agent.screening.pool_analysis import run_pool_analysis_daily
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +265,15 @@ def _paper_settle_job() -> None:
     快照库为空时返回跳过摘要（job 记 ok），持仓缺价时抛错走重试。
     """
     _with_retry("paper_settle_daily", "paper settle", run_paper_settle_daily)
+
+
+def _auto_pool_analysis_job() -> None:
+    """add-auto-pool-analysis-daily-brief：自动选股分析（16:22）。
+
+    读当日成功精选池 → 时效性校验 → 建会话并入 AnalyzeQueue；任务只等待入队，
+    不等待分析完成。空池/过期池显式 skipped，不消费 LLM、不建会话。
+    """
+    _with_retry("auto_pool_analysis_daily", "auto pool analysis", run_pool_analysis_daily)
 
 
 def _marking_job() -> None:
@@ -495,6 +505,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         _paper_settle_job,
         _cron_for("paper_settle_daily"),
         id="paper_settle_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-auto-pool-analysis-daily-brief：自动选股分析（16:22）——选股 15:40 完成、
+    # paper 结算 16:20 之后；只建会话并入队，分析在 AnalyzeQueue 后台执行。
+    scheduler.add_job(
+        _auto_pool_analysis_job,
+        _cron_for("auto_pool_analysis_daily"),
+        id="auto_pool_analysis_daily",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
