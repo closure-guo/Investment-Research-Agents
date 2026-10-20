@@ -58,6 +58,9 @@ def _clean_env(monkeypatch):
         "JUDGE_MODEL",
         "JUDGE_BASE_URL",
         "JUDGE_API_KEY",
+        "DAILY_BRIEF_MODEL",
+        "DAILY_BRIEF_BASE_URL",
+        "DAILY_BRIEF_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -484,3 +487,38 @@ class TestDeepSeekThinkingCapability:
         ]
         out = sanitize_messages_for_profile(messages, profile.capability)
         assert out[0]["reasoning_content"] == "思考"
+
+
+class TestDailyBriefPurpose:
+    """add-auto-pool-analysis-daily-brief：日报 purpose 的逐字段环境覆盖。"""
+
+    ENV = {
+        "LLM_MODEL": "openai/deepseek-v4.1-flash",
+        "LLM_BASE_URL": "https://opencode.ai/zen/go/v1",
+        "LLM_API_KEY": "oc_sk_test",
+    }
+
+    def test_inherits_llm_env_when_no_override(self):
+        profile = resolve_profile(purpose="daily_brief", _env=self.ENV)
+        assert profile.provider == "openai"
+        assert profile.model == "openai/deepseek-v4.1-flash"
+        assert profile.base_url == "https://opencode.ai/zen/go/v1"
+        assert profile.api_key == "oc_sk_test"
+
+    def test_model_override_keeps_llm_endpoint_and_key(self):
+        env = {**self.ENV, "DAILY_BRIEF_MODEL": "openai/another-model"}
+        profile = resolve_profile(purpose="daily_brief", _env=env)
+        assert profile.model == "openai/another-model"
+        assert profile.base_url == "https://opencode.ai/zen/go/v1"
+        assert profile.api_key == "oc_sk_test"
+
+    def test_base_url_and_key_override_per_field(self):
+        env = {
+            **self.ENV,
+            "DAILY_BRIEF_BASE_URL": "https://brief.example/v1",
+            "DAILY_BRIEF_API_KEY": "brief-key",
+        }
+        profile = resolve_profile(purpose="daily_brief", _env=env)
+        assert profile.model == "openai/deepseek-v4.1-flash"
+        assert profile.base_url == "https://brief.example/v1"
+        assert profile.api_key == "brief-key"

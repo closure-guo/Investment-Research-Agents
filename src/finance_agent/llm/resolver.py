@@ -42,6 +42,19 @@ _LLM_ENV = {"model": "LLM_MODEL", "base_url": "LLM_BASE_URL", "api_key": "LLM_AP
 _LLM_QUICK_ENV = {"model": "LLM_QUICK_MODEL", "base_url": "LLM_BASE_URL", "api_key": "LLM_API_KEY"}
 
 
+def _daily_brief_env(env: Mapping[str, str]) -> dict[str, str]:
+    """daily_brief 的逐字段覆盖映射（未设置的键回退到 LLM_*）。
+
+    返回的是**环境变量名映射**而非值：``_resolve_from_env`` 继续按名字取。
+    逐字段回退避免「只覆盖 model 却把 base_url/api_key 落空」的半套配置。
+    """
+    return {
+        "model": "DAILY_BRIEF_MODEL" if env.get("DAILY_BRIEF_MODEL") else "LLM_MODEL",
+        "base_url": "DAILY_BRIEF_BASE_URL" if env.get("DAILY_BRIEF_BASE_URL") else "LLM_BASE_URL",
+        "api_key": "DAILY_BRIEF_API_KEY" if env.get("DAILY_BRIEF_API_KEY") else "LLM_API_KEY",
+    }
+
+
 class IncompleteLLMConfigError(ValueError):
     """半套配置（如只有 model 无端点/凭据）——禁止与环境变量混搭漂移。"""
 
@@ -321,11 +334,14 @@ def _resolve_profile_static(
         return get_profile_preset(preset)
 
     # 3. 环境变量（按 purpose 分流；judge 独立映射，不回退 LLM_*）
-    mapping = (
-        _JUDGE_ENV
-        if purpose == "judge"
-        else (_LLM_QUICK_ENV if purpose == "quick" and env.get("LLM_QUICK_MODEL") else _LLM_ENV)
-    )
+    if purpose == "judge":
+        mapping = _JUDGE_ENV
+    elif purpose == "daily_brief":
+        mapping = _daily_brief_env(env)
+    elif purpose == "quick" and env.get("LLM_QUICK_MODEL"):
+        mapping = _LLM_QUICK_ENV
+    else:
+        mapping = _LLM_ENV
     model, base_url, api_key = _resolve_from_env(env, mapping)
     if purpose == "judge" and not (model and base_url and api_key):
         # judge 环境缺任一关键字段：不静默借用 LLM_*，也不落 registry 默认
