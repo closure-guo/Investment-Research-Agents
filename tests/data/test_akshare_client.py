@@ -1428,6 +1428,44 @@ class TestFetchMarketCapsBulk:
         assert client.sources_seen["market_cap"] == set()
 
     @patch("finance_agent.data.akshare_client.requests.get")
+    def test_transient_request_error_retries_same_batch(self, mock_get, client, monkeypatch):
+        """单批瞬时断连（SSL EOF/RemoteDisconnected）→ 重试同批，不整批放弃。"""
+        monkeypatch.setattr(
+            "finance_agent.data.akshare_client._TENCENT_BATCH_RETRY_SLEEP_S",
+            0.0,
+            raising=False,
+        )
+        mock_get.side_effect = [
+            requests.exceptions.SSLError("EOF occurred in violation of protocol"),
+            requests.exceptions.ConnectionError("Remote end closed connection"),
+            self._gbk_response(self._quote_line("sh600519", "600519", "16613.58")),
+        ]
+
+        caps = client.fetch_market_caps_bulk(["600519"])
+
+        assert caps == {"600519": pytest.approx(16613.58e8)}
+        assert mock_get.call_count == 3
+        assert client.sources_seen["market_cap"] == {"tencent"}
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_retry_exhausted_returns_none(self, mock_get, client, monkeypatch, caplog):
+        """连续失败至重试上限 → 仍返回 None（全覆盖否则 cap_data_missing 语义不变）。"""
+        monkeypatch.setattr(
+            "finance_agent.data.akshare_client._TENCENT_BATCH_RETRY_SLEEP_S",
+            0.0,
+            raising=False,
+        )
+        mock_get.side_effect = requests.exceptions.ConnectionError("refused")
+
+        with caplog.at_level("ERROR", logger="finance_agent.data.akshare_client"):
+            caps = client.fetch_market_caps_bulk(["600519"])
+
+        assert caps is None
+        assert mock_get.call_count == 3
+        assert client.sources_seen["market_cap"] == set()
+        assert any("重试" in record.getMessage() for record in caplog.records)
+
+    @patch("finance_agent.data.akshare_client.requests.get")
     def test_incomplete_coverage_warns_but_returns_parsed(self, mock_get, client, caplog):
         """条数不齐：返回已解析子集 + WARNING（缺失数/总数可审计）。"""
         mock_get.return_value = self._gbk_response(

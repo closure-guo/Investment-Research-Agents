@@ -212,6 +212,11 @@ _TENCENT_BATCH_CHUNK = 100
 _TENCENT_BATCH_SLEEP_S = 0.2
 # 批量请求超时（码多、串长于单标的，放宽于单标的 10s）
 _TENCENT_BATCH_TIMEOUT_S = 20
+# 单批尝试次数：56 批连发时实测偶发 SSL EOF / RemoteDisconnected；
+# 首批失败即整批放弃会让 regime 日批假性 cap_data_missing
+_TENCENT_BATCH_ATTEMPTS = 3
+# 单批重试间隔（测试 monkeypatch 置 0）
+_TENCENT_BATCH_RETRY_SLEEP_S = 0.5
 
 
 def _add_prefix(code: str) -> str:
@@ -2169,7 +2174,8 @@ class AKShareClient:
         spot 无 ``流通市值`` 列（新浪回退列形）时的真实市值兜底源——按
         「快照同源 spot 优先 → 腾讯批量兜底」链式尝试的第二源，采用时调用方
         在指标行留痕 ``cap_source=tencent``。≤100 码/批切分、批间小睡防限流；
-        整批失败/整串不可解析 → ERROR + None（调用方 ``cap_data_missing``，
+        每批最多 ``_TENCENT_BATCH_ATTEMPTS`` 次尝试（瞬时断连/不可解析重试同批），
+        重试耗尽 → ERROR + None（调用方 ``cap_data_missing``，
         MUST NOT 以成交额等替代口径冒充）；个别码缺失（停牌/退市/市值字段空）→
         WARNING 并返回已解析子集（覆盖是否够用交调用方判定）。成功记入
         ``sources_seen["market_cap"]``。
@@ -2192,27 +2198,43 @@ class AKShareClient:
             if batch_no > 1:
                 time.sleep(_TENCENT_BATCH_SLEEP_S)
             symbols = ",".join(self._to_sina_symbol(code) for code in chunk)
-            try:
-                resp = requests.get(
-                    f"https://qt.gtimg.cn/q={symbols}", timeout=_TENCENT_BATCH_TIMEOUT_S
-                )
-                text = resp.content.decode("gbk")
-            except Exception as e:
-                logger.error(
-                    "腾讯批量市值取数失败（第 %d/%d 批，%d 码）: %s",
-                    batch_no,
-                    len(chunks),
-                    len(chunk),
-                    e,
-                )
-                return None
-            parsed = _parse_tencent_batch_caps(text)
+            parsed: dict[str, float] | None = None
+            for attempt in range(1, _TENCENT_BATCH_ATTEMPTS + 1):
+                try:
+                    resp = requests.get(
+                        f"https://qt.gtimg.cn/q={symbols}",
+                        timeout=_TENCENT_BATCH_TIMEOUT_S,
+                    )
+                    parsed = _parse_tencent_batch_caps(resp.content.decode("gbk"))
+                except Exception as e:
+                    parsed = None
+                    logger.warning(
+                        "腾讯批量市值取数失败（第 %d/%d 批，第 %d/%d 次）: %s",
+                        batch_no,
+                        len(chunks),
+                        attempt,
+                        _TENCENT_BATCH_ATTEMPTS,
+                        e,
+                    )
+                else:
+                    if parsed:
+                        break
+                    logger.warning(
+                        "腾讯批量行情整批不可解析（第 %d/%d 批，第 %d/%d 次）",
+                        batch_no,
+                        len(chunks),
+                        attempt,
+                        _TENCENT_BATCH_ATTEMPTS,
+                    )
+                if attempt < _TENCENT_BATCH_ATTEMPTS:
+                    time.sleep(_TENCENT_BATCH_RETRY_SLEEP_S)
             if not parsed:
                 logger.error(
-                    "腾讯批量行情整批不可解析（第 %d/%d 批，%d 码）",
+                    "腾讯批量市值取数重试耗尽（第 %d/%d 批，%d 码，%d 次）",
                     batch_no,
                     len(chunks),
                     len(chunk),
+                    _TENCENT_BATCH_ATTEMPTS,
                 )
                 return None
             caps.update(parsed)
