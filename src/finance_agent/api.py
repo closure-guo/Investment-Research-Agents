@@ -2430,6 +2430,12 @@ async def analyze(req: AnalyzeRequest):
         )
 
     # ── ReAct 路径：registry 后台任务 + 订阅转发（生成与连接解耦）──
+    # 追问时跳过历史事件重放：用当前 journal 最大 seq 作为 after_seq，
+    # 避免上一轮 done 终态事件导致 registry.subscribe 提前 return（SSE 流终止）。
+    # 须在 registry.start 前取值：新会话的 session_created 由任务发布，
+    # start 后再取 max_seq 可能跳过该事件，前端拿不到 session_id
+    # （当前会话 ID 缺失 → 运行中管线卡被隐藏，issue #424/#328）。
+    afterSeq = await asyncio.to_thread(get_max_event_seq, session_id)
     started = await registry.start(
         session_id,
         _run_react_analysis(
@@ -2445,9 +2451,6 @@ async def analyze(req: AnalyzeRequest):
     if not started:
         # single-flight：会话已有活跃任务，拒绝新消息（不追加 user 消息）
         return JSONResponse(status_code=409, content={"error": "session_busy"})
-    # 追问时跳过历史事件重放：用当前 journal 最大 seq 作为 after_seq，
-    # 避免上一轮 done 终态事件导致 registry.subscribe 提前 return（SSE 流终止）
-    afterSeq = await asyncio.to_thread(get_max_event_seq, session_id)
     return StreamingResponse(
         _subscribe_sse(session_id, after_seq=afterSeq),
         media_type="text/event-stream",

@@ -188,3 +188,40 @@ def test_quick_chat_followup_sse_not_terminated_by_previous_done(isolated_db, mo
     # 关键断言：应收到本轮（上海）的新事件，且不应重放上一轮（沈阳）的历史事件
     assert "上海天气多云" in tokens, f"应收到本轮 chat_token，实际收到: {tokens}"
     assert "沈阳天气晴" not in tokens, f"不应重放上一轮 chat_token，实际收到: {tokens}"
+
+
+def test_new_analyze_stream_keeps_session_created_when_task_wins_race(isolated_db, monkeypatch):
+    """新会话 /api/analyze：后台任务先发布 session_created 时不得被 after_seq 跳过。
+
+    竞态（issue #424/#328 根因）：React 路径此前在 registry.start 之后读取
+    journal 最大 seq 作为 after_seq。高负载下后台任务可在两步之间先发布
+    session_created（seq 1），端点于是从 after_seq=1 订阅，首个事件被跳过。
+    前端收不到 session_created → currentSessionId 为空 → 运行中管线卡被
+    visibleMessages 过滤，整段深析只剩「思考中」，表现为 UI 冻结。
+
+    /api/chat 已按「先取 after_seq 再 start」修复同一竞态；本测试守护
+    /api/analyze 对齐该顺序。
+    """
+
+    async def fake_start(session_id, coro):
+        # 模拟后台任务在 registry.start 返回前已发布 session_created
+        coro.close()
+        session_store.append_session_event(
+            session_id, {"type": "session_created", "session_id": session_id}
+        )
+        return True
+
+    monkeypatch.setattr(api_mod.registry, "start", fake_start)
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/analyze",
+            json={"query": "深度分析600519", "api_key": "sk-test"},
+        )
+        assert resp.status_code == 200
+        events = [json.loads(line[6:]) for line in resp.iter_lines() if line.startswith("data: ")]
+
+    types = [e.get("type") for e in events]
+    assert "session_created" in types, f"新会话首个事件被 after_seq 跳过: {types}"
+    created = next(e for e in events if e.get("type") == "session_created")
+    assert created.get("session_id"), "session_created 必须携带 session_id"
