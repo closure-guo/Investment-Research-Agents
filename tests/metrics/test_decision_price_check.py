@@ -230,6 +230,19 @@ class TestScenarioNonPriceDimensions:
         )
         assert check_decision_prices(decision, TI_600845, PL_600845, CLOSE_600845) == []
 
+    def test_kdj_j_value_not_price(self):
+        """KDJ 的 J 值读数（80）是震荡指标，不是价位；不得与 MA20 做偏差比对。
+
+        同花顺 10-20 生产实证：模型触发条件写「J 值回落至 80 以下」，校验器把 80
+        当股价与 MA20 202.517 比对（偏差 60.5%）并阻断报告；模型改为定性表述后，
+        reasoning 里的纠错说明仍含 80，二次校验再次误报。
+        """
+        decision = _decision(
+            reasoning="上一稿把 KDJ 的 J 值读数 80 写入触发条件，现改为定性表述",
+            reeval_triggers=["J 值回落至 80 以下且价格守住 MA20"],
+        )
+        assert check_decision_prices(decision, TI_600845, PL_600845, CLOSE_600845) == []
+
     def test_indicator_name_numbers_not_extracted(self):
         """「MA60」「60日均线」中的数字是指标名成分，不得当价位提取。"""
         decision = _decision(
