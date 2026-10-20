@@ -187,6 +187,7 @@ def test_collect_facts_includes_sections(seeded_dbs):
         assert key in facts
     assert facts["screening"]["batch"]["status"] == "ok"
     assert facts["screening"]["pool_top"][0]["symbol"] == "600519"
+    assert facts["screening"]["auto_analysis_runs"][0]["dispatch_status"] == "enqueued"
     assert facts["screening"]["auto_analysis_runs"][0]["session_status"] == "completed"
     assert facts["predictions"]["created_today"] == 1
     assert facts["predictions"]["created_actions"] == {"buy": 1}

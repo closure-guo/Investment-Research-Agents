@@ -362,3 +362,6 @@ pytest-of-*/
 
 # pre-commit 缓存/探针目录
 .pre-commit-home-probe/
+
+# 每日汇报 E2E 专用库（add-auto-pool-analysis-daily-brief）
+data/test-e2e-dailyops-*

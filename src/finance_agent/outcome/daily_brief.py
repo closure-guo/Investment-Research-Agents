@@ -114,12 +114,25 @@ def _screening_facts(path: Path, as_of: str) -> dict[str, Any]:
     )
     runs: list[dict[str, Any]] = []
     try:
-        runs = _read(
+        raw_runs = _read(
             path,
             "SELECT symbol, session_id, status, error FROM pool_analysis_runs "
             "WHERE trade_date = ? ORDER BY symbol",
             (as_of,),
         )
+        # 库内 status 是「派发状态」（queued=已入队 / dispatch_failed / session_failed），
+        # 不是会话终态；改名后喂给 LLM，避免与 sessions.status 混淆成矛盾。
+        runs = [
+            {
+                "symbol": row.get("symbol"),
+                "session_id": row.get("session_id"),
+                "dispatch_status": (
+                    "enqueued" if row.get("status") == "queued" else row.get("status")
+                ),
+                "error": row.get("error"),
+            }
+            for row in raw_runs
+        ]
     except sqlite3.Error as exc:
         logger.warning("读取 pool_analysis_runs 失败（%s）", exc)
     removals: list[dict[str, Any]] = []

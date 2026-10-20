@@ -744,3 +744,25 @@ def test_seed_screening_accepts_selection_mode(testing_client, _screening_db) ->
     body = TestClient(app).get("/api/screening/pool").json()
     assert body["selection_mode"] == "fallback"
     assert "非因子信号" in body["notice"]
+
+
+def test_seed_daily_brief_roundtrip(testing_client) -> None:
+    """add-auto-pool-analysis-daily-brief：/api/test/seed 的 daily_brief 造数可用。"""
+    from finance_agent.outcome.daily_brief import get_daily_brief
+
+    resp = testing_client.post(
+        "/api/test/seed",
+        json={
+            "daily_brief": {
+                "date": "2026-10-20",
+                "status": "ok",
+                "markdown": "# 日报\n## 今日结论",
+                "model": "openai/deepseek-v4.1-flash",
+            }
+        },
+    )
+    assert resp.status_code == 200
+    row = get_daily_brief("2026-10-20")
+    assert row is not None
+    assert row["markdown"].startswith("# 日报")
+    assert row["model"] == "openai/deepseek-v4.1-flash"

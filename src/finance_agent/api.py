@@ -896,6 +896,7 @@ if TESTING:
             and not req.get("regime_reset")
             and not isinstance(req.get("events"), dict)
             and not req.get("events_reset")
+            and not isinstance(req.get("daily_brief"), dict)
         ):
             return {"status": "ok", "mode": "testing"}
         # add-paper-broker：战绩造数复位（清 equity_curve + paper_equity 两表）。双曲线
