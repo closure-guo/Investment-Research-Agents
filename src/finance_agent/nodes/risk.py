@@ -535,7 +535,9 @@ def risk_judge(state: dict) -> dict:
             "严格低于最新收盘价；等于收盘价的价位（含 entry_ref）MUST NOT 保留在"
             "触发条件中——需要现价语境时以陈述句写入 reasoning（如「现价 23.03」），"
             "不得写成触发条件；上破条件建议附加确认语义（放量突破/收盘站稳）以保留"
-            "筛选力。"
+            "筛选力。文本价位 MUST 落在 price_levels 参考带内（或等于带边界值）；"
+            "带外的回踩/止损 MUST 改写为定性表述（如「回踩至止损参考带下沿附近」）"
+            "或改用带内边界值，MUST NOT 保留带外裸数字，否则校验器会再次阻断。"
         )
         data = call_llm_for_json(
             retry_context,

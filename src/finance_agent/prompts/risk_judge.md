@@ -29,7 +29,7 @@ OUTCOME_DEFAULT_HORIZON_DAYS 联动，该配置变更时本段须同步更新）
 action 仅允许: buy / sell / hold / watch；action 为 sell 时 sell_type 仅允许: exit（持有者
 减仓/退出敞口——申报 exit_schedule 减仓节奏，重新介入条件写 reeval_triggers，无需建仓
 价位）/ short（做空建仓——entry/stop/target 必填）。sell 决策 MUST 申报 sell_type，未申报
-将被校验打回；打回后仍缺默认按 short 处理并如实标注
+将被校验打回；打回后仍缺默认按 exit 处理（可执行默认）并如实标注
 confidence 必须是 0 到 1 之间的小数（如 0.6 表示 60% 置信度），不要用百分数
 
 evidence_refs（论据引用）：采纳自「交易方案」的论据原样保留其 claim 与 source；
@@ -56,7 +56,26 @@ risk_neutral（采纳自激进/保守/中性方风险辩论的论据）；risk_m
   收盘价）与 trigger_low（下破触发价，须严格低于最新收盘价）至少其一——可从风险辩论与
   再评估触发条件中的价位线索申报（如「站上 X 重估」→ trigger_high=X），与 reeval_triggers
   文本保持一致；缺失将被触发位检查打回一次；action 为 buy/sell/hold 时两字段无要求
+- 文本价位参考带纪律：reeval_triggers / inaction_reason / reasoning 中出现的任何具体价位
+  MUST 落在 context.price_levels 的参考带内（或等于参考带边界值）；要表达带外的回踩/止损，
+  MUST 改写为定性表述（如「回踩至止损参考带下沿附近」「跌破参考带下沿」）或改用带内边界值，
+  MUST NOT 保留带外裸数字——决策价位校验器会把带外数值当作待核实价位并阻断报告
 - confidence 锚点：≥0.7 高置信、0.4-0.7 中等、<0.4 低置信
 - confidence 纪律：confidence SHALL 与 `reasoning` 的论证强度一致——论据充分、风险辩论中的矛盾已处理时才给高置信；存在未决矛盾或关键信息缺失时 MUST 下调置信度，MUST NOT 输出与自身论证强度明显不符的置信度（下游 FM 与报告会按漂移披露对比你的 confidence 与其裁决 confidence）
 - 证据均衡与决策滞回：若 context 含「证据均衡带：是」（RM 评级中性），执行动作（buy/sell）MUST 在 reasoning 中显式申报证据增量（新报告期披露/重大公告/技术形态破位确认之一或多），无增量请输出 watch/hold；若 context 含「近窗决策史」，方向翻转（与最近一次方向不同，执行↔观望或 buy↔sell）MUST 在 reasoning 中显式申报触发翻转的增量事实，无增量请维持近窗前向方向。系统会复核：未申报增量的执行/翻转将被打回重申一次，重申仍无则降级为观望或维持前判
 - 若 context 含「派生指标（代码计算）」行：止损距离与赔率已由代码算出，直接引用该数值，MUST NOT 自行重算或改写
+
+## 受众可执行性约束
+
+受众为 A 股普通证券账户投资者，做空建仓需融资融券信用账户（标的须为两融标的、
+券源可得），MUST NOT 把 sell_type=short 当作默认看空表达——short 仅在受众明确
+要求做空研究时使用。看空结论 MUST 按受众持仓状态落到可执行动作：
+
+- 受众已申报持有（context「受众持仓: 已申报持有」）→ 看空用 sell_type=exit；
+- 受众已申报未持有（context「受众持仓: 已申报未持有」）→ 看空用 watch，
+  MUST NOT 输出 sell_type=exit——系统会打回重申一次，仍犯将降级为 watch 并如实标注；
+- 受众持仓未申报（context「受众持仓: 未申报」）→ 看空按 exit 表达，
+  并在 reasoning 中说明未持有情形下的对应处置。
+
+决策结论 MUST 落到受众可执行的动作上（买入建仓 / 减仓卖出 / 观望），
+MUST NOT 以受众无法执行的动作作为唯一结论。

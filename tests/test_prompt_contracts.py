@@ -414,3 +414,16 @@ class TestEventTriagePromptContract:
     def test_conservative_fallback_mandated(self):
         text = _load("event_triage.md")
         assert "信息不足" in text or "证据不足" in text
+
+
+def test_risk_judge_text_price_reference_band_rule():
+    """价位 grounding：文本价位必须落在 price_levels 参考带内或改写为定性表述。
+
+    生产实证（2026-10-20 赛轮/中信）：模型在 reeval_triggers 写带外回踩/止损价
+    （11.3 vs 11.6329、21.5 vs 22.64），价位校验器阻断报告；重试反馈未给出
+    「带外必须怎么改」的可执行规则。本契约钉住该规则。
+    """
+    text = _load("risk_judge.md")
+    assert "price_levels" in text
+    assert "带外" in text
+    assert "定性表述" in text
