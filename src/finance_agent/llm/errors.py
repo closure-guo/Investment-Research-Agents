@@ -56,6 +56,12 @@ class LLMTimeoutError(LLMError):
     retryable = True
 
 
+class ProviderInternalError(LLMError):
+    """provider 5xx / 内部错误 —— 可重试（瞬时故障，退避重试）。"""
+
+    retryable = True
+
+
 class ModelNotFoundError(LLMError):
     """模型不存在 —— 不重试。"""
 

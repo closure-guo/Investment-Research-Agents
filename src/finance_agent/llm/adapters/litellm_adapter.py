@@ -355,6 +355,7 @@ def normalize_exception(exc: Exception) -> LLMError:
         LLMError,
         LLMTimeoutError,
         ModelNotFound,
+        ProviderInternalError,
         RateLimitError,
         UnknownLLMError,
     )
@@ -366,6 +367,8 @@ def normalize_exception(exc: Exception) -> LLMError:
         return RateLimitError(f"限流：{exc}")
     if isinstance(exc, (ex.Timeout, ex.APIConnectionError)):
         return LLMTimeoutError(f"请求超时/连接失败：{exc}")
+    if isinstance(exc, (ex.InternalServerError, ex.ServiceUnavailableError)):
+        return ProviderInternalError(f"provider 内部错误（可重试）：{exc}")
     if isinstance(exc, ex.NotFoundError):
         return ModelNotFound(f"模型/端点不存在：{exc}")
     if isinstance(exc, ex.ContextWindowExceededError):
