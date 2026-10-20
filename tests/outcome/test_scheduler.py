@@ -943,7 +943,7 @@ class TestEarningsEventJobsRegistration:
             < ids.index("event_settle_daily")
             < ids.index("daily_marking")
         ), "注册序 = 时刻序（16:00 → 16:05 → 16:10 → 16:15 → 16:20 → 16:25 → 16:30）"
-        assert ids[-2:] == ["cohort_batch", "daily_brief_daily"]  # cohort 仍是末位注册（既有断言不变）
+        assert ids[-2:] == ["cohort_batch", "daily_brief_daily"]  # cohort 之后追加每日汇报（20:30）
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
     @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
