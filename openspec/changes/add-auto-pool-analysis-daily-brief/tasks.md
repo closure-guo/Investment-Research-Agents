@@ -12,5 +12,7 @@
 - [x] `GET /api/v1/ops/daily-brief`（date/latest）与 `/ops` 每日汇报区（空态/失败态/正常态）
 - [x] 单元/集成测试：池分析编排、幂等、上限、时效性、日报成功/失败/幂等、resolver、注册表 26
 - [x] 前端 Vitest + Playwright 日批页用例更新（26 job + 汇报区）
-- [ ] `uv run pytest` / `ruff` / `mypy` / 前端测试通过（全量 pytest 进行中；ruff 通过；mypy 新模块通过、仓库存量 api.py/evals 有既有报错）
+- [ ] `uv run pytest` / `ruff` / `mypy` / 前端测试通过（定向 338 项 + 前端 887 项 + E2E 6 项已过；
+      全量 pytest 无失败跑到 53% 后卡在依赖 Langfuse/网络的长测试，已停止；ruff 全过；
+      mypy 新模块全过，仓库存量 api.py/evals 有既有报错）
 - [x] 人工验证报告落 `tests/validation/`（交互类变更）
