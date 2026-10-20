@@ -25,6 +25,7 @@ def _events_env(tmp_path, monkeypatch):
     """事件库 + 快照库路径指向 tmp（调用期读 env）。"""
     monkeypatch.setenv("EVENTS_DB_PATH", str(tmp_path / "events.db"))
     monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "snap.db"))
+    monkeypatch.setenv("EVENT_TRIAGE_WINDOW_DAYS", "0")
     monkeypatch.delenv("EVENTS_FETCH_PERIODS", raising=False)
     monkeypatch.delenv("EVENTS_HORIZON_DAYS", raising=False)
     return tmp_path
@@ -167,6 +168,29 @@ class TestTriageDaily:
         assert summary["triaged"] == 0 and summary["watchlist_added"] == 0
         assert summary["snapshot_ctx_missing"] == 0
         assert stub.calls == 0  # 无未分诊记录 → 零 LLM 调用
+
+    def test_window_skips_historical_backlog(self, monkeypatch, _events_env) -> None:
+        """默认 30 天窗口：窗口内分诊、窗口外历史积压不调用 LLM 且计数留痕。"""
+        from finance_agent.outcome.events.model import upsert_forecasts
+
+        db = _events_env / "events.db"
+        monkeypatch.setenv("EVENT_TRIAGE_WINDOW_DAYS", "30")
+        upsert_forecasts(
+            [
+                _forecast_row("2026-10-15", code="600519"),
+                _forecast_row("2026-01-10", code="000001"),
+            ],
+            db_path=str(db),
+        )
+        stub = _StubTriageClient()
+        monkeypatch.setattr(events_job, "GatewayTriageClient", lambda: stub)
+
+        summary = events_job.run_earnings_triage_daily(as_of="2026-10-20", db_path=db)
+
+        assert summary["triaged"] == 1
+        assert summary["skipped_historical"] == 1
+        assert summary["window_days"] == 30
+        assert stub.calls == 1
 
     def test_triage_daily_does_not_degrade_cbb_notes(self, monkeypatch, _events_env) -> None:
         """兄弟日批（预告分诊）不得清空/降级既有 cbb 条目注记（评审 F2：无日历只插不覆盖）。"""

@@ -152,6 +152,19 @@ class TestUntriaged:
         )
         assert len(list_untriaged(db_path=db)) == 2
 
+    def test_since_filters_older_untriaged(self, tmp_path):
+        """分诊窗口：``since`` 之前的未分诊历史记录不进入调度批。"""
+        db = tmp_path / "events.db"
+        upsert_forecasts(
+            [
+                _forecast(code="600519", available_at="2025-04-10"),
+                _forecast(code="000001", available_at="2025-05-20", source_record_id="ind|X"),
+            ],
+            db_path=db,
+        )
+        rows = list_untriaged(since="2025-05-01", db_path=db)
+        assert [row["code"] for row in rows] == ["000001"]
+
 
 class TestTriage:
     def test_record_triage_is_idempotent_per_forecast(self, tmp_path):
