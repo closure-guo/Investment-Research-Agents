@@ -75,6 +75,7 @@ from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.cohort.runner import run_cohort_batch
+from finance_agent.outcome.daily_brief import run_daily_brief
 from finance_agent.outcome.events.job import (
     run_cb_daily,
     run_earnings_fetch_daily,
@@ -93,6 +94,7 @@ from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
 from finance_agent.screening.pipeline import run_microcap_lane, run_screening_daily
+from finance_agent.screening.pool_analysis import run_pool_analysis_daily
 
 logger = logging.getLogger(__name__)
 
@@ -266,6 +268,15 @@ def _paper_settle_job() -> None:
     _with_retry("paper_settle_daily", "paper settle", run_paper_settle_daily)
 
 
+def _auto_pool_analysis_job() -> None:
+    """add-auto-pool-analysis-daily-brief：自动选股分析（16:22）。
+
+    读当日成功精选池 → 时效性校验 → 建会话并入 AnalyzeQueue；任务只等待入队，
+    不等待分析完成。空池/过期池显式 skipped，不消费 LLM、不建会话。
+    """
+    _with_retry("auto_pool_analysis_daily", "auto pool analysis", run_pool_analysis_daily)
+
+
 def _marking_job() -> None:
     """add-track-record-stage-b：每日盯市 + 净值曲线（16:30，settle 之后）。"""
     _with_retry("daily_marking", "daily marking", run_daily_marking)
@@ -327,6 +338,16 @@ def _research_report_inbox_job() -> None:
     无文件为空态，解析失败记 degraded/failed，不阻断其他 job。
     """
     _with_retry("research_report_inbox_daily", "research report inbox", ingest_inbox)
+
+
+def _daily_brief_job() -> None:
+    """add-auto-pool-analysis-daily-brief：每日 LLM 运营汇报（20:30）。
+
+    汇总当日选股/分析/观点/执行/因子/失败任务事实 → ``purpose=daily_brief`` 生成
+    Markdown → 落 ``daily_briefs`` 与 ``reports/daily-brief-YYYY-MM-DD.md``；LLM
+    失败写确定性降级摘要并上抛，经 ``run_job`` 记 failed 并退避重试。
+    """
+    _with_retry("daily_brief_daily", "daily brief", run_daily_brief)
 
 
 def _cohort_job() -> None:
@@ -498,6 +519,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-auto-pool-analysis-daily-brief：自动选股分析（16:22）——选股 15:40 完成、
+    # paper 结算 16:20 之后；只建会话并入队，分析在 AnalyzeQueue 后台执行。
+    scheduler.add_job(
+        _auto_pool_analysis_job,
+        _cron_for("auto_pool_analysis_daily"),
+        id="auto_pool_analysis_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     # add-event-driven-lane：事件结算（16:25）——paper 结算之后、盯市（16:30）之前；
     # 记账入场（T+1 开盘口径）+ 到期结算（参考价缺失保持 open + 留痕）。
     scheduler.add_job(
@@ -606,6 +636,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         _cohort_job,
         _cron_for("cohort_batch"),
         id="cohort_batch",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-auto-pool-analysis-daily-brief：每日 LLM 运营汇报（20:30）——cohort 之后，
+    # 给自动选股分析留出完成时间；失败写降级摘要并记 failed。
+    scheduler.add_job(
+        _daily_brief_job,
+        _cron_for("daily_brief_daily"),
+        id="daily_brief_daily",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )

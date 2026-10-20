@@ -1400,3 +1400,38 @@ class TestCaliberEndpoints:
         assert resp.status_code == 422
         assert "NOT_A_KNOB" in resp.json()["detail"]
         assert list_job_runs(ops_api.CALIBER_AUDIT_JOB) == []
+
+
+class TestDailyBrief:
+    """add-auto-pool-analysis-daily-brief：每日汇报只读接口。"""
+
+    def test_latest_returns_row(self, client):
+        from finance_agent.outcome.daily_brief import upsert_daily_brief
+
+        upsert_daily_brief(
+            "2026-10-20", "ok", "# 日报\n## 今日结论", model="openai/deepseek-v4.1-flash"
+        )
+        resp = client.get(f"{BASE}/daily-brief/latest")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["brief_date"] == "2026-10-20"
+        assert body["markdown"].startswith("# 日报")
+        assert body["model"] == "openai/deepseek-v4.1-flash"
+
+    def test_by_date_returns_row(self, client):
+        from finance_agent.outcome.daily_brief import upsert_daily_brief
+
+        upsert_daily_brief("2026-10-19", "ok", "旧日报")
+        resp = client.get(f"{BASE}/daily-brief", params={"date": "2026-10-19"})
+        assert resp.status_code == 200
+        assert resp.json()["markdown"] == "旧日报"
+
+    def test_missing_returns_404(self, client):
+        resp = client.get(f"{BASE}/daily-brief", params={"date": "1999-01-01"})
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "daily_brief_not_found"
+
+    def test_latest_missing_returns_404(self, client):
+        resp = client.get(f"{BASE}/daily-brief/latest")
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "daily_brief_not_found"

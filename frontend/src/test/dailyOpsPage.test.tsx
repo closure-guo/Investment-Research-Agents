@@ -79,6 +79,7 @@ function mockFetch(
     batches?: ScreeningBatch[]
     batchesStatus?: number
     run?: { status: number; body?: unknown }
+    brief?: { status: number; body?: unknown }
   } = {}
 ) {
   const respond = (body: unknown, status = 200) =>
@@ -99,6 +100,10 @@ function mockFetch(
     }
     if (url.startsWith('/api/screening/batches')) {
       return respond(opts.batches ?? [], opts.batchesStatus ?? 200)
+    }
+    if (url === '/api/v1/ops/daily-brief/latest') {
+      const brief = opts.brief ?? { status: 404, body: { error: 'daily_brief_not_found' } }
+      return respond(brief.body ?? {}, brief.status)
     }
     if (/^\/api\/v1\/ops\/jobs\/[^/]+\/run$/.test(url)) {
       const run = opts.run ?? { status: 202, body: { run_id: 9 } }
@@ -445,5 +450,77 @@ describe('日批运维页（delta add-daily-ops-page T2.2）', () => {
 
     expect(window.location.pathname).toBe('/ops')
     expect(await screen.findByTestId('daily-ops-page')).toBeTruthy()
+  })
+})
+
+describe('日批运维页每日汇报区（add-auto-pool-analysis-daily-brief）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(new Date(2026, 9, 14, 21, 0, 0))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    window.history.pushState({}, '', '/')
+  })
+
+  it('渲染最新日报：日期、模型与 Markdown 正文', async () => {
+    mockFetch({
+      jobs: [jobsBody([])],
+      brief: {
+        status: 200,
+        body: {
+          brief_date: TODAY,
+          status: 'ok',
+          markdown: '## 今日结论\n精选池 0 只，今日 0 笔买入。',
+          model: 'openai/deepseek-v4.1-flash',
+          prompt_version: '1',
+          error: null,
+          created_at: `${TODAY}T20:30:00`,
+        },
+      },
+    })
+
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+
+    expect(await screen.findByTestId('daily-brief')).toBeTruthy()
+    expect(screen.getByTestId('daily-brief-date').textContent).toBe(TODAY)
+    expect(screen.getByTestId('daily-brief-model').textContent).toContain('deepseek-v4.1-flash')
+    expect(screen.getByTestId('daily-brief-markdown').textContent).toContain('今日结论')
+  })
+
+  it('404 → 「今日汇报尚未生成」空态', async () => {
+    mockFetch({ jobs: [jobsBody([])], brief: { status: 404, body: { error: 'daily_brief_not_found' } } })
+
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+
+    expect(await screen.findByTestId('daily-brief-empty')).toHaveTextContent('今日汇报尚未生成')
+    expect(screen.queryByTestId('daily-brief-markdown')).toBeNull()
+  })
+
+  it('failed → 失败横幅 + 降级摘要正文', async () => {
+    mockFetch({
+      jobs: [jobsBody([])],
+      brief: {
+        status: 200,
+        body: {
+          brief_date: TODAY,
+          status: 'failed',
+          markdown: '# 每日运营汇报（降级）\nLLM 生成失败',
+          model: null,
+          prompt_version: '1',
+          error: 'RateLimitError: quota',
+          created_at: `${TODAY}T20:30:00`,
+        },
+      },
+    })
+
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+
+    expect(await screen.findByTestId('daily-brief-failure')).toHaveTextContent('RateLimitError')
+    expect(screen.getByTestId('daily-brief-markdown').textContent).toContain('降级')
   })
 })

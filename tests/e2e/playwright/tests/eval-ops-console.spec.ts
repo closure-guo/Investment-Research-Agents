@@ -40,7 +40,8 @@ test.describe.configure({ timeout: 120_000 })
 // add-microcap-lane-guardrails（18→19：小票通道 16:45，插于完整性校验 16:40 之后）；
 // add-convertible-bond-coverage（19→20：转债日批 16:50，插于小票通道 16:45 与 cohort 之间）；
 // add-research-report-dataplane（20→24：研报元数据 16:52 / 评级变动 16:54 /
-// 预期快照 16:56 / 投喂扫描 16:58，按时刻序插于转债日批与 cohort 之间）。
+// 预期快照 16:56 / 投喂扫描 16:58，按时刻序插于转债日批与 cohort 之间）；
+// add-auto-pool-analysis-daily-brief（24→26：自动选股分析 16:22 / 每日汇报 20:30）。
 const JOB_IDS = [
   'market_snapshot_daily',
   'regime_daily',
@@ -53,6 +54,7 @@ const JOB_IDS = [
   'paper_execute_daily',
   'earnings_triage_daily',
   'paper_settle_daily',
+  'auto_pool_analysis_daily',
   'event_settle_daily',
   'daily_marking',
   'metrics_snapshot',
@@ -64,6 +66,7 @@ const JOB_IDS = [
   'earnings_forecasts_daily',
   'research_report_inbox_daily',
   'cohort_batch',
+  'daily_brief_daily',
   'memory_extract_monthly',
   'factor_proposal_monthly',
 ] as const

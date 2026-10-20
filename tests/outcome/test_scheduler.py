@@ -199,7 +199,7 @@ class TestCohortJobRegistration:
         mock_sched_cls.return_value = sched
         assert start_scheduler() is sched
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 24, (
+        assert len(ids) == 26, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
@@ -214,15 +214,17 @@ class TestCohortJobRegistration:
         # 19→20：+cb_daily（转债日批接线，add-convertible-bond-coverage，16:50）
         # 20→23：+research_reports_daily/rating_changes_daily/earnings_forecasts_daily
         # （研报数据面三 job，add-research-report-dataplane，16:52/16:54/16:56）
-        assert ids[-1] == "cohort_batch"
+        assert ids[-2:] == ["cohort_batch", "daily_brief_daily"]
         assert set(ids) == {
             "decision_settle_daily",
             "paper_execute_daily",
             "paper_settle_daily",
+            "auto_pool_analysis_daily",
             "daily_marking",
             "metrics_snapshot",
             "integrity_check",
             "cohort_batch",
+            "daily_brief_daily",
             "market_snapshot_daily",
             "regime_daily",
             "screening_daily",
@@ -544,7 +546,7 @@ class TestMisfireHardening:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 24, (
+        assert len(ids) == 26, (
             ids
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
@@ -941,7 +943,7 @@ class TestEarningsEventJobsRegistration:
             < ids.index("event_settle_daily")
             < ids.index("daily_marking")
         ), "注册序 = 时刻序（16:00 → 16:05 → 16:10 → 16:15 → 16:20 → 16:25 → 16:30）"
-        assert ids[-1] == "cohort_batch"  # cohort 仍是末位注册（既有断言不变）
+        assert ids[-2:] == ["cohort_batch", "daily_brief_daily"]  # cohort 之后追加每日汇报（20:30）
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
     @patch("finance_agent.outcome.scheduler.BackgroundScheduler")

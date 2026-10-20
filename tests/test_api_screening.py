@@ -562,7 +562,9 @@ def test_analyze_endpoint_removes_suspended_symbol_and_starts_others(
 ) -> None:
     """spec 场景「盘前停牌移除」：Z 停牌 → removed(SUSPENDED) 且不建会话，其余照常入队。"""
     _install_snapshot(monkeypatch, tmp_path, suspended=frozenset({"600001"}))
-    monkeypatch.setattr("finance_agent.api.fetch_key_events", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "finance_agent.screening.freshness.fetch_key_events", lambda *args, **kwargs: []
+    )
     started = _stub_pipeline_start(monkeypatch)
     _stub_sessions(monkeypatch)
 
@@ -588,7 +590,7 @@ def test_analyze_endpoint_flags_limit_locked_and_new_event(
     """LIMIT_LOCKED / NEW_EVENT 经端点透传（事件装配接线；桩零网络）。"""
     _install_snapshot(monkeypatch, tmp_path, limit_locked=frozenset({"600002"}))
     monkeypatch.setattr(
-        "finance_agent.api.fetch_key_events",
+        "finance_agent.screening.freshness.fetch_key_events",
         lambda symbol, *args, **kwargs: (
             [{"date": _AS_OF, "title": "重大合同"}] if symbol == "600003" else []
         ),
@@ -621,11 +623,11 @@ def test_analyze_endpoint_skips_freshness_without_snapshot_state(
     def _must_not_fetch(*args, **kwargs):
         raise AssertionError("无快照状态时不得触达事件装配")
 
-    monkeypatch.setattr("finance_agent.api.fetch_key_events", _must_not_fetch)
+    monkeypatch.setattr("finance_agent.screening.freshness.fetch_key_events", _must_not_fetch)
     _stub_pipeline_start(monkeypatch)
     _stub_sessions(monkeypatch)
 
-    with caplog.at_level(logging.INFO, logger="finance_agent.api"):
+    with caplog.at_level(logging.INFO, logger="finance_agent.screening.freshness"):
         body = TestClient(app).post("/api/screening/analyze", json={}).json()
 
     assert body["removed"] == []
@@ -659,11 +661,11 @@ def test_analyze_endpoint_skips_and_warns_when_snapshot_older_than_batch(
     def _must_not_fetch(*args, **kwargs):
         raise AssertionError("快照无更新状态时不得触达事件装配")
 
-    monkeypatch.setattr("finance_agent.api.fetch_key_events", _must_not_fetch)
+    monkeypatch.setattr("finance_agent.screening.freshness.fetch_key_events", _must_not_fetch)
     _stub_pipeline_start(monkeypatch)
     _stub_sessions(monkeypatch)
 
-    with caplog.at_level(logging.INFO, logger="finance_agent.api"):
+    with caplog.at_level(logging.INFO, logger="finance_agent.screening.freshness"):
         body = TestClient(app).post("/api/screening/analyze", json={}).json()
 
     assert body["removed"] == []
@@ -675,7 +677,9 @@ def test_analyze_endpoint_skips_and_warns_when_snapshot_older_than_batch(
 def test_analyze_endpoint_reads_snapshot_through_env_path(pool_seed, monkeypatch, tmp_path) -> None:
     """库路径调用期读 SNAPSHOT_DB_PATH（导入期冻结会让 E2E/env 注入失效）。"""
     _install_snapshot(monkeypatch, tmp_path, suspended=frozenset({"600005"}))
-    monkeypatch.setattr("finance_agent.api.fetch_key_events", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "finance_agent.screening.freshness.fetch_key_events", lambda *args, **kwargs: []
+    )
     _stub_pipeline_start(monkeypatch)
     _stub_sessions(monkeypatch)
 
@@ -744,3 +748,25 @@ def test_seed_screening_accepts_selection_mode(testing_client, _screening_db) ->
     body = TestClient(app).get("/api/screening/pool").json()
     assert body["selection_mode"] == "fallback"
     assert "非因子信号" in body["notice"]
+
+
+def test_seed_daily_brief_roundtrip(testing_client) -> None:
+    """add-auto-pool-analysis-daily-brief：/api/test/seed 的 daily_brief 造数可用。"""
+    from finance_agent.outcome.daily_brief import get_daily_brief
+
+    resp = testing_client.post(
+        "/api/test/seed",
+        json={
+            "daily_brief": {
+                "date": "2026-10-20",
+                "status": "ok",
+                "markdown": "# 日报\n## 今日结论",
+                "model": "openai/deepseek-v4.1-flash",
+            }
+        },
+    )
+    assert resp.status_code == 200
+    row = get_daily_brief("2026-10-20")
+    assert row is not None
+    assert row["markdown"].startswith("# 日报")
+    assert row["model"] == "openai/deepseek-v4.1-flash"

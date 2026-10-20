@@ -70,10 +70,12 @@ from evals.causal_ablation.preregister import (
 )
 from evals.causal_ablation.status_index import collect_status_index
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from finance_agent.outcome.cohort.model import init_cohort_runs, list_cohort_runs
 from finance_agent.outcome.cohort.runner import _resolve_budget as _cohort_budget
+from finance_agent.outcome.daily_brief import get_daily_brief
 from finance_agent.outcome.ops.jobs import (
     JOB_IDS,
     JOB_LABELS,
@@ -457,6 +459,28 @@ async def get_run(run_id: int) -> dict[str, Any]:
     row = await asyncio.to_thread(get_job_run, run_id)
     if row is None:
         raise HTTPException(status_code=404, detail="run_not_found")
+    return row
+
+
+@router.get("/daily-brief")
+async def get_daily_brief_by_date(date: str | None = None) -> Any:
+    """每日 LLM 运营汇报（add-auto-pool-analysis-daily-brief）。
+
+    指定 ``date=YYYY-MM-DD`` 读取该日；缺省读取最新一份。无行 → 404 +
+    ``daily_brief_not_found``（不以空文档冒充已生成）。
+    """
+    row = await asyncio.to_thread(get_daily_brief, date)
+    if row is None:
+        return JSONResponse(status_code=404, content={"error": "daily_brief_not_found"})
+    return row
+
+
+@router.get("/daily-brief/latest")
+async def get_latest_daily_brief() -> Any:
+    """最新一份每日汇报（按 ``brief_date`` 倒序）。"""
+    row = await asyncio.to_thread(get_daily_brief, None)
+    if row is None:
+        return JSONResponse(status_code=404, content={"error": "daily_brief_not_found"})
     return row
 
 

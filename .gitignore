@@ -356,3 +356,12 @@ data/charts/
 
 # 探针/运维运行态抓取目录（log/judge_ab_* 证据文件已显式入库；时间戳子目录为运行态，不入库）
 log/20*-*/
+
+# pytest 临时目录（basetemp 落在仓库根时产生，含运行态 SQLite）
+pytest-of-*/
+
+# pre-commit 缓存/探针目录
+.pre-commit-home-probe/
+
+# 每日汇报 E2E 专用库（add-auto-pool-analysis-daily-brief）
+data/test-e2e-dailyops-*

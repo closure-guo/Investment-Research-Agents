@@ -47,6 +47,7 @@ from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.cohort.runner import run_cohort_batch
+from finance_agent.outcome.daily_brief import run_daily_brief
 from finance_agent.outcome.events.job import (
     run_cb_daily,
     run_earnings_fetch_daily,
@@ -64,6 +65,7 @@ from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
 from finance_agent.screening.pipeline import run_microcap_lane, run_screening_daily
+from finance_agent.screening.pool_analysis import run_pool_analysis_daily
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,9 @@ JOB_IDS: tuple[str, ...] = (
     # 16:15 分诊插在仿真执行（16:10）之后
     "earnings_triage_daily",
     "paper_settle_daily",
+    # 自动选股分析（add-auto-pool-analysis-daily-brief）：16:22——选股 15:40 完成、
+    # paper 结算 16:20 之后；只建会话并入队，不阻塞调度线程
+    "auto_pool_analysis_daily",
     # 16:25 事件结算插在 paper 结算（16:20）之后
     "event_settle_daily",
     "daily_marking",
@@ -102,6 +107,9 @@ JOB_IDS: tuple[str, ...] = (
     "earnings_forecasts_daily",
     "research_report_inbox_daily",
     "cohort_batch",
+    # 每日汇报（add-auto-pool-analysis-daily-brief）：20:30——cohort 之后，给自动分析
+    # 留出完成时间；事实汇总 + LLM 生成，失败写降级摘要并记 failed
+    "daily_brief_daily",
     "memory_extract_monthly",
     "factor_proposal_monthly",
 )
@@ -119,6 +127,7 @@ JOB_LABELS: dict[str, str] = {
     "earnings_triage_daily": "预告分诊",
     "event_settle_daily": "事件结算",
     "paper_settle_daily": "paper 结算",
+    "auto_pool_analysis_daily": "自动选股分析",
     "daily_marking": "盯市",
     "metrics_snapshot": "指标快照",
     "integrity_check": "完整性校验",
@@ -132,6 +141,7 @@ JOB_LABELS: dict[str, str] = {
     "earnings_forecasts_daily": "一致预期快照",
     "research_report_inbox_daily": "研报投喂",
     "cohort_batch": "cohort 跑批",
+    "daily_brief_daily": "每日汇报",
     "memory_extract_monthly": "记忆提炼",
     "factor_proposal_monthly": "因子提案",
 }
@@ -150,6 +160,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "earnings_triage_daily": run_earnings_triage_daily,
     "event_settle_daily": run_event_settle_daily,
     "paper_settle_daily": run_paper_settle_daily,
+    "auto_pool_analysis_daily": run_pool_analysis_daily,
     "daily_marking": run_daily_marking,
     "metrics_snapshot": persist_metrics_snapshot,
     "integrity_check": integrity_check,
@@ -160,6 +171,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "earnings_forecasts_daily": run_forecasts_daily,
     "research_report_inbox_daily": ingest_inbox,
     "cohort_batch": run_cohort_batch,
+    "daily_brief_daily": run_daily_brief,
     "memory_extract_monthly": run_memory_extract_monthly,
     "factor_proposal_monthly": run_factor_proposal_monthly,
 }
@@ -247,6 +259,14 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "minute": 20,
         "timezone": "Asia/Shanghai",
     },
+    # 自动选股分析（add-auto-pool-analysis-daily-brief）：16:22——选股 15:40 完成、
+    # paper 结算 16:20 之后；任务只准备会话并入队，分析在 AnalyzeQueue 后台执行
+    "auto_pool_analysis_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 22,
+        "timezone": "Asia/Shanghai",
+    },
     # 事件结算（add-event-driven-lane）：16:25——paper 结算之后、盯市（16:30）之前；
     # 记账入场（T+1 开盘）+ 到期结算（参考价缺失保持 open + 留痕）
     "event_settle_daily": {
@@ -322,6 +342,14 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 18,
         "minute": 0,
+        "timezone": "Asia/Shanghai",
+    },
+    # 每日汇报（add-auto-pool-analysis-daily-brief）：20:30——cohort 18:00 之后，
+    # 给自动选股分析留出完成时间；汇总当日事实 → LLM → 落库/落盘
+    "daily_brief_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 20,
+        "minute": 30,
         "timezone": "Asia/Shanghai",
     },
     "memory_extract_monthly": {

@@ -26,6 +26,10 @@ from pydantic import BaseModel, ConfigDict, StrictBool, field_validator
 
 _logger = logging.getLogger("finance_agent.api")
 
+# 主事件循环引用：调度线程（APScheduler）需要把自动选股分析的入队动作投递回
+# uvicorn 主循环，才能复用 AnalyzeQueue 的 _promote/_watch 与 SSE/journal 通道。
+_MAIN_LOOP: asyncio.AbstractEventLoop | None = None
+
 load_dotenv()  # 加载 .env，须在 finance_agent 模块导入前执行（llm.py 等在 import 时读取环境变量）
 
 # 默认 LLM 模型（无环境变量 LLM_MODEL 时的回退值）。
@@ -38,9 +42,7 @@ from finance_agent.data.snapshot import (  # noqa: E402
     compute_snapshot_status,
     get_all_meta,
     latest_snapshot_date,
-    read_universe,
 )
-from finance_agent.events.pipeline import fetch_key_events  # noqa: E402
 from finance_agent.execution.brokers.base import ORDER_STATUSES, STATUS_REJECTED  # noqa: E402
 from finance_agent.factors.builtin import BUILTIN_FACTORS  # noqa: E402
 from finance_agent.factors.library import (  # noqa: E402
@@ -65,10 +67,12 @@ from finance_agent.memory.semantic import (  # noqa: E402
     reject_clause,
 )
 from finance_agent.pipeline_runner import PipelineRunner, build_layer_tree  # noqa: E402
+from finance_agent.screening.freshness import screening_freshness_removals  # noqa: E402
 from finance_agent.screening.pipeline import (  # noqa: E402
-    check_signal_freshness,
     latest_successful_pool,
-    read_snapshot_calendar,
+)
+from finance_agent.screening.pool_analysis import (  # noqa: E402
+    prepare_pool_analysis_batch,
 )
 from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
 from finance_agent.screening.ranker import recent_ic_stats  # noqa: E402
@@ -78,7 +82,6 @@ from finance_agent.screening.store import (  # noqa: E402
     latest_screening_batch,
     latest_successful_batch,
     list_batches,
-    record_screening_removals,
 )
 from finance_agent.session_store import (  # noqa: E402
     append_chat,
@@ -111,6 +114,8 @@ from finance_agent.timeline_builder import apply_chat_event  # noqa: E402
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """启动时清扫悬挂 running 会话：后端重启后 PipelineRunner 内存态已丢失，置 failed 供前端恢复展示。"""
+    global _MAIN_LOOP
+    _MAIN_LOOP = asyncio.get_running_loop()
     PipelineRunner.mark_swept_failed()
     # cohort 运维配置引导(delta add-eval-ops-console):env → ops_config 表的一次性种子,
     # 已有表值不覆盖(界面改过的值重启保持)。旁路铁律:引导失败只记 ERROR,不阻断启动。
@@ -132,6 +137,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
+        _MAIN_LOOP = None
         # 旁路铁律:退出时必须尝试关闭 scheduler;关闭失败记 ERROR 不阻断 API 关停
         try:
             stop_scheduler(_scheduler)
@@ -890,6 +896,7 @@ if TESTING:
             and not req.get("regime_reset")
             and not isinstance(req.get("events"), dict)
             and not req.get("events_reset")
+            and not isinstance(req.get("daily_brief"), dict)
         ):
             return {"status": "ok", "mode": "testing"}
         # add-paper-broker：战绩造数复位（清 equity_curve + paper_equity 两表）。双曲线
@@ -1080,6 +1087,20 @@ if TESTING:
             queue_seed = screening_seed.get("queue")
             if isinstance(queue_seed, list):
                 _get_analyze_queue().seed(queue_seed)
+        # 每日汇报造数（add-auto-pool-analysis-daily-brief）：E2E/前端测试用；
+        # 同日期 upsert，不产生重复行。
+        daily_brief_seed = req.get("daily_brief")
+        if isinstance(daily_brief_seed, dict):
+            from finance_agent.outcome.daily_brief import upsert_daily_brief as _seed_brief
+
+            _seed_brief(
+                str(daily_brief_seed.get("date") or datetime.now().strftime("%Y-%m-%d")),
+                str(daily_brief_seed.get("status") or "ok"),
+                str(daily_brief_seed.get("markdown") or ""),
+                model=daily_brief_seed.get("model"),
+                prompt_version=daily_brief_seed.get("prompt_version"),
+                error=daily_brief_seed.get("error"),
+            )
         # 语义记忆造数（delta add-memory-confirmation T1）：可选先 reset（清条款表）再写
         # 条款——逐条经既有落库（去重口径同生产：同文本已存在则跳过）后再按 status 走
         # 既有状态机置态，与真实确认/驳回路径同源。库路径调用期读 SESSIONS_DB_PATH。
@@ -2430,6 +2451,12 @@ async def analyze(req: AnalyzeRequest):
         )
 
     # ── ReAct 路径：registry 后台任务 + 订阅转发（生成与连接解耦）──
+    # 追问时跳过历史事件重放：用当前 journal 最大 seq 作为 after_seq，
+    # 避免上一轮 done 终态事件导致 registry.subscribe 提前 return（SSE 流终止）。
+    # 须在 registry.start 前取值：新会话的 session_created 由任务发布，
+    # start 后再取 max_seq 可能跳过该事件，前端拿不到 session_id
+    # （当前会话 ID 缺失 → 运行中管线卡被隐藏，issue #424/#328）。
+    afterSeq = await asyncio.to_thread(get_max_event_seq, session_id)
     started = await registry.start(
         session_id,
         _run_react_analysis(
@@ -2445,9 +2472,6 @@ async def analyze(req: AnalyzeRequest):
     if not started:
         # single-flight：会话已有活跃任务，拒绝新消息（不追加 user 消息）
         return JSONResponse(status_code=409, content={"error": "session_busy"})
-    # 追问时跳过历史事件重放：用当前 journal 最大 seq 作为 after_seq，
-    # 避免上一轮 done 终态事件导致 registry.subscribe 提前 return（SSE 流终止）
-    afterSeq = await asyncio.to_thread(get_max_event_seq, session_id)
     return StreamingResponse(
         _subscribe_sse(session_id, after_seq=afterSeq),
         media_type="text/event-stream",
@@ -3529,38 +3553,43 @@ def _screening_freshness_removals(
     也不得以空 findings 冒充「已校验通过」。三条降级路径（含跳过）**一律记
     WARNING 及以上**：spec 要求的重校验被跳过着对运维必须可见，不得静默通过。
     """
-    snapshot_date = latest_snapshot_date()
-    if snapshot_date is None:
-        _logger.warning("选股时效性校验跳过：快照库无数据（无最新可得状态可核对）")
-        return []
-    if batch_date is not None and snapshot_date < batch_date:
-        _logger.warning(
-            "选股时效性校验跳过：快照最新日期 %s 早于池批次 %s（无更新状态可核对）",
-            snapshot_date,
-            batch_date,
+    return screening_freshness_removals(pool_rows, batch_date)
+
+
+def _enqueue_pool_analysis(symbol: str, session_id: str) -> bool:
+    """把自动批次的一个标的投递到主循环的 AnalyzeQueue（线程安全）。
+
+    调度器 job 在 APScheduler 线程里运行，``AnalyzeQueue._promote`` 需要运行中的
+    事件循环；用 ``call_soon_threadsafe`` 把入队动作送回 uvicorn 主循环，才能复用
+    ``_start_screening_analysis`` 的 ``PipelineRunner.start(loop=...)`` 与 SSE/journal。
+    """
+    loop = _MAIN_LOOP
+    if loop is None or loop.is_closed():
+        return False
+    loop.call_soon_threadsafe(_get_analyze_queue().enqueue, symbol, session_id)
+    return True
+
+
+def submit_pool_analysis_batch(
+    *, max_symbols: int | None = None, timeout: float = 120.0
+) -> dict[str, Any]:
+    """调度线程入口：在 uvicorn 主循环上准备并投递自动分析批次。
+
+    只等待「建会话 + 入队」完成（通常 <1s/标的），不等待分析本身；分析由
+    ``AnalyzeQueue`` 在后台补位执行并复用既有 SSE/journal。
+    """
+    loop = _MAIN_LOOP
+    if loop is None or loop.is_closed():
+        raise RuntimeError("主事件循环不可用：自动选股分析只能在后端进程内触发")
+
+    async def _run() -> dict[str, Any]:
+        return await asyncio.to_thread(
+            prepare_pool_analysis_batch,
+            max_symbols=max_symbols,
+            enqueue=_enqueue_pool_analysis,
         )
-        return []
-    try:
-        rows = read_universe(snapshot_date)
-        calendar = read_snapshot_calendar()
-    except Exception:  # noqa: BLE001 -- 校验输入不可得：降级跳过，不让端点 500
-        _logger.exception("选股时效性校验读取快照失败（%s），本次跳过校验", snapshot_date)
-        return []
-    symbols = [str(row.get("symbol") or "").strip() for row in pool_rows]
-    symbols = [symbol for symbol in symbols if symbol]
-    findings = check_signal_freshness(
-        symbols,
-        snapshot_rows={str(row.get("code") or "").strip(): row for row in rows},
-        events_by_symbol={symbol: fetch_key_events(symbol) for symbol in symbols},
-        as_of=snapshot_date,
-        calendar=calendar,
-    )
-    if findings:
-        try:
-            record_screening_removals(snapshot_date, findings)
-        except Exception:  # noqa: BLE001 -- 审计写失败不回滚已判定的移除（记日志）
-            _logger.exception("选股移除审计写库失败（%s）", snapshot_date)
-    return findings
+
+    return asyncio.run_coroutine_threadsafe(_run(), loop).result(timeout=timeout)
 
 
 @app.post("/api/screening/analyze")
@@ -4246,7 +4275,7 @@ def _broker_snapshot_marks(symbols: list[str]) -> tuple[str | None, dict[str, fl
     只读面，缺价由调用方以 ``null`` + 标注表达（``settle_daily`` 的 fail loud 是
     日批落库语义，两者口径不同）。
     """
-    from finance_agent.data.snapshot import SnapshotError, latest_snapshot_date, read_bars
+    from finance_agent.data.snapshot import SnapshotError, read_bars
     from finance_agent.execution.brokers.paper import _snapshot_code, _valid_close
 
     as_of = latest_snapshot_date()
