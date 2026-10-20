@@ -78,7 +78,7 @@ export default defineConfig({
   webServer: [
     {
       // 后端：TESTING=1 + STUB_SCENARIO=tool_call，确定性模拟思考-搜索-思考
-      command: 'uv run uvicorn finance_agent.api:app --port 8001',
+      command: 'node tests/e2e/playwright/scripts/dev-supervisor.mjs --port 8001 -- uv run uvicorn finance_agent.api:app --port 8001',
       env: { TESTING: '1', STUB_SCENARIO: 'tool_call', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', REPORTS_DIR: 'tmp/e2e-reports-8001' },
       url: 'http://localhost:8001/api/health',
       timeout: 30_000,
@@ -87,7 +87,7 @@ export default defineConfig({
     },
     {
       // 前端：独立端口 5174，API 代理指向 8001 stub 后端
-      command: 'npm run dev -- --port 5174',
+      command: 'node ../tests/e2e/playwright/scripts/dev-supervisor.mjs --port 5174 -- npm run dev -- --port 5174',
       env: { VITE_API_TARGET: 'http://127.0.0.1:8001' },
       url: 'http://localhost:5174',
       timeout: 30_000,
@@ -99,7 +99,7 @@ export default defineConfig({
     // 5 层深度分析管线（管线内部 LLM/数据由 _llm_utils/fetch 的 TESTING stub 接管）。
     // 与 tool_call 场景隔离：两组后端 STUB_SCENARIO 不同，不能共用端口。
     {
-      command: 'uv run uvicorn finance_agent.api:app --port 8002',
+      command: 'node tests/e2e/playwright/scripts/dev-supervisor.mjs --port 8002 -- uv run uvicorn finance_agent.api:app --port 8002',
       env: { TESTING: '1', STUB_SCENARIO: 'pipeline', STUB_NODE_DELAY: '1.5', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', REPORTS_DIR: 'tmp/e2e-reports-8002' },
       url: 'http://localhost:8002/api/health',
       timeout: 30_000,
@@ -107,7 +107,7 @@ export default defineConfig({
       cwd: '../../../',
     },
     {
-      command: 'npm run dev -- --port 5175',
+      command: 'node ../tests/e2e/playwright/scripts/dev-supervisor.mjs --port 5175 -- npm run dev -- --port 5175',
       env: { VITE_API_TARGET: 'http://127.0.0.1:8002' },
       url: 'http://localhost:5175',
       timeout: 30_000,
@@ -118,7 +118,7 @@ export default defineConfig({
     // 独立端口对（后端 8003 / 前端 5176），STUB_SCENARIO=llm_failure
     // LLM 在第 1 轮 raise 异常，验证前端展示错误信息而非无限等待。
     {
-      command: 'uv run uvicorn finance_agent.api:app --port 8003',
+      command: 'node tests/e2e/playwright/scripts/dev-supervisor.mjs --port 8003 -- uv run uvicorn finance_agent.api:app --port 8003',
       env: { TESTING: '1', STUB_SCENARIO: 'llm_failure', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', REPORTS_DIR: 'tmp/e2e-reports-8003' },
       url: 'http://localhost:8003/api/health',
       timeout: 30_000,
@@ -126,7 +126,7 @@ export default defineConfig({
       cwd: '../../../',
     },
     {
-      command: 'npm run dev -- --port 5176',
+      command: 'node ../tests/e2e/playwright/scripts/dev-supervisor.mjs --port 5176 -- npm run dev -- --port 5176',
       env: { VITE_API_TARGET: 'http://127.0.0.1:8003' },
       url: 'http://localhost:5176',
       timeout: 30_000,
