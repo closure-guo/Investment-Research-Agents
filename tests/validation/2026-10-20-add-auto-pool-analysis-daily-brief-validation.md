@@ -75,6 +75,24 @@
 | `mypy`（新增/改动模块） | 5 个新模块 clean；仓库存量 `api.py`/`evals` 有既有报错 |
 | 全量 `uv run pytest` | 无失败跑到 53%，随后卡在依赖 Langfuse/网络的长测试；已停止（非本变更引入） |
 
+## 合并后端到端复测（2026-10-20 13:xx）
+
+- 合并：PR #428，squash 提交 `2ccc082a`（本地 main 已 ff 到该提交）。
+- Playwright（专用端口 8009/5179，独立测试库）：
+  `daily-ops` 6/6、`screening-page` 6/6、`broker-console` 5/5，共 **17 passed**。
+- 真实链路（合并后 main，独立库，真实 LLM）：
+  1. 种子当日池 `600519` → 触发 `auto_pool_analysis_daily` → `started=1`；
+  2. 五层分析完成，报告 **17,804 字符**，预测 `600519.SH`，`action=watch`，`fund_manager_decision=approve`；
+  3. 触发 `market_snapshot_daily` → 写入 5,568 行（spot_source=sina）；
+  4. 造一条 2026-10-19 的 `approve + buy` 预测（仅用于验证执行消费端，非模型产出）→
+     触发 `paper_execute_daily` → `signals_created=1 / orders_placed=1`，成交价 1321.67、
+     费用 33.04、持仓 100 股、现金 867,799.96；
+  5. 触发 `daily_brief_daily` → `status=ok`、模型 `openai/deepseek-v4.1-flash`、1,673 字符，
+     日报正确写出「1 笔纸面买入、100 股、1321.67、费用 33.04」，并明确标注 paper broker。
+
+**说明**：模型对 `600519` 的自动分析结论是 `watch`，所以自动链路本身不会下单；第 4 步是
+为验证「预测 → 信号 → 订单 → 持仓」消费端而人工造的一条 buy 预测，不代表模型已转多。
+
 ## 结论
 
 - [x] 自动选股分析日批可用（无需人工）
