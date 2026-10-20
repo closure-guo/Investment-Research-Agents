@@ -109,6 +109,10 @@ _NON_PRICE_PREFIX = ":：第/"
 _NON_PRICE_KEYWORDS: tuple[str, ...] = (
     "rsi",
     "kdj",
+    "j值",
+    "j 值",
+    "j线",
+    "j 线",
     "macd",
     "dif",
     "dea",
