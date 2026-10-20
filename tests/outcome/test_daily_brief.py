@@ -275,3 +275,14 @@ def test_same_date_rerun_upserts(seeded_dbs, tmp_path, monkeypatch):
     rows = list_daily_briefs(db_path=seeded_dbs["sessions_db_path"])
     assert len(rows) == 1
     assert rows[0]["markdown"] == "# 第二版"
+
+
+def test_prompt_contains_required_sections():
+    """prompt 权威源契约：事实占位符与六个固定章节。"""
+    from pathlib import Path
+
+    text = Path("src/finance_agent/prompts/daily_brief.md").read_text(encoding="utf-8")
+    assert "{{daily_facts}}" in text
+    for section in ("今日结论", "选股与精选池", "分析与决策", "交易与持仓", "风险与异常", "明日关注"):
+        assert f"## {section}" in text
+    assert "不得编造" in text or "MUST NOT 编造" in text
