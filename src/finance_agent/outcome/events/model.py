@@ -196,10 +196,14 @@ def upsert_forecasts(
 
 
 def list_untriaged(
-    *, as_of: str | None = None, db_path: str | Path | None = None
+    *,
+    as_of: str | None = None,
+    since: str | None = None,
+    db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """未分诊预告（无 ``event_triage`` 行）；``as_of`` 给定时按 ``available_at <= as_of``
-    做时点截断（MUST NOT 前视），缺省不过滤。按 ``available_at``、``code`` 升序。
+    做时点截断（MUST NOT 前视），``since`` 给定时按 ``available_at >= since`` 做分诊
+    窗口截断（历史积压不进每日调度批），缺省均不过滤。按 ``available_at``、``code`` 升序。
     """
     init_events_db(db_path)
     conn = _connect(db_path)
@@ -214,6 +218,9 @@ def list_untriaged(
         if as_of is not None:
             sql += " AND f.available_at <= ?"
             params.append(as_of)
+        if since is not None:
+            sql += " AND f.available_at >= ?"
+            params.append(since)
         sql += " ORDER BY f.available_at ASC, f.code ASC, f.source_record_id ASC"  # noqa: S608
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
     finally:

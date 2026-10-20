@@ -8,7 +8,8 @@
   （``sources_seen["earnings_forecast"]`` 记 ``none``）→ 成功期先幂等落库（不丢已成功
   数据），再上抛 RuntimeError（异常文案带 ``upserted`` 与失败期列表；ops ``run_job``
   记 ``failed`` + 原因），MUST NOT 以零条新增冒充成功；
-- ``run_earnings_triage_daily``：扫未分诊（``available_at <= 今日``）→ LLM 分诊
+- ``run_earnings_triage_daily``：扫未分诊（``available_at <= 今日``，且默认限于
+  ``EVENT_TRIAGE_WINDOW_DAYS`` 自然日窗口内）→ LLM 分诊
   （快照要素**逐行时点化**注入：每行取 ≤ 该行 ``available_at`` 的最近快照日字段；
   无覆盖行不注入快照字段，缺失计数入摘要 ``snapshot_ctx_missing``）→ 构建事件观察清单；
 - ``run_event_settle_daily``：记账入场（T+1 开盘口径，交易日历识别停牌缺口）+ 到期
@@ -219,6 +220,23 @@ def _snapshot_context(
     return context, missing
 
 
+_DEFAULT_TRIAGE_WINDOW_DAYS = 30
+
+
+def _triage_window_days() -> int:
+    """分诊窗口（自然日）；0 = 不设限。缺省/非法 → 默认 30 天。"""
+    raw = os.getenv("EVENT_TRIAGE_WINDOW_DAYS", str(_DEFAULT_TRIAGE_WINDOW_DAYS))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "EVENT_TRIAGE_WINDOW_DAYS 非法（%r），回落 %d 天",
+            raw,
+            _DEFAULT_TRIAGE_WINDOW_DAYS,
+        )
+        return _DEFAULT_TRIAGE_WINDOW_DAYS
+
+
 def run_earnings_triage_daily(
     *,
     client: Any = None,
@@ -226,9 +244,25 @@ def run_earnings_triage_daily(
     db_path: str | Path | None = None,
     snapshot_db_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """分诊日批：未分诊（时点截断）→ 逐行时点快照 → LLM 分诊 → 观察清单。"""
+    """分诊日批：未分诊（时点截断 + 默认 30 天窗口）→ 逐行时点快照 → LLM 分诊 → 观察清单。"""
     as_of = as_of or date.today().isoformat()
-    rows = list_untriaged(as_of=as_of, db_path=db_path)
+    window_days = _triage_window_days()
+    all_rows = list_untriaged(as_of=as_of, db_path=db_path)
+    rows = all_rows
+    skipped_historical = 0
+    if window_days > 0 and all_rows:
+        try:
+            since = (date.fromisoformat(as_of) - timedelta(days=window_days)).isoformat()
+        except ValueError:
+            logger.warning("分诊窗口起点解析失败（as_of=%r），本批不设窗口", as_of)
+        else:
+            rows = [
+                row
+                for row in all_rows
+                if not str(row.get("available_at") or "")
+                or str(row.get("available_at")) >= since
+            ]
+            skipped_historical = len(all_rows) - len(rows)
     if not rows:
         return {
             "triaged": 0,
@@ -236,6 +270,8 @@ def run_earnings_triage_daily(
             "watchlist_added": 0,
             "snapshot_ctx_missing": 0,
             "as_of": as_of,
+            "window_days": window_days,
+            "skipped_historical": skipped_historical,
         }
     snapshot_ctx, snapshot_missing = _snapshot_context(rows, snapshot_db_path=snapshot_db_path)
     client = client or GatewayTriageClient()
@@ -252,6 +288,8 @@ def run_earnings_triage_daily(
         "watchlist_added": added,
         "snapshot_ctx_missing": snapshot_missing,
         "as_of": as_of,
+        "window_days": window_days,
+        "skipped_historical": skipped_historical,
     }
     logger.info("事件分诊日批完成: %s", summary)
     return summary

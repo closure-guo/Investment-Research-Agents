@@ -247,6 +247,13 @@ prompt 权威源 `src/finance_agent/prompts/event_triage.md`，发布走 `script
 每行取「≤ 该行 `available_at` 的最近快照日」的该股快照字段，该日无覆盖（老公告/空库）→ 该行不注入快照字段（仅预告要素）并在日批摘要
 计数留痕 `snapshot_ctx_missing`（MUST NOT 对回填批次共用单一快照日/前视）。
 
+**分诊窗口**（2026-10-20 登记，裁决自首跑 5,365 条积压）：日批仅分诊 `available_at` 距判断日 ≤
+`EVENT_TRIAGE_WINDOW_DAYS`（默认 30 个自然日）的记录；窗口外历史未分诊记录不进入每日调度批，
+摘要留痕 `skipped_historical`。窗口只约束**调度批**，不改分诊合同与历史数据（`earnings_forecasts` 全量保留）；
+需要全量历史分诊时显式把窗口设为 0 或另跑回填脚本，MUST NOT 让历史积压逐日重扫。窗口内 `available_at`
+缺失的记录按“未知”纳入（不静默丢）。裁决理由：事件线 v1 为前瞻观察通道，历史盈余季（2026-01 2,915 条、
+2026-07 1,832 条）分诊无行动价值；30 天窗口首跑约 150 条，既覆盖当前预告季又不制造无限积压。
+
 **入场 / horizon / 结算口径**：入场 = 可得时点（`available_at`，缺省回落 `announce_date`）**次一交易日开盘价**
 （`fetch_kline(adjust=SETTLEMENT_ADJUST)` 后复权 hfq，与执行链同口径）；记账人口 = `verdict='outperform'` 且未入场者
 （`in_line`/`risk` 不记账；全候选反事实读数为非目标，如需另立 delta）。

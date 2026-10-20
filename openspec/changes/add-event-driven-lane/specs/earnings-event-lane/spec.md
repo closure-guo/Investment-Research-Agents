@@ -28,6 +28,8 @@
 
 系统 SHALL 提供日批扫描通道：对新增且未分诊的预告记录构造分诊输入（预告要素 + 标的快照要素）并调用 LLM 分诊；输出 SHALL 满足合同：`verdict ∈ {outperform, in_line, risk}`、`reason`（≤ 50 字）、`evidence`（引用的输入字段及取值）。单条调用失败 SHALL 降级为 `in_line` 并记 trace warning，不阻断本批其他记录。分诊结果 SHALL 落库并含模型标识与 prompt 版本指纹。分诊 prompt 权威源 SHALL 为 `src/finance_agent/prompts/event_triage.md`，发布 SHALL 走既有 prompt 部署通道（prompt-deploy-consistency 门禁适用）。
 
+日批扫描范围 SHALL 默认限于 `available_at` 距判断日 ≤ `EVENT_TRIAGE_WINDOW_DAYS`（默认 30 个自然日）的记录；窗口外历史未分诊记录 SHALL NOT 进入每日调度批，并在摘要留痕 `skipped_historical`。窗口 SHALL 只约束调度批，不删除/改写历史预告数据；窗口设为 0 表示不设限（显式全量回填）。窗口内 `available_at` 缺失的记录 SHALL 按“未知”纳入，MUST NOT 静默丢弃。
+
 #### Scenario: 分诊合同校验
 
 - **GIVEN** 一条预告记录进入分诊
@@ -40,6 +42,13 @@
 - **GIVEN** 一批 20 条记录其中 1 条 LLM 调用抛出 typed error
 - **WHEN** 批次执行
 - **THEN** 其余 19 条正常产出分诊结果；失败条目按 `in_line` 处理且 trace 含 warning
+
+#### Scenario: 历史积压不逐日重扫
+
+- **GIVEN** 库内存在窗口外（`available_at` 早于 `判断日 − EVENT_TRIAGE_WINDOW_DAYS`）的未分诊历史预告
+- **WHEN** 日批分诊运行
+- **THEN** 这些记录不进入本次 LLM 分诊，摘要 `skipped_historical` 计数留痕
+- **AND** 窗口内记录照常分诊
 
 ### Requirement: 事件观察清单与深度分析接线
 
