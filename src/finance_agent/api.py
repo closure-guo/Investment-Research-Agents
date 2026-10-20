@@ -38,9 +38,7 @@ from finance_agent.data.snapshot import (  # noqa: E402
     compute_snapshot_status,
     get_all_meta,
     latest_snapshot_date,
-    read_universe,
 )
-from finance_agent.events.pipeline import fetch_key_events  # noqa: E402
 from finance_agent.execution.brokers.base import ORDER_STATUSES, STATUS_REJECTED  # noqa: E402
 from finance_agent.factors.builtin import BUILTIN_FACTORS  # noqa: E402
 from finance_agent.factors.library import (  # noqa: E402
@@ -65,10 +63,9 @@ from finance_agent.memory.semantic import (  # noqa: E402
     reject_clause,
 )
 from finance_agent.pipeline_runner import PipelineRunner, build_layer_tree  # noqa: E402
+from finance_agent.screening.freshness import screening_freshness_removals  # noqa: E402
 from finance_agent.screening.pipeline import (  # noqa: E402
-    check_signal_freshness,
     latest_successful_pool,
-    read_snapshot_calendar,
 )
 from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
 from finance_agent.screening.ranker import recent_ic_stats  # noqa: E402
@@ -78,7 +75,6 @@ from finance_agent.screening.store import (  # noqa: E402
     latest_screening_batch,
     latest_successful_batch,
     list_batches,
-    record_screening_removals,
 )
 from finance_agent.session_store import (  # noqa: E402
     append_chat,
@@ -3529,38 +3525,7 @@ def _screening_freshness_removals(
     也不得以空 findings 冒充「已校验通过」。三条降级路径（含跳过）**一律记
     WARNING 及以上**：spec 要求的重校验被跳过着对运维必须可见，不得静默通过。
     """
-    snapshot_date = latest_snapshot_date()
-    if snapshot_date is None:
-        _logger.warning("选股时效性校验跳过：快照库无数据（无最新可得状态可核对）")
-        return []
-    if batch_date is not None and snapshot_date < batch_date:
-        _logger.warning(
-            "选股时效性校验跳过：快照最新日期 %s 早于池批次 %s（无更新状态可核对）",
-            snapshot_date,
-            batch_date,
-        )
-        return []
-    try:
-        rows = read_universe(snapshot_date)
-        calendar = read_snapshot_calendar()
-    except Exception:  # noqa: BLE001 -- 校验输入不可得：降级跳过，不让端点 500
-        _logger.exception("选股时效性校验读取快照失败（%s），本次跳过校验", snapshot_date)
-        return []
-    symbols = [str(row.get("symbol") or "").strip() for row in pool_rows]
-    symbols = [symbol for symbol in symbols if symbol]
-    findings = check_signal_freshness(
-        symbols,
-        snapshot_rows={str(row.get("code") or "").strip(): row for row in rows},
-        events_by_symbol={symbol: fetch_key_events(symbol) for symbol in symbols},
-        as_of=snapshot_date,
-        calendar=calendar,
-    )
-    if findings:
-        try:
-            record_screening_removals(snapshot_date, findings)
-        except Exception:  # noqa: BLE001 -- 审计写失败不回滚已判定的移除（记日志）
-            _logger.exception("选股移除审计写库失败（%s）", snapshot_date)
-    return findings
+    return screening_freshness_removals(pool_rows, batch_date)
 
 
 @app.post("/api/screening/analyze")
@@ -4246,7 +4211,7 @@ def _broker_snapshot_marks(symbols: list[str]) -> tuple[str | None, dict[str, fl
     只读面，缺价由调用方以 ``null`` + 标注表达（``settle_daily`` 的 fail loud 是
     日批落库语义，两者口径不同）。
     """
-    from finance_agent.data.snapshot import SnapshotError, latest_snapshot_date, read_bars
+    from finance_agent.data.snapshot import SnapshotError, read_bars
     from finance_agent.execution.brokers.paper import _snapshot_code, _valid_close
 
     as_of = latest_snapshot_date()
