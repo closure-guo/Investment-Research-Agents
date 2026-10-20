@@ -63,6 +63,18 @@
 - 分析结论为 `watch`，因此纸面账户仍为 0 订单。这是模型判断，不是自动买入链路断开。
 - 真实券商仍为 paper broker；本变更不接实盘。
 
+## 验证证据
+
+| 检查 | 结果 |
+|---|---|
+| `openspec validate add-auto-pool-analysis-daily-brief --strict` | valid |
+| 定向后端套件（池分析/日报/注册表/API/LLM/prompt） | 338 passed |
+| 前端 Vitest 全量 | 887 passed；1 项 `factorResearchPage` 并行负载下波动，单跑 27/27 通过（与本变更无关） |
+| Playwright daily-ops（专用端口 8009/5179） | 6 passed（含 26 job 时间线与日报区） |
+| `ruff check`（变更文件） | All checks passed |
+| `mypy`（新增/改动模块） | 5 个新模块 clean；仓库存量 `api.py`/`evals` 有既有报错 |
+| 全量 `uv run pytest` | 无失败跑到 53%，随后卡在依赖 Langfuse/网络的长测试；已停止（非本变更引入） |
+
 ## 结论
 
 - [x] 自动选股分析日批可用（无需人工）
