@@ -18,6 +18,7 @@ from finance_agent.llm.errors import (
     LLMError,
     LLMTimeoutError,
     ModelNotFound,
+    ProviderInternalError,
     RateLimitError,
     UnknownLLMError,
 )
@@ -40,6 +41,8 @@ class TestErrorNormalization:
             ("RateLimitError", RateLimitError),
             ("Timeout", LLMTimeoutError),
             ("APIConnectionError", LLMTimeoutError),
+            ("InternalServerError", ProviderInternalError),
+            ("ServiceUnavailableError", ProviderInternalError),
             ("NotFoundError", ModelNotFound),
             ("ContextWindowExceededError", ContextOverflow),
         ],
@@ -63,6 +66,7 @@ class TestErrorNormalization:
         assert AuthError().retryable is False
         assert RateLimitError().retryable is True
         assert LLMTimeoutError().retryable is True
+        assert ProviderInternalError().retryable is True
         assert ModelNotFound().retryable is False
         assert ContentFiltered().retryable is False
 
