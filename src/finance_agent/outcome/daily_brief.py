@@ -325,22 +325,14 @@ def collect_daily_facts(
             for row in screening["auto_analysis_runs"]
             if row.get("session_id")
         ]
-        statuses = _safe(
-            "session_statuses", lambda: _session_statuses(sessions_db, session_ids)
-        )
+        statuses = _safe("session_statuses", lambda: _session_statuses(sessions_db, session_ids))
         for row in screening["auto_analysis_runs"]:
             row["session_status"] = (statuses or {}).get(str(row.get("session_id") or ""))
 
-    facts["predictions"] = _safe(
-        "predictions", lambda: _prediction_facts(sessions_db, as_of)
-    ) or {}
-    facts["execution"] = _safe(
-        "execution", lambda: _execution_facts(execution_db, as_of)
-    ) or {}
+    facts["predictions"] = _safe("predictions", lambda: _prediction_facts(sessions_db, as_of)) or {}
+    facts["execution"] = _safe("execution", lambda: _execution_facts(execution_db, as_of)) or {}
     facts["factors"] = _safe("factors", lambda: _factor_facts(factor_db)) or {}
-    facts["failures"] = _safe(
-        "failures", lambda: _job_failure_facts(sessions_db, as_of)
-    ) or []
+    facts["failures"] = _safe("failures", lambda: _job_failure_facts(sessions_db, as_of)) or []
     return facts
 
 
@@ -391,9 +383,7 @@ def render_fallback(facts: dict[str, Any], error: str) -> str:
     ]
     if failures:
         for row in failures:
-            lines.append(
-                f"- {row.get('job_id')}：{row.get('status')}；{_fmt(row.get('error'))}"
-            )
+            lines.append(f"- {row.get('job_id')}：{row.get('status')}；{_fmt(row.get('error'))}")
     else:
         lines.append("- 无失败/跳过任务记录。")
     warnings = facts.get("warnings") or []
@@ -507,10 +497,9 @@ def run_daily_brief(
         factor_db_path=factor_db_path,
     )
     info = load_prompt_with_meta("daily_brief")
-    prompt = (
-        info.template.replace("{{daily_facts}}", json.dumps(facts, ensure_ascii=False, indent=2))
-        .replace("{{brief_date}}", day)
-    )
+    prompt = info.template.replace(
+        "{{daily_facts}}", json.dumps(facts, ensure_ascii=False, indent=2)
+    ).replace("{{brief_date}}", day)
     try:
         raw, meta = complete_text(
             [{"role": "user", "content": prompt}],

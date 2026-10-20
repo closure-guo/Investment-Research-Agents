@@ -562,7 +562,9 @@ def test_analyze_endpoint_removes_suspended_symbol_and_starts_others(
 ) -> None:
     """spec 场景「盘前停牌移除」：Z 停牌 → removed(SUSPENDED) 且不建会话，其余照常入队。"""
     _install_snapshot(monkeypatch, tmp_path, suspended=frozenset({"600001"}))
-    monkeypatch.setattr("finance_agent.screening.freshness.fetch_key_events", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "finance_agent.screening.freshness.fetch_key_events", lambda *args, **kwargs: []
+    )
     started = _stub_pipeline_start(monkeypatch)
     _stub_sessions(monkeypatch)
 
@@ -675,7 +677,9 @@ def test_analyze_endpoint_skips_and_warns_when_snapshot_older_than_batch(
 def test_analyze_endpoint_reads_snapshot_through_env_path(pool_seed, monkeypatch, tmp_path) -> None:
     """库路径调用期读 SNAPSHOT_DB_PATH（导入期冻结会让 E2E/env 注入失效）。"""
     _install_snapshot(monkeypatch, tmp_path, suspended=frozenset({"600005"}))
-    monkeypatch.setattr("finance_agent.screening.freshness.fetch_key_events", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "finance_agent.screening.freshness.fetch_key_events", lambda *args, **kwargs: []
+    )
     _stub_pipeline_start(monkeypatch)
     _stub_sessions(monkeypatch)
 

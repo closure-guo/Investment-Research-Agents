@@ -60,8 +60,7 @@ def _seed_sessions(path) -> None:
         ),
     )
     con.execute(
-        "INSERT INTO job_runs (job_id, status, error, started_at, finished_at) "
-        "VALUES (?,?,?,?,?)",
+        "INSERT INTO job_runs (job_id, status, error, started_at, finished_at) VALUES (?,?,?,?,?)",
         ("screening_daily", "failed", "快照缺失", f"{AS_OF}T15:40:00", f"{AS_OF}T15:41:00"),
     )
     con.commit()
@@ -121,8 +120,7 @@ def _seed_execution(path) -> None:
         """
     )
     con.execute(
-        "INSERT INTO orders (order_id, symbol, side, qty, status, created_at) "
-        "VALUES (?,?,?,?,?,?)",
+        "INSERT INTO orders (order_id, symbol, side, qty, status, created_at) VALUES (?,?,?,?,?,?)",
         ("o1", "600519", "buy", 100, "filled", f"{AS_OF}T16:10:00"),
     )
     con.execute(
@@ -232,8 +230,10 @@ def test_llm_success_persists_and_writes_file(seeded_dbs, tmp_path, monkeypatch)
     row = get_daily_brief(AS_OF, db_path=seeded_dbs["sessions_db_path"])
     assert row is not None and row["status"] == "ok"
     assert row["prompt_version"] == "3"
-    assert (tmp_path / "reports" / f"daily-brief-{AS_OF}.md").read_text(encoding="utf-8").startswith(
-        "# 日报"
+    assert (
+        (tmp_path / "reports" / f"daily-brief-{AS_OF}.md")
+        .read_text(encoding="utf-8")
+        .startswith("# 日报")
     )
 
 
@@ -267,9 +267,7 @@ def test_same_date_rerun_upserts(seeded_dbs, tmp_path, monkeypatch):
         lambda name: SimpleNamespace(template="{facts}", prompt_version=3),
     )
     responses = iter([("# 第一版", {"model": "m"}), ("# 第二版", {"model": "m"})])
-    monkeypatch.setattr(
-        daily_brief, "complete_text", lambda *a, **k: next(responses)
-    )
+    monkeypatch.setattr(daily_brief, "complete_text", lambda *a, **k: next(responses))
     run_daily_brief(AS_OF, **seeded_dbs)
     run_daily_brief(AS_OF, **seeded_dbs)
     rows = list_daily_briefs(db_path=seeded_dbs["sessions_db_path"])
@@ -283,6 +281,13 @@ def test_prompt_contains_required_sections():
 
     text = Path("src/finance_agent/prompts/daily_brief.md").read_text(encoding="utf-8")
     assert "{{daily_facts}}" in text
-    for section in ("今日结论", "选股与精选池", "分析与决策", "交易与持仓", "风险与异常", "明日关注"):
+    for section in (
+        "今日结论",
+        "选股与精选池",
+        "分析与决策",
+        "交易与持仓",
+        "风险与异常",
+        "明日关注",
+    ):
         assert f"## {section}" in text
     assert "不得编造" in text or "MUST NOT 编造" in text
