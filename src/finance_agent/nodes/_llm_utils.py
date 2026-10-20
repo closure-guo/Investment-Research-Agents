@@ -268,6 +268,7 @@ def _call_llm_for_json_once(
     validate: Callable[[dict], Any] | None,
 ) -> dict:
     """单 profile 的一次「调用 + 解析 + repair」。"""
+    from finance_agent.llm.errors import EmptyLLMOutputError
     from finance_agent.llm.gateway import FALLBACK_TRIGGER_ERRORS
 
     kwargs = {
@@ -281,6 +282,10 @@ def _call_llm_for_json_once(
         response = call_llm_streaming(prompt, **kwargs)
     except FALLBACK_TRIGGER_ERRORS:
         # 触发类错误同 profile 重试无意义（spec：依链切换）→ 交给上层链执行器
+        raise
+    except EmptyLLMOutputError:
+        # call_llm_streaming 内已做强化指令 repair（最多 3 次）；此处再外层重试
+        # 会把尝试次数翻倍，且不改变模型行为 → 直接上抛。
         raise
     except Exception:
         # 服务瞬时故障（方舟偶发 500 / 流式中断，r4 实测）重试一次
@@ -588,6 +593,21 @@ def usage_collector() -> Iterator[UsageAccumulator]:
         _usage_acc.reset(token)
 
 
+# 空输出重试强化指令（incident 017 延伸）：模型只输出 reasoning、正文为空时，
+# 原样重放同一 prompt 会以相同概率复现。第二次尝试追加明确指令，要求直接产出
+# 最终答案；若节点要求 JSON，则输出完整合法 JSON（对齐 llm-output-contract
+# 「空输出触发 repair」场景）。
+_EMPTY_OUTPUT_RETRY_INSTRUCTION = (
+    "上一次回复只有思考过程，没有最终答案。不要只输出思考；"
+    "现在直接输出最终答案。若任务要求 JSON，直接输出完整合法 JSON，不得为空。"
+)
+
+
+def _with_empty_output_retry_instruction(messages: list[dict]) -> list[dict]:
+    """在原始 messages 末尾追加空输出强化指令（不修改调用方列表）。"""
+    return [*messages, {"role": "user", "content": _EMPTY_OUTPUT_RETRY_INSTRUCTION}]
+
+
 def call_llm_streaming(
     prompt: str,
     system: str = "",
@@ -682,7 +702,7 @@ def call_llm_streaming(
     # 首轮 17 分钟的部分正文被整段丢弃。
     from finance_agent.llm import errors as _llm_errors
     from finance_agent.llm.adapters.litellm_adapter import build_resume_kwargs
-    from finance_agent.llm.errors import LLMError, OutputTruncatedError
+    from finance_agent.llm.errors import EmptyLLMOutputError, LLMError, OutputTruncatedError
 
     # 截断升级预算（官方上限）
     _ESCALATE_BUDGET = 131072
@@ -702,7 +722,9 @@ def call_llm_streaming(
     # 续写场景下的已完成正文累积（升级重试不从头重跑，返回值须拼接两轮）
     carried_answer = ""
     attempt_messages: list[dict] = messages
-    for attempt in range(2):
+    # 空输出允许 3 次尝试（llm-output-contract「repair 重试 1-2 次」）；
+    # 截断与其它 retryable 错误仍只重试一次（保持既有语义）。
+    for attempt in range(3):
         answer_parts: list[str] = []
         try:
             # _call_base + escalate 合并下发（escalate 覆盖 max_tokens：
@@ -733,6 +755,12 @@ def call_llm_streaming(
                     )
                     raise err_cls(ev.raw.get("error") or ev.finish_reason or "LLM error")
             return carried_answer + "".join(answer_parts)
+        except EmptyLLMOutputError:
+            if attempt >= 2:
+                raise
+            # 只思考不产出正文：追加强化指令后重试（最多两次 repair），
+            # 不翻倍预算、不携带续写上下文。
+            attempt_messages = _with_empty_output_retry_instruction(messages)
         except OutputTruncatedError:
             if attempt == 1:
                 raise

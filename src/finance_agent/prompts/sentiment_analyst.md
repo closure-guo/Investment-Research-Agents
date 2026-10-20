@@ -26,10 +26,9 @@
 {
   "agent_name": "sentiment",
   "summary": "一句话总结舆情面状况",
-"plain_conclusion": "一句普通人可读的舆情结论（含多空方向与关键依据，非黑话堆砌）",
+  "plain_conclusion": "一句普通人可读的舆情结论（含多空方向与关键依据，非黑话堆砌）",
   "key_findings": ["关键发现1", "关键发现2"],
   "claims": [
-  "markdown": "## 舆情分析\n详细分析内容..."
     {
       "claim_type": "entity",
       "source_type": "data",
@@ -41,6 +40,7 @@
       "horizon_hint": "short"
     }
   ],
+  "markdown": "## 舆情分析\n详细分析内容..."
 }
 ```
 

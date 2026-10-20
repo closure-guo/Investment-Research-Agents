@@ -212,7 +212,21 @@ class TestStreamingRetryOnRetryableLLMError:
             from finance_agent.nodes._llm_utils import call_llm_streaming
 
             call_llm_streaming("p", node_name="trader")
-        assert calls["n"] == 2
+        assert calls["n"] == 3
+
+    def test_empty_output_not_double_retried_by_json_wrapper(self):
+        """call_llm_streaming 内已做强化 repair；外层 JSON 包装不得再翻倍尝试。"""
+        from unittest.mock import MagicMock
+
+        from finance_agent.llm.errors import EmptyLLMOutputError
+
+        fake = MagicMock(side_effect=EmptyLLMOutputError("thinking 后即止"))
+        with (
+            patch("finance_agent.nodes._llm_utils.call_llm_streaming", fake),
+            pytest.raises(EmptyLLMOutputError),
+        ):
+            call_llm_for_json("p")
+        assert fake.call_count == 1
 
 
 def test_truncation_retry_escalates_budget():
