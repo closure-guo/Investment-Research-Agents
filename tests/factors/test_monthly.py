@@ -69,19 +69,19 @@ def _seed_snapshot_dates(db_path: Path, n: int) -> None:
 
 
 def test_admission_lookback_independent_of_monitor():
-    """准入面板深度常量独立（raise-admission-panel-depth）：250；监控口径不动。"""
+    """准入面板深度常量独立（raise-admission-panel-depth-500）：500；监控口径不动。"""
     from finance_agent.factors import constraints, monitor
 
-    assert constraints.ADMISSION_PANEL_LOOKBACK_DAYS == 250
+    assert constraints.ADMISSION_PANEL_LOOKBACK_DAYS == 500
     assert monitor._PANEL_LOOKBACK_DAYS == constraints.DECAY_WINDOW + 30  # 衰减监控口径逐字不变
 
 
 def test_panel_from_snapshot_takes_admission_lookback(tmp_path):
-    """260 日可用 → 准入面板取最近 250 日（独立于监控面板的 90 日口径）。"""
+    """520 日可用 → 准入面板取最近 500 日（独立于监控面板的 90 日口径）。"""
     from finance_agent.factors.constraints import ADMISSION_PANEL_LOOKBACK_DAYS
 
     snap = tmp_path / "snap.db"
-    _seed_snapshot_dates(snap, n=260)
+    _seed_snapshot_dates(snap, n=520)
 
     panel = monthly._panel_from_snapshot(snap)
 
@@ -91,7 +91,7 @@ def test_panel_from_snapshot_takes_admission_lookback(tmp_path):
 def test_panel_from_snapshot_shallow_fails_loud(tmp_path):
     """可用深度 < 下限 → ValueError（MUST NOT 以浅面板放行评估）。"""
     snap = tmp_path / "snap.db"
-    _seed_snapshot_dates(snap, n=249)
+    _seed_snapshot_dates(snap, n=499)
 
     with pytest.raises(ValueError, match="深度不足"):
         monthly._panel_from_snapshot(snap)
