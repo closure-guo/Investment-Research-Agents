@@ -52,6 +52,7 @@ export default defineConfig({
         // 独立测试库，与生产 data/sessions.db 物理隔离
         SESSIONS_DB_PATH: 'data/test-e2e-sessions.db',
         SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db',
+        RESEARCH_REPORTS_DB_PATH: 'data/test-e2e-research-reports.db',
         // 因子库 E2E 造数库（同默认 config 口径）
         FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db',
         // 执行台账 E2E 造数库（同默认 config 口径；broker_reset 清账户三表）

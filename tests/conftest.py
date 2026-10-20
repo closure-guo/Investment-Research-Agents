@@ -50,7 +50,7 @@ def _reset_probe_cache():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_runtime_dbs(request, tmp_path):
+def _isolate_runtime_dbs(request, tmp_path, monkeypatch):
     """运行时数据库隔离（#133 / incident 031）：非 live 测试一律不得写开发库。
 
     背景：非 live 测试也会走真实落库挂点——tests/test_deep_trace_root.py 调
@@ -101,6 +101,17 @@ def _isolate_runtime_dbs(request, tmp_path):
     # env；省略 db_path 的用例同样不得读/写开发库 data/events.db）
     old_events_env = os.environ.get("EVENTS_DB_PATH")
     os.environ["EVENTS_DB_PATH"] = str(tmp_path / "runtime-events.db")
+    # ⑦ RESEARCH_REPORTS_DB_PATH：add-research-report-dataplane（data/research_reports_store
+    # 同款调用期读 env；省略 db_path 的用例同样不得读/写开发库 data/research_reports.db）
+    old_rr_env = os.environ.get("RESEARCH_REPORTS_DB_PATH")
+    os.environ["RESEARCH_REPORTS_DB_PATH"] = str(tmp_path / "runtime-research-reports.db")
+    # 一致预期按需直拉属网络调用：非 live 测试一律离线（个别用例自行 monkeypatch
+    # fetch_forecast_snapshot 时会覆盖本 patch）。fetch_data 的真实路径用例因此
+    # 拿到 status=missing 而不触网。
+    monkeypatch.setattr(
+        "finance_agent.data.research_reports._call_ak",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline-test")),
+    )
     try:
         yield tmp_db
     finally:
@@ -125,6 +136,10 @@ def _isolate_runtime_dbs(request, tmp_path):
             os.environ.pop("EVENTS_DB_PATH", None)
         else:
             os.environ["EVENTS_DB_PATH"] = old_events_env
+        if old_rr_env is None:
+            os.environ.pop("RESEARCH_REPORTS_DB_PATH", None)
+        else:
+            os.environ["RESEARCH_REPORTS_DB_PATH"] = old_rr_env
 
 
 @pytest.fixture

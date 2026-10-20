@@ -288,6 +288,13 @@ data/execution.db*
 # 同 data/screening.db / data/regime.db 处置；env EVENTS_DB_PATH 可覆盖）
 data/events.db*
 data/test-e2e-events.db*
+# 研报数据面库（delta add-research-report-dataplane：本地运行时数据 + E2E 隔离库，
+# 同 data/events.db 处置；env RESEARCH_REPORTS_DB_PATH 可覆盖）
+data/research_reports.db*
+data/test-e2e-research-reports.db*
+data/test-e2e-ui-baseline-research-reports.db*
+# 研报投喂目录（个人研究自用；人工放入的 PDF 与解析产物不得入库）
+data/research_report_inbox/
 data/test-repro.db*
 data/*.corrupt-backup
 

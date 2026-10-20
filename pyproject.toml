@@ -22,6 +22,7 @@ dependencies = [
     "apscheduler>=3.11.3",
     "weasyprint>=62.0",
     "ag-ui-protocol==0.1.21",
+    "pypdf>=5.0",
 ]
 
 [tool.uv]
