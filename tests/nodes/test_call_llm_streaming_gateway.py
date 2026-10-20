@@ -150,16 +150,17 @@ class TestErrorEventRestore:
         assert captured == [65536, 131071]
         assert messages_len == [1, 2], "升级重试须追加续写指令消息（不从头重跑）"
 
-    def test_retryable_non_truncated_error_retries_without_escalation(self):
-        """retryable 非截断（EmptyLLMOutputError）重试一次，预算不翻倍（escalate 仅截断分支触发）。"""
+    def test_retryable_empty_output_retries_with_instruction_without_escalation(self):
+        """空输出 repair：最多 3 次、每次追加强化指令；预算不翻倍（escalate 仅截断分支触发）。"""
         from finance_agent.llm.types import CanonicalEvent
 
-        calls = {"n": 0, "max_tokens": []}
+        calls = {"n": 0, "max_tokens": [], "messages": []}
 
         def fake(*a, **kw):
             calls["n"] += 1
             calls["max_tokens"].append(kw.get("max_tokens"))
-            if calls["n"] == 1:
+            calls["messages"].append(a[0] if a else kw.get("messages"))
+            if calls["n"] <= 2:
                 return iter(
                     [
                         CanonicalEvent(
@@ -175,8 +176,12 @@ class TestErrorEventRestore:
             from finance_agent.nodes._llm_utils import call_llm_streaming
 
             assert call_llm_streaming("p") == "res"
-        assert calls["n"] == 2
-        assert calls["max_tokens"] == [65536, 65536]
+        assert calls["n"] == 3
+        assert calls["max_tokens"] == [65536, 65536, 65536]
+        assert calls["messages"][0][-1]["content"] == "p"
+        assert "不要只输出思考" in calls["messages"][1][-1]["content"]
+        assert "不要只输出思考" in calls["messages"][2][-1]["content"]
+        assert len(calls["messages"][2]) == 2, "强化指令不得重复堆叠"
 
     def test_unknown_error_event_falls_back_to_unknown_llm_error(self):
         """finish_reason 查不到 typed 类 → UnknownLLMError 还原（对齐 legacy _ERROR_CLASS_BY_NAME 缺省）。"""

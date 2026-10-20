@@ -24,10 +24,9 @@
 {
   "agent_name": "macro",
   "summary": "一句话总结宏观环境对股票的影响",
-"plain_conclusion": "一句普通人可读的宏观结论（含多空方向与关键依据，非黑话堆砌）",
+  "plain_conclusion": "一句普通人可读的宏观结论（含多空方向与关键依据，非黑话堆砌）",
   "key_findings": ["关键发现1", "关键发现2"],
   "claims": [
-  "markdown": "## 宏观分析\n详细分析内容..."
     {
       "claim_type": "numerical",
       "source_type": "data",
@@ -36,9 +35,11 @@
       "interpretation": "CPI 同比上涨 0.5%",
       "metric_name": "CPI",
       "period": "2026-07",
+      "direction": "flat",
       "horizon_hint": "mid"
     }
   ],
+  "markdown": "## 宏观分析\n详细分析内容..."
 }
 ```
 

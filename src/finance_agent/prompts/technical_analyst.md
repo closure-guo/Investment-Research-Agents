@@ -17,10 +17,9 @@
 {
   "agent_name": "technical",
   "summary": "一句话总结技术面状况",
-"plain_conclusion": "一句普通人可读的技术面结论（含多空方向与关键依据，非黑话堆砌）",
+  "plain_conclusion": "一句普通人可读的技术面结论（含多空方向与关键依据，非黑话堆砌）",
   "key_findings": ["关键发现1", "关键发现2"],
   "claims": [
-  "markdown": "## 技术面分析\n详细分析内容..."
     {
       "claim_type": "numerical",
       "source_type": "data",
@@ -33,6 +32,7 @@
       "horizon_hint": "mid"
     }
   ],
+  "markdown": "## 技术面分析\n详细分析内容..."
 }
 ```
 
