@@ -38,7 +38,9 @@ test.describe.configure({ timeout: 120_000 })
 // add-event-driven-lane（15→18：预告抓取 16:05 / 预告分诊 16:15 / 事件结算 16:25，
 // 按时刻序插于既有日批链空档）；
 // add-microcap-lane-guardrails（18→19：小票通道 16:45，插于完整性校验 16:40 之后）；
-// add-convertible-bond-coverage（19→20：转债日批 16:50，插于小票通道 16:45 与 cohort 之间）。
+// add-convertible-bond-coverage（19→20：转债日批 16:50，插于小票通道 16:45 与 cohort 之间）；
+// add-research-report-dataplane（20→24：研报元数据 16:52 / 评级变动 16:54 /
+// 预期快照 16:56 / 投喂扫描 16:58，按时刻序插于转债日批与 cohort 之间）。
 const JOB_IDS = [
   'market_snapshot_daily',
   'regime_daily',
@@ -57,6 +59,10 @@ const JOB_IDS = [
   'integrity_check',
   'microcap_screening_daily',
   'cb_daily',
+  'research_reports_daily',
+  'rating_changes_daily',
+  'earnings_forecasts_daily',
+  'research_report_inbox_daily',
   'cohort_batch',
   'memory_extract_monthly',
   'factor_proposal_monthly',
@@ -127,7 +133,7 @@ async function cohortAuditCount(request: APIRequestContext): Promise<number> {
 }
 
 test.describe('评估运维分区（设置中心）', () => {
-  test('分区渲染任务卡片（当前 20 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
+  test('分区渲染任务卡片（当前 24 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
     await openEvalOps(page)
 
     // TESTING=1 → 调度器未启动：显式提示，不得空白、不得以空列表冒充「一切正常」
