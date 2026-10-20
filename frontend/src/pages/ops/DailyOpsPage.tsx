@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Button } from '../../components/ui/button'
 import { PageShellD, type ShellBatch } from '../../components/shells/PageShellD'
 import { StatusBadge } from '../../components/StatusBadge'
@@ -102,6 +104,74 @@ interface TaskState {
   summary: string
   /** 失败原因逐字（仅失败行有） */
   error: string | null
+}
+
+interface DailyBriefRow {
+  brief_date: string
+  status: string
+  markdown: string
+  model: string | null
+  prompt_version: string | null
+  error: string | null
+  created_at: string
+}
+
+type BriefState = 'loading' | 'ok' | 'missing' | 'error'
+
+/** 每日汇报区：404=尚未生成、非 2xx=取数失败、failed=LLM 失败，三态严格区分 */
+function DailyBriefCard({ brief, state }: { brief: DailyBriefRow | null; state: BriefState }) {
+  return (
+    <section data-testid="daily-brief" className="px-4 pb-4">
+      <h2 className="mb-2 text-sm font-medium" style={{ color: 'var(--text-default)' }}>
+        每日汇报
+      </h2>
+      {state === 'loading' && (
+        <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+          加载中…
+        </p>
+      )}
+      {state === 'missing' && (
+        <p data-testid="daily-brief-empty" className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+          今日汇报尚未生成（20:30 自动生成）
+        </p>
+      )}
+      {state === 'error' && (
+        <p data-testid="daily-brief-load-error" className="text-xs" style={{ color: 'var(--status-error-default)' }}>
+          日报加载失败（数据未取到，与「尚未生成」不同）
+        </p>
+      )}
+      {state === 'ok' && brief && (
+        <div className="rounded border p-3" style={{ borderColor: 'var(--border-default)' }}>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+            <span data-testid="daily-brief-date">{brief.brief_date}</span>
+            <StatusBadge
+              status={brief.status === 'ok' ? 'active' : 'failed'}
+              label={brief.status === 'ok' ? '已生成' : '生成失败'}
+            />
+            <span data-testid="daily-brief-model" style={{ color: 'var(--text-tertiary)' }}>
+              {brief.model ?? '模型未记录'}
+            </span>
+          </div>
+          {brief.status !== 'ok' && (
+            <p
+              data-testid="daily-brief-failure"
+              className="mb-2 text-xs"
+              style={{ color: 'var(--status-error-default)' }}
+            >
+              生成失败：{brief.error ?? '未知错误'}
+            </p>
+          )}
+          <div
+            data-testid="daily-brief-markdown"
+            className="text-sm leading-relaxed"
+            style={{ color: 'var(--text-default)' }}
+          >
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{brief.markdown}</ReactMarkdown>
+          </div>
+        </div>
+      )}
+    </section>
+  )
 }
 
 /** 任务五态判定 + 摘要文案（纯函数，便于用例钉死日期/时刻） */
@@ -219,6 +289,8 @@ export function DailyOpsPage({ onBack, onOpenEvalOps }: { onBack: () => void; on
   const [schedulerRunning, setSchedulerRunning] = useState(true)
   const [pendingJobId, setPendingJobId] = useState<string | null>(null)
   const [notices, setNotices] = useState<Record<string, string>>({})
+  const [brief, setBrief] = useState<DailyBriefRow | null>(null)
+  const [briefState, setBriefState] = useState<BriefState>('loading')
 
   const load = useCallback(async () => {
     setLoadFailed(false)
@@ -242,6 +314,24 @@ export function DailyOpsPage({ onBack, onOpenEvalOps }: { onBack: () => void; on
       } else {
         setBatches([])
         setBatchesFailed(true)
+      }
+      // 每日汇报独立取数：404=尚未生成（空态）、非 2xx=取数失败、200=渲染；
+      // 失败不得拖垮时间线，也不得把失败读成「尚未生成」。
+      try {
+        const briefResp = await fetch('/api/v1/ops/daily-brief/latest')
+        if (briefResp.status === 404) {
+          setBrief(null)
+          setBriefState('missing')
+        } else if (!briefResp.ok) {
+          setBrief(null)
+          setBriefState('error')
+        } else {
+          setBrief((await briefResp.json()) as DailyBriefRow)
+          setBriefState('ok')
+        }
+      } catch {
+        setBrief(null)
+        setBriefState('error')
       }
     } catch {
       setLoadFailed(true)
@@ -363,6 +453,7 @@ export function DailyOpsPage({ onBack, onOpenEvalOps }: { onBack: () => void; on
         </div>
       ) : (
         <>
+          <DailyBriefCard brief={brief} state={briefState} />
           <PageShellD
             batches={shellBatches}
             loading={jobs === null}

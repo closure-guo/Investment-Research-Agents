@@ -1086,6 +1086,20 @@ if TESTING:
             queue_seed = screening_seed.get("queue")
             if isinstance(queue_seed, list):
                 _get_analyze_queue().seed(queue_seed)
+        # 每日汇报造数（add-auto-pool-analysis-daily-brief）：E2E/前端测试用；
+        # 同日期 upsert，不产生重复行。
+        daily_brief_seed = req.get("daily_brief")
+        if isinstance(daily_brief_seed, dict):
+            from finance_agent.outcome.daily_brief import upsert_daily_brief as _seed_brief
+
+            _seed_brief(
+                str(daily_brief_seed.get("date") or datetime.now().strftime("%Y-%m-%d")),
+                str(daily_brief_seed.get("status") or "ok"),
+                str(daily_brief_seed.get("markdown") or ""),
+                model=daily_brief_seed.get("model"),
+                prompt_version=daily_brief_seed.get("prompt_version"),
+                error=daily_brief_seed.get("error"),
+            )
         # 语义记忆造数（delta add-memory-confirmation T1）：可选先 reset（清条款表）再写
         # 条款——逐条经既有落库（去重口径同生产：同文本已存在则跳过）后再按 status 走
         # 既有状态机置态，与真实确认/驳回路径同源。库路径调用期读 SESSIONS_DB_PATH。
@@ -2436,6 +2450,12 @@ async def analyze(req: AnalyzeRequest):
         )
 
     # ── ReAct 路径：registry 后台任务 + 订阅转发（生成与连接解耦）──
+    # 追问时跳过历史事件重放：用当前 journal 最大 seq 作为 after_seq，
+    # 避免上一轮 done 终态事件导致 registry.subscribe 提前 return（SSE 流终止）。
+    # 须在 registry.start 前取值：新会话的 session_created 由任务发布，
+    # start 后再取 max_seq 可能跳过该事件，前端拿不到 session_id
+    # （当前会话 ID 缺失 → 运行中管线卡被隐藏，issue #424/#328）。
+    afterSeq = await asyncio.to_thread(get_max_event_seq, session_id)
     started = await registry.start(
         session_id,
         _run_react_analysis(
@@ -2451,9 +2471,6 @@ async def analyze(req: AnalyzeRequest):
     if not started:
         # single-flight：会话已有活跃任务，拒绝新消息（不追加 user 消息）
         return JSONResponse(status_code=409, content={"error": "session_busy"})
-    # 追问时跳过历史事件重放：用当前 journal 最大 seq 作为 after_seq，
-    # 避免上一轮 done 终态事件导致 registry.subscribe 提前 return（SSE 流终止）
-    afterSeq = await asyncio.to_thread(get_max_event_seq, session_id)
     return StreamingResponse(
         _subscribe_sse(session_id, after_seq=afterSeq),
         media_type="text/event-stream",

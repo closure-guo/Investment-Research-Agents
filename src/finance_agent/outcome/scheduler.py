@@ -75,6 +75,7 @@ from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.cohort.runner import run_cohort_batch
+from finance_agent.outcome.daily_brief import run_daily_brief
 from finance_agent.outcome.events.job import (
     run_cb_daily,
     run_earnings_fetch_daily,
@@ -337,6 +338,16 @@ def _research_report_inbox_job() -> None:
     无文件为空态，解析失败记 degraded/failed，不阻断其他 job。
     """
     _with_retry("research_report_inbox_daily", "research report inbox", ingest_inbox)
+
+
+def _daily_brief_job() -> None:
+    """add-auto-pool-analysis-daily-brief：每日 LLM 运营汇报（20:30）。
+
+    汇总当日选股/分析/观点/执行/因子/失败任务事实 → ``purpose=daily_brief`` 生成
+    Markdown → 落 ``daily_briefs`` 与 ``reports/daily-brief-YYYY-MM-DD.md``；LLM
+    失败写确定性降级摘要并上抛，经 ``run_job`` 记 failed 并退避重试。
+    """
+    _with_retry("daily_brief_daily", "daily brief", run_daily_brief)
 
 
 def _cohort_job() -> None:
@@ -625,6 +636,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         _cohort_job,
         _cron_for("cohort_batch"),
         id="cohort_batch",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-auto-pool-analysis-daily-brief：每日 LLM 运营汇报（20:30）——cohort 之后，
+    # 给自动选股分析留出完成时间；失败写降级摘要并记 failed。
+    scheduler.add_job(
+        _daily_brief_job,
+        _cron_for("daily_brief_daily"),
+        id="daily_brief_daily",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )

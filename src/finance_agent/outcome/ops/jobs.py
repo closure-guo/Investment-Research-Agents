@@ -47,6 +47,7 @@ from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.cohort.runner import run_cohort_batch
+from finance_agent.outcome.daily_brief import run_daily_brief
 from finance_agent.outcome.events.job import (
     run_cb_daily,
     run_earnings_fetch_daily,
@@ -106,6 +107,9 @@ JOB_IDS: tuple[str, ...] = (
     "earnings_forecasts_daily",
     "research_report_inbox_daily",
     "cohort_batch",
+    # 每日汇报（add-auto-pool-analysis-daily-brief）：20:30——cohort 之后，给自动分析
+    # 留出完成时间；事实汇总 + LLM 生成，失败写降级摘要并记 failed
+    "daily_brief_daily",
     "memory_extract_monthly",
     "factor_proposal_monthly",
 )
@@ -137,6 +141,7 @@ JOB_LABELS: dict[str, str] = {
     "earnings_forecasts_daily": "一致预期快照",
     "research_report_inbox_daily": "研报投喂",
     "cohort_batch": "cohort 跑批",
+    "daily_brief_daily": "每日汇报",
     "memory_extract_monthly": "记忆提炼",
     "factor_proposal_monthly": "因子提案",
 }
@@ -166,6 +171,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "earnings_forecasts_daily": run_forecasts_daily,
     "research_report_inbox_daily": ingest_inbox,
     "cohort_batch": run_cohort_batch,
+    "daily_brief_daily": run_daily_brief,
     "memory_extract_monthly": run_memory_extract_monthly,
     "factor_proposal_monthly": run_factor_proposal_monthly,
 }
@@ -336,6 +342,14 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 18,
         "minute": 0,
+        "timezone": "Asia/Shanghai",
+    },
+    # 每日汇报（add-auto-pool-analysis-daily-brief）：20:30——cohort 18:00 之后，
+    # 给自动选股分析留出完成时间；汇总当日事实 → LLM → 落库/落盘
+    "daily_brief_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 20,
+        "minute": 30,
         "timezone": "Asia/Shanghai",
     },
     "memory_extract_monthly": {
