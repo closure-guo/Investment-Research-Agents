@@ -1949,23 +1949,51 @@ class AKShareClient:
     def fetch_research_reports(self, stock_code: str) -> list[dict]:
         """拉取个股券商研报列表（东财）。
 
-        返回 list[dict]：title/org/rating/target_price/date。目标价缺失为 None。
-        失败或空返回 []。
+        返回 list[dict]：title/org/rating/publish_date/recent_report_count/
+        eps_forecasts/pe_forecasts/pdf_url。
+
+        字段与东财真实列名对齐（机构/日期）；该接口不提供目标价，不再保留恒空占位
+        （add-research-report-dataplane：此前读 research机构/报告日期/目标价 三个不存在
+        的列名，机构/日期自上线起恒空）。失败或空返回 []。
         """
         df = _call_ak(ak.stock_research_report_em, symbol=stock_code)
         if df is None or df.empty:
             logger.error("券商研报拉取失败/返回空（研报信源缺失）: %s", stock_code)
             return []
+        eps_cols: list[tuple[int, str]] = []
+        pe_cols: list[tuple[int, str]] = []
+        for column in df.columns:
+            text = str(column)
+            eps_match = re.match(r"^(\d{4})-盈利预测-收益$", text)
+            if eps_match:
+                eps_cols.append((int(eps_match.group(1)), text))
+                continue
+            pe_match = re.match(r"^(\d{4})-盈利预测-市盈率$", text)
+            if pe_match:
+                pe_cols.append((int(pe_match.group(1)), text))
         rows: list[dict] = []
         for _, row in df.head(8).iterrows():
-            target = row.get("目标价")
+            eps: dict[str, float] = {}
+            for year, column in eps_cols:
+                value = row.get(column)
+                if pd.notna(value):
+                    eps[str(year)] = float(value)
+            pe: dict[str, float] = {}
+            for year, column in pe_cols:
+                value = row.get(column)
+                if pd.notna(value):
+                    pe[str(year)] = float(value)
+            recent = row.get("近一月个股研报数")
             rows.append(
                 {
                     "title": str(row.get("报告名称") or ""),
-                    "org": str(row.get(" research机构") or row.get("research机构") or ""),
+                    "org": str(row.get("机构") or ""),
                     "rating": str(row.get("东财评级") or ""),
-                    "target_price": float(target) if pd.notna(target) else None,
-                    "date": str(row.get("报告日期") or ""),
+                    "publish_date": str(row.get("日期") or ""),
+                    "recent_report_count": int(recent) if pd.notna(recent) else None,
+                    "eps_forecasts": eps,
+                    "pe_forecasts": pe,
+                    "pdf_url": str(row.get("报告PDF链接") or "") or None,
                 }
             )
         return rows
