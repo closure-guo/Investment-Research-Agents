@@ -110,14 +110,16 @@ test('当日时间线：注册表全部任务按排程时刻升序渲染，每�
   //  的因子收割 + add-crowding-regime-positioning 的拥挤度日批
   //  + add-event-driven-lane 的事件线三件（16:05/16:15/16:25）
   //  + add-microcap-lane-guardrails 的小票通道（16:45）
-  //  + add-convertible-bond-coverage 的转债日批（16:50）= 20）
+  //  + add-convertible-bond-coverage 的转债日批（16:50）
+  //  + add-research-report-dataplane 的研报数据面四 job（16:52/16:54/16:56/16:58）= 24）
   const items = page.locator('[data-testid^="page-shell-batch-"]')
-  await expect(items).toHaveCount(20)
+  await expect(items).toHaveCount(24)
 
   // 排程升序（数据驱动）：09:00/10:00 月批 → 15:30 行情快照 → 15:35 拥挤度 →
   // 15:40 选股 → 15:45 因子衰减监控 → 15:50 内置因子注册 → 15:55 因子收割 →
   // 16:00 判定 → 16:05 预告抓取 → 16:10 仿真执行 → 16:15 预告分诊 → 16:20 paper 结算
-  // → 16:25 事件结算 → … → 16:45 小票通道 → 16:50 转债日批 → 18:00 cohort
+  // → 16:25 事件结算 → … → 16:45 小票通道 → 16:50 转债日批 →
+  // 16:52 研报元数据 → 16:54 评级变动 → 16:56 一致预期快照 → 16:58 研报投喂 → 18:00 cohort
   await expect(items.nth(0)).toContainText('每月 1 日 09:00')
   await expect(items.nth(0)).toContainText('记忆提炼')
   await expect(items.nth(1)).toContainText('每月 1 日 10:00')
@@ -144,11 +146,19 @@ test('当日时间线：注册表全部任务按排程时刻升序渲染，每�
   await expect(items.nth(17)).toContainText('小票通道')
   await expect(items.nth(18)).toContainText('16:50')
   await expect(items.nth(18)).toContainText('转债日批')
-  await expect(items.nth(19)).toContainText('18:00')
-  await expect(items.nth(19)).toContainText('cohort 跑批')
+  await expect(items.nth(19)).toContainText('16:52')
+  await expect(items.nth(19)).toContainText('研报元数据')
+  await expect(items.nth(20)).toContainText('16:54')
+  await expect(items.nth(20)).toContainText('评级变动')
+  await expect(items.nth(21)).toContainText('16:56')
+  await expect(items.nth(21)).toContainText('一致预期快照')
+  await expect(items.nth(22)).toContainText('16:58')
+  await expect(items.nth(22)).toContainText('研报投喂')
+  await expect(items.nth(23)).toContainText('18:00')
+  await expect(items.nth(23)).toContainText('cohort 跑批')
 
   // 每项状态徽章 ∈ 五态（成功/失败/未跑/运行中/跳过；运行历史不由本 spec 控制，只断言枚举不变量）
-  for (let index = 0; index < 20; index += 1) {
+  for (let index = 0; index < 24; index += 1) {
     const badge = items.nth(index).getByTestId('status-badge')
     await expect(badge).toHaveAttribute('data-status', /^(active|failed|retired|running|degraded)$/)
     await expect(badge).toHaveText(/^(成功|失败|未跑|运行中|跳过)$/)

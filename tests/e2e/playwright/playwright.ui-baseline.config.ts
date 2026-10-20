@@ -89,6 +89,7 @@ export default defineConfig({
         TESTING: '1',
         SESSIONS_DB_PATH: 'data/test-e2e-ui-baseline.db',
         SNAPSHOT_DB_PATH: 'data/test-e2e-ui-baseline-snapshot.db',
+        RESEARCH_REPORTS_DB_PATH: 'data/test-e2e-ui-baseline-research-reports.db',
         SCREENING_DB_PATH: 'data/test-e2e-ui-baseline-screening.db',
         EXECUTION_DB_PATH: 'data/test-e2e-ui-baseline-execution.db',
         CACHE_DB_PATH: 'data/test-e2e-ui-baseline-cache.db',

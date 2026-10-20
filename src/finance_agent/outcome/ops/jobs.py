@@ -32,6 +32,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from finance_agent.data.research_reports import (
+    ingest_inbox,
+    run_forecasts_daily,
+    run_ratings_daily,
+    run_reports_daily,
+)
 from finance_agent.data.snapshot_job import MARKET_SNAPSHOT_SCHEDULE, run_market_snapshot_batch
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.execution.driver import run_execution_daily
@@ -89,6 +95,12 @@ JOB_IDS: tuple[str, ...] = (
     # 转债日批（add-convertible-bond-coverage）：16:50——小票通道（16:45）之后、
     # cohort（18:00）之前；仅观察通道（零 LLM 准入、不接执行链、不产生订单）
     "cb_daily",
+    # 研报数据面（add-research-report-dataplane）：16:52/16:54/16:56——转债之后、
+    # cohort 之前；只落元数据（五类研报/评级变动/一致预期），互不阻塞
+    "research_reports_daily",
+    "rating_changes_daily",
+    "earnings_forecasts_daily",
+    "research_report_inbox_daily",
     "cohort_batch",
     "memory_extract_monthly",
     "factor_proposal_monthly",
@@ -114,6 +126,11 @@ JOB_LABELS: dict[str, str] = {
     "microcap_screening_daily": "小票通道",
     # add-convertible-bond-coverage：转债日批（规则化标注、零 LLM；仅观察通道）
     "cb_daily": "转债日批",
+    # add-research-report-dataplane：研报数据面（只元数据）
+    "research_reports_daily": "研报元数据",
+    "rating_changes_daily": "评级变动",
+    "earnings_forecasts_daily": "一致预期快照",
+    "research_report_inbox_daily": "研报投喂",
     "cohort_batch": "cohort 跑批",
     "memory_extract_monthly": "记忆提炼",
     "factor_proposal_monthly": "因子提案",
@@ -138,6 +155,10 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "integrity_check": integrity_check,
     "microcap_screening_daily": run_microcap_lane,
     "cb_daily": run_cb_daily,
+    "research_reports_daily": run_reports_daily,
+    "rating_changes_daily": run_ratings_daily,
+    "earnings_forecasts_daily": run_forecasts_daily,
+    "research_report_inbox_daily": ingest_inbox,
     "cohort_batch": run_cohort_batch,
     "memory_extract_monthly": run_memory_extract_monthly,
     "factor_proposal_monthly": run_factor_proposal_monthly,
@@ -267,6 +288,34 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 50,
+        "timezone": "Asia/Shanghai",
+    },
+    # add-research-report-dataplane：研报数据面三 job（16:52/16:54/16:56）——
+    # 转债日批之后、cohort 之前；只元数据，东财侧串行限流 ≥1s，互不阻塞
+    "research_reports_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 52,
+        "timezone": "Asia/Shanghai",
+    },
+    "rating_changes_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 54,
+        "timezone": "Asia/Shanghai",
+    },
+    "earnings_forecasts_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 56,
+        "timezone": "Asia/Shanghai",
+    },
+    # 研报投喂（个人研究自用）：16:58——数据面三 job 之后、cohort 之前；
+    # 扫描 RESEARCH_REPORT_INBOX_DIR，文件哈希幂等，无文件即空态
+    "research_report_inbox_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 58,
         "timezone": "Asia/Shanghai",
     },
     "cohort_batch": {

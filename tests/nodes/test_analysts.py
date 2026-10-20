@@ -653,15 +653,72 @@ class TestCoverageSourcesContext:
                     "title": "中报点评",
                     "org": "浙商证券",
                     "rating": "买入",
-                    "target_price": 1600.0,
-                    "date": "2026-08-20",
+                    "publish_date": "2026-08-20",
                 }
             ],
+            "analyst_consensus": {
+                "status": "covered",
+                "report_count": 12,
+                "rating_buy": 9,
+                "rating_add": 3,
+                "rating_neutral": 0,
+                "rating_reduce": 0,
+                "rating_sell": 0,
+                "eps_y1": 2.10,
+                "eps_y1_year": 2026,
+            },
         }
         ctx = _build_fundamental_context(state)
         assert "公告" in ctx and "2026年半年度报告" in ctx
-        assert "研报" in ctx and "买入" in ctx and "1600" in ctx
+        assert "研报" in ctx and "买入" in ctx and "浙商证券" in ctx and "2026-08-20" in ctx
+        assert "一致预期" in ctx and "近6个月研报数 12" in ctx and "2026E EPS 2.1" in ctx
         assert "不得" in ctx  # 防锚定条款
+
+    def test_fundamental_context_no_coverage_is_explicit(self):
+        from finance_agent.nodes.analysts import _build_fundamental_context
+
+        ctx = _build_fundamental_context(
+            {
+                "stock_name": "x",
+                "stock_code": "y",
+                "analyst_consensus": {"status": "no_coverage"},
+            }
+        )
+        assert "无分析师覆盖" in ctx
+        consensus_line = ctx.split("一致预期")[1].split("\n")[0]
+        assert "0" not in consensus_line
+
+    def test_fundamental_context_consensus_missing_is_explicit(self):
+        from finance_agent.nodes.analysts import _build_fundamental_context
+
+        ctx = _build_fundamental_context({"stock_name": "x", "stock_code": "y"})
+        assert "一致预期数据缺失" in ctx
+
+    def test_fundamental_context_includes_manual_report_digest(self):
+        from finance_agent.nodes.analysts import _build_fundamental_context
+
+        ctx = _build_fundamental_context(
+            {
+                "stock_name": "x",
+                "stock_code": "y",
+                "manual_report_digest": {
+                    "report_count": 2,
+                    "brokers": ["国信证券", "开源证券"],
+                    "latest_report_date": "2026-10-19",
+                    "ratings": {"买入": 1, "增持": 1},
+                    "target_price": {"min": 30.0, "median": 35.0, "max": 40.0, "count": 2},
+                    "eps_forecasts": {"2026": {"min": 0.5, "median": 0.6, "max": 0.7, "count": 2}},
+                    "core_logic": ["IDC回暖"],
+                    "catalysts": ["新订单"],
+                    "risks": ["竞争加剧"],
+                },
+            }
+        )
+        assert "手工投喂研报合并" in ctx
+        assert "国信证券" in ctx and "开源证券" in ctx
+        assert "2026E 0.50~0.70" in ctx
+        assert "核心逻辑" in ctx and "IDC回暖" in ctx
+        assert "不得直接作为你的结论依据" in ctx
 
     def test_fundamental_context_empty_sources(self):
         from finance_agent.nodes.analysts import _build_fundamental_context
