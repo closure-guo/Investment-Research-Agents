@@ -666,6 +666,60 @@ def fundamental_analyst(state: dict) -> dict:
     }
 
 
+_CONSENSUS_RATING_KEYS = (
+    ("rating_buy", "买入"),
+    ("rating_add", "增持"),
+    ("rating_neutral", "中性"),
+    ("rating_reduce", "减持"),
+    ("rating_sell", "卖出"),
+)
+
+
+def _consensus_section(consensus: dict) -> str:
+    """一致预期段渲染（add-research-report-dataplane）。
+
+    三态显式：covered 渲染覆盖机构数/评级分布/一致预期 EPS；no_coverage 显式
+    「无分析师覆盖」（MUST NOT 以零值占位伪装）；其余（missing）显式数据缺失。
+    """
+    status = (consensus or {}).get("status")
+    if status == "covered":
+        parts: list[str] = []
+        report_count = consensus.get("report_count")
+        if report_count is not None:
+            parts.append(f"近6个月研报数 {report_count}")
+        distribution = [
+            f"{label}{(consensus.get(key) or 0)}"
+            for key, label in _CONSENSUS_RATING_KEYS
+            if consensus.get(key) is not None
+        ]
+        if distribution:
+            parts.append("评级分布 " + "/".join(distribution))
+        eps_bits = []
+        for index in (1, 2, 3):
+            eps = consensus.get(f"eps_y{index}")
+            year = consensus.get(f"eps_y{index}_year")
+            if eps is not None:
+                eps_bits.append(f"{year or '?'}E EPS {eps}")
+        if eps_bits:
+            parts.append("一致预期 " + "，".join(eps_bits))
+        body = "；".join(parts) if parts else "覆盖数据不全"
+        return (
+            f"一致预期（state 键 analyst_consensus）: {body}"
+            "\n注意：一致预期是市场预期参照，存在机构口径与预测年度差异，"
+            "不得直接作为你的结论依据。"
+        )
+    if status == "no_coverage":
+        return "一致预期（state 键 analyst_consensus）: 无分析师覆盖"
+    return "一致预期（state 键 analyst_consensus）: 一致预期数据缺失"
+
+
+def _manual_report_section(digest: dict) -> str:
+    """手工投喂研报合并段（个人研究材料；与东方财富一致预期并列、来源可辨）。"""
+    from finance_agent.data.research_reports import format_merge_digest
+
+    return f"手工投喂研报合并（state 键 manual_report_digest）:\n{format_merge_digest(digest)}"
+
+
 @_with_memory_block
 def _build_fundamental_context(state: dict) -> str:
     """构建基本面分析的 LLM context。"""
@@ -708,18 +762,21 @@ def _build_fundamental_context(state: dict) -> str:
                 "title": r.get("title", ""),
                 "org": r.get("org", ""),
                 "rating": r.get("rating", ""),
-                "target_price": r.get("target_price"),
-                "date": r.get("date", ""),
+                "publish_date": r.get("publish_date") or r.get("date", ""),
             }
             for r in reports[:8]
         ]
         sections.append(
             f"券商研报（state 键 research_reports，最近{len(trimmed_rep)}条）:\n"
             f"{json.dumps(trimmed_rep, ensure_ascii=False, default=str)}"
-            "\n注意：评级与目标价是卖方机构观点，存在立场偏差，不得直接作为你的结论依据，仅作市场预期参照。"
+            "\n注意：评级是卖方机构观点，存在立场偏差，不得直接作为你的结论依据，仅作市场预期参照。"
         )
     else:
         sections.append("券商研报（state 键 research_reports）: 暂无数据")
+    sections.append(_consensus_section(state.get("analyst_consensus") or {}))
+    digest = state.get("manual_report_digest")
+    if digest:
+        sections.append(_manual_report_section(digest))
 
     # 三大报表（近 3 年，减少 token）——财报降序（最新在前），head = 最新 3 年
     for name, key in [

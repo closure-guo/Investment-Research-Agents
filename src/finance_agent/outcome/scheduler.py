@@ -60,6 +60,12 @@ from typing import Any
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from finance_agent.data.research_reports import (
+    ingest_inbox,
+    run_forecasts_daily,
+    run_ratings_daily,
+    run_reports_daily,
+)
 from finance_agent.data.snapshot_job import run_market_snapshot_batch
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.execution.driver import run_execution_daily
@@ -295,6 +301,34 @@ def _cb_daily_job() -> None:
     _with_retry("cb_daily", "cb daily", run_cb_daily)
 
 
+def _research_reports_job() -> None:
+    """add-research-report-dataplane：五类研报元数据日批（16:52，收盘后）。
+
+    东财 reportapi 按发布日窗口增量（全市场），新浪计数交叉/降级记录，
+    分析师档案随批重建；单类失败记 degraded，全部失败记 failed，不阻断兄弟 job。
+    """
+    _with_retry("research_reports_daily", "research reports", run_reports_daily)
+
+
+def _rating_changes_job() -> None:
+    """add-research-report-dataplane：巨潮评级变动日批（16:54，按日全市场）。"""
+    _with_retry("rating_changes_daily", "rating changes", run_ratings_daily)
+
+
+def _earnings_forecasts_job() -> None:
+    """add-research-report-dataplane：全市场一致预期快照日批（16:56，一次约 2887 只）。"""
+    _with_retry("earnings_forecasts_daily", "earnings forecasts", run_forecasts_daily)
+
+
+def _research_report_inbox_job() -> None:
+    """add-research-report-dataplane：投喂目录扫描（16:58，个人研究自用）。
+
+    扫描 ``RESEARCH_REPORT_INBOX_DIR`` 下的 PDF → 全文解析入库（文件哈希幂等）；
+    无文件为空态，解析失败记 degraded/failed，不阻断其他 job。
+    """
+    _with_retry("research_report_inbox_daily", "research report inbox", ingest_inbox)
+
+
 def _cohort_job() -> None:
     """add-forward-paper-trading-cohort：探班池盘后跑批（时刻取自 ops_config）。
 
@@ -513,6 +547,38 @@ def start_scheduler() -> BackgroundScheduler | None:
         _cb_daily_job,
         _cron_for("cb_daily"),
         id="cb_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-research-report-dataplane：研报数据面三 job（16:52/16:54/16:56）——转债
+    # 日批（16:50）之后、cohort（18:00）之前；只落元数据（不碰全文），互不阻塞，
+    # 单 job 失败只影响自己的运行记录。
+    scheduler.add_job(
+        _research_reports_job,
+        _cron_for("research_reports_daily"),
+        id="research_reports_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    scheduler.add_job(
+        _rating_changes_job,
+        _cron_for("rating_changes_daily"),
+        id="rating_changes_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    scheduler.add_job(
+        _earnings_forecasts_job,
+        _cron_for("earnings_forecasts_daily"),
+        id="earnings_forecasts_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # 研报投喂（个人研究自用）：16:58——扫描投喂目录 PDF，全文解析入库。
+    scheduler.add_job(
+        _research_report_inbox_job,
+        _cron_for("research_report_inbox_daily"),
+        id="research_report_inbox_daily",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )

@@ -28,6 +28,7 @@ Purpose = Literal[
     "judge",
     "factor_proposal",
     "factor_transcription",
+    "report_extraction",
 ]
 
 

@@ -27,6 +27,8 @@ REQUIRED_CAPS: dict[str, dict[str, set[str]]] = {
     "factor_proposal": {"json_schema": {"json_mode", "strict_schema"}},
     # 因子转译（add-factor-harvest-bridge）：结构化载荷硬要求（二值裁决 JSON）
     "factor_transcription": {"json_schema": {"json_mode", "strict_schema"}},
+    # 投喂研报抽取（add-research-report-dataplane）：结构化 JSON 合同
+    "report_extraction": {"json_schema": {"json_mode", "strict_schema"}},
 }
 
 # 能力偏序 rank（越大越强）；fallback 链成员 rank 不得低于 primary

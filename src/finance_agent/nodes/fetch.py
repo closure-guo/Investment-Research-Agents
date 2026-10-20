@@ -116,6 +116,8 @@ def _stub_fetch_data(state: dict) -> dict[str, Any]:
         "news_list": [],
         "announcements": [],
         "research_reports": [],
+        "analyst_consensus": {"status": "missing"},
+        "manual_report_digest": None,
         "share_unlock": [],
         "block_trades": [],
         # 终审 I1（clear-valuation-chain-debts）：真实路径另产出 kline/benchmark_kline/
@@ -185,6 +187,8 @@ def _set_optional_fallback(result: dict, label: str) -> None:
         "news_list": [],
         "announcements": [],
         "research_reports": [],
+        "analyst_consensus": {"status": "missing"},
+        "manual_report_digest": None,
         "share_unlock": [],
         "block_trades": [],
         # update-financial-freshness-and-valuation Task 4：快照失败降级空 dict
@@ -379,6 +383,23 @@ def fetch_data(state: dict, cache=None, client=None, *, kline_days: int = 250) -
                 obs.update(output={"status": "error", "error": str(e)}, level="ERROR")
             logger.warning("同业数据拉取失败: %s", e)
             result["peer_financials"] = None
+
+    # 一致预期（add-research-report-dataplane）：研报数据面当日快照优先，数据面
+    # 尚未跑过时按需单次直拉全市场；非必需源，失败不阻断管线。三态由数据层给出：
+    # covered / no_coverage（有快照但该股无覆盖）/ missing（快照与直拉都不可得）。
+    try:
+        from finance_agent.data.research_reports import (
+            get_consensus_for_analysis,
+            get_manual_report_digest,
+        )
+
+        result["analyst_consensus"] = get_consensus_for_analysis(code)
+        # 手工投喂研报合并（个人研究）：纯读库；无投喂记录为 None
+        result["manual_report_digest"] = get_manual_report_digest(code)
+    except Exception as e:
+        logger.warning("一致预期/投喂合并获取失败: %s", e)
+        result["analyst_consensus"] = {"status": "missing", "stock_code": code}
+        result["manual_report_digest"] = None
 
     return result
 
