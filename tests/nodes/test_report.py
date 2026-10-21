@@ -539,3 +539,40 @@ class TestPositionTierNormalization:
 
         assert _fmt_position(d.position_size) == "未提供"
         assert d.position_size == "none"
+
+
+class TestBuySellReevalRendering:
+    """report-decision-rendering MODIFIED：buy/sell 也渲染再评估触发条件行。"""
+
+    def test_buy_sell_with_triggers_renders_numbered_items(self):
+        from finance_agent.nodes.report import _format_trade_decision
+
+        d = TradeDecision(
+            action="sell",
+            confidence=0.55,
+            reasoning="r",
+            position_size="light",
+            entry_price=2.99,
+            stop_loss=3.12,
+            target_price=2.9,
+            reeval_triggers=["跌破 2.94 转空评估", "反抽至均线加仓"],
+        )
+        out = _format_trade_decision(d)
+        assert "再评估触发条件" in out
+        assert "跌破 2.94 转空评估" in out
+
+    def test_buy_sell_without_triggers_renders_wei_shen_bao(self):
+        from finance_agent.nodes.report import _format_trade_decision
+
+        d = TradeDecision(
+            action="sell",
+            confidence=0.55,
+            reasoning="r",
+            position_size="light",
+            entry_price=2.99,
+            stop_loss=3.12,
+            target_price=2.9,
+            reeval_triggers=[],
+        )
+        # 锚定实际渲染形态（加粗标签 + 全角冒号），同文件既有 watch 用例同款
+        assert "- **再评估触发条件**: 未申报" in _format_trade_decision(d)

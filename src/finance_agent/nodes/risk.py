@@ -13,7 +13,11 @@ from finance_agent.langfuse_tracing import update_current_span
 from finance_agent.models import DebateMessage, TradeDecision
 from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint
 from finance_agent.nodes.validate import apply_payout_self_check as _apply_payout_self_check
-from finance_agent.nodes.validate import final_price_missing, inaction_rationale_missing
+from finance_agent.nodes.validate import (
+    exec_reeval_missing,
+    final_price_missing,
+    inaction_rationale_missing,
+)
 from finance_agent.prompts.loader import load_prompt_with_meta
 
 
@@ -156,6 +160,33 @@ def risk_judge(state: dict) -> dict:
                 final_price_check["note"] = (
                     "价位结论已被理由重试覆盖（终稿换代后价位齐备，未再次打回）"
                 )
+    # 终稿执行动作再评估触发条件必填（agent-node-contracts 2026-09 扩展，601818 实证）：
+    # buy/sell 缺 reeval 打回一次，feedback 引用风险辩论共识线索；仍缺放行 + 如实标注
+    final_reeval_check: dict = {"result": "pass", "note": ""}
+    _missing_reeval = exec_reeval_missing(decision)
+    if _missing_reeval:
+        retry_context = (
+            f"{context}\n\n【再评估触发条件打回】buy/sell 终稿必须结构化申报 "
+            "reeval_triggers（1-3 条可观察、可判定的退出/加仓再评估条件）。"
+            "风险辩论中保守/中性方已提出过触发条件线索，请将其结构化申报为完整决策 JSON 的字段。"
+        )
+        data = call_llm_for_json(
+            retry_context,
+            system=system,
+            api_key=api_key,
+            node_name="risk_judge",
+            llm_config=state.get("llm_config"),
+            stock_code=state.get("stock_code"),
+            prompt_name=_pinfo.prompt_name,
+            prompt_version=_pinfo.prompt_version,
+        )
+        decision = TradeDecision.model_validate(data)
+        _missing_reeval = exec_reeval_missing(decision)
+        if _missing_reeval:
+            final_reeval_check["result"] = "released"
+            final_reeval_check["note"] = "已打回仍未申报：reeval_triggers"
+        else:
+            final_reeval_check["note"] = "打回后已申报"
     # 赔率自检（任务 6 + extend-payout-self-check-coverage）：终稿 reasoning 自报赔率
     # vs 自身价位代码计算——冲突原位修正；转述窗口跳过（计数上报）
     _reasoning, _payout_fixed, _payout_skipped = _apply_payout_self_check(
@@ -174,6 +205,7 @@ def risk_judge(state: dict) -> dict:
         "payout_ratio_conflict_skipped": _payout_skipped,
         "final_price_check": final_price_check,
         "final_inaction_check": final_inaction_check,
+        "final_reeval_check": final_reeval_check,
     }
 
 

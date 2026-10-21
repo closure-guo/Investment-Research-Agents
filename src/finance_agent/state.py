@@ -186,6 +186,9 @@ class AnalysisState(TypedDict, total=False):
     final_inaction_check: (
         dict  # 终稿非执行动作理由完整性（require-watch-hold-rationale）：{result, note}
     )
+    final_reeval_check: (
+        dict  # 终稿执行动作再评估触发条件必填（agent-node-contracts 2026-09）：{result, note}
+    )
     citation_coverage: float  # 正文数字普查覆盖率（0-1，监控不进路由）
 
     # ── URL 信源溯源（Kimi 风格引用）──

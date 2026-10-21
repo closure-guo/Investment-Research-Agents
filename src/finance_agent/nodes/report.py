@@ -534,8 +534,10 @@ def _format_trade_decision(decision: TradeDecision | dict) -> str:
     """格式化交易决策（report-render-operational-params：渲染完整操作参数）。
 
     buy/sell 渲染仓位+入场/止损/目标价（0/缺失「未提供」）；watch/hold 语义上无建仓
-    参数，不渲染硬价格行，渲染结构化「不行动原因」与「再评估触发条件」（缺失如实
-    标注「未申报」，require-watch-hold-rationale）。
+    参数，不渲染硬价格行，渲染结构化「不行动原因」（缺失如实标注「未申报」，
+    require-watch-hold-rationale）。「再评估触发条件」为全部 action 必渲染行
+    （agent-node-contracts 2026-09 扩展，601818 实证；watch/hold 语义不变，缺失
+    如实「未申报」）。
     """
     if isinstance(decision, TradeDecision):
         action = decision.action
@@ -578,7 +580,8 @@ def _format_trade_decision(decision: TradeDecision | dict) -> str:
         lines.append(
             f"- **不行动原因**: {inaction if isinstance(inaction, str) and inaction.strip() else '未申报'}"
         )
-        lines.append(f"- **再评估触发条件**: {_fmt_reeval_triggers(triggers)}")
+    # reeval 为全部 action 必渲染（agent-node-contracts 2026-09 扩展：601818 实证）
+    lines.append(f"- **再评估触发条件**: {_fmt_reeval_triggers(triggers)}")
     lines.append(f"- **理由**: {reasoning}")
     if corrected:
         # toolize-price-levels：价位经工具参考带修正（可观测，不静默）

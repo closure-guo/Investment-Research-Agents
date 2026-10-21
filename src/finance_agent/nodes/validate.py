@@ -175,6 +175,31 @@ def inaction_rationale_missing(decision: object) -> list[str]:
     return missing
 
 
+def exec_reeval_missing(decision: object) -> list[str]:
+    """终稿 buy/sell 的 reeval_triggers 必填判定（agent-node-contracts 2026-09 扩展，
+    601818 实证：sell 终稿无任何再评估触发条件，FM 仍批准）。
+
+    watch/hold 的 reeval 由 inaction_rationale_missing 管，本检查不重复约束。
+    只查清洗后的有效条目数（模型层已归一噪声形态），不做内容质量判断。
+    接受 pydantic 对象与 dict 两种形态（历史落库 JSON 的 str 形态按单元素归一，
+    同 inaction_rationale_missing）。
+    """
+    if isinstance(decision, dict):
+        action = str(decision.get("action") or "")
+        triggers = decision.get("reeval_triggers")
+    else:
+        action = str(getattr(decision, "action", "") or "")
+        triggers = getattr(decision, "reeval_triggers", None)
+    if action not in ("buy", "sell"):
+        return []
+    if isinstance(triggers, str):
+        triggers = [triggers] if triggers.strip() else []
+    valid = [t for t in (triggers or []) if isinstance(t, str) and t.strip()]
+    if not valid:
+        return ["reeval_triggers"]
+    return []
+
+
 def _inaction_rationale_check(plan: object, state: dict) -> dict:
     """非执行动作理由完整性检查（trader 侧）：缺一次打回，仍缺放行+如实标注。
 
