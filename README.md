@@ -4,8 +4,6 @@ A 股全链路 AI 投研系统：从数据获取、选股与因子研究，到�
 
 > **免责声明**：本项目仅供研究，不构成投资建议。战绩与 paper 仿真数据为研究性口径，不保证准确性，据此操作风险自负。
 
-> **项目名称**：对外名称 **Investment Research Agents**（原 Finance Analysis Agent）。Python 导入包仍为 `finance_agent`，仓库目录仍为 `finance_analysis_agent`——发行名与导入名解耦，历史链接与脚本无需改动。
-
 ## 架构
 
 <a href="docs/assets/system-flow.html">
