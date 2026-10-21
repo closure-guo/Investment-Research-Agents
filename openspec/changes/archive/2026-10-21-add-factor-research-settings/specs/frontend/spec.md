@@ -84,6 +84,22 @@ MUST NOT 显示成功。重启请求发出后若 `restart_pending` 持续为真�
 - **AND** 状态文案含「状态未知」并披露「已记录保持运行」
 - **AND** 若启动器有存活证据，开关可操作并明示「将在 ≤3 分钟内自动拉起」
 
+#### Scenario: 陈旧时开关位置取意图
+
+- **GIVEN** 快照陈旧且 `control.desired_running=true`
+- **WHEN** 打开监控页
+- **THEN** 开关位置为**关**（本变更推翻原「取意图=开」口径：持久化意图 MUST NOT 冒充运行中）
+- **AND** 状态文案含「状态未知」并披露「已记录保持运行，启动器将在 ≤3 分钟内拉起」
+- **AND** 点击停止/启动仍可操作（离线方向不因实态未知而禁用）
+
+#### Scenario: 启动失败如实披露
+
+- **GIVEN** `control.pending=true` 且快照 `agent.last_action="start-failed"`、`last_error` 非空
+- **WHEN** 页面刷新
+- **THEN** 展示「启动失败（动作时刻）：<last_error 摘要>；代理将自动重试」
+- **AND** MUST NOT 继续以「切换中」冒充进展
+- **AND** 停止失败（`stop-failed`）按同一口径披露
+
 #### Scenario: 开关两态与切换中
 
 - **GIVEN** 快照 `actual_state="running"` 且 `control.pending=false`
