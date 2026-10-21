@@ -85,6 +85,20 @@ class TestNormalize:
         db = tmp_path / "rr.db"
         assert store.upsert_reports([rr.normalize_em_row({}, "stock", 2026)], db_path=db) == 0
 
+    def test_depth_class_from_title(self):
+        deep = rr.normalize_em_row(
+            {"title": "贵州茅台深度报告", "orgSName": "中信证券", "publishDate": "2026-10-20"},
+            "stock",
+            current_year=2026,
+        )
+        comment = rr.normalize_em_row(
+            {"title": "贵州茅台三季报点评", "orgSName": "中信证券", "publishDate": "2026-10-20"},
+            "stock",
+            current_year=2026,
+        )
+        assert deep["depth_class"] == "deep"
+        assert comment["depth_class"] == "comment"
+
 
 class TestPagination:
     def test_paginates_all_pages(self, monkeypatch):
@@ -294,7 +308,7 @@ class TestInboxIngest:
         assert len(docs) == 2
         assert docs[0]["usage_policy"] == "personal_research"
 
-    def test_parse_failure_is_failed_run(self, tmp_path, monkeypatch):
+    def test_parse_failure_ingests_empty_doc_degraded(self, tmp_path, monkeypatch):
         db = tmp_path / "rr.db"
         inbox = tmp_path / "inbox"
         inbox.mkdir()
@@ -303,8 +317,11 @@ class TestInboxIngest:
             rr, "extract_pdf_text", lambda path: (_ for _ in ()).throw(ValueError("bad pdf"))
         )
         got = rr.ingest_inbox(inbox, db_path=db, extract=False)
-        assert got["ingested"] == 0 and got["errors"]
-        assert store.latest_run("research_report_inbox_daily", db_path=db)["status"] == "failed"
+        # complete-research-report-provenance：解析失败仍入库（偏移 null），运行记 degraded
+        assert got["ingested"] == 1 and got["errors"]
+        assert store.latest_run("research_report_inbox_daily", db_path=db)["status"] == "degraded"
+        stored = store.get_document(store.list_documents(db_path=db)[0]["doc_key"], db_path=db)
+        assert stored["page_offsets"] is None
 
 
 class TestExtraction:

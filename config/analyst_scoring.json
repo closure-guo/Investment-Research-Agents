@@ -1,0 +1,29 @@
+{
+  "_meta": {
+    "description": "内外资分开打分的先验权重（未校准）；只影响展示，不进入任何决策路径",
+    "updated": "2026-10-20"
+  },
+  "depth_weights": {
+    "deep": 1.0,
+    "comment": 0.6,
+    "unknown": 0.4
+  },
+  "foreign": {
+    "action_weights": {
+      "rating_up": 1,
+      "target_up": 1,
+      "rating_down": -1,
+      "target_down": -1,
+      "positioning": 0,
+      "sentiment": 0,
+      "other": 0
+    },
+    "confidence_weights": {
+      "high": 1.0,
+      "medium": 0.7,
+      "low": 0.4
+    },
+    "horizon_days": 20,
+    "benchmark": "000300"
+  }
+}

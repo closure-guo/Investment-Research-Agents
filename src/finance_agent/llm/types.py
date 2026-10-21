@@ -29,6 +29,7 @@ Purpose = Literal[
     "factor_proposal",
     "factor_transcription",
     "report_extraction",
+    "foreign_broker_event",
     "daily_brief",
 ]
 

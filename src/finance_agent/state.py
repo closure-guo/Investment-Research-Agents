@@ -101,6 +101,9 @@ class AnalysisState(TypedDict, total=False):
         dict  # 一致预期三态：covered/no_coverage/missing（add-research-report-dataplane）
     )
     manual_report_digest: dict | None  # 手工投喂研报的按标的合并摘要（无投喂记录为 None）
+    strategy_report_digest: (
+        dict | None
+    )  # 策略/宏观研报观点聚合（宏观分析师消费；无记录/陈旧为 None）
     share_unlock: list[dict]  # 限售解禁排队
     block_trades: list[dict]  # 大宗交易明细（近 30 天）
 

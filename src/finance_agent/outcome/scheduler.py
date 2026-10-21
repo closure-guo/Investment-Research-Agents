@@ -60,6 +60,7 @@ from typing import Any
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from finance_agent.data.foreign_broker_news import run_foreign_broker_news_daily
 from finance_agent.data.research_reports import (
     ingest_inbox,
     run_forecasts_daily,
@@ -74,6 +75,7 @@ from finance_agent.factors.harvest import run_factor_harvest
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
+from finance_agent.outcome.analyst_claims.job import run_analyst_claim_settle_daily
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.daily_brief import run_daily_brief
 from finance_agent.outcome.events.job import (
@@ -336,8 +338,41 @@ def _research_report_inbox_job() -> None:
 
     扫描 ``RESEARCH_REPORT_INBOX_DIR`` 下的 PDF → 全文解析入库（文件哈希幂等）；
     无文件为空态，解析失败记 degraded/failed，不阻断其他 job。
+    抽取完成后按开关触发关联标的分析（add-report-triggered-analysis；默认关闭）。
     """
     _with_retry("research_report_inbox_daily", "research report inbox", ingest_inbox)
+    try:
+        from finance_agent.api import submit_report_trigger_batch
+
+        submit_report_trigger_batch()
+    except Exception as exc:  # noqa: BLE001 - 触发失败不得使投喂 job 失败
+        logger.warning("研报触发分析批次失败（投喂结果不受影响）: %s", exc)
+
+
+def _analyst_claim_settle_job() -> None:
+    """add-analyst-ex-post-verification：分析师主张结算（17:00）。
+
+    生成评级/EPS/目标价事件 → 结算到期主张 → 落当日分桶记分卡；零 LLM。
+    单条结算失败保持 pending 次日重试（job degraded），生成阶段失败记 failed。
+    """
+    _with_retry(
+        "analyst_claim_settle_daily",
+        "analyst claim settle daily",
+        run_analyst_claim_settle_daily,
+    )
+
+
+def _foreign_broker_news_job() -> None:
+    """add-foreign-broker-sentiment：外资二手快讯日批（17:05）。
+
+    抓取配置源 → 关键字过滤 → 事件抽取 → 落库；无源为空态，单源失败降级。
+    v1 只读观测，不进入任何分析师上下文或决策路径。
+    """
+    _with_retry(
+        "foreign_broker_news_daily",
+        "foreign broker news",
+        run_foreign_broker_news_daily,
+    )
 
 
 def _daily_brief_job() -> None:
@@ -609,6 +644,24 @@ def start_scheduler() -> BackgroundScheduler | None:
         _research_report_inbox_job,
         _cron_for("research_report_inbox_daily"),
         id="research_report_inbox_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-analyst-ex-post-verification：分析师主张结算（17:00）——研报数据面
+    # （16:52–16:56）之后、cohort（18:00）之前；零 LLM，只读行情快照与指数收盘。
+    scheduler.add_job(
+        _analyst_claim_settle_job,
+        _cron_for("analyst_claim_settle_daily"),
+        id="analyst_claim_settle_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-foreign-broker-sentiment：外资二手快讯（17:05）——分析师结算之后、
+    # cohort 之前；只读观测，无源为空态。
+    scheduler.add_job(
+        _foreign_broker_news_job,
+        _cron_for("foreign_broker_news_daily"),
+        id="foreign_broker_news_daily",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )

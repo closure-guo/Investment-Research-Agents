@@ -118,6 +118,7 @@ def _stub_fetch_data(state: dict) -> dict[str, Any]:
         "research_reports": [],
         "analyst_consensus": {"status": "missing"},
         "manual_report_digest": None,
+        "strategy_report_digest": None,
         "share_unlock": [],
         "block_trades": [],
         # 终审 I1（clear-valuation-chain-debts）：真实路径另产出 kline/benchmark_kline/
@@ -189,6 +190,7 @@ def _set_optional_fallback(result: dict, label: str) -> None:
         "research_reports": [],
         "analyst_consensus": {"status": "missing"},
         "manual_report_digest": None,
+        "strategy_report_digest": None,
         "share_unlock": [],
         "block_trades": [],
         # update-financial-freshness-and-valuation Task 4：快照失败降级空 dict
@@ -391,15 +393,19 @@ def fetch_data(state: dict, cache=None, client=None, *, kline_days: int = 250) -
         from finance_agent.data.research_reports import (
             get_consensus_for_analysis,
             get_manual_report_digest,
+            get_strategy_digest,
         )
 
         result["analyst_consensus"] = get_consensus_for_analysis(code)
         # 手工投喂研报合并（个人研究）：纯读库；无投喂记录为 None
         result["manual_report_digest"] = get_manual_report_digest(code)
+        # 策略/宏观研报观点聚合（宏观分析师消费）：纯读库；无记录/全部陈旧为 None
+        result["strategy_report_digest"] = get_strategy_digest()
     except Exception as e:
         logger.warning("一致预期/投喂合并获取失败: %s", e)
         result["analyst_consensus"] = {"status": "missing", "stock_code": code}
         result["manual_report_digest"] = None
+        result["strategy_report_digest"] = None
 
     return result
 

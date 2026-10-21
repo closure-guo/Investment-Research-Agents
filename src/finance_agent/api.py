@@ -3592,6 +3592,48 @@ def submit_pool_analysis_batch(
     return asyncio.run_coroutine_threadsafe(_run(), loop).result(timeout=timeout)
 
 
+def submit_report_trigger_batch(
+    *, dry_run: bool = False, doc_keys: list[str] | None = None, timeout: float = 120.0
+) -> dict[str, Any]:
+    """调度线程入口：研报触发关联分析（默认关闭由 run_report_trigger_daily 判定）。"""
+    loop = _MAIN_LOOP
+    if loop is None or loop.is_closed():
+        raise RuntimeError("主事件循环不可用：研报触发分析只能在后端进程内触发")
+
+    async def _run() -> dict[str, Any]:
+        from finance_agent.screening.report_trigger import (
+            prepare_report_analysis_batch,
+            run_report_trigger_daily,
+        )
+
+        if doc_keys is None and not dry_run:
+            return await asyncio.to_thread(run_report_trigger_daily, enqueue=_enqueue_pool_analysis)
+        return await asyncio.to_thread(
+            prepare_report_analysis_batch,
+            doc_keys=doc_keys,
+            dry_run=dry_run,
+            enqueue=None if dry_run else _enqueue_pool_analysis,
+        )
+
+    return asyncio.run_coroutine_threadsafe(_run(), loop).result(timeout=timeout)
+
+
+@app.post("/api/research/reports/{doc_key}/trigger-analysis")
+async def trigger_report_analysis(doc_key: str, dry_run: bool = False) -> Any:
+    """按投喂文档触发关联标的分析（add-report-triggered-analysis）。
+
+    ``dry_run=true`` 只返回 ``would_trigger`` 与跳过原因，不建会话、不写库、不调 LLM。
+    """
+    from finance_agent.screening.report_trigger import prepare_report_analysis_batch
+
+    return await asyncio.to_thread(
+        prepare_report_analysis_batch,
+        doc_keys=[doc_key],
+        dry_run=dry_run,
+        enqueue=None if dry_run else _enqueue_pool_analysis,
+    )
+
+
 @app.post("/api/screening/analyze")
 async def screening_analyze() -> Any:
     """精选池批量深度分析（S3/S4 + 时效性校验）：独立 session + 复用管线，并发上限 2。

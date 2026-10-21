@@ -8,7 +8,7 @@
     "output": "docs/assets/system-flow.html",
     "viewBox": [
       1340,
-      660
+      720
     ],
     "views": [
       {
@@ -62,7 +62,7 @@
           "layer4",
           "layer5"
         ],
-        "note": "全部 Agent 经 LLM 网关收口；数据面多源回退与八库 SQLite 见下方说明卡。"
+        "note": "全部 Agent 经 LLM 网关收口；数据面多源回退与九库 SQLite 见下方说明卡。"
       }
     ]
   },
@@ -298,6 +298,21 @@
         170,
         70
       ]
+    },
+    {
+      "id": "research_data",
+      "type": "database",
+      "label": "研报数据面",
+      "sublabel": "五类 · 评级 · 一致预期 · 投喂",
+      "tag": "16:52–17:05",
+      "pos": [
+        30,
+        580
+      ],
+      "size": [
+        200,
+        72
+      ]
     }
   ],
   "connections": [
@@ -506,6 +521,18 @@
           292
         ]
       ]
+    },
+    {
+      "id": "research-data-to-prep",
+      "from": "research_data",
+      "to": "prep",
+      "label": "研报/评级/预期/投喂",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        165,
+        500
+      ]
     }
   ],
   "cards": [
@@ -532,10 +559,20 @@
       "dot": "emerald",
       "title": "支撑面与调度",
       "items": [
-        "八库 SQLite：会话/缓存/快照/因子/选股/执行/事件/拥挤度",
+        "九库 SQLite：会话/缓存/快照/因子/选股/执行/事件/拥挤度/研报",
         "数据面多源回退：腾讯/东财/新浪 · AKShare",
         "LLM 收口 ProfileResolver→LiteLLM · Langfuse",
-        "APScheduler 20 任务驱动；三反馈环兜底"
+        "APScheduler 28 任务驱动；三反馈环兜底"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "研报消费与检验",
+      "items": [
+        "五类元数据 16:52 · 评级变动 16:54 · 一致预期 16:56",
+        "投喂 PDF 16:58 → 页偏移 · 跨源关联 · LLM 抽取",
+        "17:00 分析师事后检验：事件 → 20/60 日超额 → 机构记分卡",
+        "策略观点→宏观 · 个股投喂→基本面 · 关联标的触发入队 · 外资快讯只读"
       ]
     }
   ]
