@@ -25,3 +25,16 @@ def test_register_script_is_idempotent_and_targets_ensure_entry():
     assert "-Force" in text
     assert "-Unregister" in text
     assert "ensure-factor-research.sh" in text
+
+
+def test_register_script_uses_windowless_helper():
+    """动作必须是 GUI 子系统 helper，不得退回 powershell.exe -WindowStyle Hidden。
+
+    Windows 11 默认终端为 Windows Terminal 时 SW_HIDE 被忽略，任务每 2 分钟
+    弹出可见控制台（2026-10-21 任务改名重建后复发过）。
+    """
+    text = (REPO / "scripts" / "register-factor-research-task.ps1").read_text(encoding="utf-8")
+    assert "FinanceAgentLauncher.cs" in text
+    assert "New-ScheduledTaskAction -Execute $helperExe" in text
+    assert "-Execute 'powershell.exe'" not in text
+    assert (REPO / "scripts" / "FinanceAgentLauncher.cs").exists()
