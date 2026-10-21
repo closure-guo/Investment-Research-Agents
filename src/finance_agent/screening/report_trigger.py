@@ -307,17 +307,32 @@ def prepare_report_analysis_batch(
 
     if doc_keys is None:
         rows = rr_store.list_extractions(limit=200, db_path=research_db_path)
+        input_scope = "all_extractions"
     else:
         rows = [
             row
             for row in (rr_store.get_extraction(key, db_path=research_db_path) for key in doc_keys)
             if row
         ]
+        input_scope = "explicit_doc_keys"
     rows = [row for row in rows if row]
+
+    # 输入为空时显式披露原因：深度抽取只覆盖人工投喂 PDF，API 采集的研报只有元数据。
+    # 不披露会让「库内没有抽取」与「跑过但无候选」在摘要里长得一样，运维无法区分。
+    notice: str | None = None
+    if not rows:
+        notice = (
+            "no_extractions: 深度抽取仅覆盖人工投喂 PDF（当前库内 0 条），本次无候选；"
+            "API 采集的研报只落元数据"
+            if input_scope == "all_extractions"
+            else "doc_not_found: 指定文档无抽取结果（尚未投喂或抽取失败）"
+        )
 
     skipped = dict.fromkeys(_STATUS_SKIP, 0)
     result: dict[str, Any] = {
         "status": "dry_run" if dry_run else "ok",
+        "input_scope": input_scope,
+        "notice": notice,
         "as_of": day,
         "docs_scanned": len(rows),
         "candidates": 0,

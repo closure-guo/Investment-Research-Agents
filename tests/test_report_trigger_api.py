@@ -62,3 +62,70 @@ def test_unknown_doc_returns_empty(tmp_path, monkeypatch):
     body = resp.json()
     assert body["docs_scanned"] == 0
     assert body["would_trigger"] == []
+
+
+def test_batch_zero_extractions_discloses_dormancy(tmp_path, monkeypatch):
+    """库内 0 条抽取时，批量触发必须显式披露输入为空，不得静默 ok。"""
+    _isolate(tmp_path, monkeypatch)
+    from finance_agent.screening.report_trigger import prepare_report_analysis_batch
+
+    body = prepare_report_analysis_batch(
+        doc_keys=None,
+        dry_run=True,
+        enqueue=None,
+        research_db_path=str(tmp_path / "rr.db"),
+        screening_db_path=str(tmp_path / "screening.db"),
+        events_db_path=str(tmp_path / "events.db"),
+        execution_db_path=str(tmp_path / "execution.db"),
+        scope_symbols=set(),
+    )
+    assert body["docs_scanned"] == 0
+    assert body["input_scope"] == "all_extractions"
+    assert body["notice"] is not None
+    assert body["notice"].startswith("no_extractions")
+
+
+def test_batch_with_extractions_has_no_notice(tmp_path, monkeypatch):
+    """有抽取输入时不应带空态提示。"""
+    _isolate(tmp_path, monkeypatch)
+    rr_store.upsert_extraction(
+        "d1",
+        {
+            "broker": "中信证券",
+            "report_date": "2026-10-20",
+            "stocks": [{"code": "600519"}],
+            "core_logic": [],
+            "catalysts": [],
+            "risks": [],
+        },
+        db_path=tmp_path / "rr.db",
+    )
+    from finance_agent.screening.report_trigger import prepare_report_analysis_batch
+
+    body = prepare_report_analysis_batch(
+        doc_keys=None,
+        dry_run=True,
+        enqueue=None,
+        as_of="2026-10-21",
+        research_db_path=str(tmp_path / "rr.db"),
+        screening_db_path=str(tmp_path / "screening.db"),
+        events_db_path=str(tmp_path / "events.db"),
+        execution_db_path=str(tmp_path / "execution.db"),
+        scope_symbols={"600519"},
+        max_age_days=7,
+    )
+    assert body["docs_scanned"] == 1
+    assert body["input_scope"] == "all_extractions"
+    assert body["notice"] is None
+
+
+def test_explicit_missing_doc_discloses_reason(tmp_path, monkeypatch):
+    """显式指定的文档不存在时，原因必须可区分于「库内本来没有抽取」。"""
+    _isolate(tmp_path, monkeypatch)
+    client = TestClient(app)
+    body = client.post(
+        "/api/research/reports/missing/trigger-analysis", params={"dry_run": "true"}
+    ).json()
+    assert body["input_scope"] == "explicit_doc_keys"
+    assert body["notice"] is not None
+    assert body["notice"].startswith("doc_not_found")

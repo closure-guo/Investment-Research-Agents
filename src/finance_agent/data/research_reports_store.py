@@ -876,3 +876,14 @@ def list_extractions(limit: int = 500, db_path: str | Path | None = None) -> lis
     finally:
         conn.close()
     return [dict(row) for row in rows]
+
+
+def count_extractions(db_path: str | Path | None = None) -> int:
+    """抽取结果总行数（覆盖度披露用：不受 list 的 limit 截断）。"""
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM report_extractions").fetchone()
+    finally:
+        conn.close()
+    return int(row[0]) if row else 0
