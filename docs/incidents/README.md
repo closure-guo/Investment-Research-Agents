@@ -26,6 +26,7 @@
 | [043](043-snapshot-parallel-backfill-index-corruption-20261016.md) | 2026-10-16 | 快照库 16 进程并行回填 + 硬杀进程 + 容器跨挂载读 → 索引层损坏（唯一索引失效→17 重复键）；表数据零丢失，表重建恢复；防护理待落 | 已恢复（integrity ok；防护随 unify-quant-research-architecture 收口） |
 | [044](044-e2e-config-snapshot-leak-api-wedge-20261017.md) | 2026-10-17 | E2E 隔离配置缺 SNAPSHOT_DB_PATH——本机跑 isolated/timeline 等 7 个套件时其后端读生产快照库，与容器跨挂载 SQLite 争用（#344 读侧变体）→ 生产后端 API 整体卡死 ~40-60min（快照库零损伤） | 已修复（7 配置补隔离 + 套件复跑验证；隔离清单门禁待落） |
 | [045](045-local-e2e-reused-prod-stack-port-shadow-20261018.md) | 2026-10-18 | 本地 E2E 误复用生产栈（外部拉起 + reuseExistingServer 探活）→ 测试会话污染生产库；并发发现 [::1] 端口遮蔽（wslrelay/docker 代理与本地服务争用，浏览器命中容器旧前端，038 同族合并） | 部分修复（写控制文件用例加 fixture 守卫 + 专用端口验证；环境治理三项挂账） |
+| [046](046-sessions-db-wal-handle-index-corruption-20261020.md) | 2026-10-20 | worker 持有已删除 `sessions.db-wal` 句柄（delete-pending）→ 新连接无法进入 WAL 模式，会话/战绩/评分卡/日报/cohort API 全断约 2 小时；并发发现 `idx_session_events_session` 索引损坏（REINDEX 被 malformed 拒绝），按 sqlite_master 导出重建，事件日志抢救 97.5%（丢 28,027 行尾部），355 会话与业务表零丢失；日批全部补跑 | 已恢复（库 integrity ok + 日批补跑；迁 named volume / 健康探针 / 页级校验 / 派发回写挂账） |
 | 002  | 2026-05-26 | [报告准确性复盘：茅台 FA 分析偏差](002-report-accuracy-20260526.md) | 部分修复 |
 | 003  | 2026-06-03 | [股票名称获取失败 + NaN 处理缺陷](003-stock-name-and-na-handling-20260603.md) | 已修复   |
 | 004  | 2026-06-04 | [数据准确性系统性问题 — efficiency 年份错位 + ROE 口径 + LLM 自算](004-data-accuracy-20260604.md) | 已修复 |
@@ -96,6 +97,7 @@
 - [037](037-event-backlog-sqlite-transient-terminal-loss-20261004.md) thinking_token 积压（15 分钟滞后）× SQLite 瞬断落在积压排空窗口——管线已完成但三界面三种说法，R2+ 节点事件永久丢失；终态事件不允许与批量 token 队列竞争
 - [038](038-e2e-default-suite-hits-production-vite-proxy-20261007.md) E2E 默认套件经 vite 代理（默认 8000）+ reuseExistingServer 打穿到生产后端——本机生产常驻时本地跑门禁必然命中；前端代理目标必须显式、复用前必须核验 TESTING 模式（031「默认不安全」主题的 E2E 侧变体）
 - [039](039-relay-lag-prereport-backlog-20261008.md) thinking 洪峰在 final_report 之前——压缩门槛以消费到 report chunk 为前提，在「消费滞后」这个优化目标场景下恰好失效；复现测试的流序必须取自生产 trace（既有场景 D 手造顺排流绕开了真实语序）
+- [046](046-sessions-db-wal-handle-index-corruption-20261020.md) worker 持有已删除 `sessions.db-wal` 句柄（delete-pending）→ 新连接无法进入 WAL 模式，会话/战绩/日报/cohort 全断约 2 小时；并发发现事件索引损坏，导出重建抢救 97.5%；与 043/044 同属 Windows bind mount 上的 SQLite 易损家族 → 热库迁 named volume 挂账
 
 ### 测试体系与开发流程
 
