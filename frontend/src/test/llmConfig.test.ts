@@ -161,6 +161,22 @@ describe('buildLlmConfigPayload - 载荷构建', () => {
     const payload = buildLlmConfigPayload(cfg)
     expect(payload?.contextLength).toBeUndefined()
   })
+
+  it('携带 capability 时透传（供后端系统操作工具门禁）', () => {
+    const capability = {
+      non_stream: true,
+      stream: true,
+      tool_call: false,
+      tool_followup: false,
+      json_output: true,
+    }
+    const cfg: LLMConfig = { apiKey: 'sk-1', model: 'm', baseUrl: '', thinking: '', capability }
+    expect(buildLlmConfigPayload(cfg)).toEqual({
+      model: 'm',
+      apiKey: 'sk-1',
+      capability,
+    })
+  })
 })
 
 describe('isDeepSeekModel', () => {

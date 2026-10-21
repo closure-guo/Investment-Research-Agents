@@ -102,6 +102,8 @@ export interface LLMConfigPayload {
   thinking?: string
   apiForm?: string
   contextLength?: number
+  /** probe 能力矩阵：仅供后端决定是否注册系统操作工具，不进入 LLMConfig */
+  capability?: CapabilityMatrix | null
 }
 
 // API 形式选项（add-llm-api-form）：下拉框展示文案 + 存储值。
@@ -204,9 +206,12 @@ export function buildLlmConfigPayload(cfg: LLMConfig): LLMConfigPayload | null {
   if (typeof cfg.contextLength === 'number' && Number.isInteger(cfg.contextLength) && cfg.contextLength > 0) {
     payload.contextLength = cfg.contextLength
   }
+  // probe capability 随载荷透传：后端据此决定是否注册系统操作工具（不进入 LLMConfig）
+  if (cfg.capability) payload.capability = cfg.capability
   // 全空（无任何真实配置字段）时返回 null —— apiForm 默认值本身不构成配置，
   // 否则仅下发 {apiForm} 会触发后端「缺 model」报错，破坏 env 回退路径。
-  if (!model && !baseUrl && !apiKey && payload.thinking === undefined) return null
+  // capability 不算真实配置字段，但需要透传（无 key/model 时后端走 env）。
+  if (!model && !baseUrl && !apiKey && payload.thinking === undefined && !payload.capability) return null
   return payload
 }
 

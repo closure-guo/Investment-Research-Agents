@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { createContext, forwardRef, useCallback, useContext, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import {
   AssistantRuntimeProvider,
   MessagePrimitive,
@@ -8,7 +8,7 @@ import type { AssistantRuntime } from '@assistant-ui/core'
 import type {
   ReasoningMessagePartComponent,
   TextMessagePartComponent,
-  ToolCallMessagePartComponent,
+  ToolCallMessagePartProps,
 } from '@assistant-ui/core/react'
 import { useAgUiRuntime } from '@assistant-ui/react-ag-ui'
 import ReactMarkdown from 'react-markdown'
@@ -51,7 +51,12 @@ export interface QuickThreadProps {
   onRunningChange?: (running: boolean) => void
   /** run 错误（RUN_ERROR / HTTP 失败 / 断连）——409 busy 等在此等价呈现 */
   onError?: (message: string) => void
+  /** 打开派生分析会话（start_stock_analysis 回执里的 session_id） */
+  onOpenSession?: (sessionId: string) => void
 }
+
+// 工具结果 → 结构化卡片所需的最小上下文（避免把 onOpenSession 逐层透传）
+const QuickOperatorContext = createContext<((sessionId: string) => void) | undefined>(undefined)
 
 // Markdown 文本渲染（与 App 中 chat response 同款 remark-gfm 配置）
 const MarkdownText: TextMessagePartComponent = ({ text }) => (
@@ -87,16 +92,61 @@ const ReasoningBlock: ReasoningMessagePartComponent = ({ text }) => (
   </div>
 )
 
-// 工具调用段（TOOL_CALL_* → tool-call part）：单行横幅
-const ToolCallBlock: ToolCallMessagePartComponent = ({ toolName }) => (
-  <div
-    className="text-xs rounded-lg px-3 py-1.5 mb-2 inline-flex items-center gap-1.5"
-    style={{ color: 'var(--text-secondary)', background: 'var(--bg-overlay-l1)' }}
-  >
-    <i className="fas fa-tools text-[10px]" style={{ color: 'var(--text-brand)' }}></i>
-    <span>调用工具 · {toolName}</span>
-  </div>
-)
+// 工具结果解析：字符串 JSON 或对象；畸形结果静默回退为无结构化卡片
+function parseToolResult(result: unknown): Record<string, unknown> | null {
+  if (typeof result === 'string') {
+    try {
+      const parsed = JSON.parse(result)
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null
+    } catch {
+      return null
+    }
+  }
+  return result && typeof result === 'object' ? (result as Record<string, unknown>) : null
+}
+
+// 工具调用段（TOOL_CALL_* → tool-call part）：横幅 + 可选的「打开分析会话」按钮
+const ToolCallBlock = ({ toolName, result }: ToolCallMessagePartProps) => {
+  const onOpenSession = useContext(QuickOperatorContext)
+  const parsed = parseToolResult(result)
+  const sessionId =
+    parsed && typeof parsed.session_id === 'string' && parsed.session_id
+      ? parsed.session_id
+      : null
+  const pendingConfirm = parsed?.status === 'confirmation_required'
+
+  return (
+    <div className="mb-2 flex flex-col items-start gap-1.5">
+      <div
+        className="text-xs rounded-lg px-3 py-1.5 inline-flex items-center gap-1.5"
+        style={{ color: 'var(--text-secondary)', background: 'var(--bg-overlay-l1)' }}
+      >
+        <i className="fas fa-tools text-[10px]" style={{ color: 'var(--text-brand)' }}></i>
+        <span>调用工具 · {toolName}</span>
+        {pendingConfirm && (
+          <span
+            className="rounded px-1.5 py-0.5 text-[10px]"
+            style={{ color: 'var(--status-warning-default)', background: 'var(--bg-overlay-l2)' }}
+          >
+            等待确认
+          </span>
+        )}
+      </div>
+      {sessionId && onOpenSession && (
+        <button
+          type="button"
+          data-testid="agui-open-analysis"
+          onClick={() => onOpenSession(sessionId)}
+          className="text-xs rounded-lg px-3 py-1.5 inline-flex items-center gap-1.5 transition-colors"
+          style={{ color: 'var(--text-onbrand)', background: 'var(--bg-brand)' }}
+        >
+          <i className="fas fa-arrow-right text-[10px]"></i>
+          <span>打开分析会话</span>
+        </button>
+      )}
+    </div>
+  )
+}
 
 const QuickUserMessage = () => (
   <div className="flex justify-end animate-slide-in" data-testid="agui-user-message">
@@ -132,7 +182,7 @@ const QuickAssistantMessage = () => (
 )
 
 const QuickThread = forwardRef<QuickThreadHandle, QuickThreadProps>(function QuickThread(
-  { apiKey, llmConfig = null, sessionId = null, onSessionCreated, onRunFinished, onRunningChange, onError },
+  { apiKey, llmConfig = null, sessionId = null, onSessionCreated, onRunFinished, onRunningChange, onError, onOpenSession },
   ref,
 ) {
   // 会话 id 生命周期：初始 = App 传入（恢复/切回场景），RUN_STARTED.thread_id
@@ -242,30 +292,32 @@ const QuickThread = forwardRef<QuickThreadHandle, QuickThreadProps>(function Qui
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <div className="w-full" data-testid="agui-thread">
-        <ThreadPrimitive.Root>
-          <ThreadPrimitive.Viewport
-            autoScroll
-            className="flex flex-col gap-4 overflow-y-visible"
-          >
-            <ThreadPrimitive.Messages
-              components={{ UserMessage: QuickUserMessage, AssistantMessage: QuickAssistantMessage }}
-            />
-            <ThreadPrimitive.If running>
-              <div
-                data-testid="agui-stream-status"
-                className="flex items-center gap-2 px-1"
-                style={{ color: 'var(--text-tertiary)' }}
-              >
-                <span
-                  className="block w-3 h-3 rounded-full border-2 border-t-transparent animate-spin"
-                  style={{ borderColor: 'var(--bg-brand)' }}
-                ></span>
-              </div>
-            </ThreadPrimitive.If>
-          </ThreadPrimitive.Viewport>
-        </ThreadPrimitive.Root>
-      </div>
+      <QuickOperatorContext.Provider value={onOpenSession}>
+        <div className="w-full" data-testid="agui-thread">
+          <ThreadPrimitive.Root>
+            <ThreadPrimitive.Viewport
+              autoScroll
+              className="flex flex-col gap-4 overflow-y-visible"
+            >
+              <ThreadPrimitive.Messages
+                components={{ UserMessage: QuickUserMessage, AssistantMessage: QuickAssistantMessage }}
+              />
+              <ThreadPrimitive.If running>
+                <div
+                  data-testid="agui-stream-status"
+                  className="flex items-center gap-2 px-1"
+                  style={{ color: 'var(--text-tertiary)' }}
+                >
+                  <span
+                    className="block w-3 h-3 rounded-full border-2 border-t-transparent animate-spin"
+                    style={{ borderColor: 'var(--bg-brand)' }}
+                  ></span>
+                </div>
+              </ThreadPrimitive.If>
+            </ThreadPrimitive.Viewport>
+          </ThreadPrimitive.Root>
+        </div>
+      </QuickOperatorContext.Provider>
     </AssistantRuntimeProvider>
   )
 })
