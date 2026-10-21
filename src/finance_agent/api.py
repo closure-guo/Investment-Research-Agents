@@ -22,7 +22,15 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict, StrictBool, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 _logger = logging.getLogger("finance_agent.api")
 
@@ -4126,6 +4134,21 @@ FACTOR_RESEARCH_STALE_AFTER_S = 180  # 3× 采集周期（契约 ≤60s）；阈
 FACTOR_RESEARCH_LAUNCHER_FRESH_AFTER_S = 300  # 2× 启动器节拍（120s）+ 余量
 FACTOR_RESEARCH_LAUNCHER_HONOR_ETA_S = 180  # 离线受理的披露上界（与陈旧阈值同值）
 
+# 研发节奏配置（delta add-factor-research-settings）：四个旋钮的默认值与合法区间。
+# 与 distro 侧 factor_research_agent.DEFAULT_CONFIG / CONFIG_BOUNDS 字面同步。
+FACTOR_RESEARCH_CONFIG_DEFAULTS: dict[str, int] = {
+    "snapshot_interval_s": 15,
+    "session_gap_s": 60,
+    "short_session_backoff_s": 600,
+    "short_session_threshold_s": 120,
+}
+FACTOR_RESEARCH_CONFIG_BOUNDS: dict[str, tuple[int, int]] = {
+    "snapshot_interval_s": (5, 120),
+    "session_gap_s": (0, 3600),
+    "short_session_backoff_s": (0, 7200),
+    "short_session_threshold_s": (30, 3600),
+}
+
 
 def _factor_research_snapshot_payload() -> dict[str, Any]:
     """快照面：透传 + 派生 ``available``/``age_seconds``/``stale``（控制块另行附加）。"""
@@ -4199,27 +4222,121 @@ def _factor_research_honor(
 
 
 def _read_control_file(path: Path) -> dict[str, Any]:
-    """控制文件读取：缺失/不可解析/字段非法 → ``desired_running=None``（如实不猜）。"""
+    """控制文件读取：缺失/不可解析/字段非法 → 对应字段 ``None``（如实不猜）。"""
+    empty = {
+        "desired_running": None,
+        "requested_at": None,
+        "restart_requested_at": None,
+        "restart_requested_at_epoch": None,
+        "restart_request_id": None,
+    }
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return {"desired_running": None, "requested_at": None}
+        return empty
     if not isinstance(data, dict):
-        return {"desired_running": None, "requested_at": None}
+        return empty
     desired = data.get("desired_running")
     requested_at = data.get("requested_at")
+    restart_at = data.get("restart_requested_at")
+    restart_epoch = data.get("restart_requested_at_epoch")
+    restart_id = data.get("restart_request_id")
     return {
         "desired_running": desired if isinstance(desired, bool) else None,
         "requested_at": requested_at if isinstance(requested_at, str) else None,
+        "restart_requested_at": restart_at if isinstance(restart_at, str) else None,
+        "restart_requested_at_epoch": restart_epoch
+        if isinstance(restart_epoch, int) and not isinstance(restart_epoch, bool)
+        else None,
+        "restart_request_id": restart_id if isinstance(restart_id, str) else None,
     }
+
+
+def _restart_pending(control: dict[str, Any], snapshot: dict[str, Any]) -> bool:
+    """重启请求是否仍未获处理：有请求 + 快照新鲜 + 无同一 request_id 的终态结果。
+
+    旧版代理不写 ``agent.restart`` → 恒为真（MUST NOT 凭快照推进判成功）。
+    快照陈旧/不可用 → 恒假（实态不可证，MUST NOT 判「重启中」）。
+    """
+    request_id = control.get("restart_request_id")
+    if not isinstance(request_id, str):
+        return False
+    if not (snapshot.get("available") and not snapshot.get("stale")):
+        return False
+    agent = snapshot.get("agent")
+    handled = agent.get("restart") if isinstance(agent, dict) else None
+    return not (
+        isinstance(handled, dict)
+        and handled.get("request_id") == request_id
+        and handled.get("result") in ("restarted", "restart-failed")
+    )
+
+
+def _factor_research_actual_state(snapshot: dict[str, Any]) -> str:
+    """实态三态：running / stopped / unverified（持久化意图不参与判定）。"""
+    if snapshot.get("available") and not snapshot.get("stale"):
+        return "running" if (snapshot.get("supervisor") or {}).get("running") else "stopped"
+    return "unverified"
+
+
+def _normalize_pipeline_config(data: Any) -> tuple[dict[str, int], list[str]]:
+    """节奏配置逐字段归一化：非法/越界 → 默认值并列入 invalid_fields。"""
+    values = dict(FACTOR_RESEARCH_CONFIG_DEFAULTS)
+    invalid: list[str] = []
+    if not isinstance(data, dict):
+        return values, invalid
+    for key, (low, high) in FACTOR_RESEARCH_CONFIG_BOUNDS.items():
+        if key not in data:
+            continue
+        raw = data.get(key)
+        if isinstance(raw, int) and not isinstance(raw, bool) and low <= raw <= high:
+            values[key] = raw
+        else:
+            invalid.append(key)
+    return values, invalid
+
+
+def _factor_research_config_path() -> Path:
+    return Path(os.environ.get("FACTOR_RESEARCH_CONFIG_PATH", "data/factor_research/pipeline.json"))
+
+
+def _factor_research_config_block() -> dict[str, Any]:
+    """配置块：生效值 + 来源（file/defaults/corrupt）+ 非法字段 + 更新时间。"""
+    path = _factor_research_config_path()
+    defaults = dict(FACTOR_RESEARCH_CONFIG_DEFAULTS)
+    if not path.is_file():
+        return {"values": defaults, "source": "defaults", "invalid_fields": [], "updated_at": None}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {"values": defaults, "source": "corrupt", "invalid_fields": [], "updated_at": None}
+    if not isinstance(data, dict):
+        return {"values": defaults, "source": "corrupt", "invalid_fields": [], "updated_at": None}
+    values, invalid = _normalize_pipeline_config(data)
+    updated_at = data.get("updated_at")
+    return {
+        "values": values,
+        "source": "file",
+        "invalid_fields": invalid,
+        "updated_at": updated_at if isinstance(updated_at, str) else None,
+    }
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """原子写（唯一 tmp 名 + replace）：宿主容器与 distro 侧脚本可能并发写同一文件。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _factor_research_control_block(
     snapshot: dict[str, Any], launcher: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """control 块：期望态 + pending + honor（受理能力与 ETA 的单一判定源）。
+    """control 块：期望态 + pending + 重启请求 + honor（受理能力与 ETA 的单一判定源）。
 
-    陈旧/不可用快照 → 实态不可证 → ``pending`` 恒假（MUST NOT 据陈旧数据判「切换中」）。
+    陈旧/不可用快照 → 实态不可证 → ``pending`` / ``restart_pending`` 恒假
+    （MUST NOT 据陈旧数据判「切换中/重启中」）。
     """
     control = _read_control_file(
         Path(os.environ.get("FACTOR_RESEARCH_CONTROL_PATH", "data/factor_research/control.json"))
@@ -4233,7 +4350,13 @@ def _factor_research_control_block(
         running = bool((snapshot.get("supervisor") or {}).get("running"))
         pending = control["desired_running"] != running
     honor, eta = _factor_research_honor(snapshot, launcher or {})
-    return {**control, "pending": pending, "honor": honor, "honor_eta_seconds": eta}
+    return {
+        **control,
+        "pending": pending,
+        "honor": honor,
+        "honor_eta_seconds": eta,
+        "restart_pending": _restart_pending(control, snapshot),
+    }
 
 
 def _factor_research_status_payload() -> dict[str, Any]:
@@ -4241,6 +4364,8 @@ def _factor_research_status_payload() -> dict[str, Any]:
     launcher = _factor_research_launcher_payload()
     return {
         **snapshot,
+        "actual_state": _factor_research_actual_state(snapshot),
+        "config": _factor_research_config_block(),
         "launcher": launcher,
         "control": _factor_research_control_block(snapshot, launcher),
     }
@@ -4254,8 +4379,34 @@ class FactorResearchControlRequest(BaseModel):
     desired_running: StrictBool
 
 
+class FactorResearchRestartRequest(BaseModel):
+    """重启请求：空对象（零命令面；多余字段 422）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class FactorResearchConfigRequest(BaseModel):
+    """研发节奏配置：四个可选严格整数（范围校验；未知字段 422；空对象 422）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_interval_s: StrictInt | None = Field(default=None, ge=5, le=120)
+    session_gap_s: StrictInt | None = Field(default=None, ge=0, le=3600)
+    short_session_backoff_s: StrictInt | None = Field(default=None, ge=0, le=7200)
+    short_session_threshold_s: StrictInt | None = Field(default=None, ge=30, le=3600)
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> FactorResearchConfigRequest:
+        if all(getattr(self, key) is None for key in FACTOR_RESEARCH_CONFIG_BOUNDS):
+            raise ValueError("at least one field is required")
+        return self
+
+
 def _factor_research_control_update(desired_running: bool) -> dict[str, Any]:
-    """写控制文件（原子 tmp + replace）；无任何受理能力 → 409，MUST NOT 落文件。"""
+    """写控制文件（原子 tmp + replace）；无任何受理能力 → 409，MUST NOT 落文件。
+
+    显式启停写入不含 restart 字段的新文件——清除未执行的重启请求。
+    """
     snapshot = _factor_research_snapshot_payload()
     launcher = _factor_research_launcher_payload()
     honor, _eta = _factor_research_honor(snapshot, launcher)
@@ -4268,12 +4419,10 @@ def _factor_research_control_update(desired_running: bool) -> dict[str, Any]:
         "requested_at_epoch": int(now.timestamp()),
         "request_id": uuid.uuid4().hex[:12],
     }
-    path = Path(os.environ.get("FACTOR_RESEARCH_CONTROL_PATH", "data/factor_research/control.json"))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # 唯一 tmp 名（宿主容器与 distro 侧脚本可能并发写同一控制文件：固定名会交叉落残缺 JSON）
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    _atomic_write_json(
+        Path(os.environ.get("FACTOR_RESEARCH_CONTROL_PATH", "data/factor_research/control.json")),
+        payload,
+    )
     return {
         "control": _factor_research_control_block(
             _factor_research_snapshot_payload(), _factor_research_launcher_payload()
@@ -4281,9 +4430,58 @@ def _factor_research_control_update(desired_running: bool) -> dict[str, Any]:
     }
 
 
+def _factor_research_restart_update() -> dict[str, Any]:
+    """写重启请求（desired_running=true + restart 标记）；通道无证据 → 409。"""
+    snapshot = _factor_research_snapshot_payload()
+    launcher = _factor_research_launcher_payload()
+    honor, _eta = _factor_research_honor(snapshot, launcher)
+    if honor == "unavailable":
+        raise HTTPException(status_code=409, detail="control_unavailable")
+    now = datetime.now().astimezone()
+    payload = {
+        "desired_running": True,
+        "requested_at": now.isoformat(),
+        "requested_at_epoch": int(now.timestamp()),
+        "request_id": uuid.uuid4().hex[:12],
+        "restart_requested_at": now.isoformat(),
+        "restart_requested_at_epoch": int(now.timestamp()),
+        "restart_request_id": uuid.uuid4().hex[:12],
+    }
+    _atomic_write_json(
+        Path(os.environ.get("FACTOR_RESEARCH_CONTROL_PATH", "data/factor_research/control.json")),
+        payload,
+    )
+    return {
+        "control": _factor_research_control_block(
+            _factor_research_snapshot_payload(), _factor_research_launcher_payload()
+        )
+    }
+
+
+def _factor_research_config_update(req: FactorResearchConfigRequest) -> dict[str, Any]:
+    """合并写节奏配置（四级校验后原子落盘）；通道无证据 → 409。"""
+    snapshot = _factor_research_snapshot_payload()
+    launcher = _factor_research_launcher_payload()
+    honor, _eta = _factor_research_honor(snapshot, launcher)
+    if honor == "unavailable":
+        raise HTTPException(status_code=409, detail="control_unavailable")
+    current = _factor_research_config_block()["values"]
+    updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    now = datetime.now().astimezone()
+    payload = {
+        **current,
+        **updates,
+        "updated_at": now.isoformat(),
+        "updated_at_epoch": int(now.timestamp()),
+        "request_id": uuid.uuid4().hex[:12],
+    }
+    _atomic_write_json(_factor_research_config_path(), payload)
+    return {"config": _factor_research_config_block()}
+
+
 @app.get("/api/factor-research/status")
 async def factor_research_status() -> dict[str, Any]:
-    """因子研发监控快照（只读）：透传快照 + 派生 ``age_seconds`` / ``stale`` + ``control`` 块。"""
+    """因子研发监控快照（只读）：快照 + actual_state + config + launcher + control。"""
     return await asyncio.to_thread(_factor_research_status_payload)
 
 
@@ -4291,6 +4489,20 @@ async def factor_research_status() -> dict[str, Any]:
 async def factor_research_control(req: FactorResearchControlRequest) -> dict[str, Any]:
     """看护启停控制：期望态写入控制文件（distro 代理调和）；快照缺失/损坏/陈旧 → 409。"""
     return await asyncio.to_thread(_factor_research_control_update, req.desired_running)
+
+
+@app.post("/api/factor-research/restart")
+async def factor_research_restart(
+    req: FactorResearchRestartRequest | None = None,
+) -> dict[str, Any]:
+    """管线重启：写重启请求（代理按 request_id 去重执行）；通道无证据 → 409。"""
+    return await asyncio.to_thread(_factor_research_restart_update)
+
+
+@app.put("/api/factor-research/config")
+async def factor_research_config(req: FactorResearchConfigRequest) -> dict[str, Any]:
+    """研发节奏配置：四个旋钮写 pipeline.json（代理周期读取）；通道无证据 → 409。"""
+    return await asyncio.to_thread(_factor_research_config_update, req)
 
 
 # ── 执行台账只读查询（delta add-broker-console：暴露 + 呈现，零业务复制） ──

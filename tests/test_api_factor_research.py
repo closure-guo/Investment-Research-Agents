@@ -52,14 +52,38 @@ def _launcher_path(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def _config_path(tmp_path, monkeypatch):
+    """研发节奏配置路径指向 tmp（调用期读 env；delta add-factor-research-settings）。"""
+    path = tmp_path / "pipeline.json"
+    monkeypatch.setenv("FACTOR_RESEARCH_CONFIG_PATH", str(path))
+    return path
+
+
 _NO_CONTROL = {
     "desired_running": None,
     "requested_at": None,
     "pending": False,
     "honor": "unavailable",
     "honor_eta_seconds": None,
+    "restart_requested_at": None,
+    "restart_requested_at_epoch": None,
+    "restart_request_id": None,
+    "restart_pending": False,
 }
 _NO_LAUNCHER = {"available": False, "reason": "missing"}
+_DEFAULT_CONFIG_VALUES = {
+    "snapshot_interval_s": 15,
+    "session_gap_s": 60,
+    "short_session_backoff_s": 600,
+    "short_session_threshold_s": 120,
+}
+_NO_CONFIG = {
+    "values": _DEFAULT_CONFIG_VALUES,
+    "source": "defaults",
+    "invalid_fields": [],
+    "updated_at": None,
+}
 
 
 def _snapshot(age_s: int = 40) -> dict:
@@ -115,6 +139,8 @@ def test_missing_file_reports_missing():
     assert resp.json() == {
         "available": False,
         "reason": "missing",
+        "actual_state": "unverified",
+        "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
     }
@@ -127,6 +153,8 @@ def test_corrupt_text_reports_corrupt(_status_path):
     assert resp.json() == {
         "available": False,
         "reason": "corrupt",
+        "actual_state": "unverified",
+        "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
     }
@@ -137,6 +165,8 @@ def test_non_object_json_reports_corrupt(_status_path):
     assert TestClient(app).get(_ENDPOINT).json() == {
         "available": False,
         "reason": "corrupt",
+        "actual_state": "unverified",
+        "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
     }
@@ -148,6 +178,8 @@ def test_missing_timestamp_reports_corrupt(_status_path):
     assert TestClient(app).get(_ENDPOINT).json() == {
         "available": False,
         "reason": "corrupt",
+        "actual_state": "unverified",
+        "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
     }
@@ -451,3 +483,286 @@ def test_control_put_rejected_when_launcher_stale(_status_path, _control_path, _
 
     assert TestClient(app).put(_CONTROL_ENDPOINT, json={"desired_running": True}).status_code == 409
     assert not _control_path.exists()
+
+
+# ── actual_state 实态派生（add-factor-research-settings）──
+
+
+def test_actual_state_running_wins_over_false_intent(_status_path, _control_path):
+    """实态优先：快照说运行中，持久化意图 false 也不得报 stopped。"""
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")  # running=True
+    _control_path.write_text(json.dumps({"desired_running": False}), encoding="utf-8")
+    body = TestClient(app).get(_ENDPOINT).json()
+    assert body["actual_state"] == "running"
+    assert body["control"]["pending"] is True
+
+
+def test_actual_state_stopped(_status_path):
+    snap = _snapshot()
+    snap["supervisor"] = {"running": False, "pid": None, "started_at": None}
+    _status_path.write_text(json.dumps(snap), encoding="utf-8")
+    assert TestClient(app).get(_ENDPOINT).json()["actual_state"] == "stopped"
+
+
+def test_actual_state_unverified_when_stale_even_with_true_intent(_status_path, _control_path):
+    """重启后常见形态：快照陈旧 + 意图 true → 必须 unverified（MUST NOT 冒充 running）。"""
+    _status_path.write_text(json.dumps(_snapshot(age_s=400)), encoding="utf-8")
+    _control_path.write_text(json.dumps({"desired_running": True}), encoding="utf-8")
+    body = TestClient(app).get(_ENDPOINT).json()
+    assert body["actual_state"] == "unverified"
+    assert body["control"]["desired_running"] is True
+
+
+def test_actual_state_unverified_when_snapshot_missing(_status_path):
+    assert TestClient(app).get(_ENDPOINT).json()["actual_state"] == "unverified"
+
+
+# ── POST /api/factor-research/restart（spec「管线重启控制」）──
+
+_RESTART_ENDPOINT = "/api/factor-research/restart"
+
+
+def test_restart_writes_control_file_and_reports_pending(_status_path, _control_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")  # running=True
+    resp = TestClient(app).post(_RESTART_ENDPOINT, json={})
+    assert resp.status_code == 200
+    on_disk = json.loads(_control_path.read_text(encoding="utf-8"))
+    assert on_disk["desired_running"] is True
+    assert isinstance(on_disk["restart_requested_at"], str) and on_disk["restart_requested_at"]
+    assert isinstance(on_disk["restart_requested_at_epoch"], int)
+    assert isinstance(on_disk["restart_request_id"], str) and on_disk["restart_request_id"]
+    control = resp.json()["control"]
+    assert control["restart_pending"] is True
+    assert control["restart_request_id"] == on_disk["restart_request_id"]
+    assert not list(_control_path.parent.glob("*.tmp"))
+
+
+def test_restart_accepts_empty_body(_status_path, _control_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    assert TestClient(app).post(_RESTART_ENDPOINT).status_code == 200
+
+
+def test_restart_rejects_extra_body_fields(_status_path, _control_path):
+    """零命令面：多余字段（含命令）→ 422 且不落文件。"""
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    resp = TestClient(app).post(_RESTART_ENDPOINT, json={"cmd": "rm -rf /"})
+    assert resp.status_code == 422
+    assert not _control_path.exists()
+
+
+def test_restart_rejected_when_unavailable(_control_path):
+    resp = TestClient(app).post(_RESTART_ENDPOINT, json={})
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "control_unavailable"
+    assert not _control_path.exists()
+
+
+def test_restart_accepted_with_fresh_launcher(_status_path, _control_path, _launcher_path):
+    _status_path.write_text(json.dumps(_snapshot(age_s=400)), encoding="utf-8")
+    _launcher_path.write_text(json.dumps(_launcher(age_s=30)), encoding="utf-8")
+    resp = TestClient(app).post(_RESTART_ENDPOINT, json={})
+    assert resp.status_code == 200
+    assert resp.json()["control"]["honor"] == "launcher"
+    assert _control_path.exists()
+
+
+def _agent_restart(now: int, request_id: str, result: str = "restarted") -> dict:
+    return {
+        "last_action": "started" if result == "restarted" else "start-failed",
+        "last_action_at": datetime.fromtimestamp(now - 5, tz=_TZ).isoformat(),
+        "last_action_epoch": now - 5,
+        "last_error": None if result == "restarted" else "看护未在启动窗口内就位",
+        "restart": {
+            "request_id": request_id,
+            "requested_at_epoch": now - 10,
+            "result": result,
+            "handled_at": datetime.fromtimestamp(now - 5, tz=_TZ).isoformat(),
+            "handled_at_epoch": now - 5,
+        },
+    }
+
+
+def test_restart_pending_false_after_agent_handled(_status_path, _control_path):
+    now = int(time.time())
+    _control_path.write_text(
+        json.dumps(
+            {
+                "desired_running": True,
+                "restart_request_id": "r123",
+                "restart_requested_at": datetime.fromtimestamp(now - 10, tz=_TZ).isoformat(),
+                "restart_requested_at_epoch": now - 10,
+            }
+        ),
+        encoding="utf-8",
+    )
+    snap = _snapshot(age_s=2)
+    snap["agent"] = _agent_restart(now, "r123")
+    _status_path.write_text(json.dumps(snap), encoding="utf-8")
+    body = TestClient(app).get(_ENDPOINT).json()
+    assert body["control"]["restart_pending"] is False
+    assert body["control"]["restart_request_id"] == "r123"
+
+
+def test_restart_pending_false_after_failure(_status_path, _control_path):
+    now = int(time.time())
+    _control_path.write_text(
+        json.dumps(
+            {
+                "desired_running": True,
+                "restart_request_id": "r123",
+                "restart_requested_at_epoch": now - 10,
+            }
+        ),
+        encoding="utf-8",
+    )
+    snap = _snapshot(age_s=2)
+    snap["agent"] = _agent_restart(now, "r123", result="restart-failed")
+    _status_path.write_text(json.dumps(snap), encoding="utf-8")
+    assert TestClient(app).get(_ENDPOINT).json()["control"]["restart_pending"] is False
+
+
+def test_restart_pending_true_for_old_agent_without_evidence(_status_path, _control_path):
+    """旧代理不写 agent.restart：快照推进也不得判成功。"""
+    now = int(time.time())
+    _control_path.write_text(
+        json.dumps(
+            {
+                "desired_running": True,
+                "restart_request_id": "r123",
+                "restart_requested_at_epoch": now - 60,
+            }
+        ),
+        encoding="utf-8",
+    )
+    snap = _snapshot(age_s=2)
+    snap["agent"] = {"last_action": "noop", "last_action_at": None, "last_error": None}
+    _status_path.write_text(json.dumps(snap), encoding="utf-8")
+    assert TestClient(app).get(_ENDPOINT).json()["control"]["restart_pending"] is True
+
+
+def test_control_put_clears_restart_request(_status_path, _control_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    _control_path.write_text(
+        json.dumps(
+            {
+                "desired_running": True,
+                "restart_request_id": "r123",
+                "restart_requested_at_epoch": int(time.time()) - 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    TestClient(app).put(_CONTROL_ENDPOINT, json={"desired_running": False})
+    on_disk = json.loads(_control_path.read_text(encoding="utf-8"))
+    assert "restart_request_id" not in on_disk
+    assert "restart_requested_at_epoch" not in on_disk
+
+
+# ── PUT /api/factor-research/config（spec「研发节奏配置通道」）──
+
+_CONFIG_ENDPOINT = "/api/factor-research/config"
+
+
+def test_status_config_defaults_when_file_missing(_status_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    assert TestClient(app).get(_ENDPOINT).json()["config"] == _NO_CONFIG
+
+
+def test_config_put_merges_with_existing_values(_status_path, _config_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    _config_path.write_text(
+        json.dumps({**_DEFAULT_CONFIG_VALUES, "session_gap_s": 120, "updated_at": "old"}),
+        encoding="utf-8",
+    )
+    resp = TestClient(app).put(_CONFIG_ENDPOINT, json={"snapshot_interval_s": 30})
+    assert resp.status_code == 200
+    body = resp.json()["config"]
+    assert body["values"]["snapshot_interval_s"] == 30
+    assert body["values"]["session_gap_s"] == 120  # 未传字段沿用既有值
+    assert body["source"] == "file"
+    on_disk = json.loads(_config_path.read_text(encoding="utf-8"))
+    assert on_disk["snapshot_interval_s"] == 30
+    assert on_disk["session_gap_s"] == 120
+    assert isinstance(on_disk["updated_at"], str) and on_disk["updated_at"]
+    assert isinstance(on_disk["request_id"], str) and on_disk["request_id"]
+    assert not list(_config_path.parent.glob("*.tmp"))
+
+
+def test_config_put_status_readback(_status_path, _config_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    TestClient(app).put(
+        _CONFIG_ENDPOINT,
+        json={
+            "snapshot_interval_s": 30,
+            "session_gap_s": 120,
+            "short_session_backoff_s": 900,
+            "short_session_threshold_s": 60,
+        },
+    )
+    cfg = TestClient(app).get(_ENDPOINT).json()["config"]
+    assert cfg["values"] == {
+        "snapshot_interval_s": 30,
+        "session_gap_s": 120,
+        "short_session_backoff_s": 900,
+        "short_session_threshold_s": 60,
+    }
+
+
+def test_config_put_validation_rejects_bad_input(_status_path, _config_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    client = TestClient(app)
+    for payload in (
+        {},  # 空对象
+        {"snapshot_interval_s": 1},  # 低于下限
+        {"snapshot_interval_s": 121},  # 高于上限
+        {"snapshot_interval_s": "30"},  # 字符串
+        {"snapshot_interval_s": True},  # 布尔不得强转
+        {"session_gap_s": 3601},
+        {"short_session_backoff_s": -1},
+        {"short_session_threshold_s": 29},
+        {"snapshot_interval_s": 30, "cmd": "rm -rf /"},  # 未知字段
+    ):
+        assert client.put(_CONFIG_ENDPOINT, json=payload).status_code == 422, payload
+    assert not _config_path.exists()
+
+
+def test_config_put_rejected_when_unavailable(_config_path):
+    resp = TestClient(app).put(_CONFIG_ENDPOINT, json={"snapshot_interval_s": 30})
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "control_unavailable"
+    assert not _config_path.exists()
+
+
+def test_status_config_invalid_fields_fallback(_status_path, _config_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    _config_path.write_text(
+        json.dumps({"session_gap_s": 99999, "short_session_backoff_s": "600"}),
+        encoding="utf-8",
+    )
+    cfg = TestClient(app).get(_ENDPOINT).json()["config"]
+    assert cfg["values"]["session_gap_s"] == 60
+    assert cfg["values"]["short_session_backoff_s"] == 600
+    assert cfg["source"] == "file"
+    assert set(cfg["invalid_fields"]) == {"session_gap_s", "short_session_backoff_s"}
+
+
+def test_status_config_corrupt_reports_corrupt(_status_path, _config_path):
+    _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    _config_path.write_text("not json", encoding="utf-8")
+    cfg = TestClient(app).get(_ENDPOINT).json()["config"]
+    assert cfg["source"] == "corrupt"
+    assert cfg["values"] == _DEFAULT_CONFIG_VALUES
+
+
+def test_config_path_read_at_call_time(tmp_path, monkeypatch):
+    first = tmp_path / "p1.json"
+    second = tmp_path / "p2.json"
+    monkeypatch.setenv("FACTOR_RESEARCH_CONFIG_PATH", str(first))
+    monkeypatch.setenv("FACTOR_RESEARCH_STATUS_PATH", str(tmp_path / "s.json"))
+    (tmp_path / "s.json").write_text(json.dumps(_snapshot()), encoding="utf-8")
+    client = TestClient(app)
+    client.put(_CONFIG_ENDPOINT, json={"snapshot_interval_s": 30})
+    assert first.exists() and not second.exists()
+    monkeypatch.setenv("FACTOR_RESEARCH_CONFIG_PATH", str(second))
+    client.put(_CONFIG_ENDPOINT, json={"snapshot_interval_s": 40})
+    assert second.exists()

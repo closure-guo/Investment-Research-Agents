@@ -32,6 +32,10 @@ const LAUNCHER_PATH = path.resolve(
   fileURLToPath(new URL('.', import.meta.url)),
   '../../../../data/test-e2e-factor-research-launcher.json'
 )
+const CONFIG_PATH = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  '../../../../data/test-e2e-factor-research-pipeline.json'
+)
 
 // 防御：fixture 路径必须测试隔离，绝不落到生产 data/factor_research/status.json 与控制文件
 if (!STATUS_PATH.includes('test-e2e') || !CONTROL_PATH.includes('test-e2e')) {
@@ -40,15 +44,21 @@ if (!STATUS_PATH.includes('test-e2e') || !CONTROL_PATH.includes('test-e2e')) {
 if (!LAUNCHER_PATH.includes('test-e2e')) {
   throw new Error(`launcher fixture 路径未隔离: ${LAUNCHER_PATH}`)
 }
+if (!CONFIG_PATH.includes('test-e2e')) {
+  throw new Error(`config fixture 路径未隔离: ${CONFIG_PATH}`)
+}
 
 function isoAt(epoch: number): string {
   return new Date(epoch * 1000).toISOString()
 }
 
 /** 控制文件读取（PUT 真实落盘后的真值断言；不存在/损坏 → null）。 */
-function readControl(): { desired_running?: unknown } | null {
+function readControl(): { desired_running?: unknown; restart_request_id?: unknown } | null {
   try {
-    return JSON.parse(readFileSync(CONTROL_PATH, 'utf-8')) as { desired_running?: unknown }
+    return JSON.parse(readFileSync(CONTROL_PATH, 'utf-8')) as {
+      desired_running?: unknown
+      restart_request_id?: unknown
+    }
   } catch {
     return null
   }
@@ -130,6 +140,24 @@ function removeLauncher() {
   rmSync(LAUNCHER_PATH, { force: true })
 }
 
+/** 节奏配置文件（delta add-factor-research-settings；与后端 FACTOR_RESEARCH_CONFIG_PATH 同源）。 */
+function readConfig(): Record<string, unknown> | null {
+  try {
+    return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+function writeConfig(payload: Record<string, unknown>) {
+  mkdirSync(path.dirname(CONFIG_PATH), { recursive: true })
+  writeFileSync(CONFIG_PATH, JSON.stringify(payload), 'utf-8')
+}
+
+function removeConfig() {
+  rmSync(CONFIG_PATH, { force: true })
+}
+
 test.beforeEach(() => {
   removeLauncher()
 })
@@ -138,6 +166,7 @@ test.afterAll(() => {
   removeSnapshot()
   removeControl()
   removeLauncher()
+  removeConfig()
 })
 
 test('1. 运行中：看护徽章/pid/循环·步骤·进度/因子/日志尾/历史表/累计计数', async ({ page }) => {
@@ -310,6 +339,8 @@ test('9. 离线可开：陈旧快照 + 启动器心跳 → 开关可点并明示
 
   const sw = page.getByTestId('factor-research-control-switch')
   await expect(sw).toBeEnabled()
+  // 快照陈旧 → 实态未知：开关 MUST NOT 显示为开（只有验证过运行中才为开）
+  await expect(sw).toHaveAttribute('aria-checked', 'false')
   await expect(page.getByTestId('factor-research-control-state')).toContainText('≤3 分钟')
   await expect(page.getByTestId('factor-research-stale-banner')).toContainText(
     '启动器正在按节拍尝试恢复'
@@ -370,4 +401,98 @@ test('12. 连续短命会话：最近 3 次均 <120 秒 → 告警', async ({ pa
   await page.goto('/factor-research')
 
   await expect(page.getByTestId('factor-research-short-sessions')).toContainText('连续短命会话')
+})
+
+// ── 实态语义 + 重启 + 配置页（delta add-factor-research-settings）──
+
+test('13. 快照陈旧 + 意图 true：开关不冒充运行中（关）且明示状态未知', async ({ page }) => {
+  const epoch = Math.floor(Date.now() / 1000) - 400
+  writeSnapshot(snapshotBody({ collected_at: isoAt(epoch), collected_at_epoch: epoch }))
+  writeControl({ desired_running: true, requested_at: isoAt(epoch - 10) })
+  writeLauncher()
+
+  await page.goto('/factor-research')
+
+  const sw = page.getByTestId('factor-research-control-switch')
+  await expect(sw).toHaveAttribute('aria-checked', 'false')
+  await expect(page.getByTestId('status-badge')).toHaveAttribute('data-status', 'degraded')
+  await expect(page.getByTestId('status-badge')).toHaveText('状态未知')
+  const state = page.getByTestId('factor-research-control-state')
+  await expect(state).toContainText('状态未知')
+  await expect(state).toContainText('已记录保持运行')
+})
+
+test('14. 重启管线：确认后控制文件真写入 restart 请求 → 「重启中」→ 研究侧回写后恢复', async ({
+  page,
+}) => {
+  writeSnapshot(snapshotBody())
+  removeControl()
+
+  await page.goto('/factor-research')
+
+  const restart = page.getByTestId('factor-research-restart-button')
+  await expect(restart).toBeEnabled()
+  await restart.click()
+  await expect(page.getByTestId('factor-research-restart-confirm-dialog')).toBeVisible()
+  expect(readControl()).toBeNull() // 未确认前零请求
+
+  await page.getByTestId('factor-research-restart-confirm').click()
+  await expect
+    .poll(() => readControl()?.restart_request_id, { timeout: 10_000 })
+    .toBeTruthy()
+  const control = readControl() as { restart_request_id: string; desired_running: boolean }
+  expect(control.desired_running).toBe(true)
+
+  // 后端已看到请求但快照尚无 agent.restart → 「重启中」+ 按钮禁用
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('重启中')
+  await expect(page.getByTestId('factor-research-restart-button')).toBeDisabled()
+
+  // 模拟研究侧代理回写处理结果 → 刷新后恢复实态
+  writeSnapshot(
+    snapshotBody({
+      agent: {
+        last_action: 'started',
+        last_action_at: isoAt(Math.floor(Date.now() / 1000)),
+        last_action_epoch: Math.floor(Date.now() / 1000),
+        last_error: null,
+        restart: {
+          request_id: control.restart_request_id,
+          requested_at_epoch: Math.floor(Date.now() / 1000) - 5,
+          result: 'restarted',
+          handled_at: isoAt(Math.floor(Date.now() / 1000)),
+          handled_at_epoch: Math.floor(Date.now() / 1000),
+        },
+      },
+    })
+  )
+  await page.reload()
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('已开启')
+  await expect(page.getByTestId('factor-research-restart-button')).toBeEnabled()
+})
+
+test('15. 设置中心因子研发配置：实态/节奏配置保存真写文件', async ({ page }) => {
+  writeSnapshot(snapshotBody())
+  // 前序重启用例会留下 restart 请求；本用例验证配置页实态，先清控制文件
+  removeControl()
+  writeConfig({
+    snapshot_interval_s: 15,
+    session_gap_s: 60,
+    short_session_backoff_s: 600,
+    short_session_threshold_s: 120,
+  })
+
+  await page.goto('/settings')
+  await page.getByTestId('settings-nav-factor-research').click()
+  await expect(page.getByTestId('factor-research-settings-pane')).toBeVisible()
+  await expect(page.getByTestId('factor-research-settings-state')).toContainText('已开启')
+
+  const input = page.getByTestId('factor-research-settings-config-snapshot_interval_s')
+  await expect(input).toHaveValue('15')
+  await input.fill('30')
+  await page.getByTestId('factor-research-settings-config-save').click()
+
+  await expect
+    .poll(() => (readConfig()?.snapshot_interval_s as number | undefined), { timeout: 10_000 })
+    .toBe(30)
+  await expect(page.getByTestId('factor-research-settings-config-saved')).toContainText('已保存')
 })

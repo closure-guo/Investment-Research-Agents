@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import App from '../App'
 import { FactorResearchPage } from '../pages/factors/FactorResearchPage'
-import type { FactorResearchStatusResponse } from '../types'
+import { DEFAULT_FACTOR_RESEARCH_CONFIG } from '../lib/factorResearch'
+import type { FactorResearchControl, FactorResearchStatusResponse } from '../types'
 
 /**
  * 因子研发监控页单测（delta add-factor-research-monitor T3；spec frontend「因子研发监控页」）。
@@ -18,6 +19,22 @@ import type { FactorResearchStatusResponse } from '../types'
  * fetch 全 mock（页面契约层单测；E2E 走真实端点 + fixture 快照文件）。
  */
 
+/** 控制块完整默认值（restart 字段必填；delta add-factor-research-settings） */
+function controlBlock(overrides: Partial<FactorResearchControl> = {}): FactorResearchControl {
+  return {
+    desired_running: null,
+    requested_at: null,
+    pending: false,
+    honor: 'live',
+    honor_eta_seconds: 0,
+    restart_requested_at: null,
+    restart_requested_at_epoch: null,
+    restart_request_id: null,
+    restart_pending: false,
+    ...overrides,
+  }
+}
+
 function snapshotBody(overrides: Partial<FactorResearchStatusResponse> = {}): FactorResearchStatusResponse {
   return {
     available: true,
@@ -25,6 +42,12 @@ function snapshotBody(overrides: Partial<FactorResearchStatusResponse> = {}): Fa
     stale: false,
     collected_at: '2026-10-17T12:00:00+08:00',
     collected_at_epoch: 1760683200,
+    config: {
+      values: DEFAULT_FACTOR_RESEARCH_CONFIG,
+      source: 'file',
+      invalid_fields: [],
+      updated_at: null,
+    },
     supervisor: { running: true, pid: 7752, started_at: '2026-10-17T11:36:00+08:00' },
     current_session: {
       log_file: 'session-20261017-113600.log',
@@ -56,13 +79,13 @@ function snapshotBody(overrides: Partial<FactorResearchStatusResponse> = {}): Fa
       },
     ],
     totals: { sessions: 2, candidates: 135, workspace_tasks: 222 },
-    control: {
+    control: controlBlock({
       desired_running: null,
       requested_at: null,
       pending: false,
       honor: 'live',
       honor_eta_seconds: 0,
-    },
+    }),
     ...overrides,
   }
 }
@@ -169,7 +192,7 @@ describe('因子研发监控页（delta add-factor-research-monitor T3）', () =
     expect(screen.queryByTestId('factor-research-empty-missing')).toBeNull()
   })
 
-  it('轮询刷新（注入 20ms）：候选计数随新快照更新', async () => {
+  it('轮询刷新（注入 200ms）：候选计数随新快照更新', async () => {
     mockFetch([
       snapshotBody(),
       snapshotBody({
@@ -177,7 +200,7 @@ describe('因子研发监控页（delta add-factor-research-monitor T3）', () =
         stale: true,
       }),
     ])
-    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={20} />)
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={200} />)
 
     await screen.findByTestId('factor-research-supervisor')
     expect(screen.getByTestId('factor-research-totals').textContent).toContain('候选实现 135')
@@ -312,6 +335,7 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
   ) {
     let statusCalls = 0
     const putCalls: Array<{ body: unknown }> = []
+    const restartCalls: number[] = []
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString()
       if (url === '/api/factor-research/status') {
@@ -323,22 +347,32 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
         putCalls.push({ body: JSON.parse(String(init.body)) })
         return respond(
           putResponse.body ?? {
-            control: {
-          desired_running: false,
-          requested_at: '2026-10-17T23:10:00+08:00',
-          pending: true,
-          honor: 'live',
-          honor_eta_seconds: 0,
-        },
+            control: controlBlock({
+              desired_running: false,
+              requested_at: '2026-10-17T23:10:00+08:00',
+              pending: true,
+              honor: 'live',
+              honor_eta_seconds: 0,
+            }),
           },
           putResponse.status ?? 200
         )
+      }
+      if (url === '/api/factor-research/restart' && init?.method === 'POST') {
+        restartCalls.push(Date.now())
+        return respond({
+          control: controlBlock({
+            desired_running: true,
+            restart_request_id: 'r1',
+            restart_pending: true,
+          }),
+        })
       }
       if (url === '/api/sessions') return respond({ sessions: [] })
       return respond({})
     })
     vi.stubGlobal('fetch', fetchMock)
-    return { fetchMock, putCalls }
+    return { fetchMock, putCalls, restartCalls }
   }
 
   beforeEach(() => {
@@ -364,13 +398,13 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
     const { putCalls } = mockControlFetch([
       snapshotBody(),
       snapshotBody({
-        control: {
+        control: controlBlock({
           desired_running: false,
           requested_at: '2026-10-17T23:10:00+08:00',
           pending: true,
           honor: 'live',
           honor_eta_seconds: 0,
-        },
+        }),
       }),
     ])
     render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
@@ -424,13 +458,13 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
   it('pending 渲染：切换中 + 禁用（MUST NOT 冒充已生效）', async () => {
     mockFetch(
       snapshotBody({
-        control: {
+        control: controlBlock({
           desired_running: false,
           requested_at: '2026-10-17T23:10:00+08:00',
           pending: true,
           honor: 'live',
           honor_eta_seconds: 0,
-        },
+        }),
       })
     )
     render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
@@ -445,13 +479,13 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
       snapshotBody({
         stale: true,
         age_seconds: 400,
-        control: {
+        control: controlBlock({
           desired_running: null,
           requested_at: null,
           pending: false,
           honor: 'unavailable',
           honor_eta_seconds: null,
-        },
+        }),
       }),
     ])
     render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
@@ -574,18 +608,18 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
     expect(screen.getByTestId('factor-research-control-switch').getAttribute('aria-checked')).toBe('true')
   })
 
-  it('离线可开：honor=launcher → 开关可用、位置取意图、明示 ≤3 分钟', async () => {
+  it('离线可开：honor=launcher → 开关不冒充运行中（位置关）、可点击开启并明示 ≤3 分钟', async () => {
     const { putCalls } = mockControlFetch([
       snapshotBody({
         stale: true,
         age_seconds: 400,
-        control: {
+        control: controlBlock({
           desired_running: true,
           requested_at: null,
           pending: false,
           honor: 'launcher',
           honor_eta_seconds: 180,
-        },
+        }),
         launcher: { available: true, fresh: true, agent_ok: true, age_seconds: 30 },
       }),
     ])
@@ -593,13 +627,18 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
 
     const sw = await screen.findByTestId('factor-research-control-switch')
     expect((sw as HTMLButtonElement).disabled).toBe(false)
-    expect(sw.getAttribute('aria-checked')).toBe('true')
-    expect(screen.getByTestId('factor-research-control-state').textContent).toContain('≤3 分钟')
+    // 核心回归：持久化意图 true + 快照陈旧 → 开关 MUST NOT 显示为开
+    expect(sw.getAttribute('aria-checked')).toBe('false')
+    const state = screen.getByTestId('factor-research-control-state').textContent ?? ''
+    expect(state).toContain('状态未知')
+    expect(state).toContain('已记录保持运行')
+    expect(state).toContain('≤3 分钟')
 
+    // 点击 = 重新确认启动（不是停止），请求体 desired_running=true
     fireEvent.click(sw)
-    fireEvent.click(await screen.findByTestId('factor-research-control-confirm'))
+    expect(screen.queryByTestId('factor-research-control-confirm-dialog')).toBeNull()
     await waitFor(() => expect(putCalls).toHaveLength(1))
-    expect(putCalls[0].body).toEqual({ desired_running: false })
+    expect(putCalls[0].body).toEqual({ desired_running: true })
   })
 
   it('双离线：honor=unavailable → 禁用并明示研究侧与启动器均离线', async () => {
@@ -607,13 +646,13 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
       snapshotBody({
         stale: true,
         age_seconds: 400,
-        control: {
+        control: controlBlock({
           desired_running: true,
           requested_at: null,
           pending: false,
           honor: 'unavailable',
           honor_eta_seconds: null,
-        },
+        }),
       }),
     ])
     render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
@@ -631,13 +670,13 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
         stale: true,
         age_seconds: 400,
         collected_at: '2026-10-19T18:00:00+08:00',
-        control: {
+        control: controlBlock({
           desired_running: true,
           requested_at: '2026-10-19T19:00:00+08:00',
           pending: false,
           honor: 'launcher',
           honor_eta_seconds: 180,
-        },
+        }),
         launcher: { available: true, fresh: true, agent_ok: true, age_seconds: 30 },
       })
     )
@@ -653,13 +692,13 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
     mockFetch(
       snapshotBody({
         supervisor: { running: false, pid: null, started_at: null },
-        control: {
+        control: controlBlock({
           desired_running: true,
           requested_at: '2026-10-19T18:00:00+08:00',
           pending: true,
           honor: 'live',
           honor_eta_seconds: 0,
-        },
+        }),
         agent: {
           last_action: 'start-failed',
           last_action_at: '2026-10-19T18:00:05+08:00',
@@ -691,5 +730,110 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
     const alert = await screen.findByTestId('factor-research-short-sessions')
     expect(alert.textContent).toContain('连续短命会话')
     expect(alert.textContent).toContain('23')
+  })
+
+  // ── 重启管线（delta add-factor-research-settings）──
+
+  it('重启：二次确认前零请求 → POST → 「重启中」+ 禁用', async () => {
+    const restartAt = new Date().toISOString()
+    const { putCalls, restartCalls } = mockControlFetch([
+      snapshotBody(),
+      snapshotBody({
+        control: controlBlock({
+          desired_running: true,
+          restart_requested_at: restartAt,
+          restart_requested_at_epoch: Math.floor(Date.now() / 1000),
+          restart_request_id: 'r1',
+          restart_pending: true,
+        }),
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const restart = await screen.findByTestId('factor-research-restart-button')
+    fireEvent.click(restart)
+    expect(await screen.findByTestId('factor-research-restart-confirm-dialog')).toBeTruthy()
+    expect(restartCalls).toHaveLength(0) // 未确认前 MUST NOT 发请求
+
+    fireEvent.click(screen.getByTestId('factor-research-restart-confirm'))
+    await waitFor(() => expect(restartCalls).toHaveLength(1))
+    expect(putCalls).toHaveLength(0)
+    await waitFor(() =>
+      expect(screen.getByTestId('factor-research-control-state').textContent).toContain('重启中')
+    )
+    expect(
+      (screen.getByTestId('factor-research-restart-button') as HTMLButtonElement).disabled
+    ).toBe(true)
+  })
+
+  it('重启失败：agent.restart=restart-failed → 展示原因，不显示重启中', async () => {
+    mockFetch(
+      snapshotBody({
+        control: controlBlock({
+          desired_running: true,
+          restart_requested_at: '2026-10-21T10:00:00+08:00',
+          restart_requested_at_epoch: 1761002400,
+          restart_request_id: 'r1',
+          restart_pending: false,
+        }),
+        agent: {
+          last_action: 'start-failed',
+          last_action_at: '2026-10-21T10:00:05+08:00',
+          last_error: '看护未在启动窗口内就位',
+          restart: {
+            request_id: 'r1',
+            requested_at_epoch: 1761002400,
+            result: 'restart-failed',
+            handled_at: '2026-10-21T10:00:05+08:00',
+            handled_at_epoch: 1761002405,
+          },
+        },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-control-switch')
+    const state = screen.getByTestId('factor-research-control-state').textContent ?? ''
+    expect(state).toContain('重启失败')
+    expect(state).toContain('看护未在启动窗口内就位')
+    expect(state).not.toContain('重启中')
+  })
+
+  it('旧代理未执行重启：restart_pending 超 60 秒 → 如实提示未被执行', async () => {
+    const old = new Date(Date.now() - 120_000).toISOString()
+    mockFetch(
+      snapshotBody({
+        control: controlBlock({
+          desired_running: true,
+          restart_requested_at: old,
+          restart_requested_at_epoch: Math.floor((Date.now() - 120_000) / 1000),
+          restart_request_id: 'r1',
+          restart_pending: true,
+        }),
+        agent: { last_action: 'noop', last_action_at: new Date().toISOString(), last_error: null },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-control-switch')
+    expect(screen.getByTestId('factor-research-control-state').textContent).toContain(
+      '重启请求未被执行'
+    )
+  })
+
+  it('陈旧 + 意图 true：徽章为「状态未知」而非运行中/已停止', async () => {
+    mockFetch(
+      snapshotBody({
+        stale: true,
+        age_seconds: 400,
+        control: controlBlock({ desired_running: true, honor: 'launcher', honor_eta_seconds: 180 }),
+        launcher: { available: true, fresh: true, agent_ok: true, age_seconds: 30 },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const badge = await screen.findByTestId('status-badge')
+    expect(badge).toHaveAttribute('data-status', 'degraded')
+    expect(badge.textContent).toBe('状态未知')
   })
 })

@@ -955,6 +955,7 @@ export default function App() {
             onDeleteProfile={handleDeleteProfile}
             onBack={() => navigate('/')}
             onCleared={handleSessionsCleared}
+            onOpenFactorResearch={() => navigate('/factor-research')}
             initialModule={settingsFocus}
           />
         ) : bootRestoring && viewState === 'empty' ? (

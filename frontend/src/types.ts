@@ -1159,8 +1159,41 @@ export interface FactorResearchAgent {
   /** 最近一次期望态调和动作（控制文件缺失/损坏 → no_intent；一致 → noop） */
   last_action: 'no_intent' | 'noop' | 'started' | 'stopped' | 'start-failed' | 'stop-failed' | null
   last_action_at: string | null
+  /** 动作时刻（Unix 秒；旧版代理可能缺省） */
+  last_action_epoch?: number | null
   /** start-failed / stop-failed 时的可判读摘要 */
   last_error: string | null
+  /** 研究侧实际读取的节奏配置（旧版代理不上报） */
+  config?: FactorResearchConfigBlock | null
+  /** 最近一次已处理的重启请求（无 → null；旧版代理不上报） */
+  restart?: FactorResearchRestartRecord | null
+}
+
+export interface FactorResearchRestartRecord {
+  request_id: string | null
+  requested_at_epoch: number | null
+  result: 'restarted' | 'restart-failed'
+  handled_at: string | null
+  handled_at_epoch: number | null
+}
+
+export interface FactorResearchConfigValues {
+  /** 状态采集/控制轮询间隔（秒）；下一周期生效 */
+  snapshot_interval_s: number
+  /** 正常会话间隔（秒）；下次启动看护生效 */
+  session_gap_s: number
+  /** 短命会话退避（秒）；下次启动看护生效 */
+  short_session_backoff_s: number
+  /** 短命会话阈值（秒）；下次启动看护生效 */
+  short_session_threshold_s: number
+}
+
+export interface FactorResearchConfigBlock {
+  values: FactorResearchConfigValues
+  /** file=配置文件；defaults=缺失；corrupt=不可解析 */
+  source: 'file' | 'defaults' | 'corrupt'
+  invalid_fields: string[]
+  updated_at: string | null
 }
 
 export interface FactorResearchLauncher {
@@ -1188,7 +1221,17 @@ export interface FactorResearchControl {
   honor: 'live' | 'launcher' | 'unavailable'
   /** 离线受理的预计拉起上界（秒；live=0，unavailable=null） */
   honor_eta_seconds: number | null
+  /** 重启请求发起时刻（ISO8601；无 → null） */
+  restart_requested_at: string | null
+  /** 重启请求发起时刻（Unix 秒；无 → null） */
+  restart_requested_at_epoch: number | null
+  /** 重启请求标识（无 → null） */
+  restart_request_id: string | null
+  /** 有请求 + 快照新鲜 + 研究侧尚未回写同一 request_id 的终态结果 */
+  restart_pending: boolean
 }
+
+export type FactorResearchActualState = 'running' | 'stopped' | 'unverified'
 
 export interface FactorResearchStatusResponse {
   available: boolean
@@ -1198,6 +1241,10 @@ export interface FactorResearchStatusResponse {
   stale?: boolean
   collected_at?: string | null
   collected_at_epoch?: number | null
+  /** 验证过的实态（持久化意图不参与判定） */
+  actual_state?: FactorResearchActualState
+  /** 研发节奏配置块（delta add-factor-research-settings） */
+  config?: FactorResearchConfigBlock | null
   supervisor?: FactorResearchSupervisor | null
   current_session?: FactorResearchCurrentSession | null
   sessions?: FactorResearchSession[]

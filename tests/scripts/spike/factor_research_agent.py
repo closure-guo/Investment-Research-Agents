@@ -49,6 +49,7 @@ logger = logging.getLogger("factor_research_agent")
 DEFAULT_WORKDIR = "/root/rdagent-work"
 DEFAULT_CONTROL = "/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/control.json"
 DEFAULT_LAUNCHER = "/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/launcher.json"
+DEFAULT_CONFIG_PATH = "/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/pipeline.json"
 DEFAULT_INTERVAL_S = 15
 LAUNCH_SCRIPT = "/root/launch-fin-factor.sh"
 PIDFILE_NAME = "factor_research.pid"
@@ -57,8 +58,24 @@ LOCK_NAME = "factor_research_agent.lock"
 SINGLETON_LOCK_NAME = "factor_research_agent.singleton.lock"
 RESIDUAL_MARKER_NAME = "factor_research_stop_residual"
 SUPERVISOR_SCRIPT_NAME = ".factor_research_supervisor.sh"
+RESTART_STATE_NAME = ".agent_restart_state.json"
 # 手动 reconcile-once 等锁上限（应急通道不被守护的长采集无限阻塞；超时降级继续并告警）
 RECONCILE_LOCK_TIMEOUT_S = 8.0
+
+# 研发节奏配置（delta add-factor-research-settings）：与后端
+# FACTOR_RESEARCH_CONFIG_DEFAULTS / BOUNDS 字面同步。
+DEFAULT_CONFIG_VALUES: dict[str, int] = {
+    "snapshot_interval_s": DEFAULT_INTERVAL_S,
+    "session_gap_s": 60,
+    "short_session_backoff_s": 600,
+    "short_session_threshold_s": 120,
+}
+CONFIG_BOUNDS: dict[str, tuple[int, int]] = {
+    "snapshot_interval_s": (5, 120),
+    "session_gap_s": (0, 3600),
+    "short_session_backoff_s": (0, 7200),
+    "short_session_threshold_s": (30, 3600),
+}
 
 
 class SingletonBusy(RuntimeError):  # noqa: N818 - 「单例被占」判定，与既有命名风格一致
@@ -81,19 +98,28 @@ while true; do
   END=$(date +%s)
   DUR=$((END - START))
   echo "[supervisor] session ended after ${DUR}s (log: $LOG) at $(date -Is)" >> "$LOGDIR/supervisor.log"
-  if [ "$DUR" -lt 120 ]; then
-    sleep 600   # 短命会话（配额/网络故障）→ 退避 10 分钟
+  if [ "$DUR" -lt {{SHORT_THRESHOLD}} ]; then
+    sleep {{SHORT_BACKOFF}}   # 短命会话（配额/网络故障）→ 退避
   else
-    sleep 60
+    sleep {{SESSION_GAP}}
   fi
 done
 """
 
 
-def render_supervisor_script(workdir: str | Path) -> str:
-    """看护脚本渲染（占位符替换；bash 花括号原样保留）。"""
-    return SUPERVISOR_SCRIPT.replace("{{WORKDIR}}", str(workdir)).replace(
-        "{{LAUNCH}}", LAUNCH_SCRIPT
+def render_supervisor_script(workdir: str | Path, config: dict[str, int] | None = None) -> str:
+    """看护脚本渲染（占位符替换；bash 花括号原样保留）。
+
+    ``config`` 取节奏配置的生效值（缺省用 DEFAULT_CONFIG_VALUES）；会话间隔与退避
+    在下次启动看护时生效（页面已明示）。
+    """
+    values = {**DEFAULT_CONFIG_VALUES, **(config or {})}
+    return (
+        SUPERVISOR_SCRIPT.replace("{{WORKDIR}}", str(workdir))
+        .replace("{{LAUNCH}}", LAUNCH_SCRIPT)
+        .replace("{{SHORT_THRESHOLD}}", str(values["short_session_threshold_s"]))
+        .replace("{{SHORT_BACKOFF}}", str(values["short_session_backoff_s"]))
+        .replace("{{SESSION_GAP}}", str(values["session_gap_s"]))
     )
 
 
@@ -137,6 +163,125 @@ def set_intent(control_path: str | Path, desired: bool) -> dict[str, Any]:
     return payload
 
 
+# ── 研发节奏配置（add-factor-research-settings）──────────────────────────────
+
+
+def read_config(config_path: str | Path, defaults: dict[str, int] | None = None) -> dict[str, Any]:
+    """读节奏配置并 fail-safe 归一化：缺失/损坏/越界 → 默认值（不崩、不猜）。
+
+    返回 ``{"values": {...}, "source": file|defaults|corrupt, "invalid_fields": [...],
+    "updated_at": str|None}``。``defaults`` 可覆盖默认值（CLI ``--interval`` 用于
+    snapshot_interval_s 的缺省）。
+    """
+    base = {**DEFAULT_CONFIG_VALUES, **(defaults or {})}
+    path = Path(config_path)
+    if not path.is_file():
+        return {"values": base, "source": "defaults", "invalid_fields": [], "updated_at": None}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {"values": base, "source": "corrupt", "invalid_fields": [], "updated_at": None}
+    if not isinstance(data, dict):
+        return {"values": base, "source": "corrupt", "invalid_fields": [], "updated_at": None}
+    values = dict(base)
+    invalid: list[str] = []
+    for key, (low, high) in CONFIG_BOUNDS.items():
+        if key not in data:
+            continue
+        raw = data.get(key)
+        if isinstance(raw, int) and not isinstance(raw, bool) and low <= raw <= high:
+            values[key] = raw
+        else:
+            invalid.append(key)
+    updated_at = data.get("updated_at")
+    return {
+        "values": values,
+        "source": "file",
+        "invalid_fields": invalid,
+        "updated_at": updated_at if isinstance(updated_at, str) else None,
+    }
+
+
+# ── 重启请求（add-factor-research-settings）────────────────────────────────
+
+
+def read_restart_request(control_path: str | Path) -> tuple[int | None, str | None]:
+    """读控制文件的重启请求 → ``(restart_requested_at_epoch, restart_request_id)``。
+
+    缺失/不可解析/字段非法 → ``(None, None)``（fail-safe：不猜、不执行）。
+    """
+    try:
+        data = json.loads(Path(control_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    epoch = data.get("restart_requested_at_epoch")
+    request_id = data.get("restart_request_id")
+    valid_epoch = isinstance(epoch, int) and not isinstance(epoch, bool) and epoch > 0
+    valid_id = isinstance(request_id, str) and bool(request_id)
+    if not valid_epoch and not valid_id:
+        return None, None
+    return (epoch if valid_epoch else None, request_id if valid_id else None)
+
+
+def restart_key(epoch: int | None, request_id: str | None) -> str | None:
+    """去重键：优先 request_id；仅 epoch 时用 ``epoch:<n>``；全无 → None。"""
+    if request_id:
+        return request_id
+    if epoch is not None:
+        return f"epoch:{epoch}"
+    return None
+
+
+def _restart_state_file(workdir: str | Path) -> Path:
+    return Path(workdir) / "factor_research_logs" / RESTART_STATE_NAME
+
+
+def read_restart_state(workdir: str | Path) -> dict[str, Any] | None:
+    """读已处理重启请求（代理重启后不重复执行）；缺失/损坏 → None。"""
+    try:
+        data = json.loads(_restart_state_file(workdir).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_restart_state(
+    workdir: str | Path,
+    *,
+    request_id: str | None,
+    requested_at_epoch: int | None,
+    result: str,
+) -> dict[str, Any]:
+    """持久化最近一次重启处理结果（原子写；供快照 agent.restart 回显）。"""
+    now = datetime.now().astimezone()
+    payload = {
+        "last_restart_request_id": request_id,
+        "last_restart_requested_at_epoch": requested_at_epoch,
+        "last_restart_result": result,
+        "handled_at": now.isoformat(),
+        "handled_at_epoch": int(now.timestamp()),
+    }
+    _restart_state_file(workdir).parent.mkdir(parents=True, exist_ok=True)
+    cfs.atomic_write_json(_restart_state_file(workdir), payload)
+    return payload
+
+
+def restart_summary(workdir: str | Path) -> dict[str, Any] | None:
+    """快照 ``agent.restart`` 块（最近一次重启请求的终态结果）；无 → None。"""
+    state = read_restart_state(workdir)
+    if state is None:
+        return None
+    return {
+        "request_id": state.get("last_restart_request_id"),
+        "requested_at_epoch": state.get("last_restart_requested_at_epoch"),
+        "result": state.get("last_restart_result"),
+        "handled_at": state.get("handled_at"),
+        "handled_at_epoch": state.get("handled_at_epoch"),
+    }
+
+
 # ── 实态与启停动作（与旧脚本逐字同语义）────────────────────────────────────
 
 
@@ -174,12 +319,12 @@ def agent_pid(workdir: str | Path) -> int | None:
     return pid if (_alive(pid) and _pid_is_agent(pid)) else None
 
 
-def start_supervisor(workdir: str | Path) -> bool:
+def start_supervisor(workdir: str | Path, config: dict[str, int] | None = None) -> bool:
     """拉起看护：写看护脚本 → 新会话拉起 → pidfile 存活校验（~2s 窗口，同旧脚本）。"""
     workdir = Path(workdir)
     (workdir / "factor_research_logs").mkdir(parents=True, exist_ok=True)
     script = workdir / SUPERVISOR_SCRIPT_NAME
-    script.write_text(render_supervisor_script(workdir), encoding="utf-8")
+    script.write_text(render_supervisor_script(workdir, config), encoding="utf-8")
     script.chmod(0o755)
     subprocess.Popen(  # noqa: S603 - 固定命令（本模块渲染的脚本），无外部输入
         ["bash", str(script)],  # noqa: S607 - bash 走 PATH 解析（distro 内），无外部输入
@@ -258,17 +403,81 @@ def stop_supervisor(workdir: str | Path) -> bool:
 # ── 调和与周期 ────────────────────────────────────────────────────────────
 
 
-def reconcile_once(workdir: str | Path, control_path: str | Path) -> str:
+def _start_supervisor(workdir: str | Path, config: dict[str, int] | None) -> bool:
+    """启动适配：无配置时保持单参调用（既有测试桩/旧调用面兼容）。"""
+    if config is None:
+        return start_supervisor(workdir)
+    return start_supervisor(workdir, config)
+
+
+def restart_supervisor(
+    workdir: str | Path, config: dict[str, int] | None = None
+) -> tuple[bool, str]:
+    """重启看护：运行中先停止（失败即中止，MUST NOT 再启动第二个看护）→ 启动。
+
+    返回 ``(ok, action)``；``action`` 取 ``started`` / ``start-failed`` / ``stop-failed``
+    （与快照 ``agent.last_action`` 六值对齐）。
+    """
+    if supervisor_pid(workdir) is not None and not stop_supervisor(workdir):
+        return False, "stop-failed"
+    if _start_supervisor(workdir, config):
+        return True, "started"
+    return False, "start-failed"
+
+
+def _handle_restart(
+    workdir: str | Path,
+    control_path: str | Path,
+    config: dict[str, int] | None,
+) -> str | None:
+    """执行未处理的重启请求；无待处理请求 → None。
+
+    去重键持久化在研发工作区（代理重启后不重复执行）；结果同样落盘供快照回显。
+    """
+    epoch, request_id = read_restart_request(control_path)
+    key = restart_key(epoch, request_id)
+    if key is None:
+        return None
+    state = read_restart_state(workdir)
+    if state is not None and state.get("last_restart_request_id") == key:
+        return None
+    ok, action = restart_supervisor(workdir, config)
+    write_restart_state(
+        workdir,
+        request_id=key,
+        requested_at_epoch=epoch,
+        result="restarted" if ok else "restart-failed",
+    )
+    return action
+
+
+def reconcile_once(
+    workdir: str | Path,
+    control_path: str | Path,
+    config_path: str | Path | None = None,
+    config: dict[str, int] | None = None,
+) -> str:
     """调和一次：期望态 vs 实态 → 动作。返回动作标签（日志/测试用）。
 
     ``no_intent``（无有效期望态，不干预）/ ``noop``（一致，幂等）/
     ``started`` / ``stopped`` / ``start-failed`` / ``stop-failed``。
+
+    ``config_path`` 非空时先读节奏配置（fail-safe 归一化）；``config`` 可直接给生效值
+    （``run_tick`` 复用同一次读取）。
     """
     desired, requested_at, request_id = read_desired(control_path)
     if desired is None:
         logger.info("控制文件缺失/不可解析 → 不干预（fail-safe）")
         return "no_intent"
+    if config is None and config_path is not None:
+        config = read_config(config_path)["values"]
+    values = config
     running = supervisor_pid(workdir) is not None
+    if desired is True:
+        restart_action = _handle_restart(workdir, control_path, values)
+        if restart_action is not None:
+            logger.info("执行重启请求：%s", restart_action)
+            return restart_action
     if desired == running:
         # 残留自愈：既往停止未清干净（有标记）→ 继续清扫。标记只在「停止动作验证失败」
         # 时落盘，故不会对操作者手动起的 fin_factor 会话盲杀。
@@ -284,7 +493,7 @@ def reconcile_once(workdir: str | Path, control_path: str | Path) -> str:
         requested_at,
     )
     if desired:
-        return "started" if start_supervisor(workdir) else "start-failed"
+        return "started" if _start_supervisor(workdir, values) else "start-failed"
     return "stopped" if stop_supervisor(workdir) else "stop-failed"
 
 
@@ -353,24 +562,63 @@ _ACTION_ERRORS = {
 }
 
 
-def _agent_meta(action: str, now: datetime | None = None) -> dict[str, Any]:
-    """快照 agent 块：最近一次调和动作 + 可判读失败摘要（失败原因由动作标签派生）。"""
-    at = (now or datetime.now().astimezone()).isoformat()
-    return {
+def _agent_meta(
+    action: str,
+    config: dict[str, Any] | None = None,
+    restart: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """快照 agent 块：最近一次调和动作 + 失败摘要 + 生效配置 + 最近重启结果。"""
+    at = now or datetime.now().astimezone()
+    meta: dict[str, Any] = {
         "last_action": action,
-        "last_action_at": at,
+        "last_action_at": at.isoformat(),
+        "last_action_epoch": int(at.timestamp()),
         "last_error": _ACTION_ERRORS.get(action),
     }
+    if config is not None:
+        meta["config"] = config
+    # 无重启记录时如实为 null（快照契约 agent.restart: {...} | null）
+    meta["restart"] = restart
+    return meta
 
 
 def run_tick(
-    workdir: str | Path, control_path: str | Path, out_path: str | Path, state_path: str | Path
+    workdir: str | Path,
+    control_path: str | Path,
+    out_path: str | Path,
+    state_path: str | Path,
+    config_path: str | Path | None = None,
+    config_defaults: dict[str, int] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """一次完整周期：锁内「先调和后采集」（快照即刻反映动作结果）。"""
+    """一次完整周期：锁内「先调和后采集」（快照即刻反映动作结果）。
+
+    ``config_path`` 非空 → 本周期读一次节奏配置，调和与快照上报复用同一份生效值
+    （``agent.config``）；缺省 → 默认值（测试/旧调用面）。``config_defaults`` 覆盖
+    配置文件缺省（CLI ``--interval``）。
+    """
+    config = (
+        read_config(config_path, defaults=config_defaults)
+        if config_path is not None
+        else {
+            "values": {**DEFAULT_CONFIG_VALUES, **(config_defaults or {})},
+            "source": "defaults",
+            "invalid_fields": [],
+            "updated_at": None,
+        }
+    )
     with tick_lock(workdir):
-        action = reconcile_once(workdir, control_path)
+        if config_path is None:
+            action = reconcile_once(workdir, control_path)
+        else:
+            action = reconcile_once(
+                workdir, control_path, config_path=config_path, config=config["values"]
+            )
         snapshot = cfs.collect_once(
-            Path(workdir), Path(out_path), Path(state_path), agent_meta=_agent_meta(action)
+            Path(workdir),
+            Path(out_path),
+            Path(state_path),
+            agent_meta=_agent_meta(action, config=config, restart=restart_summary(workdir)),
         )
     return action, snapshot
 
@@ -381,6 +629,7 @@ def ensure_daemon(
     out_path: str | Path,
     state_path: str | Path,
     interval: int,
+    config_path: str | Path | None = None,
 ) -> int | None:
     """确保代理守护存活：已在跑 → 返回 pid；否则新会话拉起并校验。失败 → None。"""
     workdir = Path(workdir)
@@ -404,6 +653,8 @@ def ensure_daemon(
         "--interval",
         str(interval),
     ]
+    if config_path is not None:
+        args.extend(["--config", str(config_path)])
     with open(logdir / "agent.log", "ab") as log:
         subprocess.Popen(  # noqa: S603 - 固定命令（本文件自身 + 常量参数），无外部输入
             args,  # noqa: S607 - sys.executable 为绝对路径
@@ -422,13 +673,14 @@ def launcher_tick(
     state_path: str | Path,
     launcher_path: str | Path,
     interval: int = DEFAULT_INTERVAL_S,
+    config_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """启动器节拍：确保代理守护存活 + 原子写心跳。
 
     MUST NOT 写控制文件 / MUST NOT 直接启停看护（启动器只证明「手在场」，不表达意图）。
     心跳写失败不影响已完成的代理存活保证（调用方按返回码如实上报）。
     """
-    pid = ensure_daemon(workdir, control_path, out_path, state_path, interval)
+    pid = ensure_daemon(workdir, control_path, out_path, state_path, interval, config_path)
     snapshot_age_s: int | None = None
     try:
         snap = json.loads(Path(out_path).read_text(encoding="utf-8"))
@@ -480,6 +732,11 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("FACTOR_RESEARCH_LAUNCHER_PATH") or DEFAULT_LAUNCHER,
         help="启动器心跳路径（默认取 env FACTOR_RESEARCH_LAUNCHER_PATH 或标准宿主桥路径）",
     )
+    parser.add_argument(
+        "--config",
+        default=os.environ.get("FACTOR_RESEARCH_CONFIG_PATH") or DEFAULT_CONFIG_PATH,
+        help="节奏配置文件路径（默认取 env FACTOR_RESEARCH_CONFIG_PATH 或标准宿主桥路径）",
+    )
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_S)
     parser.add_argument(
         "--pidfile",
@@ -500,6 +757,7 @@ def main(argv: list[str] | None = None) -> int:
     workdir = Path(args.workdir)
     control_path = Path(args.control)
     out_path = Path(args.out)
+    config_path = Path(args.config)
     state_path = (
         Path(args.state)
         if args.state
@@ -509,7 +767,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.launcher_tick:
         try:
             payload = launcher_tick(
-                workdir, control_path, out_path, state_path, Path(args.launcher), args.interval
+                workdir,
+                control_path,
+                out_path,
+                state_path,
+                Path(args.launcher),
+                args.interval,
+                config_path,
             )
         except OSError as exc:
             print(f"FAILED to write launcher heartbeat: {exc}", file=sys.stderr)
@@ -523,7 +787,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.ensure_daemon:
-        pid = ensure_daemon(workdir, control_path, out_path, state_path, args.interval)
+        pid = ensure_daemon(workdir, control_path, out_path, state_path, args.interval, config_path)
         if pid is None:
             print("FAILED to start agent daemon", file=sys.stderr)
             return 1
@@ -531,8 +795,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.reconcile_once:
+        cfg = read_config(
+            config_path,
+            defaults={**DEFAULT_CONFIG_VALUES, "snapshot_interval_s": args.interval},
+        )
         with tick_lock(workdir, timeout_s=RECONCILE_LOCK_TIMEOUT_S):
-            action = reconcile_once(workdir, control_path)
+            action = reconcile_once(workdir, control_path, config=cfg["values"])
         print(f"reconcile: {action}")
         return 1 if action in ("start-failed", "stop-failed") else 0
 
@@ -542,10 +810,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with singleton_lock(workdir):
             pidfile.write_text(str(os.getpid()), encoding="utf-8")
-            logger.info("agent daemon started pid %s（interval=%ss）", os.getpid(), args.interval)
+            logger.info(
+                "agent daemon started pid %s（interval 由 %s 决定）", os.getpid(), config_path
+            )
             while True:
                 try:
-                    action, snapshot = run_tick(workdir, control_path, out_path, state_path)
+                    action, snapshot = run_tick(
+                        workdir,
+                        control_path,
+                        out_path,
+                        state_path,
+                        config_path,
+                        {**DEFAULT_CONFIG_VALUES, "snapshot_interval_s": args.interval},
+                    )
                     print(
                         f"[agent] {snapshot['collected_at']} "
                         f"running={snapshot['supervisor']['running']} "
@@ -554,7 +831,12 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 except Exception as exc:  # noqa: BLE001 - 守护循环永不因单轮异常退出（采集器同先例）
                     print(f"[agent] tick failed: {exc!r}", file=sys.stderr, flush=True)
-                time.sleep(args.interval)
+                # 采集间隔下一周期生效（配置缺失/损坏 → CLI --interval 缺省）
+                interval = read_config(
+                    config_path,
+                    defaults={**DEFAULT_CONFIG_VALUES, "snapshot_interval_s": args.interval},
+                )["values"]["snapshot_interval_s"]
+                time.sleep(interval)
     except SingletonBusy as exc:
         print(f"FAILED: 已有代理守护在跑（{exc}）", file=sys.stderr)
         return 1
