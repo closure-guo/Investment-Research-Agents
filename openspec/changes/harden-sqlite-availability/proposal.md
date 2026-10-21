@@ -13,6 +13,10 @@ SQLite 在跨挂载 WAL 并发下先后出现索引损坏（043）、跨挂载�
 `sessions.db` 315MB、`market_snapshot.db` 502MB，日批在 15:30–17:00 有十余个任务连续写入，
 跨挂载并发窗口远大于偶发事件。这条记录可作为「热库迁 named volume + 页级校验」的直接证据。
 
+同一轮巡检还确认了派发终态回写缺口：`pool_analysis_runs` 中 2026-10-20 / 600519 一行
+自 22:31 派发后停在 `queued`，对应会话 `f3dbed77` 已于 23:54 正常 `completed`，
+运行行未回写终态——与本提案「派发终态回写」一项互为印证。
+
 ## What Changes
 
 - **热 SQLite 库迁至 Docker named volume**：`sessions.db` / `screening.db` / `execution.db` / `events.db` /
