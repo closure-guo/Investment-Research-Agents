@@ -32,3 +32,10 @@
 - [x] 5.3 `uv run pytest` 定向测试全绿；`uv run ruff check` 通过
 - [ ] 5.4 用真实 feed 跑一轮：确认事件落库、摘要不超限、内外资分开可查
 - [ ] 5.5 人工抽查 10 条抽取，确认无原文外推断、无全文入库
+
+> **5.4 / 5.5 阻塞于缺原料（2026-10-21 核实）**：`FOREIGN_NEWS_FEEDS` 未在 `.env` 配置，
+> `foreign_broker_events` 为 0 行、`report_extractions` 为 0 行，日批 `foreign_broker_news_daily`
+> 按空态返回。两项目前都无法执行，**不得勾选**。解除条件：配置一个真实 feed 地址后跑
+> `foreign_broker_news_daily`，并对落库的 10 条事件做抽取抽查。人工抽查的对象是
+> `report_extractions` 或外资事件抽取，两者都需要先有非空输入。
+
