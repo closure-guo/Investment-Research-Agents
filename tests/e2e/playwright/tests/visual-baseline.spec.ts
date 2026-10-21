@@ -29,7 +29,7 @@ test.describe('视觉基线截图采集（refactor-ui-design-system Task 2）', 
     await page.goto('/')
 
     // 空态页就绪：标题 + 输入框可见
-    await expect(page.getByRole('heading', { name: 'Finance Analysis Agent' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Investment Research Agents' })).toBeVisible()
     await expect(page.locator('textarea').first()).toBeVisible()
 
     await page.screenshot({ fullPage: true, path: path.join(BASELINE_DIR, 'empty-state.png') })

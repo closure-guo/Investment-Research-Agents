@@ -1,4 +1,4 @@
-# Finance Analysis Agent
+# Investment Research Agents
 
 ## Mandatory skill invocation
 

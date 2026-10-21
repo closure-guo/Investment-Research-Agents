@@ -8,7 +8,7 @@ import { test, expect } from '@playwright/test'
 test.describe('F2 smoke: 全栈可达', () => {
   test('前端首页可达且标题正确', async ({ page }) => {
     await page.goto('/')
-    await expect(page).toHaveTitle(/Finance Analysis Agent/i)
+    await expect(page).toHaveTitle(/Investment Research Agents/i)
   })
 
   test('后端 /api/health 返回 200', async ({ request }) => {

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "Finance Analysis Agent — 研究到战绩的全链路",
+    "title": "Investment Research Agents — 研究到战绩的全链路",
     "locale": "zh-CN",
     "quality_profile": "showcase",
     "output": "docs/assets/system-flow.html",

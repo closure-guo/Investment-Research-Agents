@@ -1,4 +1,4 @@
-# AGENTS.md — Finance Analysis Agent
+# AGENTS.md — Investment Research Agents
 
 LangGraph 多 Agent A 股分析系统：FastAPI 后端 + React 18/Vite 前端。输入股票代码，输出多 Agent 辩论式交易决策报告。
 

@@ -1,4 +1,4 @@
-# Finance Analysis Agent — Domain Context
+# Investment Research Agents — Domain Context
 
 ## Purpose
 

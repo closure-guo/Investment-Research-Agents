@@ -145,7 +145,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _logger.exception("decision settle scheduler 关闭失败(忽略)")
 
 
-app = FastAPI(title="Finance Analysis Agent API", lifespan=_lifespan)
+app = FastAPI(title="Investment Research Agents API", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -3295,7 +3295,7 @@ async def run_info() -> dict:
     )
     version = "0.1.0"
     with contextlib.suppress(Exception):  # 包未安装时回退默认版本
-        version = importlib.metadata.version("finance-agent")
+        version = importlib.metadata.version("investment-research-agents")
     return {
         "model": model,
         "base_url": base_url,

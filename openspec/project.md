@@ -1,4 +1,4 @@
-# Finance Analysis Agent - OpenSpec Project Context
+# Investment Research Agents - OpenSpec Project Context
 
 ## Project Overview
 
