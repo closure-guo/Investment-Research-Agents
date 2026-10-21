@@ -1,8 +1,10 @@
-# Finance Analysis Agent
+# Investment Research Agents
 
 基于 LangGraph 的 A 股上市公司 AI 分析报告系统。输入股票代码或自然语言查询，通过多 Agent 辩论式架构自动生成交易决策分析报告。支持深度分析、快速搜索、追问三种模式，标的不明确时 Agent 主动反问澄清；SSE 流式实时推送分析进度，交易决策自动落库并按交易日收盘结算。
 
 > **免责声明**：本项目仅供研究，不构成投资建议。战绩与 paper 仿真数据为研究性口径，不保证准确性，据此操作风险自负。
+
+> **项目名称**：对外名称 **Investment Research Agents**（原 Finance Analysis Agent）。Python 导入包仍为 `finance_agent`，仓库目录仍为 `finance_analysis_agent`——发行名与导入名解耦，历史链接与脚本无需改动。
 
 ## 架构
 
@@ -13,7 +15,7 @@
   </picture>
 </a>
 
-> 全链路一图流由 [Archify](https://github.com/tt-a1i/archify) 生成（图源 [system-flow.json](docs/assets/system-flow.json)，交互版 [system-flow.html](docs/assets/system-flow.html) 支持缩放、搜索、明暗主题与导览路径）。用户输入与选股日批（15:40 出精选池，18:00 批量入链）汇入同一张 LangGraph 图：PREP 数据准备 → L1 四分析师并行 → L2 多空辩论×2 → L3 Trader（价位门禁）→ L4 风控辩论×2 → L5 基金经理审批产出报告；决策落库观点池后 D+1 开盘 paper 撮合，收盘结算入战绩，记忆层回灌下一次分析。因子供给线（RD-Agent → 转译 → 五道闸 → 因子库）与 20 个日批/月批任务的触发时刻标在图上，八个 SQLite 库、多源数据面与 LLM 网关治理见说明卡；节点级完整拓扑的文字版见 [graph.mmd](docs/assets/graph.mmd)。
+> 全链路一图流由 [Archify](https://github.com/tt-a1i/archify) 生成（图源 [system-flow.json](docs/assets/system-flow.json)，交互版 [system-flow.html](docs/assets/system-flow.html) 支持缩放、搜索、明暗主题与导览路径）。用户输入与选股日批（15:40 出精选池，18:00 批量入链）汇入同一张 LangGraph 图：PREP 数据准备 → L1 四分析师并行 → L2 多空辩论×2 → L3 Trader（价位门禁）→ L4 风控辩论×2 → L5 基金经理审批产出报告；决策落库观点池后 D+1 开盘 paper 撮合，收盘结算入战绩，记忆层回灌下一次分析。因子供给线（RD-Agent → 转译 → 五道闸 → 因子库）与 26 个日批/月批任务的触发时刻标在图上，八个 SQLite 库、多源数据面与 LLM 网关治理见说明卡；节点级完整拓扑的文字版见 [graph.mmd](docs/assets/graph.mmd)。
 
 五层架构：
 
@@ -44,7 +46,7 @@
 
 ## 质量保障
 
-- 后端 323 个 pytest 测试文件（4,335 个用例，含 `tests/llm_contracts/` provider 合同套件）、前端 78 个 Vitest 测试文件（665 个用例）、41 个 Playwright E2E spec / 87 个用例（stub 套件 69 例为 CI 门禁，`@live` 标记 18 例不进门禁、真模型验证显式运行，nightly 防漂移）
+- 后端 427 个 pytest 测试文件（6,442 个用例，含 `tests/llm_contracts/` provider 合同套件）、前端 100 个 Vitest 测试文件（888 个用例）、55 个 Playwright E2E spec；CI 四套配置合计 152 例（默认 91 + timeline 36 + track-record 20 + eval-ops 5，其中默认套件含 7 个 `@live` 用例，无真实模型凭证时跳过）
 - `evals/` 评估框架（详见下节「评估体系」）：judge 评分与人工校准 / 版本对比 / 消融实验 / claim 验证基准 / golden set / 决策回放显著性检验
 
 ## 评估体系
@@ -256,7 +258,7 @@ src/finance_agent/
 │   └── track_record/     # 战绩仪表盘 (净值/跑赢指数对比/组合 β/α/观点日志/夏普 rf 中债1Y)
 ├── agui/                 # AG-UI 协议通道 (quick 模式对话，双轨隔离)
 ├── export/               # 报告导出 (docx/pptx/pdf/md 四格式，service.py 统一收口)
-└── prompts/              # LLM prompt（Langfuse 托管，本地 .md 兜底，14 个模板）
+└── prompts/              # LLM prompt（Langfuse 托管，本地 .md 兜底，20 个模板）
 
 frontend/src/
 ├── App.tsx               # 主应用 (会话/分析视图/设置面板)
@@ -281,7 +283,7 @@ frontend/src/
 - [x] **P8 Langfuse 可观测性** - LLM 追踪 + Prompt 管理 + 评分上报 (ADR-0015/0016)
 - [x] **P9 意图澄清对话流** - 标的不明确时 Agent 反问澄清 (ADR-0017)
 
-> P9 之后的演进以 OpenSpec delta 为单位管理（`openspec/changes/archive/` 已归档 162 个变更）。近期主题：LLM Provider Gateway 防腐层、Kimi 风格前端 UX（命令面板/下载中心/深色模式/报告侧栏）、引用校验语义覆盖强化（术语/期次一致性 + 分桶定向重试 + 期次键消歧）、决策结果跟踪与价位申报必填化（含误拦治理与打回反馈可执行化）、决策滞回与前向战绩仪表盘（跑赢指数对比/组合 β/α/观点日志状态 tab/观点池完整性）、LLM 治理续章（能力探测两级判定/kimi reasoning_effort 温度契约/纯文本输出合同守卫）、事件投递韧性五联及续章（运维出口/终态有界送达）、报告 K 线升级、评估体系 judge 人工校准与 rubric 判例迭代。
+> P9 之后的演进以 OpenSpec delta 为单位管理（`openspec/changes/archive/` 已归档 222 个变更）。近期主题：LLM Provider Gateway 防腐层、Kimi 风格前端 UX（命令面板/下载中心/深色模式/报告侧栏）、引用校验语义覆盖强化（术语/期次一致性 + 分桶定向重试 + 期次键消歧）、决策结果跟踪与价位申报必填化（含误拦治理与打回反馈可执行化）、决策滞回与前向战绩仪表盘（跑赢指数对比/组合 β/α/观点日志状态 tab/观点池完整性）、LLM 治理续章（能力探测两级判定/kimi reasoning_effort 温度契约/纯文本输出合同守卫）、事件投递韧性五联及续章（运维出口/终态有界送达）、报告 K 线升级、评估体系 judge 人工校准与 rubric 判例迭代。
 
 ## 文档
 
@@ -293,9 +295,9 @@ frontend/src/
 - [专题设计](docs/design/) - LLM Provider Gateway、E2E 方案、评估体系等专项设计档案
 - [评估体系](evals/) - 评估框架（judge/对比/消融/claim 基准），基线说明见 [docs/evals/](docs/evals/)
 - [项目工作流](docs/project-workflow.md) - OpenSpec + Superpowers 双框架实施指南
-- [事故记录](docs/incidents/) - 系统性问题与解决方案（001-038，38 个编号 / 40 份文档）
+- [事故记录](docs/incidents/) - 系统性问题与解决方案（001-045，45 个编号 / 47 份事故文档，另含索引）
 - [AGENTS.md](AGENTS.md) - Agent 工作指南（任务路由、契约红线、测试约束）
-- [OpenSpec](openspec/specs/) - 系统行为规范（唯一真相来源，63 个 capability）
+- [OpenSpec](openspec/specs/) - 系统行为规范（唯一真相来源，79 个 capability）
 
 ## 思路来源
 

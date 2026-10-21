@@ -1,5 +1,5 @@
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  Finance Analysis Agent — 一键部署                                ║
+# ║  Investment Research Agents — 一键部署                                ║
 # ║  docker compose up -d --build                                     ║
 # ║  前端: http://localhost:5173  后端: http://localhost:8000         ║
 # ║  Langfuse: http://localhost:3000                                  ║
@@ -183,8 +183,15 @@ services:
       - langfuse_postgres_data:/var/lib/postgresql/data
 
 volumes:
+  # 固定到旧项目名前缀：Docker 命名卷默认带 compose 项目名前缀，改项目名会创建
+  # 一套空卷，Langfuse 的 traces/prompts/scores 看似丢失。这里显式沿用旧卷名。
   langfuse_postgres_data:
+    name: finance-agent_langfuse_postgres_data
   langfuse_clickhouse_data:
+    name: finance-agent_langfuse_clickhouse_data
   langfuse_clickhouse_logs:
+    name: finance-agent_langfuse_clickhouse_logs
   langfuse_minio_data:
+    name: finance-agent_langfuse_minio_data
   langfuse_redis_data:
+    name: finance-agent_langfuse_redis_data

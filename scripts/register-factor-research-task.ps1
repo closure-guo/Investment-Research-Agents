@@ -11,7 +11,7 @@
 #>
 param(
   [switch]$Unregister,
-  [string]$TaskName = 'finance-agent-factor-research-launcher',
+  [string]$TaskName = 'investment-research-agents-factor-research-launcher',
   [string]$Distro = 'rdagent',
   [int]$IntervalMinutes = 2
 )

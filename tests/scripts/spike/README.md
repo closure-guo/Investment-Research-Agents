@@ -130,7 +130,7 @@ powershell -ExecutionPolicy Bypass -File scripts/register-factor-research-task.p
 
 | 现象 | 检查 |
 |---|---|
-| `launcher.json` 不更新 | `Get-ScheduledTask finance-agent-factor-research-launcher` 状态；任务历史；`wsl -d rdagent -u root -e bash /root/ensure-factor-research.sh` 手动跑一次 |
+| `launcher.json` 不更新 | `Get-ScheduledTask investment-research-agents-factor-research-launcher` 状态；任务历史；`wsl -d rdagent -u root -e bash /root/ensure-factor-research.sh` 手动跑一次 |
 | 心跳有但 `agent_ok=false` | `detail` 字段 + `/root/rdagent-work/factor_research_logs/agent.log`（代理拉不起来） |
 | 页面「研究侧离线——≤3 分钟内自动拉起」但一直不起 | 确认计划任务在跑；`wsl -d rdagent -u root -- tail -50 /root/rdagent-work/factor_research_logs/agent.log` |
 | 页面「启动失败（原因）」 | 快照 `agent.last_action=start-failed` + `last_error`（key 过期/launch 脚本缺失等），修好后代理下轮自动重试 |

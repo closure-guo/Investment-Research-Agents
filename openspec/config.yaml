@@ -3,7 +3,7 @@ schema: spec-driven
 # Project context (optional)
 # This is shown to AI when creating artifacts.
 context: |
-  项目：Finance Analysis Agent — 面向 A 股市场的多 Agent 投研分析系统
+  项目：Investment Research Agents — 面向 A 股市场的多 Agent 投研分析系统
   领域：A 股上市公司财务分析与交易决策报告
 
   技术栈：

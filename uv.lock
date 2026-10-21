@@ -846,7 +846,7 @@ wheels = [
 ]
 
 [[package]]
-name = "finance-agent"
+name = "investment-research-agents"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
