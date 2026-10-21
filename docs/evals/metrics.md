@@ -405,6 +405,57 @@ null + 「日历不可用」文案冒充刷新，评审 F2）；两种情形均*
 不接 regime 仓位系数、不进执行链目标、**不产生订单**（与 §1.16 小票通道同纪律）。
 转债行情/事件的日批 job 为 `cb_daily`（16:50，见 `outcome/scheduler.py`）。
 
+### 1.18 分析师事后检验（delta `add-analyst-ex-post-verification`，2026-10-20 登记）
+
+**事件定义**：只检验变动。评级序数 买入=5 / 增持=4 / 中性=3 / 减持=2 / 卖出=1；当前评级
+与前次比较 → 上调 / 下调 / 维持（维持作为对照组）；前次缺失或 `is_first_rating=1` → 首次评级；
+评级词未识别不生成主张，MUST NOT 依赖巨潮 `rating_change` 文本（实测只有「维持/未知」）。
+EPS 修正按 `(code, org, 预测年度)` 与同机构前一篇研报比较上修/下修；首次覆盖不生成。
+目标价变动仅在存在前次目标价时生成上/下；无前值跳过（不把首次给目标价当变动）。
+
+**结算**：入场 = 发布日次一交易日开盘（`open × close_qfq / close_raw` 复权换算）；
+出场 = 入场后第 H 个交易日收盘；评级 H=20、EPS/目标价 H=60（交易日）。
+基准 = 000300（`index_closes`，与判定链同源）；超额 = 原始收益 − 基准同窗口收益。
+停牌/缺行情/缺基准记 `unresolved` 并留原因，MUST NOT 填前值；单条结算异常保持 `pending`
+次日重试，job 记 degraded。
+
+**记分卡**：按 `org` / `rating` / `claim_type` / `industry` 四维分桶，输出 `n`、胜率
+（excess>0 占比）、平均/中位超额；`n < 30` → `reliable=false`，只报描述统计，
+不做显著性宣告。机构权重先验 `clip(0.5 + mean_excess / 0.10, 0.5, 1.5)`，
+v1 只读、MUST NOT 进入分析师/辩论/交易/风控/执行任何决策路径。
+
+**隔离**：主张与结算 MUST NOT 写入 `predictions`，不计入净值、胜率或战绩页。
+job `analyst_claim_settle_daily`（17:00，零 LLM）生成主张 → 结算 → 落当日快照。
+
+### 1.19 内外资分开打分（delta `add-region-split-broker-scoring`，2026-10-20 登记）
+
+**口径隔离**：内资 `analyst_claims.region='domestic'` / 记分卡 `score_family='event_study'`；
+外资 `foreign_broker_events.region='foreign'` / 记分卡 `score_family='sentiment'`。
+两套指标族不合并、不横比；统一视图只读取拼装。
+
+**内资深度**：`research_reports.depth_class` 按标题确定性分类（深度/专题/策略/展望→deep；
+点评/跟踪/快评/更新→comment；其余 unknown）；EPS claims 继承报告 depth，评级/目标价事件无标题记 null。
+记分卡新增 `depth` 桶；org/rating 桶输出 `deep_n` 与
+`weighted_mean_excess = Σ(w_i × excess_i) / Σ(w_i)`，权重先验
+`deep=1.0 / comment=0.6 / unknown=0.4`（`config/analyst_scoring.json`），
+不替换原始 `mean_excess`/`win_rate`。
+
+**外资情绪分**：`event_score` 确定性计算——
+up/down 动作（rating_up/target_up/rating_down/target_down）取动作符号 × 置信度；
+positioning/sentiment 取方向符号 × 置信度；`direction=neutral|unknown` 归零；
+置信度 high=1.0 / medium=0.7 / low=0.4。参数为**先验**，未校准。
+
+**外资命中**：v1 只结算 `target_type='market'` 且方向为 positive/negative 的事件；
+入场 = 发布日次一交易日收盘，出场 = 入场后第 20 个交易日收盘，基准 000300；
+`hit` = 看多且收益>0 或 看空且收益<0。sector/stock 记 `unresolved(target_not_market)`，
+方向不明记 `unresolved(no_direction)`，缺基准记 `unresolved(missing_benchmark)`。
+
+**外资记分卡**：按 broker/action/direction 分桶，输出 `n`、`hits`、`hit_rate`、`mean_return`、
+`net_score`（事件情绪分均值）；`n<30` → `reliable=false`；不输出机构权重与显著性结论。
+
+**统一视图**：`GET /api/v1/ops/research/scorecards` 返回 `{domestic, foreign}` 两块；
+任一块为空显式 `status=empty`。两套分数均为只读观测，MUST NOT 进入分析师上下文或决策路径。
+
 ---
 
 ## 2. 时间线（每轮一行，收口时追加）

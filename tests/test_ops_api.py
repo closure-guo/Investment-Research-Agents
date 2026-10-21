@@ -1435,3 +1435,177 @@ class TestDailyBrief:
         resp = client.get(f"{BASE}/daily-brief/latest")
         assert resp.status_code == 404
         assert resp.json()["error"] == "daily_brief_not_found"
+
+
+class TestAnalystScorecardEndpoint:
+    """add-analyst-ex-post-verification：只读记分卡端点。"""
+
+    def _db(self) -> Path:
+        return Path(os.environ["RESEARCH_REPORTS_DB_PATH"])
+
+    def test_empty_returns_empty_status(self, client):
+        resp = client.get(f"{BASE}/research/analyst-scorecard")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "empty"
+        assert body["rows"] == []
+        assert body["snapshot_date"] is None
+
+    def test_filter_by_snapshot_and_bucket_type(self, client):
+        from finance_agent.data import analyst_claims_store as store
+
+        store.replace_scorecard(
+            "2026-10-20",
+            [
+                {
+                    "bucket_type": "org",
+                    "bucket_key": "中信证券",
+                    "n": 12,
+                    "wins": 8,
+                    "win_rate": 8 / 12,
+                    "mean_excess": 0.03,
+                    "median_excess": 0.02,
+                    "reliable": False,
+                    "weight": 0.8,
+                    "tier": "1",
+                },
+                {
+                    "bucket_type": "rating",
+                    "bucket_key": "买入",
+                    "n": 12,
+                    "wins": 8,
+                    "win_rate": 8 / 12,
+                    "mean_excess": 0.03,
+                    "median_excess": 0.02,
+                    "reliable": False,
+                    "weight": None,
+                    "tier": None,
+                },
+            ],
+            db_path=self._db(),
+        )
+        resp = client.get(
+            f"{BASE}/research/analyst-scorecard",
+            params={"snapshot_date": "2026-10-20", "bucket_type": "org"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["snapshot_date"] == "2026-10-20"
+        assert [row["bucket_key"] for row in body["rows"]] == ["中信证券"]
+        assert body["rows"][0]["reliable"] == 0
+
+
+class TestForeignSentimentEndpoint:
+    """add-foreign-broker-sentiment：只读情绪序列端点。"""
+
+    def _db(self) -> Path:
+        return Path(os.environ["RESEARCH_REPORTS_DB_PATH"])
+
+    def test_empty(self, client):
+        resp = client.get(f"{BASE}/research/foreign-sentiment")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "empty"
+        assert body["rows"] == []
+
+    def test_rows_and_counts(self, client):
+        from finance_agent.data.foreign_broker_news import upsert_event
+
+        upsert_event(
+            {
+                "event_key": "e1",
+                "title": "UBS 上调中国银行股评级",
+                "url": "https://example.invalid/a",
+                "source": "example",
+                "published_at": "2026-10-20",
+                "broker": "UBS",
+                "action": "rating_up",
+                "target_type": "sector",
+                "target": "银行",
+                "direction": "positive",
+                "summary": "瑞银上调中国银行股评级",
+                "confidence": "high",
+                "extraction_status": "ok",
+            },
+            db_path=self._db(),
+        )
+        resp = client.get(f"{BASE}/research/foreign-sentiment", params={"broker": "UBS"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["counts"]["total"] == 1
+        assert body["counts"]["by_action"]["rating_up"] == 1
+        assert body["counts"]["by_direction"]["positive"] == 1
+
+
+class TestScorecardsUnified:
+    """add-region-split-broker-scoring：内外资两块独立返回。"""
+
+    def _db(self) -> Path:
+        return Path(os.environ["RESEARCH_REPORTS_DB_PATH"])
+
+    def test_empty_both_blocks(self, client):
+        resp = client.get(f"{BASE}/research/scorecards")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["domestic"]["status"] == "empty"
+        assert body["foreign"]["status"] == "empty"
+        assert body["domestic"]["score_family"] == "event_study"
+        assert body["foreign"]["score_family"] == "sentiment"
+
+    def test_blocks_keep_separate_metrics(self, client):
+        from finance_agent.data import analyst_claims_store as store
+        from finance_agent.outcome.foreign_broker_scoring import persist_foreign_scorecard
+
+        store.replace_scorecard(
+            "2026-10-20",
+            [
+                {
+                    "bucket_type": "org",
+                    "bucket_key": "中信证券",
+                    "n": 12,
+                    "wins": 8,
+                    "win_rate": 8 / 12,
+                    "mean_excess": 0.03,
+                    "median_excess": 0.02,
+                    "reliable": False,
+                    "weight": 0.8,
+                    "tier": "1",
+                    "region": "domestic",
+                    "score_family": "event_study",
+                    "weighted_mean_excess": 0.04,
+                    "deep_n": 5,
+                }
+            ],
+            db_path=self._db(),
+        )
+        persist_foreign_scorecard(
+            "2026-10-20",
+            [
+                {
+                    "bucket_type": "broker",
+                    "bucket_key": "UBS",
+                    "n": 6,
+                    "hits": 4,
+                    "hit_rate": 4 / 6,
+                    "mean_return": 0.01,
+                    "net_score": 0.5,
+                    "reliable": False,
+                }
+            ],
+            db_path=self._db(),
+        )
+        resp = client.get(f"{BASE}/research/scorecards")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["domestic"]["status"] == "ok"
+        assert body["foreign"]["status"] == "ok"
+        domestic = body["domestic"]["rows"][0]
+        foreign = body["foreign"]["rows"][0]
+        assert domestic["win_rate"] is not None
+        assert domestic["weighted_mean_excess"] == 0.04
+        assert "hit_rate" not in domestic
+        assert foreign["hit_rate"] is not None
+        assert foreign["net_score"] == 0.5
+        assert "win_rate" not in foreign

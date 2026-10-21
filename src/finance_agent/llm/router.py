@@ -29,6 +29,8 @@ REQUIRED_CAPS: dict[str, dict[str, set[str]]] = {
     "factor_transcription": {"json_schema": {"json_mode", "strict_schema"}},
     # 投喂研报抽取（add-research-report-dataplane）：结构化 JSON 合同
     "report_extraction": {"json_schema": {"json_mode", "strict_schema"}},
+    # 外资二手快讯事件抽取（add-foreign-broker-sentiment）：结构化 JSON 合同
+    "foreign_broker_event": {"json_schema": {"json_mode", "strict_schema"}},
 }
 
 # 能力偏序 rank（越大越强）；fallback 链成员 rank 不得低于 primary

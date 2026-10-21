@@ -24,6 +24,7 @@ import os
 import random
 import re
 import time
+import unicodedata
 import urllib.parse
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -191,6 +192,7 @@ def normalize_em_row(raw: dict, report_type: str, current_year: int) -> dict:
         )
         if encode_url
         else None,
+        "depth_class": classify_depth(str(raw.get("title") or "")),
         "source": "eastmoney",
     }
 
@@ -370,13 +372,74 @@ def infer_metadata_from_filename(stem: str) -> tuple[str | None, str | None]:
     return org, None
 
 
-def extract_pdf_text(path: str | Path) -> tuple[str, int]:
-    """抽取 PDF 全文与页数（pypdf；延迟导入避免非投喂路径加载解析器）。"""
+_DEPTH_DEEP_KEYWORDS = ("深度", "专题", "策略", "展望")
+_DEPTH_COMMENT_KEYWORDS = ("点评", "跟踪", "快评", "更新")
+
+
+def page_offsets(pages: list[str]) -> list[dict]:
+    """每页在 ``"\\n".join(pages)`` 中的字符边界（左闭右开）。"""
+    offsets: list[dict] = []
+    cursor = 0
+    for index, page in enumerate(pages, start=1):
+        length = len(page)
+        offsets.append({"page": index, "start": cursor, "end": cursor + length})
+        cursor += length + 1
+    return offsets
+
+
+def classify_depth(title: str | None) -> str:
+    """确定性深度分级：deep / comment / unknown。只落库，不用于丢弃或加权。"""
+    text = str(title or "")
+    if any(keyword in text for keyword in _DEPTH_DEEP_KEYWORDS):
+        return "deep"
+    if any(keyword in text for keyword in _DEPTH_COMMENT_KEYWORDS):
+        return "comment"
+    return "unknown"
+
+
+def normalize_title(title: str | None) -> str:
+    """跨源标题归一：NFKC + 去空白/标点 + casefold（保留中文实词）。"""
+    text = unicodedata.normalize("NFKC", str(title or ""))
+    return re.sub(r"[\W_]+", "", text).casefold()
+
+
+def clean_doc_title(stem: str | None, org: str | None) -> str:
+    """文件名 stem → 可匹配标题：去机构前缀与尾部日期/序号。"""
+    text = str(stem or "")
+    prefix = str(org or "").strip()
+    if prefix and text.startswith(f"{prefix}-"):
+        text = text[len(prefix) + 1 :]
+    text = re.sub(r"[-_](?:\d{6}|\d{8}|20\d{6})(?:\s*\(\d+\))?$", "", text)
+    text = re.sub(r"\s*\(\d+\)$", "", text)
+    return text.strip() or str(stem or "")
+
+
+def match_report_key(
+    broker: str | None,
+    publish_date: str | None,
+    title: str | None,
+    *,
+    window_days: int = 1,
+    db_path: str | Path | None = None,
+) -> str | None:
+    """按 (机构, 日期 ±1 天, 归一标题) 关联元数据；恰好 1 条命中才返回。"""
+    if not broker or not publish_date or not title:
+        return None
+    rows = store.list_reports_for_match(
+        str(broker), str(publish_date)[:10], window_days=window_days, db_path=db_path
+    )
+    target = normalize_title(title)
+    hits = [row for row in rows if normalize_title(row.get("title")) == target]
+    return hits[0]["report_key"] if len(hits) == 1 else None
+
+
+def extract_pdf_text(path: str | Path) -> tuple[str, int, list[dict]]:
+    """抽取 PDF 全文、页数与页偏移（pypdf；延迟导入避免非投喂路径加载解析器）。"""
     from pypdf import PdfReader
 
     reader = PdfReader(str(path))
     texts = [(page.extract_text() or "") for page in reader.pages]
-    return "\n".join(texts).strip(), len(reader.pages)
+    return "\n".join(texts), len(reader.pages), page_offsets(texts)
 
 
 def _document_key(data: bytes) -> str:
@@ -388,12 +451,14 @@ def ingest_inbox(
     *,
     db_path: str | None = None,
     extract: bool = True,
+    force_reparse: bool = False,
 ) -> dict:
     """扫描投喂目录，把新 PDF 解析入库（文件内容哈希幂等，重复投喂 no-op）。
 
     个人研究自用：全文落 ``report_documents``（usage_policy=personal_research）；
     ``extract=True`` 时对新入库文档同步做 LLM 结构化抽取（失败只记错误，
-    不阻断入库与其他文件）。
+    不阻断入库与其他文件）。``force_reparse=True`` 时只重算既有文档的页偏移/
+    跨源关联/深度分级，不新增行、不调 LLM；原文件缺失保留原行并记 ``file_missing``。
     """
     resolved = (
         inbox_dir
@@ -402,9 +467,40 @@ def ingest_inbox(
     )
     directory = Path(resolved)
     store.init_db(db_path)
-    scanned = ingested = skipped = 0
+    scanned = ingested = skipped = reparsed = 0
     errors: list[str] = []
-    if directory.exists():
+
+    def _parse_pdf(path: Path) -> tuple[str, int, list[dict] | None]:
+        parsed = extract_pdf_text(path)
+        if len(parsed) == 2:  # 兼容旧自定义解析器/monkeypatch
+            text, pages = parsed
+            return text, pages, None
+        return parsed
+
+    if force_reparse:
+        for doc in store.list_documents(limit=1000, db_path=db_path):
+            scanned += 1
+            path = Path(str(doc.get("file_path") or ""))
+            if not path.exists():
+                errors.append(f"{doc.get('filename')}: file_missing")
+                continue
+            try:
+                _, _, offsets = _parse_pdf(path)
+                org = doc.get("org")
+                publish_date = doc.get("publish_date")
+                title = clean_doc_title(Path(str(doc.get("filename") or "")).stem, org)
+                store.update_document_metadata(
+                    str(doc["doc_key"]),
+                    page_offsets=offsets,
+                    report_key=match_report_key(org, publish_date, title, db_path=db_path),
+                    depth_class=classify_depth(title),
+                    db_path=db_path,
+                )
+                reparsed += 1
+            except Exception as exc:
+                logger.error("投喂重解析失败 %s: %s", doc.get("filename"), exc)
+                errors.append(f"{doc.get('filename')}: {exc}")
+    elif directory.exists():
         for path in sorted(directory.rglob("*.pdf")):
             scanned += 1
             try:
@@ -413,8 +509,15 @@ def ingest_inbox(
                 if store.document_exists(key, db_path=db_path):
                     skipped += 1
                     continue
-                text, pages = extract_pdf_text(path)
+                try:
+                    text, pages, offsets = _parse_pdf(path)
+                except Exception as exc:  # 无文本层/加密/损坏：文档仍入库，偏移为 null
+                    text, pages, offsets = "", 0, None
+                    logger.warning("投喂解析降级 %s: %s", path.name, exc)
+                    errors.append(f"{path.name}: parse_failed: {exc}")
                 org, publish_date = infer_metadata_from_filename(path.stem)
+                title = clean_doc_title(path.stem, org)
+                depth = classify_depth(title)
                 created = store.upsert_document(
                     {
                         "doc_key": key,
@@ -426,6 +529,9 @@ def ingest_inbox(
                         "page_count": pages,
                         "char_count": len(text),
                         "text": text,
+                        "page_offsets": offsets,
+                        "report_key": match_report_key(org, publish_date, title, db_path=db_path),
+                        "depth_class": depth,
                         "usage_policy": "personal_research",
                         "source_type": "manual_feed",
                     },
@@ -433,9 +539,20 @@ def ingest_inbox(
                 )
                 if created:
                     ingested += 1
-                    if extract:
+                    if extract and text:
                         try:
-                            extract_document(key, db_path=db_path)
+                            extraction = extract_document(key, db_path=db_path)
+                            broker = extraction.get("broker") or org
+                            date_value = extraction.get("report_date") or publish_date
+                            linked = match_report_key(broker, date_value, title, db_path=db_path)
+                            if linked:
+                                store.update_document_metadata(
+                                    key,
+                                    page_offsets=offsets,
+                                    report_key=linked,
+                                    depth_class=depth,
+                                    db_path=db_path,
+                                )
                         except Exception as exc:  # 抽取失败不影响入库
                             logger.error("投喂抽取失败 %s: %s", path.name, exc)
                             errors.append(f"{path.name} 抽取: {exc}")
@@ -444,7 +561,7 @@ def ingest_inbox(
             except Exception as exc:
                 logger.error("投喂解析失败 %s: %s", path.name, exc)
                 errors.append(f"{path.name}: {exc}")
-    if errors and ingested == 0 and scanned:
+    if errors and ingested == 0 and reparsed == 0 and scanned:
         status = "failed"
     elif errors:
         status = "degraded"
@@ -457,12 +574,17 @@ def ingest_inbox(
         None,
         None,
         status,
-        ingested,
+        ingested + reparsed,
         detail=json.dumps(
-            {"scanned": scanned, "skipped": skipped, "errors": errors},
+            {
+                "scanned": scanned,
+                "skipped": skipped,
+                "reparsed": reparsed,
+                "errors": errors,
+            },
             ensure_ascii=False,
         )
-        if (errors or skipped)
+        if (errors or skipped or reparsed)
         else None,
         db_path=db_path,
     )
@@ -471,6 +593,7 @@ def ingest_inbox(
         "scanned": scanned,
         "ingested": ingested,
         "skipped": skipped,
+        "reparsed": reparsed,
         "errors": errors,
     }
 
@@ -498,12 +621,21 @@ _RATING_MAP = {
     "看空": "卖出",
     "偏空": "减持",
     "观望": "中性",
+    # 英文机构口径（外资行/中资英文报告）
+    "buy": "买入",
+    "strong buy": "买入",
+    "overweight": "增持",
+    "accumulate": "增持",
+    "neutral": "中性",
+    "hold": "中性",
+    "underweight": "减持",
+    "sell": "卖出",
 }
 
 
 def _normalize_rating(value: Any) -> str:
     text = str(value or "").strip()
-    return _RATING_MAP.get(text, "未知")
+    return _RATING_MAP.get(text) or _RATING_MAP.get(text.lower()) or "未知"
 
 
 def _str_list(value: Any, limit: int = 5) -> list[str]:
@@ -519,7 +651,84 @@ def _str_list(value: Any, limit: int = 5) -> list[str]:
     return out
 
 
-def _coerce_extraction(payload: dict) -> dict:
+def _page_or_none(value: Any, page_count: int | None) -> int | None:
+    try:
+        page = int(value)
+    except (TypeError, ValueError):
+        return None
+    if page < 1:
+        return None
+    if page_count is not None and page > int(page_count):
+        return None
+    return page
+
+
+def _coerce_items(value: Any, kind: str, page_count: int | None) -> tuple[list[str], list[dict]]:
+    """兼容字符串与 ``{text, source_page}`` 两种抽取形态，返回文本与页码来源。"""
+    texts: list[str] = []
+    sources: list[dict] = []
+    if not isinstance(value, list):
+        return texts, sources
+    for item in value:
+        if isinstance(item, dict):
+            text = str(item.get("text") or "").strip()
+            page = _page_or_none(item.get("source_page"), page_count)
+        else:
+            text = str(item or "").strip()
+            page = None
+        if not text or text in texts or len(texts) >= 5:
+            continue
+        index = len(texts)
+        texts.append(text)
+        if page is not None:
+            sources.append({"kind": kind, "index": index, "text": text, "source_page": page})
+    return texts, sources
+
+
+def _coerce_sector_views(value: Any, page_count: int | None) -> list[dict]:
+    """策略/宏观行业观点收敛；direction 白名单外归「未知」，不丢弃行业。"""
+    if not isinstance(value, list):
+        return []
+    out: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        industry = str(item.get("industry") or "").strip()
+        if not industry:
+            continue
+        direction = str(item.get("direction") or "").strip()
+        if direction not in ("看多", "中性", "看空", "未知"):
+            direction = "未知"
+        out.append(
+            {
+                "industry": industry,
+                "direction": direction,
+                "rationale": str(item.get("rationale") or "").strip() or None,
+                "source_page": _page_or_none(item.get("source_page"), page_count),
+            }
+        )
+        if len(out) >= 10:
+            break
+    return out
+
+
+def _coerce_market_view(value: Any) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in ("sentiment", "positioning"):
+        text = str(value.get(key) or "").strip()
+        if text:
+            out[key] = text
+    catalysts = value.get("key_catalysts")
+    if isinstance(catalysts, list):
+        items = [str(item).strip() for item in catalysts if str(item).strip()]
+        if items:
+            out["key_catalysts"] = items[:5]
+    return out
+
+
+def _coerce_extraction(payload: dict, *, page_count: int | None = None) -> dict:
     """LLM 抽取载荷 → 入库形状（只做类型收敛与白名单，不补事实）。"""
     stocks: list[dict] = []
     raw_stocks = payload.get("stocks")
@@ -550,6 +759,7 @@ def _coerce_extraction(payload: dict) -> dict:
                     "target_price": _num(item.get("target_price")),
                     "eps_forecasts": eps,
                     "industry": str(item.get("industry") or "").strip() or None,
+                    "source_page": _page_or_none(item.get("source_page"), page_count),
                 }
             )
     report_date: str | None = str(payload.get("report_date") or "").strip()[:10]
@@ -558,16 +768,22 @@ def _coerce_extraction(payload: dict) -> dict:
     except ValueError:
         report_date = None
     summary = str(payload.get("summary") or "").strip()
+    core_logic, logic_sources = _coerce_items(payload.get("core_logic"), "core_logic", page_count)
+    catalysts, catalyst_sources = _coerce_items(payload.get("catalysts"), "catalysts", page_count)
+    risks, risk_sources = _coerce_items(payload.get("risks"), "risks", page_count)
     return {
         "broker": str(payload.get("broker") or "").strip() or None,
         "analyst": str(payload.get("analyst") or "").strip() or None,
         "report_date": report_date,
         "report_type": str(payload.get("report_type") or "").strip() or None,
         "stocks": stocks,
-        "core_logic": _str_list(payload.get("core_logic")),
-        "catalysts": _str_list(payload.get("catalysts")),
-        "risks": _str_list(payload.get("risks")),
+        "core_logic": core_logic,
+        "catalysts": catalysts,
+        "risks": risks,
         "summary": summary[:500] or None,
+        "sector_views": _coerce_sector_views(payload.get("sector_views"), page_count),
+        "market_view": _coerce_market_view(payload.get("market_view")),
+        "sources": logic_sources + catalyst_sources + risk_sources,
     }
 
 
@@ -602,7 +818,7 @@ def extract_document(doc_key: str, *, force: bool = False, db_path: str | None =
     payload = extract_json(raw_text)
     if not isinstance(payload, dict):
         raise ValueError("抽取响应不是 JSON 对象")
-    coerced = _coerce_extraction(payload)
+    coerced = _coerce_extraction(payload, page_count=doc.get("page_count"))
     store.upsert_extraction(
         doc_key,
         coerced,
@@ -769,6 +985,195 @@ def format_merge_digest(merged: dict | None, *, max_items: int = 5) -> str:
 def get_manual_report_digest(stock_code: str, *, db_path: str | None = None) -> dict | None:
     """分析期读取：投喂研报合并摘要（无投喂记录返回 None，纯读库不调 LLM）。"""
     return merge_reports_for_stock(stock_code, db_path=db_path)
+
+
+STRATEGY_REPORT_TYPES = ("策略报告", "宏观研究")
+STRATEGY_DIGEST_MAX_REPORTS = 3
+STRATEGY_DIGEST_MAX_AGE_DAYS = 30
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _json_list(value: Any) -> list:
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def get_strategy_digest(
+    *,
+    as_of: str | None = None,
+    db_path: str | None = None,
+    max_reports: int | None = None,
+    max_age_days: int | None = None,
+) -> dict | None:
+    """策略/宏观研报观点聚合（确定性、零 LLM）。
+
+    默认取 30 天内、按报告日期降序的前 3 篇；无记录或全部陈旧返回 None。
+    """
+    as_of_date = date.fromisoformat(as_of) if as_of else date.today()
+    limit_reports = max_reports or _env_int(
+        "STRATEGY_DIGEST_MAX_REPORTS", STRATEGY_DIGEST_MAX_REPORTS
+    )
+    age_limit = max_age_days or _env_int(
+        "STRATEGY_DIGEST_MAX_AGE_DAYS", STRATEGY_DIGEST_MAX_AGE_DAYS
+    )
+    selected: list[tuple[dict, date]] = []
+    for row in store.list_extractions(limit=500, db_path=db_path):
+        if str(row.get("report_type") or "") not in STRATEGY_REPORT_TYPES:
+            continue
+        try:
+            report_date = date.fromisoformat(str(row.get("report_date") or "")[:10])
+        except ValueError:
+            continue
+        if (as_of_date - report_date).days > age_limit:
+            continue
+        selected.append((row, report_date))
+    if not selected:
+        return None
+    selected.sort(key=lambda item: item[1], reverse=True)
+    docs = selected[:limit_reports]
+
+    sector: dict[str, dict] = {}
+    core_logic: list[str] = []
+    catalysts: list[str] = []
+    risks: list[str] = []
+    summaries: list[dict] = []
+    market_views: list[dict] = []
+    brokers: set[str] = set()
+    documents: list[dict] = []
+
+    for row, _ in docs:
+        if row.get("broker"):
+            brokers.add(str(row["broker"]))
+        for view in _json_list(row.get("sector_views_json")):
+            if not isinstance(view, dict):
+                continue
+            industry = str(view.get("industry") or "").strip()
+            if not industry:
+                continue
+            direction = str(view.get("direction") or "未知")
+            item = sector.setdefault(industry, {"directions": {}, "rationales": []})
+            item["directions"][direction] = item["directions"].get(direction, 0) + 1
+            rationale = str(view.get("rationale") or "").strip()
+            if rationale and rationale not in item["rationales"] and len(item["rationales"]) < 3:
+                item["rationales"].append(rationale)
+        for target, key in (
+            (core_logic, "core_logic_json"),
+            (catalysts, "catalysts_json"),
+            (risks, "risks_json"),
+        ):
+            for text in _json_list(row.get(key)):
+                text = str(text or "").strip()
+                if text and text not in target and len(target) < 3:
+                    target.append(text)
+        summary = str(row.get("summary") or "").strip()
+        if summary:
+            summaries.append(
+                {
+                    "broker": row.get("broker"),
+                    "report_date": row.get("report_date"),
+                    "summary": summary,
+                }
+            )
+        market_view = row.get("market_view_json")
+        try:
+            parsed_market = json.loads(market_view) if market_view else {}
+        except (TypeError, json.JSONDecodeError):
+            parsed_market = {}
+        if isinstance(parsed_market, dict) and parsed_market:
+            market_views.append(
+                {
+                    "broker": row.get("broker"),
+                    "report_date": row.get("report_date"),
+                    "market_view": parsed_market,
+                }
+            )
+        documents.append(
+            {
+                "doc_key": row.get("doc_key"),
+                "broker": row.get("broker"),
+                "report_date": row.get("report_date"),
+                "report_type": row.get("report_type"),
+            }
+        )
+
+    disagreements = [
+        industry
+        for industry, item in sector.items()
+        if item["directions"].get("看多", 0) and item["directions"].get("看空", 0)
+    ]
+    return {
+        "report_count": len(docs),
+        "brokers": sorted(brokers),
+        "single_broker": len(brokers) == 1,
+        "latest_report_date": max(item[1] for item in docs).isoformat(),
+        "sector_views": sector,
+        "disagreements": disagreements,
+        "core_logic": core_logic,
+        "catalysts": catalysts,
+        "risks": risks,
+        "summaries": summaries[:3],
+        "market_views": market_views[:3],
+        "documents": documents,
+    }
+
+
+def format_strategy_digest(digest: dict | None) -> str:
+    """策略观点聚合 → 宏观分析师上下文文本段；无数据返回空串。"""
+    if not digest:
+        return ""
+    brokers = "、".join(digest.get("brokers") or []) or "未知"
+    suffix = "；单机构观点" if digest.get("single_broker") else ""
+    lines = [
+        f"卖方策略观点（{digest.get('report_count', 0)} 篇；机构：{brokers}；"
+        f"最新报告日：{digest.get('latest_report_date') or '未知'}{suffix}）"
+    ]
+    for industry, item in (digest.get("sector_views") or {}).items():
+        counts = "/".join(
+            f"{direction}{count}"
+            for direction, count in (item.get("directions") or {}).items()
+            if count
+        )
+        line = f"- 行业：{industry}（{counts or '未知'}）"
+        rationales = item.get("rationales") or []
+        if rationales:
+            line += "；论据：" + "；".join(rationales[:3])
+        lines.append(line)
+    if digest.get("disagreements"):
+        lines.append("- 机构分歧行业：" + "、".join(digest["disagreements"]))
+    for label, key in (("核心逻辑", "core_logic"), ("催化剂", "catalysts"), ("风险", "risks")):
+        values = digest.get(key) or []
+        if values:
+            lines.append(f"- {label}：" + "；".join(values[:3]))
+    if digest.get("market_views"):
+        first = digest["market_views"][0]
+        view = first.get("market_view") or {}
+        bits = []
+        if view.get("sentiment"):
+            bits.append(f"情绪：{view['sentiment']}")
+        if view.get("positioning"):
+            bits.append(f"仓位：{view['positioning']}")
+        if bits:
+            lines.append(
+                f"- 市场观点（{first.get('broker') or '未知'} {first.get('report_date') or ''}）："
+                + "；".join(bits)
+            )
+    lines.append(
+        "注意：卖方观点存在立场与覆盖偏差，不得替代宏观数据推理，"
+        "不得直接作为结论依据，仅作对照参考。"
+    )
+    return "\n".join(lines)
 
 
 def get_consensus_for_analysis(stock_code: str, *, db_path: str | None = None) -> dict:
@@ -980,6 +1385,11 @@ def main(argv: list[str] | None = None) -> int:
     inbox = sub.add_parser("inbox", help="扫描投喂目录并解析入库（个人研究自用）")
     inbox.add_argument("--dir", default=None, help="投喂目录（默认 RESEARCH_REPORT_INBOX_DIR）")
     inbox.add_argument("--no-extract", action="store_true", help="只入库不抽取")
+    inbox.add_argument(
+        "--force-reparse",
+        action="store_true",
+        help="重算既有文档的页偏移/跨源关联/深度分级（不新增行、不调 LLM）",
+    )
     inbox.add_argument("--db", default=None)
     extract = sub.add_parser("extract", help="对投喂文档做 LLM 结构化抽取")
     extract.add_argument("--doc-key", default=None, help="只抽一份；省略则批量")
@@ -997,7 +1407,12 @@ def main(argv: list[str] | None = None) -> int:
             db_path=args.db,
         )
     elif args.command == "inbox":
-        result = ingest_inbox(args.dir, db_path=args.db, extract=not args.no_extract)
+        result = ingest_inbox(
+            args.dir,
+            db_path=args.db,
+            extract=not args.no_extract,
+            force_reparse=args.force_reparse,
+        )
     elif args.command == "extract":
         if args.doc_key:
             result = extract_document(args.doc_key, force=args.force, db_path=args.db)

@@ -868,6 +868,19 @@ def collect_text_sources(state: dict) -> list[str]:
                 for f in fields
                 if i.get(f)
             ]
+    # add-macro-strategy-report-context：策略观点条目进回声源（文本 claim 可 PASS(echo)）
+    digest = state.get("strategy_report_digest")
+    if isinstance(digest, dict):
+        for item in (digest.get("sector_views") or {}).values():
+            if isinstance(item, dict):
+                sources += [str(text) for text in (item.get("rationales") or []) if text]
+        for key in ("core_logic", "catalysts", "risks"):
+            sources += [str(text) for text in (digest.get(key) or []) if text]
+        sources += [
+            str(item.get("summary") or "")
+            for item in (digest.get("summaries") or [])
+            if isinstance(item, dict) and item.get("summary")
+        ]
     return sources
 
 

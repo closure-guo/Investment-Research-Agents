@@ -634,6 +634,14 @@ def _build_macro_context(state: dict) -> str:
     else:
         sections.append("宏观经济指标（state 键 macro_indicators）: 数据暂不可用")
 
+    digest = state.get("strategy_report_digest")
+    if digest:
+        from finance_agent.data.research_reports import format_strategy_digest
+
+        text = format_strategy_digest(digest)
+        if text:
+            sections.append(f"卖方策略观点（state 键 strategy_report_digest）:\n{text}")
+
     return "\n\n".join(sections)
 
 

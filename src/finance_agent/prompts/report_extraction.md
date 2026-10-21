@@ -21,12 +21,26 @@
       "rating_normalized": "买入|增持|中性|减持|卖出|未知",
       "target_price": "数字或 null（仅原文明确给出目标价时）",
       "eps_forecasts": {"2026": 1.23},
-      "industry": "原文行业，没有则 null"
+      "industry": "原文行业，没有则 null",
+      "source_page": "该标的论述所在的页码（整数）或 null"
     }
   ],
-  "core_logic": ["支撑报告观点的核心论据，最多 5 条"],
-  "catalysts": ["催化剂/后续观察点，最多 5 条"],
-  "risks": ["报告提示的风险，最多 5 条"],
+  "core_logic": [{"text": "支撑报告观点的核心论据，最多 5 条", "source_page": 2}],
+  "catalysts": [{"text": "催化剂/后续观察点，最多 5 条", "source_page": 3}],
+  "risks": [{"text": "报告提示的风险，最多 5 条", "source_page": 4}],
+  "sector_views": [
+    {
+      "industry": "行业名",
+      "direction": "看多|中性|看空|未知",
+      "rationale": "原文给出的行业论据，没有则 null",
+      "source_page": "页码或 null"
+    }
+  ],
+  "market_view": {
+    "sentiment": "市场情绪，原文明确表述才填，否则 null",
+    "positioning": "仓位/资金表述，原文明确表述才填，否则 null",
+    "key_catalysts": ["市场层面的关键催化剂"]
+  },
   "summary": "不超过 200 字的报告摘要，只陈述原文观点"
 }
 
@@ -37,8 +51,13 @@
 3. **目标价**：只认明确的目标价/合理价值/目标区间；区间给中值并在 summary 说明；没有就 null。
 4. **EPS 预测**：键为 4 位年份字符串，值必须是数字；只抽报告明确给出的年度。
 5. **多标的**：一份报告覆盖多只股票时全部列出；行业/策略/宏观报告 stocks 可为空数组。
-6. **MUST NOT** 输出原文之外的公司、数字或观点；MUST NOT 把免责声明里的信息当事实。
-7. 输出必须是合法 JSON（双引号、无注释、无尾逗号）。
+   附录或免责声明中的「全覆盖评级表」不是个股结论，MUST NOT 写入 stocks。
+6. **页码**：`source_page` 只在原文能明确判断时填写；判断不了置 null，MUST NOT 按段落顺序猜测。
+7. **行业观点**：策略/宏观/行业报告应尽力给出 `sector_views`（行业 + 方向 + 论据）；个股报告可为空。
+   `direction` 只能是 看多/中性/看空/未知；原文没有明确方向时填「未知」，MUST NOT 推断。
+8. **市场观点**：`market_view` 只抽原文明确表述；仓位百分比、情绪方向原文没写就置 null，MUST NOT 推断。
+9. **MUST NOT** 输出原文之外的公司、数字或观点；MUST NOT 把免责声明里的信息当事实。
+10. 输出必须是合法 JSON（双引号、无注释、无尾逗号）。
 
 # 研报全文
 {{document_text}}

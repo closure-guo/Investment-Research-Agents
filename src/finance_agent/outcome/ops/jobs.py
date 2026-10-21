@@ -32,6 +32,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from finance_agent.data.foreign_broker_news import run_foreign_broker_news_daily
 from finance_agent.data.research_reports import (
     ingest_inbox,
     run_forecasts_daily,
@@ -46,6 +47,7 @@ from finance_agent.factors.harvest import run_factor_harvest
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
+from finance_agent.outcome.analyst_claims.job import run_analyst_claim_settle_daily
 from finance_agent.outcome.cohort.runner import run_cohort_batch
 from finance_agent.outcome.daily_brief import run_daily_brief
 from finance_agent.outcome.events.job import (
@@ -106,6 +108,11 @@ JOB_IDS: tuple[str, ...] = (
     "rating_changes_daily",
     "earnings_forecasts_daily",
     "research_report_inbox_daily",
+    # 分析师事后检验（add-analyst-ex-post-verification）：17:00——研报数据面
+    # （16:52–16:56）之后、cohort（18:00）之前；零 LLM，结算到期主张并落记分卡
+    "analyst_claim_settle_daily",
+    # 外资二手快讯（add-foreign-broker-sentiment）：17:05——只读观测，无源为空态
+    "foreign_broker_news_daily",
     "cohort_batch",
     # 每日汇报（add-auto-pool-analysis-daily-brief）：20:30——cohort 之后，给自动分析
     # 留出完成时间；事实汇总 + LLM 生成，失败写降级摘要并记 failed
@@ -140,6 +147,8 @@ JOB_LABELS: dict[str, str] = {
     "rating_changes_daily": "评级变动",
     "earnings_forecasts_daily": "一致预期快照",
     "research_report_inbox_daily": "研报投喂",
+    "analyst_claim_settle_daily": "分析师事后检验",
+    "foreign_broker_news_daily": "外资快讯",
     "cohort_batch": "cohort 跑批",
     "daily_brief_daily": "每日汇报",
     "memory_extract_monthly": "记忆提炼",
@@ -170,6 +179,8 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "rating_changes_daily": run_ratings_daily,
     "earnings_forecasts_daily": run_forecasts_daily,
     "research_report_inbox_daily": ingest_inbox,
+    "analyst_claim_settle_daily": run_analyst_claim_settle_daily,
+    "foreign_broker_news_daily": run_foreign_broker_news_daily,
     "cohort_batch": run_cohort_batch,
     "daily_brief_daily": run_daily_brief,
     "memory_extract_monthly": run_memory_extract_monthly,
@@ -336,6 +347,21 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 58,
+        "timezone": "Asia/Shanghai",
+    },
+    # 分析师事后检验（add-analyst-ex-post-verification）：17:00——研报数据面
+    # （16:52–16:56）之后、cohort（18:00）之前；零 LLM，结算到期主张并落记分卡
+    "analyst_claim_settle_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 17,
+        "minute": 0,
+        "timezone": "Asia/Shanghai",
+    },
+    # 外资二手快讯（add-foreign-broker-sentiment）：17:05——只读观测，无源为空态
+    "foreign_broker_news_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 17,
+        "minute": 5,
         "timezone": "Asia/Shanghai",
     },
     "cohort_batch": {

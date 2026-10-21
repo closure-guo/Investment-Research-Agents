@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS research_reports (
   pe_forecasts   TEXT,
   pdf_url        TEXT,
   detail_url     TEXT,
+  depth_class    TEXT,
   source         TEXT NOT NULL,
   first_seen_at  TEXT NOT NULL,
   updated_at     TEXT NOT NULL
@@ -131,6 +132,9 @@ CREATE TABLE IF NOT EXISTS report_documents (
   page_count    INTEGER,
   char_count    INTEGER,
   text          TEXT NOT NULL,
+  page_offsets  TEXT,
+  report_key    TEXT,
+  depth_class   TEXT,
   usage_policy  TEXT NOT NULL DEFAULT 'personal_research',
   source_type   TEXT NOT NULL DEFAULT 'manual_feed',
   ingested_at   TEXT NOT NULL
@@ -149,11 +153,70 @@ CREATE TABLE IF NOT EXISTS report_extractions (
   catalysts_json  TEXT,
   risks_json      TEXT,
   summary         TEXT,
+  sector_views_json TEXT,
+  market_view_json  TEXT,
+  sources_json    TEXT,
   model           TEXT,
   prompt_version  TEXT,
   extracted_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_re_date ON report_extractions(report_date);
+
+-- 外资行二手快讯事件（add-foreign-broker-sentiment；只存标题/链接/短摘要，不存原文全文）
+CREATE TABLE IF NOT EXISTS foreign_broker_events (
+  event_key         TEXT PRIMARY KEY,
+  title             TEXT NOT NULL,
+  url               TEXT,
+  source            TEXT,
+  published_at      TEXT,
+  fetched_at        TEXT NOT NULL,
+  broker            TEXT,
+  action            TEXT,
+  target_type       TEXT,
+  target            TEXT,
+  direction         TEXT,
+  summary           TEXT,
+  confidence        TEXT,
+  extraction_status TEXT NOT NULL,
+  model             TEXT,
+  prompt_version    TEXT,
+  usage_policy      TEXT NOT NULL DEFAULT 'personal_research',
+  region            TEXT NOT NULL DEFAULT 'foreign',
+  event_score       REAL,
+  updated_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fbe_date ON foreign_broker_events(published_at);
+CREATE INDEX IF NOT EXISTS idx_fbe_broker ON foreign_broker_events(broker);
+
+-- 外资事件事后命中（add-region-split-broker-scoring；仅 market 级 000300 20 日）
+CREATE TABLE IF NOT EXISTS foreign_broker_event_outcomes (
+  event_key        TEXT PRIMARY KEY,
+  status           TEXT NOT NULL,
+  entry_date       TEXT,
+  exit_date        TEXT,
+  benchmark_return REAL,
+  hit              INTEGER,
+  reason           TEXT,
+  resolved_at      TEXT,
+  updated_at       TEXT NOT NULL
+);
+
+-- 外资独立记分卡（情绪/命中率；与内资 event_study 分表）
+CREATE TABLE IF NOT EXISTS foreign_sentiment_scorecards (
+  snapshot_date  TEXT NOT NULL,
+  region         TEXT NOT NULL DEFAULT 'foreign',
+  score_family   TEXT NOT NULL DEFAULT 'sentiment',
+  bucket_type    TEXT NOT NULL,
+  bucket_key     TEXT NOT NULL,
+  n              INTEGER NOT NULL,
+  hits           INTEGER NOT NULL,
+  hit_rate       REAL,
+  mean_return    REAL,
+  net_score      REAL,
+  reliable       INTEGER NOT NULL,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (snapshot_date, bucket_type, bucket_key)
+);
 """
 
 _TITLE_WS = re.compile(r"\s+")
@@ -183,10 +246,44 @@ def init_db(db_path: str | Path | None = None) -> Path:
     conn = _connect(path)
     try:
         conn.executescript(RESEARCH_REPORTS_DDL)
+        _ensure_columns(conn)
         conn.commit()
     finally:
         conn.close()
     return path
+
+
+# 增量列（complete-research-report-provenance）：SQLite 无 IF NOT EXISTS 的 ADD COLUMN，
+# 用 PRAGMA table_info 幂等补齐；旧库打开即升级，新库由 DDL 直接建全。
+_DOCUMENT_MIGRATIONS: dict[str, dict[str, str]] = {
+    "report_documents": {
+        "page_offsets": "TEXT",
+        "report_key": "TEXT",
+        "depth_class": "TEXT",
+    },
+    "report_extractions": {
+        "sources_json": "TEXT",
+        "sector_views_json": "TEXT",
+        "market_view_json": "TEXT",
+    },
+    "research_reports": {
+        "depth_class": "TEXT",
+    },
+    "foreign_broker_events": {
+        "region": "TEXT NOT NULL DEFAULT 'foreign'",
+        "event_score": "REAL",
+    },
+}
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    for table, columns in _DOCUMENT_MIGRATIONS.items():
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, ddl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")  # noqa: S608
+    # 依赖新增列的索引必须在 ALTER 之后建（旧库 DDL 不会补列）
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rd_report_key ON report_documents(report_key)")
 
 
 def report_key(title: str, org: str, publish_date: str) -> str:
@@ -247,6 +344,7 @@ def upsert_reports(rows: Iterable[dict], db_path: str | Path | None = None) -> i
                 _json_or_none(row.get("pe_forecasts")),
                 (row.get("pdf_url") or "").strip() or None,
                 (row.get("detail_url") or "").strip() or None,
+                (row.get("depth_class") or "unknown"),
                 (row.get("source") or "").strip() or "unknown",
                 now,
                 now,
@@ -261,8 +359,8 @@ def upsert_reports(rows: Iterable[dict], db_path: str | Path | None = None) -> i
             INSERT INTO research_reports (
               report_key, report_type, title, org, analyst, publish_date, code, name,
               industry, rating, eps_forecasts, pe_forecasts, pdf_url, detail_url,
-              source, first_seen_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+              depth_class, source, first_seen_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(report_key) DO UPDATE SET
               report_type=excluded.report_type,
               title=excluded.title,
@@ -277,6 +375,7 @@ def upsert_reports(rows: Iterable[dict], db_path: str | Path | None = None) -> i
               pe_forecasts=excluded.pe_forecasts,
               pdf_url=excluded.pdf_url,
               detail_url=excluded.detail_url,
+              depth_class=excluded.depth_class,
               source=CASE
                 WHEN instr(',' || COALESCE(research_reports.source, '') || ',',
                            ',' || excluded.source || ',') > 0
@@ -515,8 +614,9 @@ def upsert_document(document: dict, db_path: str | Path | None = None) -> bool:
             """
             INSERT OR IGNORE INTO report_documents (
               doc_key, filename, file_path, title, org, publish_date, page_count,
-              char_count, text, usage_policy, source_type, ingested_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+              char_count, text, page_offsets, report_key, depth_class, usage_policy,
+              source_type, ingested_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 document["doc_key"],
@@ -528,6 +628,9 @@ def upsert_document(document: dict, db_path: str | Path | None = None) -> bool:
                 document.get("page_count"),
                 document.get("char_count"),
                 document.get("text") or "",
+                _json_or_none(document.get("page_offsets")),
+                document.get("report_key"),
+                document.get("depth_class"),
                 document.get("usage_policy") or "personal_research",
                 document.get("source_type") or "manual_feed",
                 _now_iso(),
@@ -546,9 +649,58 @@ def list_documents(limit: int = 50, db_path: str | Path | None = None) -> list[d
     try:
         rows = conn.execute(
             "SELECT doc_key, filename, file_path, title, org, publish_date, page_count,"
-            " char_count, usage_policy, source_type, ingested_at"
+            " char_count, report_key, depth_class, usage_policy, source_type, ingested_at"
             " FROM report_documents ORDER BY ingested_at DESC LIMIT ?",
             (int(limit),),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
+
+def update_document_metadata(
+    doc_key: str,
+    *,
+    page_offsets: list[dict] | None,
+    report_key: str | None,
+    depth_class: str | None,
+    db_path: str | Path | None = None,
+) -> None:
+    """重解析更新：只改派生元数据，不动全文/标题/入库时间。"""
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE report_documents SET page_offsets=?, report_key=?, depth_class=?"
+            " WHERE doc_key=?",
+            (_json_or_none(page_offsets), report_key, depth_class, doc_key),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_reports_for_match(
+    org: str,
+    publish_date: str,
+    *,
+    window_days: int = 1,
+    db_path: str | Path | None = None,
+) -> list[dict]:
+    """跨源关联候选：同机构、发布日期 ±window_days 内的元数据行。"""
+    init_db(db_path)
+    try:
+        center = date.fromisoformat(publish_date)
+    except (TypeError, ValueError):
+        return []
+    start = (center - timedelta(days=window_days)).isoformat()
+    end = (center + timedelta(days=window_days)).isoformat()
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT report_key, title, org, publish_date FROM research_reports"
+            " WHERE org=? AND publish_date BETWEEN ? AND ?",
+            ((org or "").strip(), start, end),
         ).fetchall()
     finally:
         conn.close()
@@ -656,9 +808,9 @@ def upsert_extraction(
             """
             INSERT INTO report_extractions (
               doc_key, broker, analyst, report_date, report_type, stocks_json,
-              core_logic_json, catalysts_json, risks_json, summary, model,
-              prompt_version, extracted_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+              core_logic_json, catalysts_json, risks_json, summary, sector_views_json,
+              market_view_json, sources_json, model, prompt_version, extracted_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(doc_key) DO UPDATE SET
               broker=excluded.broker,
               analyst=excluded.analyst,
@@ -669,6 +821,9 @@ def upsert_extraction(
               catalysts_json=excluded.catalysts_json,
               risks_json=excluded.risks_json,
               summary=excluded.summary,
+              sector_views_json=excluded.sector_views_json,
+              market_view_json=excluded.market_view_json,
+              sources_json=excluded.sources_json,
               model=excluded.model,
               prompt_version=excluded.prompt_version,
               extracted_at=excluded.extracted_at
@@ -684,6 +839,9 @@ def upsert_extraction(
                 _json_or_none(extraction.get("catalysts")),
                 _json_or_none(extraction.get("risks")),
                 extraction.get("summary"),
+                _json_or_none(extraction.get("sector_views")),
+                _json_or_none(extraction.get("market_view")),
+                _json_or_none(extraction.get("sources")),
                 model,
                 None if prompt_version is None else str(prompt_version),
                 _now_iso(),

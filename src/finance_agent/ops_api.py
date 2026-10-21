@@ -484,6 +484,102 @@ async def get_latest_daily_brief() -> Any:
     return row
 
 
+@router.get("/research/analyst-scorecard")
+async def get_analyst_scorecard(
+    snapshot_date: str | None = None,
+    bucket_type: str | None = None,
+    bucket_key: str | None = None,
+) -> dict[str, Any]:
+    """分析师事后检验只读记分卡（add-analyst-ex-post-verification）。
+
+    缺省读取最新快照；按桶类型/键过滤。空态返回 ``status=empty`` + 空列表，
+    不以伪造计数冒充有样本。
+    """
+    from finance_agent.data import analyst_claims_store
+
+    def _load() -> dict[str, Any]:
+        date_value = snapshot_date or analyst_claims_store.latest_snapshot_date()
+        rows = analyst_claims_store.list_scorecard(
+            snapshot_date=date_value,
+            bucket_type=bucket_type,
+            bucket_key=bucket_key,
+        )
+        return {
+            "snapshot_date": date_value,
+            "bucket_type": bucket_type,
+            "bucket_key": bucket_key,
+            "rows": rows,
+            "status": "ok" if rows else "empty",
+        }
+
+    return await asyncio.to_thread(_load)
+
+
+@router.get("/research/foreign-sentiment")
+async def get_foreign_sentiment(
+    broker: str | None = None,
+    action: str | None = None,
+    target_type: str | None = None,
+    direction: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict[str, Any]:
+    """外资二手快讯只读情绪序列（add-foreign-broker-sentiment）。
+
+    v1 只读观测：返回事件与方向/机构计数；不进入任何分析师上下文或决策路径。
+    """
+    from finance_agent.data.foreign_broker_news import list_foreign_sentiment
+
+    return await asyncio.to_thread(
+        list_foreign_sentiment,
+        broker=broker,
+        action=action,
+        target_type=target_type,
+        direction=direction,
+        start=start,
+        end=end,
+    )
+
+
+@router.get("/research/scorecards")
+async def get_scorecards(
+    snapshot_date: str | None = None,
+    foreign_snapshot_date: str | None = None,
+) -> dict[str, Any]:
+    """内外资分开打分统一只读视图（add-region-split-broker-scoring）。
+
+    两块各自保留指标族：内资 event_study（胜率/超额），外资 sentiment（命中率/情绪净分）。
+    任一块为空时显式 status=empty，不互相填充。
+    """
+    from finance_agent.data import analyst_claims_store
+    from finance_agent.outcome.foreign_broker_scoring import (
+        latest_snapshot_date,
+        list_foreign_scorecard,
+    )
+
+    def _load() -> dict[str, Any]:
+        domestic_date = snapshot_date or analyst_claims_store.latest_snapshot_date()
+        domestic_rows = analyst_claims_store.list_scorecard(snapshot_date=domestic_date)
+        foreign_date = foreign_snapshot_date or latest_snapshot_date()
+        foreign_rows = list_foreign_scorecard(snapshot_date=foreign_date)
+        return {
+            "domestic": {
+                "snapshot_date": domestic_date,
+                "score_family": "event_study",
+                "status": "ok" if domestic_rows else "empty",
+                "rows": domestic_rows,
+            },
+            "foreign": {
+                "snapshot_date": foreign_date,
+                "score_family": "sentiment",
+                "status": "ok" if foreign_rows else "empty",
+                "rows": foreign_rows,
+            },
+        }
+
+    return await asyncio.to_thread(_load)
+
+
 # ── 端点:cohort 开关与时刻 ──
 
 

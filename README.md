@@ -11,11 +11,11 @@
 <a href="docs/assets/system-flow.html">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/system-flow.dark.png">
-    <img src="docs/assets/system-flow.png" alt="研究到战绩的全链路一图流">
+    <img src="docs/assets/system-flow.png" alt="研究到战绩的全链路一图流（含研报数据面与分析师事后检验）">
   </picture>
 </a>
 
-> 全链路一图流由 [Archify](https://github.com/tt-a1i/archify) 生成（图源 [system-flow.json](docs/assets/system-flow.json)，交互版 [system-flow.html](docs/assets/system-flow.html) 支持缩放、搜索、明暗主题与导览路径）。用户输入与选股日批（15:40 出精选池，18:00 批量入链）汇入同一张 LangGraph 图：PREP 数据准备 → L1 四分析师并行 → L2 多空辩论×2 → L3 Trader（价位门禁）→ L4 风控辩论×2 → L5 基金经理审批产出报告；决策落库观点池后 D+1 开盘 paper 撮合，收盘结算入战绩，记忆层回灌下一次分析。因子供给线（RD-Agent → 转译 → 五道闸 → 因子库）与 26 个日批/月批任务的触发时刻标在图上，八个 SQLite 库、多源数据面与 LLM 网关治理见说明卡；节点级完整拓扑的文字版见 [graph.mmd](docs/assets/graph.mmd)。
+> 全链路一图流由 [Archify](https://github.com/tt-a1i/archify) 生成（图源 [system-flow.json](docs/assets/system-flow.json)，交互版 [system-flow.html](docs/assets/system-flow.html) 支持缩放、搜索、明暗主题与导览路径）。用户输入与选股日批（15:40 出精选池，18:00 批量入链）汇入同一张 LangGraph 图：PREP 数据准备 → L1 四分析师并行 → L2 多空辩论×2 → L3 Trader（价位门禁）→ L4 风控辩论×2 → L5 基金经理审批产出报告；决策落库观点池后 D+1 开盘 paper 撮合，收盘结算入战绩，记忆层回灌下一次分析。因子供给线（RD-Agent → 转译 → 五道闸 → 因子库）与 28 个日批/月批任务的触发时刻标在图上，九个 SQLite 库、多源数据面与 LLM 网关治理见说明卡；研报消费链（五类元数据/评级变动/一致预期/投喂 PDF → 分析师事后检验/策略观点→宏观/关联标的触发分析/外资快讯只读）也已标在图上；节点级完整拓扑的文字版见 [graph.mmd](docs/assets/graph.mmd)。
 
 五层架构：
 
