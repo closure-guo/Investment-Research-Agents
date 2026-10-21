@@ -7,6 +7,12 @@ SQLite 在跨挂载 WAL 并发下先后出现索引损坏（043）、跨挂载�
 `-wal` 句柄导致新连接无法进入 WAL 模式（046）。同时现有健康检查把「单个业务接口 500」等同于「容器不健康」，
 `integrity_check` 日批只校验 predictions 快照哈希、不校验 SQLite 页完整性，本次故障期间均未报警。
 
+补充实证（2026-10-21 巡检发现）：`job_runs` 中 `factor_builtin_register`
+（2026-10-20T23:58:43）以 `OperationalError: disk I/O error` 失败——同一挂载上的写失败已从
+「索引损坏 / WAL 不可进入」扩展到普通写路径，且该次失败未触发任何告警。同期热库体量为
+`sessions.db` 315MB、`market_snapshot.db` 502MB，日批在 15:30–17:00 有十余个任务连续写入，
+跨挂载并发窗口远大于偶发事件。这条记录可作为「热库迁 named volume + 页级校验」的直接证据。
+
 ## What Changes
 
 - **热 SQLite 库迁至 Docker named volume**：`sessions.db` / `screening.db` / `execution.db` / `events.db` /
