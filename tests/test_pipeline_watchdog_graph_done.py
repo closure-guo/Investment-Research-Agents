@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
 import time
 
 import pytest
@@ -277,13 +278,18 @@ async def test_scenario_e_prereport_backlog_compressed_after_graph_done(tmp_path
 
     monkeypatch.setattr(registry, "record_drop", _spy_record_drop)
 
+    producer_done = threading.Event()
+
     def _stream(initial_state, config=None, session_id=None):
         # 真实语序：thinking 洪峰在 final_report 之前（非场景 D 的报告在前）
-        for i in range(backlog):
-            yield ("custom", {"type": "thinking", "node": "trader", "token": f"flood{i}"})
-        yield _final_updates_chunk()
-        for i in range(100):
-            yield ("custom", {"type": "thinking", "node": "trader", "token": f"tail{i}"})
+        try:
+            for i in range(backlog):
+                yield ("custom", {"type": "thinking", "node": "trader", "token": f"flood{i}"})
+            yield _final_updates_chunk()
+            for i in range(100):
+                yield ("custom", {"type": "thinking", "node": "trader", "token": f"tail{i}"})
+        finally:
+            producer_done.set()
 
     monkeypatch.setattr("finance_agent.agent_factory._stream_graph", _stream)
 
@@ -296,9 +302,17 @@ async def test_scenario_e_prereport_backlog_compressed_after_graph_done(tmp_path
             events.append(ev)
 
     # 消费整体挂成 task：泵挂起在闸门上（首事件不会产出），必须先让生产者
-    # 灌完流再开闸——若先 await 首事件再开闸会循环等待死锁
+    # 灌完流再开闸——若先 await 首事件再开闸会循环等待死锁。
+    # 同步必须等生产者真的灌完，不能用固定 sleep：冷进程与 CI 负载下 0.3s
+    # 不够，开闸过早会让 3000 条积压走非压缩路径（tail_drops=100），
+    # 本用例在单跑/CI 都因此假红（本地单跑必现、整文件因执行器已热而通过）。
     drain_task = asyncio.create_task(_drain())
-    await asyncio.sleep(0.3)  # 生产者灌完 3100 条 + graph_done 置位 + 积压成形
+    while not producer_done.is_set():
+        await asyncio.sleep(0.01)
+    # 生产者线程的 chunk 经 run_coroutine_threadsafe 排程，给循环若干次
+    # 调度机会让 put 回调全部落地，再开闸（此时 qsize 即精确积压快照）
+    for _ in range(5):
+        await asyncio.sleep(0.01)
     gate.set()  # 开闸：泵以 graph_done 后的积压快照继续
     await asyncio.wait_for(drain_task, timeout=15)
     elapsed = time.perf_counter() - t0
