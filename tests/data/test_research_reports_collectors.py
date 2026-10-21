@@ -323,6 +323,24 @@ class TestInboxIngest:
         stored = store.get_document(store.list_documents(db_path=db)[0]["doc_key"], db_path=db)
         assert stored["page_offsets"] is None
 
+    def test_extractions_total_discloses_zero_coverage(self, tmp_path, monkeypatch):
+        """空投喂目录下深度层覆盖度为 0，必须出现在摘要里（空转可被运维看见）。"""
+        db = tmp_path / "rr.db"
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        got = rr.ingest_inbox(inbox, db_path=db, extract=False)
+        assert got["extractions_total"] == 0
+
+        (inbox / "国信证券-金融工程日报-261019.pdf").write_bytes(b"%PDF fake")
+        monkeypatch.setattr(rr, "extract_pdf_text", lambda path: ("解析文本", 2))
+        rr.ingest_inbox(inbox, db_path=db, extract=False)
+        store.upsert_extraction(
+            "d1",
+            {"broker": "国信证券", "stocks": [], "core_logic": [], "catalysts": [], "risks": []},
+            db_path=db,
+        )
+        assert rr.ingest_inbox(inbox, db_path=db, extract=False)["extractions_total"] == 1
+
 
 class TestExtraction:
     def _payload(self):

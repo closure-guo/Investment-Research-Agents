@@ -594,6 +594,9 @@ def ingest_inbox(
         "ingested": ingested,
         "skipped": skipped,
         "reparsed": reparsed,
+        # 深度层覆盖度：抽取只覆盖人工投喂 PDF，此值为 0 时下游触发分析无输入。
+        # 落进 job_runs.summary，运维面可直接看见「空转」而不是只看到 ok。
+        "extractions_total": store.count_extractions(db_path=db_path),
         "errors": errors,
     }
 

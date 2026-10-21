@@ -9,6 +9,24 @@
 - 标的 SHALL 落在配置的范围集合内；默认范围 `REPORT_TRIGGER_SCOPE=pool,watchlist,holdings`，范围外 SHALL skip `out_of_scope`。
 - 触发 SHALL 只在 `REPORT_TRIGGER_ENABLED=1` 时生效；默认关闭时只记录 would-trigger 摘要，MUST NOT 建会话或调用 LLM。
 - 策略/宏观报告 MUST NOT 按行业或板块触发个股分析。
+- 摘要 SHALL 标注输入来源 `input_scope`（`all_extractions` = 批量读抽取表；`explicit_doc_keys` = 指定文档）。
+- 输入为空时摘要 SHALL 带 `notice` 说明原因（批量空态以 `no_extractions` 开头、指定文档缺失以 `doc_not_found` 开头），MUST NOT 以无候选的静默成功冒充「已运行」。
+- 投喂日批（`research_report_inbox_daily`）的运行摘要 SHALL 带 `extractions_total`（抽取表总行数，不受列表 limit 截断），使深度层覆盖度为 0 时在运维面可见。
+
+#### Scenario: 深度抽取为空时披露原因
+
+- **GIVEN** `report_extractions` 为空且未指定 `doc_keys`
+- **WHEN** 触发编排运行
+- **THEN** `docs_scanned=0`、`input_scope=all_extractions`
+- **AND** 摘要 SHALL 带以 `no_extractions` 开头的 `notice`
+- **AND** MUST NOT 建会话
+
+#### Scenario: 指定文档无抽取时原因可区分
+
+- **GIVEN** 指定的 `doc_key` 在 `report_extractions` 中不存在
+- **WHEN** 触发编排运行
+- **THEN** 摘要 SHALL 带以 `doc_not_found` 开头的 `notice`
+- **AND** MUST NOT 与「库内本来没有抽取」共用同一提示
 
 #### Scenario: 个股研报触发范围内标的
 
