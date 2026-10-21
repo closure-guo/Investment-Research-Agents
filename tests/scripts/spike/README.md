@@ -139,3 +139,49 @@ powershell -ExecutionPolicy Bypass -File scripts/register-factor-research-task.p
 → 心跳停止 → `honor` 退回 `live`（页面与上一版一致）。控制文件、快照纯新增字段，旧读方忽略即可，
 零迁移。
 
+## 2026-10-21：重启管线与研发节奏配置（delta add-factor-research-settings）
+
+新版代理新增两件事（与后端 `POST /api/factor-research/restart`、
+`PUT /api/factor-research/config` 配套）：
+
+1. **重启请求**：控制文件含 `restart_request_id` / `restart_requested_at_epoch` 时，代理按
+   request_id 去重执行一次「停止当前会话 → 重新拉起看护」；已处理 id 与结果持久化在
+   `factor_research_logs/.agent_restart_state.json`，快照回写 `agent.restart`。停止失败时
+   **不会**继续启动第二个看护。
+2. **节奏配置**：每周期读 `data/factor_research/pipeline.json`（`FACTOR_RESEARCH_CONFIG_PATH`），
+   `snapshot_interval_s` 下一周期生效；`session_gap_s` / `short_session_backoff_s` /
+   `short_session_threshold_s` 在下次启动看护时写进看护脚本生效。快照回写
+   `agent.config`（旧代理无此字段，页面显示「研究侧未上报」）。
+
+**只更新代理（不动看护）**：
+
+```bash
+# 1) 备份 + 推新版代理（行尾去 CR）
+wsl -d rdagent -u root -- bash -c "cp -f /root/factor_research_agent.py /root/factor_research_agent.py.bak-$(date +%Y%m%d)"
+wsl -d rdagent -u root -- bash -c "tr -d '\\r' > /root/factor_research_agent.py" < tests/scripts/spike/factor_research_agent.py
+wsl -d rdagent -u root -- bash -c "python3 -m py_compile /root/factor_research_agent.py"
+
+# 2) 停旧代理守护（不要动 factor_research.pid / fin_factor 会话），再用字面路径起新守护
+#    注意：不要在 `wsl ... bash -c '...'` 里用 shell 变量拼路径（MSYS 会在外层把 $W 展开为空，
+#    代理会以 --workdir . --out . 启动并在仓库根留下杂散 pidfile）。改用脚本 stdin 投递：
+tr -d '\r' < tmp/deploy_factor_agent.sh | wsl -d rdagent -u root -- bash -s
+```
+
+脚本内容要点（字面路径，无变量）：
+
+```bash
+W=/root/rdagent-work
+CTRL=/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/control.json
+OUT=/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/status.json
+CFG=/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/pipeline.json
+kill "$(cat "$W/factor_research_agent.pid")" 2>/dev/null || true
+pkill -f "factor_research_agent.py --loop" 2>/dev/null || true
+sleep 2; rm -f "$W/factor_research_agent.pid"
+python3 /root/factor_research_agent.py --ensure-daemon --workdir "$W" --control "$CTRL" \
+  --out "$OUT" --state "$W/factor_research_logs/.collector_state.json" --config "$CFG" --interval 15
+```
+
+**验证**：`tr '\0' '\n' < /proc/<新pid>/cmdline` 应看到完整字面路径；
+`status.json` 的 `agent.config` 四字段齐全；页面设置分区显示「研究侧实际读取」。
+`git_ignore_folder` / 候选文件 / 会话日志在重启后保持（代理不删除研发产物）。
+

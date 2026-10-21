@@ -352,6 +352,7 @@ def test_tick_lock_timeout_degrades_instead_of_hanging(tmp_path, monkeypatch):
 
 def test_main_reconcile_once_exit_codes(tmp_path, monkeypatch):
     workdir = _seed_workdir(tmp_path)
+    monkeypatch.setenv("FACTOR_RESEARCH_CONFIG_PATH", str(tmp_path / "pipeline.json"))
     monkeypatch.setattr(agent, "supervisor_pid", lambda w: None)
     monkeypatch.setattr(agent, "_run_quiet", lambda cmd: None)
     monkeypatch.setattr(agent, "_fin_factor_present", lambda: False)
@@ -361,7 +362,7 @@ def test_main_reconcile_once_exit_codes(tmp_path, monkeypatch):
         agent.main(["--reconcile-once", "--workdir", str(workdir), "--control", str(control_stop)])
         == 0
     )
-    monkeypatch.setattr(agent, "start_supervisor", lambda w: False)
+    monkeypatch.setattr(agent, "start_supervisor", lambda w, config=None: False)
     control_start = _write_control(tmp_path, True)
     assert (
         agent.main(["--reconcile-once", "--workdir", str(workdir), "--control", str(control_start)])
@@ -375,9 +376,12 @@ def test_main_control_path_defaults_to_env(tmp_path, monkeypatch):
     env_control = tmp_path / "env-control.json"
     env_control.write_text(json.dumps({"desired_running": True}), encoding="utf-8")
     monkeypatch.setenv("FACTOR_RESEARCH_CONTROL_PATH", str(env_control))
+    monkeypatch.setenv("FACTOR_RESEARCH_CONFIG_PATH", str(tmp_path / "pipeline.json"))
     calls: list[str] = []
     monkeypatch.setattr(agent, "supervisor_pid", lambda w: None)
-    monkeypatch.setattr(agent, "start_supervisor", lambda w: (calls.append("start"), True)[1])
+    monkeypatch.setattr(
+        agent, "start_supervisor", lambda w, config=None: (calls.append("start"), True)[1]
+    )
     assert agent.main(["--reconcile-once", "--workdir", str(workdir)]) == 0
     assert calls == ["start"]
 
@@ -518,3 +522,212 @@ def test_launcher_tick_reports_agent_failure(tmp_path, monkeypatch):
     assert payload["agent_ok"] is False
     assert payload["agent_pid"] is None
     assert payload["detail"]
+
+
+# ── 研发节奏配置（add-factor-research-settings）──
+
+
+def test_read_config_defaults_when_missing(tmp_path):
+    cfg = agent.read_config(tmp_path / "pipeline.json")
+    assert cfg["values"] == agent.DEFAULT_CONFIG_VALUES
+    assert cfg["source"] == "defaults"
+    assert cfg["invalid_fields"] == []
+    assert cfg["updated_at"] is None
+
+
+def test_read_config_file_values(tmp_path):
+    path = tmp_path / "pipeline.json"
+    path.write_text(
+        json.dumps(
+            {
+                "snapshot_interval_s": 30,
+                "session_gap_s": 120,
+                "short_session_backoff_s": 900,
+                "short_session_threshold_s": 60,
+                "updated_at": "2026-10-21T10:00:00+08:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = agent.read_config(path)
+    assert cfg["values"] == {
+        "snapshot_interval_s": 30,
+        "session_gap_s": 120,
+        "short_session_backoff_s": 900,
+        "short_session_threshold_s": 60,
+    }
+    assert cfg["source"] == "file"
+    assert cfg["updated_at"] == "2026-10-21T10:00:00+08:00"
+
+
+def test_read_config_invalid_fields_fallback(tmp_path):
+    path = tmp_path / "pipeline.json"
+    path.write_text(
+        json.dumps({"session_gap_s": 99999, "short_session_backoff_s": "600"}),
+        encoding="utf-8",
+    )
+    cfg = agent.read_config(path)
+    assert cfg["values"]["session_gap_s"] == agent.DEFAULT_CONFIG_VALUES["session_gap_s"]
+    assert (
+        cfg["values"]["short_session_backoff_s"]
+        == agent.DEFAULT_CONFIG_VALUES["short_session_backoff_s"]
+    )
+    assert set(cfg["invalid_fields"]) == {"session_gap_s", "short_session_backoff_s"}
+    assert cfg["source"] == "file"
+
+
+def test_read_config_corrupt_and_bool_rejected(tmp_path):
+    path = tmp_path / "pipeline.json"
+    path.write_text("not json", encoding="utf-8")
+    assert agent.read_config(path)["source"] == "corrupt"
+    path.write_text(json.dumps({"snapshot_interval_s": True}), encoding="utf-8")
+    cfg = agent.read_config(path)
+    assert (
+        cfg["values"]["snapshot_interval_s"] == agent.DEFAULT_CONFIG_VALUES["snapshot_interval_s"]
+    )
+    assert cfg["invalid_fields"] == ["snapshot_interval_s"]
+
+
+def test_read_config_defaults_override_for_cli_interval(tmp_path):
+    cfg = agent.read_config(
+        tmp_path / "pipeline.json",
+        defaults={**agent.DEFAULT_CONFIG_VALUES, "snapshot_interval_s": 30},
+    )
+    assert cfg["values"]["snapshot_interval_s"] == 30
+
+
+def test_render_supervisor_script_uses_config(tmp_path):
+    script = agent.render_supervisor_script(
+        tmp_path,
+        {
+            **agent.DEFAULT_CONFIG_VALUES,
+            "session_gap_s": 120,
+            "short_session_backoff_s": 900,
+            "short_session_threshold_s": 60,
+        },
+    )
+    assert "sleep 120" in script
+    assert "sleep 900" in script
+    assert "-lt 60" in script
+    assert "sleep 600" not in script
+
+
+# ── 重启请求：去重执行 + 持久化（add-factor-research-settings）──
+
+
+def _write_restart_control(tmp_path, *, desired=True, request_id="r123", epoch=None):
+    path = tmp_path / "control.json"
+    payload = {"desired_running": desired}
+    if request_id is not None:
+        payload["restart_request_id"] = request_id
+        payload["restart_requested_at_epoch"] = epoch or int(time.time())
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _stub_restart(monkeypatch, *, running, stop_ok=True, start_ok=True):
+    calls: list[str] = []
+    monkeypatch.setattr(agent, "supervisor_pid", lambda workdir: 7752 if running else None)
+    monkeypatch.setattr(
+        agent, "stop_supervisor", lambda workdir: (calls.append("stop"), stop_ok)[1]
+    )
+    monkeypatch.setattr(
+        agent, "start_supervisor", lambda workdir, config=None: (calls.append("start"), start_ok)[1]
+    )
+    return calls
+
+
+def test_reconcile_restart_stops_then_starts_once(tmp_path, monkeypatch):
+    calls = _stub_restart(monkeypatch, running=True)
+    control = _write_restart_control(tmp_path, epoch=int(time.time()))
+
+    assert agent.reconcile_once(tmp_path, control) == "started"
+    assert calls == ["stop", "start"]
+    state = json.loads(
+        (tmp_path / "factor_research_logs" / agent.RESTART_STATE_NAME).read_text(encoding="utf-8")
+    )
+    assert state["last_restart_request_id"] == "r123"
+    assert state["last_restart_result"] == "restarted"
+
+    # 同一请求下一周期不重复执行（幂等）
+    assert agent.reconcile_once(tmp_path, control) == "noop"
+    assert calls == ["stop", "start"]
+
+
+def test_reconcile_restart_when_stopped_only_starts(tmp_path, monkeypatch):
+    calls = _stub_restart(monkeypatch, running=False)
+    control = _write_restart_control(tmp_path)
+    assert agent.reconcile_once(tmp_path, control) == "started"
+    assert calls == ["start"]
+
+
+def test_reconcile_restart_ignored_when_desired_false(tmp_path, monkeypatch):
+    calls = _stub_restart(monkeypatch, running=False)
+    control = _write_restart_control(tmp_path, desired=False)
+    assert agent.reconcile_once(tmp_path, control) == "noop"
+    assert calls == []
+
+
+def test_reconcile_restart_stop_failure_never_starts_second_supervisor(tmp_path, monkeypatch):
+    calls = _stub_restart(monkeypatch, running=True, stop_ok=False)
+    control = _write_restart_control(tmp_path)
+    assert agent.reconcile_once(tmp_path, control) == "stop-failed"
+    assert calls == ["stop"]
+    state = json.loads(
+        (tmp_path / "factor_research_logs" / agent.RESTART_STATE_NAME).read_text(encoding="utf-8")
+    )
+    assert state["last_restart_result"] == "restart-failed"
+
+
+def test_reconcile_restart_start_failure_recorded(tmp_path, monkeypatch):
+    calls = _stub_restart(monkeypatch, running=False, start_ok=False)
+    control = _write_restart_control(tmp_path)
+    assert agent.reconcile_once(tmp_path, control) == "start-failed"
+    assert calls == ["start"]
+    state = json.loads(
+        (tmp_path / "factor_research_logs" / agent.RESTART_STATE_NAME).read_text(encoding="utf-8")
+    )
+    assert state["last_restart_result"] == "restart-failed"
+
+
+def test_reconcile_restart_new_request_id_runs_again(tmp_path, monkeypatch):
+    _stub_restart(monkeypatch, running=True)
+    control = _write_restart_control(tmp_path, request_id="r1")
+    assert agent.reconcile_once(tmp_path, control) == "started"
+    control = _write_restart_control(tmp_path, request_id="r2")
+    assert agent.reconcile_once(tmp_path, control) == "started"
+
+
+def test_agent_meta_includes_config_and_restart(tmp_path):
+    config = {
+        "values": {**agent.DEFAULT_CONFIG_VALUES, "snapshot_interval_s": 30},
+        "source": "file",
+        "invalid_fields": [],
+        "updated_at": None,
+    }
+    restart = {
+        "request_id": "r123",
+        "requested_at_epoch": 100,
+        "result": "restarted",
+        "handled_at": "2026-10-21T10:00:00+08:00",
+        "handled_at_epoch": 105,
+    }
+    meta = agent._agent_meta("started", config=config, restart=restart)
+    assert meta["config"]["values"]["snapshot_interval_s"] == 30
+    assert meta["config"]["source"] == "file"
+    assert meta["restart"] == restart
+    assert isinstance(meta["last_action_epoch"], int)
+
+
+def test_run_tick_reports_agent_config(tmp_path, monkeypatch):
+    workdir = _seed_workdir(tmp_path)
+    control = _write_control(tmp_path, False)
+    out = tmp_path / "status.json"
+    state = workdir / "factor_research_logs" / ".collector_state.json"
+    monkeypatch.setattr(agent, "supervisor_pid", lambda w: None)
+
+    _, snap = agent.run_tick(workdir, control, out, state)
+
+    assert snap["agent"]["config"]["values"] == agent.DEFAULT_CONFIG_VALUES
+    assert snap["agent"]["config"]["source"] == "defaults"
+    assert snap["agent"]["restart"] is None

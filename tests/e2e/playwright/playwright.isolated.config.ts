@@ -63,6 +63,12 @@ export default defineConfig({
         REGIME_DB_PATH: 'data/test-e2e-regime.db',
         // 事件观察 E2E 造数库（同默认 config 口径；events_reset 清事件线四表）
         EVENTS_DB_PATH: 'data/test-e2e-events.db',
+        // 因子研发文件桥（delta add-factor-research-settings：隔离配置同样不得读写生产
+        // data/factor_research 下的快照/控制/心跳/节奏配置）
+        FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json',
+        FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json',
+        FACTOR_RESEARCH_LAUNCHER_PATH: 'data/test-e2e-factor-research-launcher.json',
+        FACTOR_RESEARCH_CONFIG_PATH: 'data/test-e2e-factor-research-pipeline.json',
         // 隔离报告落盘目录，避免 E2E 副作用污染 reports/
         REPORTS_DIR: 'tmp/e2e-reports-8001',
       },

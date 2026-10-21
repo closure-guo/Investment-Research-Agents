@@ -10,6 +10,16 @@ import {
   DialogTitle,
 } from '../../components/ui/dialog'
 import { formatSessionTime } from '../../lib/format'
+import {
+  ACTUAL_STATE_LABEL,
+  FACTOR_RESEARCH_POLL_MS,
+  controlErrorMessage,
+  deriveControlView,
+  fetchFactorResearchStatus,
+  formatDurationS,
+  submitFactorResearchControl,
+  submitFactorResearchRestart,
+} from '../../lib/factorResearch'
 import type {
   FactorResearchCurrentSession,
   FactorResearchSession,
@@ -18,28 +28,26 @@ import type {
 
 /**
  * 因子研发监控页（delta add-factor-research-monitor T3；spec frontend「因子研发监控页」；
- * delta add-factor-research-control：看护启停开关）。
+ * delta add-factor-research-control：看护启停开关；
+ * delta add-factor-research-settings：实态语义 + 重启管线）。
  *
- * 展示外部因子研发（RD-Agent 持续循环看护）的运行状态 + 看护启停控制：
+ * 展示外部因子研发（RD-Agent 持续循环看护）的运行状态 + 控制：
  * - 取数 ``GET /api/factor-research/status``（端点透传采集器快照 + 派生 stale + control 块）；
- * - 看护状态区：运行中/已停止徽章（StatusBadge 五态）+ pid + 启动时刻 + 已运行时长 +
+ * - 看护状态区：实际态徽章（运行中/已停止/状态未知）+ pid + 启动时刻 + 已运行时长 +
  *   累计会话/候选实现数；
- * - 控制条（常驻）：启停开关 + 状态文案。开关位置反映快照**实际**状态（MUST NOT 乐观翻转）；
- *   停止经二次确认（终止当前会话）后 ``PUT /api/factor-research/control``；``control.pending``
- *   期间显示「切换中」并禁用重复操作；快照缺失/损坏/陈旧（控制通道无存活证据）→ 开关禁用并
- *   明示理由；请求失败如实提示、位置不翻转；
+ * - 控制条（常驻）：启停开关 + 重启按钮 + 状态文案。开关位置反映**验证过的实际状态**
+ *   （``actual_state``）；快照失联时显示「状态未知」并披露持久化意图，MUST NOT 用意图冒充
+ *   运行中。停止/重启经二次确认后调用端点；``pending`` / ``restart_pending`` 期间显示
+ *   切换中/重启中并禁用重复操作；
  * - 当前会话进度区：循环序号 · 当前步骤（中文映射，未知原值如实）· 步骤进度 x/5 ·
  *   本步已用/预计剩余 · 本会话因子列表 · 日志尾（等宽字体）；
  * - 会话历史表：开始时刻 / 时长 / 状态（新→旧）；
  * - 陈旧（端点 stale=true）→ 顶部明示「数据已陈旧」，内容照常展示（陈旧 ≠ 不可用）；
- * - 缺失/损坏（available=false）→ 如实空态二分（「采集器未接入」/「快照损坏」），
- *   MUST NOT 以骨架屏或错误提示冒充；
+ * - 缺失/损坏（available=false）→ 如实空态二分（「采集器未接入」/「快照损坏」）；
  * - 轮询自动刷新（默认 10s，≤ 15s 契约；测试可注入间隔）；单轮失败静默重试。
  *
- * 数据面只读；控制面仅看护启停一项（MUST NOT 增设其它控制入口）。
+ * 数据面只读；控制面仅启停 + 重启两项（MUST NOT 增设其它控制入口）。
  */
-
-export const FACTOR_RESEARCH_POLL_MS = 10_000
 
 /** RD-Agent 步骤名 → 中文（未知步骤名原值如实，不臆造映射） */
 const STEP_LABELS: Record<string, string> = {
@@ -53,18 +61,6 @@ const STEP_LABELS: Record<string, string> = {
 function stepLabel(name: string | null): string {
   if (!name) return '—'
   return STEP_LABELS[name] ?? name
-}
-
-/** 时长秒 → 人类可读（长会话小时级不塌缩为 480:00） */
-function formatDurationS(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return '—'
-  const total = Math.floor(seconds)
-  const h = Math.floor(total / 3600)
-  const m = Math.floor((total % 3600) / 60)
-  const s = total % 60
-  if (h > 0) return `${h}小时${m}分`
-  if (m > 0) return `${m}分${s}秒`
-  return `${s}秒`
 }
 
 function progressText(cur: FactorResearchCurrentSession): string {
@@ -94,9 +90,11 @@ export function FactorResearchPage({
   // null = 加载中；error = 首屏取数失败（与「未接入/损坏」空态严格区分）
   const [data, setData] = useState<FactorResearchStatusResponse | null>(null)
   const [error, setError] = useState(false)
-  // 控制面（delta add-factor-research-control）：确认弹窗 / 提交中 / 失败提示
+  // 控制面（delta add-factor-research-control / settings）：确认弹窗 / 提交中 / 失败提示
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [restartSubmitting, setRestartSubmitting] = useState(false)
   const [controlError, setControlError] = useState<string | null>(null)
   // 409 control_unavailable 后的通道封禁（快照刷新成功即恢复；spec「409 时开关禁用」）
   const [channelBlocked, setChannelBlocked] = useState(false)
@@ -104,9 +102,7 @@ export function FactorResearchPage({
 
   const load = useCallback(async () => {
     try {
-      const resp = await fetch('/api/factor-research/status')
-      if (!resp.ok) throw new Error(String(resp.status))
-      setData((await resp.json()) as FactorResearchStatusResponse)
+      setData(await fetchFactorResearchStatus())
       setError(false)
       // 通道恢复证据：成功刷新即解封并清掉一次性失败提示（如实反映当前态）
       setChannelBlocked(false)
@@ -134,29 +130,12 @@ export function FactorResearchPage({
       setSubmitting(true)
       setControlError(null)
       try {
-        const resp = await fetch('/api/factor-research/control', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ desired_running: desired }),
-        })
-        if (!resp.ok) {
-          let detail = ''
-          try {
-            detail = ((await resp.json()) as { detail?: string }).detail ?? ''
-          } catch {
-            // 非 JSON 响应：按状态码如实提示
-          }
-          if (resp.status === 409 && detail === 'control_unavailable') {
-            setChannelBlocked(true) // 禁用至下一轮刷新给出通道恢复证据
-            setControlError('控制通道不可用（快照未更新，请求未受理）')
-          } else {
-            setControlError(`请求失败（HTTP ${resp.status}）`)
-          }
-          return
-        }
+        await submitFactorResearchControl(desired)
         await load() // 刷新 → control.pending 决定「切换中」
-      } catch {
-        setControlError('请求失败：网络错误')
+      } catch (err) {
+        const { text, unavailable } = controlErrorMessage(err)
+        if (unavailable) setChannelBlocked(true) // 禁用至下一轮刷新给出通道恢复证据
+        setControlError(text)
       } finally {
         setSubmitting(false)
       }
@@ -164,68 +143,41 @@ export function FactorResearchPage({
     [load]
   )
 
+  // 重启提交（无请求体；代理按 request_id 去重执行）
+  const submitRestart = useCallback(async () => {
+    setRestartSubmitting(true)
+    setControlError(null)
+    try {
+      await submitFactorResearchRestart()
+      await load() // 刷新 → control.restart_pending 决定「重启中」
+    } catch (err) {
+      const { text, unavailable } = controlErrorMessage(err)
+      if (unavailable) setChannelBlocked(true)
+      setControlError(text)
+    } finally {
+      setRestartSubmitting(false)
+    }
+  }, [load])
+
   const supervisor = data?.supervisor ?? null
+  const launcher = data?.launcher ?? null
   const current = data?.current_session ?? null
   const sessions = data?.sessions ?? []
   const totals = data?.totals ?? null
   const stale = data?.stale === true
   const collectedAt = data?.collected_at ? formatSessionTime(data.collected_at) : '—'
 
-  // ── 控制面派生（快照实态优先；离线时以持久化意图为可信位置）──
-  const control = data?.control ?? null
-  const launcher = data?.launcher ?? null
-  const agentInfo = data?.agent ?? null
-  const honor = control?.honor ?? 'unavailable'
-  const snapshotLive = data !== null && data.available === true && !stale
-  const running = snapshotLive ? supervisor?.running === true : control?.desired_running === true
-  const pending = control?.pending === true
-  // honor 由后端判定；live 额外要求快照确实新鲜（防御后端/夹具不一致）
-  const reachable = (honor === 'live' && snapshotLive) || honor === 'launcher'
-  const switchDisabled = submitting || pending || channelBlocked || !reachable
-
-  const requestedAt = control?.requested_at ? formatSessionTime(control.requested_at) : null
-  const awaitingLauncher =
-    honor === 'launcher' &&
-    control?.requested_at != null &&
-    data?.collected_at != null &&
-    Date.parse(control.requested_at) > Date.parse(data.collected_at)
-
-  let controlStateText: string
-  if (data === null) {
-    controlStateText = '—'
-  } else if (data.available !== true) {
-    if (honor === 'launcher') {
-      controlStateText = '研究侧启动中（等待首个快照）——启动器已确认代理存活'
-    } else if (data.reason === 'corrupt') {
-      controlStateText = '控制通道未接入（快照损坏）'
-    } else {
-      controlStateText = '控制通道未接入（采集器未接入）'
-    }
-  } else if (stale) {
-    if (honor === 'launcher') {
-      controlStateText = awaitingLauncher
-        ? `已请求（${requestedAt}），等待启动器拉起`
-        : `研究侧离线（最近采集 ${collectedAt}）——将在 ≤3 分钟内自动拉起`
-    } else {
-      controlStateText = '控制通道暂不可用（研究侧与启动器均离线）'
-    }
-  } else if (pending) {
-    const failedAction =
-      agentInfo?.last_action === 'start-failed' || agentInfo?.last_action === 'stop-failed'
-        ? agentInfo.last_action
-        : null
-    if (failedAction !== null) {
-      const label = failedAction === 'start-failed' ? '启动失败' : '停止失败'
-      const at = agentInfo?.last_action_at ? formatSessionTime(agentInfo.last_action_at) : '—'
-      controlStateText = `${label}（${at}）：${agentInfo?.last_error ?? '原因未记录'}；代理将自动重试`
-    } else {
-      controlStateText = control?.requested_at
-        ? `切换中…（${formatSessionTime(control.requested_at)} 发起，等待研发侧受理）`
-        : '切换中…（等待研发侧受理）'
-    }
-  } else {
-    controlStateText = running ? '已开启' : '已关闭'
-  }
+  // 控制面派生（单一共享源：开关位置只取验证过的 actual_state，意图仅作离线披露）
+  const view = deriveControlView(data, { submitting, restartSubmitting, channelBlocked })
+  const {
+    actualState,
+    running,
+    honor,
+    snapshotLive,
+    switchDisabled,
+    restartDisabled,
+    stateText: controlStateText,
+  } = view
 
   const recentDurations = (data?.sessions ?? [])
     .filter((s) => s.duration_s !== null)
@@ -240,6 +192,11 @@ export function FactorResearchPage({
       return
     }
     void submitControl(true)
+  }
+
+  const onRestartClick = () => {
+    if (restartDisabled) return
+    setRestartConfirmOpen(true)
   }
 
   // 看护已运行时长：客户端按启动时刻实时推算（每次轮询重算）
@@ -270,7 +227,7 @@ export function FactorResearchPage({
         </div>
       </div>
 
-      {/* 控制条（常驻：开关 + 状态文案 + 失败提示；delta add-factor-research-control） */}
+      {/* 控制条（常驻：开关 + 重启 + 状态文案 + 失败提示） */}
       <div
         data-testid="factor-research-control"
         className="shrink-0 border-b border-border px-6 py-2.5"
@@ -298,6 +255,18 @@ export function FactorResearchPage({
               style={{ transform: running ? 'translateX(1.125rem)' : 'translateX(0.125rem)' }}
             />
           </button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            data-testid="factor-research-restart-button"
+            disabled={restartDisabled}
+            onClick={onRestartClick}
+            className="h-6 px-2 text-xs"
+          >
+            <i className="fas fa-rotate-right mr-1"></i>
+            重启管线
+          </Button>
           <span
             data-testid="factor-research-control-state"
             className="text-xs"
@@ -344,6 +313,38 @@ export function FactorResearchPage({
               }}
             >
               确认停止
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 重启二次确认（终止当前会话并重新拉起；delta add-factor-research-settings） */}
+      <Dialog open={restartConfirmOpen} onOpenChange={setRestartConfirmOpen}>
+        <DialogContent data-testid="factor-research-restart-confirm-dialog">
+          <DialogHeader>
+            <DialogTitle>重启研发管线？</DialogTitle>
+            <DialogDescription>
+              将终止当前研发会话（进行中的实验作废）并重新拉起看护；工作区与候选产物保留，重启后从既有工作区继续。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="secondary"
+              size="sm"
+              data-testid="factor-research-restart-cancel"
+              onClick={() => setRestartConfirmOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              size="sm"
+              data-testid="factor-research-restart-confirm"
+              onClick={() => {
+                setRestartConfirmOpen(false)
+                void submitRestart()
+              }}
+            >
+              确认重启
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -420,18 +421,24 @@ export function FactorResearchPage({
             >
               <div className="flex flex-wrap items-center gap-3">
                 <StatusBadge
-                  status={supervisor?.running ? 'running' : 'retired'}
-                  label={supervisor?.running ? '运行中' : '已停止'}
+                  status={
+                    actualState === 'running'
+                      ? 'running'
+                      : actualState === 'stopped'
+                        ? 'retired'
+                        : 'degraded'
+                  }
+                  label={ACTUAL_STATE_LABEL[actualState]}
                   className="text-[11px]"
                 />
                 <span data-testid="factor-research-supervisor-pid" className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                  pid {supervisor?.pid ?? '—'}
+                  pid {snapshotLive ? (supervisor?.pid ?? '—') : '—'}
                 </span>
                 <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                  启动 {supervisor?.started_at ? formatSessionTime(supervisor.started_at) : '—'}
+                  启动 {snapshotLive && supervisor?.started_at ? formatSessionTime(supervisor.started_at) : '—'}
                 </span>
                 <span data-testid="factor-research-supervisor-uptime" className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                  已运行 {supervisor?.running ? formatDurationS(uptimeS) : '—'}
+                  已运行 {actualState === 'running' ? formatDurationS(uptimeS) : '—'}
                 </span>
                 <span data-testid="factor-research-totals" className="ml-auto text-xs" style={{ color: 'var(--text-secondary)' }}>
                   累计会话 {totals?.sessions ?? 0} · 候选实现 {totals?.candidates ?? 0}

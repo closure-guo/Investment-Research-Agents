@@ -24,11 +24,12 @@ describe('SettingsCenterPage', () => {
 
   it('默认激活 LLM 配置分区并显示其内容', () => {
     render(<SettingsCenterPage {...baseProps} />)
-    // 左侧导航含六大分区
+    // 左侧导航含各分区（含 delta add-factor-research-settings 新增的因子研发配置）
     expect(screen.getByText('缓存管理')).toBeInTheDocument()
     expect(screen.getByText('会话管理')).toBeInTheDocument()
     expect(screen.getByText('运行信息')).toBeInTheDocument()
     expect(screen.getByText('数据监控')).toBeInTheDocument()
+    expect(screen.getByText('因子研发配置')).toBeInTheDocument()
     expect(screen.getByText('战绩展示偏好')).toBeInTheDocument()
   })
 
