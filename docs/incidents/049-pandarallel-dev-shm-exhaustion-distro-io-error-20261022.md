@@ -205,9 +205,14 @@ C: 300GB / 已用 293GB（96%），构成（实测）：
      最大静默 602s 的 1.5 倍），页面在僵死时展示无进展横幅并**停止把定格的步骤读数当当前进度**。
      E2E 17/17、pytest 58、vitest 34 全绿；人工验证报告见
      `tests/validation/2026-10-22-add-factor-research-stall-detection-validation.md`。
-   - ⏳ **exec 存活探针**未做：启动器加 `wsl -d rdagent -e /bin/true`（或写标记文件）判活，失败时
-     页面如实显示「distro I/O 错误，需重启 VM」，并允许启动器尝试 `wsl --terminate rdagent`
-     （本次真正生效的动作就是 VM 重启）。**动启动器权限边界，需单独 delta 讨论**。
+   - ✅ **exec 存活探针**已由 delta `add-factor-research-distro-liveness-probe` 落地并 archive
+     （2026-10-22）：启动器每节拍探活 `wsl -d rdagent -e /bin/true`（≤20s），结果原子写宿主侧
+     `data/factor_research/distro_probe.json`；端点派生只读 `distro` 块；页面在「快照陈旧 ∧ 探活新鲜
+     ∧ `ok=false`」时展示独立提示，并修正陈旧横幅的失实表述（不再声称「采集器可能已停止」）。
+     **自愈门控是合取**（连续失败 ≥15 ∧ 快照停摆 ≥900s ∧ 距上次自愈 ≥1800s）——判据依据是
+     历史 839 次节拍中 611 次（72.8%）非零退出而管线在跑，单次失败 MUST NOT 判死；
+     生产实测探活文件 `ok=true`，E2E 19/19，门控真值表 7/7。
+     人工验证报告见 `tests/validation/2026-10-22-add-factor-research-distro-liveness-probe-validation.md`。
 2. **pandarallel 泄漏**：`delete=False` 的 chunk 文件在异常路径残留（`/dev/shm` 与新的
    `.pandarallel_mem` 都实测有残留），长跑蚕食空间；应纳入清理或改 `delete=True` 的读回方式。
 3. **VM 内存配额**：18GB 由研发侧与生产栈共享，本次是研发侧单点打满；IC dedup 修好后

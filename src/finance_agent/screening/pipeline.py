@@ -56,11 +56,14 @@ from finance_agent.screening.candidate_llm import (
 from finance_agent.screening.constraints import FilterThresholds
 from finance_agent.screening.filters import build_candidate_record, filter_universe
 from finance_agent.screening.ranker import (
+    MIN_IC_SAMPLES_FOR_SCORING,
     Candidate,
     has_scorable_factors,
+    ic_sample_counts,
     liquidity_fallback_rank,
     rank_universe,
     recent_ic_stats,
+    select_scorable_factors,
 )
 from finance_agent.screening.store import (
     DEFAULT_MIN_DAYS,
@@ -356,22 +359,38 @@ def run_screening_batch(
         # 通道」；MUST NOT 静默等权/伪造权重）
         factors = list_active_factors(db_path=library_db_path)
         ic_stats = recent_ic_stats(factors, db_path=library_db_path)
-        if has_scorable_factors(factors, ic_stats):
+        # IC 样本门槛（add-screening-ic-bootstrap-guard）：样本不足的因子不参与
+        # 打分（权重 0）。全被排除 → 与「无可打分因子」同一显式降级通道，避免
+        # 用 1–3 个样本估出的权重把 L2 排序变成噪声、再与 3 日在榜门槛相乘成空池。
+        ic_counts = ic_sample_counts(factors, db_path=library_db_path)
+        scorable_factors, thin_factors = select_scorable_factors(factors, ic_counts)
+        if thin_factors:
+            _logger.warning(
+                "选股日批 L2 排除 IC 样本不足的因子（%s，门槛 %d 条）：%s",
+                trade_date,
+                MIN_IC_SAMPLES_FOR_SCORING,
+                ", ".join(
+                    f"factor={int(row['id'])} samples={ic_counts.get(int(row['id']), 0)}"
+                    for row in thin_factors
+                ),
+            )
+        if has_scorable_factors(scorable_factors, ic_stats):
             candidates = rank_universe(
                 panel=active_panel,
                 as_of=trade_date,
                 passed_codes=passed,
-                factors=factors,
+                factors=scorable_factors,
                 ic_stats=ic_stats,
                 top_n=L2_TOP_N,
             )
         else:
             selection_mode = "fallback"
             _logger.warning(
-                "选股日批降级（%s）：因子库无可打分因子（active=%d），L2 显式跳过，"
-                "按近 %d 日日均成交额降级排序（selection_mode=fallback）",
+                "选股日批降级（%s）：无足够 IC 样本的可打分因子（active=%d，样本达标=%d），"
+                "L2 显式跳过，按近 %d 日日均成交额降级排序（selection_mode=fallback）",
                 trade_date,
                 len(factors),
+                len(scorable_factors),
                 constraints.MIN_LIQUIDITY_HISTORY_DAYS,
             )
             candidates = liquidity_fallback_rank(

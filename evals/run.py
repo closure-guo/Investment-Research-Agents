@@ -287,6 +287,7 @@ def _rows_from_results(item_results: list) -> list[dict]:
                 "item": str(r.item.input.get("query")),
                 "mode": r.item.input.get("mode"),
                 "skipped": skipped or None,
+                "decision": output.get("decision") if isinstance(output, dict) else None,
                 "scores": {
                     e.name: e.value for e in r.evaluations if isinstance(e.value, (int, float))
                 },
@@ -309,6 +310,31 @@ def _mean_rows(rows: list[dict]) -> dict:
                 buckets.setdefault(name, []).append(float(value))
     means = {name: round(sum(vals) / len(vals), 4) for name, vals in buckets.items() if vals}
     means["judge_failures"] = failures
+    # calibrate-decision-confidence：confidence 分布（观测项，MUST NOT 进 judge 口径）
+    confidences = [
+        float(row["decision"]["confidence"])
+        for row in rows
+        if isinstance(row.get("decision"), dict)
+        and isinstance(row["decision"].get("confidence"), (int, float))
+    ]
+    if confidences:
+        ordered = sorted(confidences)
+        count = len(ordered)
+        mid = count // 2
+        median = ordered[mid] if count % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+        hist: dict[str, int] = {}
+        for value in ordered:
+            bucket = f"{int(value * 10) / 10:.1f}"
+            hist[bucket] = hist.get(bucket, 0) + 1
+        means["confidence_n"] = count
+        means["confidence_median"] = round(median, 4)
+        means["confidence_ge_070_rate"] = round(
+            sum(1 for value in ordered if value >= 0.7) / count, 4
+        )
+        means["confidence_lt_040_rate"] = round(
+            sum(1 for value in ordered if value < 0.4) / count, 4
+        )
+        means["confidence_hist"] = dict(sorted(hist.items()))
     return means
 
 

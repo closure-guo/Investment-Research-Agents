@@ -137,10 +137,26 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "pipeline-fallback-condition",
         "src/finance_agent/screening/pipeline.py",
-        "if has_scorable_factors(factors, ic_stats):",
+        "if has_scorable_factors(scorable_factors, ic_stats):",
         "if True:",
         "tests/screening/test_pipeline.py",
         "降级触发条件恒假（永不降级）",
+    ),
+    Mutation(
+        "pipeline-ic-sample-guard",
+        "src/finance_agent/screening/pipeline.py",
+        "scorable_factors, thin_factors = select_scorable_factors(factors, ic_counts)",
+        "scorable_factors, thin_factors = factors, []",
+        "tests/screening/test_pipeline.py",
+        "IC 样本门槛去除（薄样本因子照常打分）",
+    ),
+    Mutation(
+        "ranker-ic-sample-boundary",
+        "src/finance_agent/screening/ranker.py",
+        "if int(ic_counts.get(int(row[\"id\"]), 0)) >= min_samples:",
+        "if int(ic_counts.get(int(row[\"id\"]), 0)) > min_samples:",
+        "tests/screening/test_ranker.py",
+        "IC 样本门槛边界（>= → >）",
     ),
     Mutation(
         "store-selection-mode-guard",

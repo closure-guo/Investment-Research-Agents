@@ -818,7 +818,27 @@ def extract_document(doc_key: str, *, force: bool = False, db_path: str | None =
             "metadata": {"doc_key": doc_key, "filename": doc.get("filename")},
         },
     )
-    payload = extract_json(raw_text)
+    try:
+        payload = extract_json(raw_text)
+    except json.JSONDecodeError:
+        # 空正文/纯散文响应（生产 2026-10-21 实测一例）：抽取是投喂链唯一的 LLM
+        # 步骤，单次失败会让整份研报停在「已入库未抽取」→ 一次强化重试，仍失败才抛。
+        raw_text, metadata = complete_text(
+            [
+                {
+                    "role": "user",
+                    "content": prompt
+                    + "\n\n只输出一个 JSON 对象本身，不要任何解释、前后缀或 Markdown 围栏。",
+                }
+            ],
+            purpose="report_extraction",
+            max_tokens=6000,
+            trace={
+                "name": "report_extraction_retry",
+                "metadata": {"doc_key": doc_key, "filename": doc.get("filename")},
+            },
+        )
+        payload = extract_json(raw_text)
     if not isinstance(payload, dict):
         raise ValueError("抽取响应不是 JSON 对象")
     coerced = _coerce_extraction(payload, page_count=doc.get("page_count"))

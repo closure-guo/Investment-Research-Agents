@@ -81,3 +81,24 @@ class TestInactionRationalePromptContract:
         assert "1-3 条" in text
         # 继承行同样须钉死与 reasoning 的分工（design D1）
         assert "禁止照抄" in text
+
+class TestConfidenceCalibrationPromptContract:
+    """calibrate-decision-confidence：三档示例 + 证据判据（不得只给区间描述）。"""
+
+    def test_trader_has_three_tier_examples_and_evidence_rule(self):
+        text = _load("trader.md")
+        for value in ("0.85", "0.55", "0.30"):
+            assert value in text, f"trader.md 缺示例值 {value}"
+        assert "证据" in text
+
+    def test_risk_judge_has_three_tier_examples_and_evidence_rule(self):
+        text = _load("risk_judge.md")
+        for value in ("0.85", "0.55", "0.30"):
+            assert value in text, f"risk_judge.md 缺示例值 {value}"
+        assert "证据" in text
+
+    def test_fund_manager_has_three_tier_examples_and_evidence_rule(self):
+        text = _load("fund_manager.md")
+        for value in ("0.85", "0.55", "0.30"):
+            assert value in text, f"fund_manager.md 缺示例值 {value}"
+        assert "证据" in text

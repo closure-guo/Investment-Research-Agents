@@ -662,6 +662,72 @@ def test_factor_mode_regression_and_batch_tag(ws: _Workspace) -> None:
     assert pool and pool[0]["factor_contribs"]
 
 
+# ── IC 样本门槛（add-screening-ic-bootstrap-guard） ─────────────────────────
+
+
+def _factor_library(root: Path, name: str, ic_days: int) -> tuple[Path, int]:
+    """建独立因子库：1 个 active 因子 + 写入 ``ic_days`` 条 RankIC。"""
+    db = root / f"{name}_factor_library.db"
+    factor_id = add_factor(
+        expression="close",
+        hypothesis="测试假设文本（≥30 字长度达标的合成因子说明）",
+        category="builtin",
+        status="active",
+        db_path=db,
+    )
+    for day, value in zip(_CALENDAR[-ic_days:] if ic_days else (), range(ic_days), strict=True):
+        record_ic(factor_id, day, 0.01 + 0.001 * value, db_path=db)
+    return db, factor_id
+
+
+def test_thin_ic_history_falls_back_to_liquidity(ws: _Workspace) -> None:
+    """只有 3 条 IC（生产现状）→ 显式降级，精选池照常产出（不再是空池）。"""
+    thin_library, _ = _factor_library(ws.root, "thin_ic", ic_days=3)
+    _seed_pool_days(ws)
+
+    result = _run(ws, library_db_path=thin_library)
+
+    assert result["status"] == "ok"
+    assert result["selection_mode"] == "fallback"
+    assert result["pool_size"] == 2
+    pool = list_selection_pool(_AS_OF, db_path=ws.screening_db)
+    assert all(row["factor_contribs"] == [] for row in pool)
+    assert latest_screening_batch(db_path=ws.screening_db)["selection_mode"] == "fallback"
+
+
+def test_thin_factor_excluded_but_mature_factor_keeps_factor_mode(ws: _Workspace) -> None:
+    """成熟因子（60 条）+ 新因子（3 条）混合 → factor 模式，新因子不进贡献分解。"""
+    mixed_library = ws.root / "mixed_factor_library.db"
+    mature_id = add_factor(
+        expression="close",
+        hypothesis="测试假设文本（≥30 字长度达标的合成因子说明）",
+        category="builtin",
+        status="active",
+        db_path=mixed_library,
+    )
+    thin_id = add_factor(
+        expression="high",
+        hypothesis="测试假设文本（≥30 字长度达标的合成因子说明）",
+        category="builtin",
+        status="active",
+        db_path=mixed_library,
+    )
+    for day, value in zip(_CALENDAR[-60:], ws.ic_values, strict=True):
+        record_ic(mature_id, day, value, db_path=mixed_library)
+    for day in _CALENDAR[-3:]:
+        record_ic(thin_id, day, 0.5, db_path=mixed_library)
+    _seed_pool_days(ws)
+
+    result = _run(ws, library_db_path=mixed_library)
+
+    assert result["selection_mode"] == "factor"
+    pool = list_selection_pool(_AS_OF, db_path=ws.screening_db)
+    contrib_ids = {
+        contrib["factor_id"] for row in pool for contrib in row["factor_contribs"]
+    }
+    assert contrib_ids == {mature_id}
+
+
 def test_fallback_with_l3_gateway_down_still_fails_closed(ws: _Workspace) -> None:
     """降级不吞失败：库空 + L3 网关整体不可用 → 批次 failed、零池（fail-closed 不放宽）。"""
     result = _run(

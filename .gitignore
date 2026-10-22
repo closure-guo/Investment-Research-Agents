@@ -293,6 +293,10 @@ data/test-e2e-events.db*
 data/research_reports.db*
 data/test-e2e-research-reports.db*
 data/test-e2e-ui-baseline-research-reports.db*
+# 批量分析并发设置（delta add-analysis-concurrency-setting：运行时设置文件 + E2E 隔离文件；
+# env ANALYSIS_CONCURRENCY_PATH 可覆盖）
+data/settings/
+data/test-e2e-analysis-concurrency.json*
 # 研报投喂目录（个人研究自用；人工放入的 PDF 与解析产物不得入库）
 data/research_report_inbox/
 data/test-repro.db*

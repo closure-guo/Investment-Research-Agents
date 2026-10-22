@@ -709,3 +709,144 @@ def test_config_table_enabled_beats_env_unset(tmp_path, monkeypatch):
 
     assert result["enabled"] is True
     assert runner.calls == ["600519"]
+
+# ── 当日额度守卫（add-cohort-quota-guard） ──────────────────────────────────
+
+
+def _seed_row(db, ticker, *, status="success", reason=None, tokens=500_000, seq=0):
+    init_cohort_runs(db)
+    insert_cohort_run(
+        {
+            "universe_version": "v1",
+            "ticker": ticker,
+            "trade_date": _DAY,
+            "status": status,
+            "failure_reason": reason,
+            "run_seq": seq,
+            "llm_calls": 10,
+            "tokens_prompt": tokens - 1000,
+            "tokens_completion": 1000,
+            "tokens_total": tokens,
+            "trigger_time": "2026-09-24T15:00:00",
+        },
+        db,
+    )
+
+
+def test_quota_error_stops_rest_of_batch(tmp_path, monkeypatch, caplog):
+    """批内撞额度（429/5 小时上限）→ 该只记 quota，剩余立即 skipped，不再重试。"""
+    monkeypatch.setattr("finance_agent.outcome.cohort.runner._live_trace_id", lambda: None)
+    db = tmp_path / "c.db"
+    universe = _universe_file(tmp_path, ["600519", "000001", "300750"])
+
+    def quota_runner(ticker, name, req, analysis_id, start_time, session_id=None, llm_config=None):
+        quota_runner.calls.append(ticker)
+        if ticker == "600519":
+            yield _sse(
+                {
+                    "type": "error",
+                    "node_id": "x",
+                    "message": "RateLimitError: 已达到 5 小时的使用上限，限额将在 22:00 恢复",
+                }
+            )
+        else:
+            yield _sse({"type": "report_ready", "session_id": session_id, "report_markdown": "#"})
+
+    quota_runner.calls = []
+
+    with caplog.at_level(logging.WARNING, logger=_RUNNER_LOGGER):
+        result = run_cohort_batch(
+            trade_date=_DAY,
+            universe_path=universe,
+            db_path=db,
+            enabled=True,
+            graph_runner=quota_runner,
+        )
+
+    assert quota_runner.calls == ["600519"]
+    assert result["failure"] == 1 and result["skipped"] == 2
+    rows = _rows(db)
+    failed = [r for r in rows if r["status"] == "failure"]
+    assert failed[0]["failure_reason"] == "quota"
+    assert {r["failure_reason"] for r in rows if r["status"] == "skipped"} == {"quota"}
+    assert "quota" in FAILURE_CODES
+
+
+def test_quota_failure_today_skips_whole_batch(tmp_path, monkeypatch, caplog):
+    """当日已撞过额度 → 预检整批跳过，零 LLM 调用。"""
+    monkeypatch.setattr("finance_agent.outcome.cohort.runner._live_trace_id", lambda: None)
+    db = tmp_path / "c.db"
+    _seed_row(db, "600519", status="failure", reason="quota")
+    universe = _universe_file(tmp_path, ["000001", "300750"])
+    runner = _make_runner()
+
+    with caplog.at_level(logging.WARNING, logger=_RUNNER_LOGGER):
+        result = run_cohort_batch(
+            trade_date=_DAY,
+            universe_path=universe,
+            db_path=db,
+            enabled=True,
+            graph_runner=runner,
+        )
+
+    assert runner.calls == []
+    assert result["budget_stopped"] is True
+    assert result["skipped"] == 2
+    assert result["skipped_reasons"] == {"quota": 2}
+    assert all(r["failure_reason"] == "quota" for r in _rows(db) if r["status"] == "skipped")
+
+
+def test_daily_budget_preflight_skips_batch(tmp_path, monkeypatch):
+    """当日已耗 + 单只预估 > 当日预算 → 预检跳过（budget_daily），零调用。"""
+    monkeypatch.setattr("finance_agent.outcome.cohort.runner._live_trace_id", lambda: None)
+    monkeypatch.setenv("COHORT_DAILY_TOKEN_BUDGET", "1000000")
+    db = tmp_path / "c.db"
+    _seed_row(db, "600519", tokens=900_000)
+    universe = _universe_file(tmp_path, ["000001", "300750"])
+    runner = _make_runner()
+
+    result = run_cohort_batch(
+        trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+    )
+
+    assert runner.calls == []
+    assert result["budget_stopped"] is True
+    assert result["skipped_reasons"] == {"budget_daily": 2}
+    assert all(
+        r["failure_reason"] == "budget_daily" for r in _rows(db) if r["status"] == "skipped"
+    )
+    assert "budget_daily" in FAILURE_CODES
+
+
+def test_daily_budget_stops_mid_batch(tmp_path, monkeypatch):
+    """预检放行、跑完一只后余量不足 → 剩余标的 budget_daily。"""
+    monkeypatch.setattr("finance_agent.outcome.cohort.runner._live_trace_id", lambda: None)
+    monkeypatch.setenv("COHORT_DAILY_TOKEN_BUDGET", "250050")
+    db = tmp_path / "c.db"
+    universe = _universe_file(tmp_path, ["600519", "000001", "300750"])
+    runner = _make_runner(usage={"total_tokens": 140})
+
+    result = run_cohort_batch(
+        trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+    )
+
+    assert runner.calls == ["600519"]
+    assert result["success"] == 1
+    assert result["skipped_reasons"] == {"budget_daily": 2}
+
+
+def test_duplicate_takes_precedence_over_daily_skip(tmp_path, monkeypatch):
+    """幂等成功的标的记 duplicate，不因当日守卫被改写成 skipped。"""
+    monkeypatch.setattr("finance_agent.outcome.cohort.runner._live_trace_id", lambda: None)
+    monkeypatch.setenv("COHORT_DAILY_TOKEN_BUDGET", "1")
+    db = tmp_path / "c.db"
+    _seed_row(db, "600519", tokens=140)
+    universe = _universe_file(tmp_path, ["600519", "000001"])
+    runner = _make_runner()
+
+    result = run_cohort_batch(
+        trade_date=_DAY, universe_path=universe, db_path=db, enabled=True, graph_runner=runner
+    )
+
+    assert runner.calls == []
+    assert result["skipped_reasons"] == {"duplicate": 1, "budget_daily": 1}

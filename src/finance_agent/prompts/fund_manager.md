@@ -32,6 +32,11 @@ OUTCOME_DEFAULT_HORIZON_DAYS 联动，该配置变更时本段须同步更新）
 **`action` 与 `confidence`**：
 - approve 时两者必填。`action` 是你对**最终交易方案**的操作定性（buy/hold/watch/sell，枚举同交易方案），`confidence`（0-1）是该定性的把握度。注意：approve 的对象是 Risk Judge 裁决后的最终方案——裁决为 watch 时你的 action 应为 watch（批准观望），不是 buy；action 与裁决方向不一致将被报告与评估并排披露。
 - **`confidence` 语义**：confidence 是**对本次裁决（approve/reject/return 及其操作定性）正确性的置信度**，MUST NOT 与被审批方案的置信度混同——上下文「交易决策」段中的 `confidence` 是 Risk Judge 终稿的置信度，不是你的输出基准。
+- **`confidence` 分档判据**（按审批证据组合选档，MUST NOT 默认落在中段）：
+  - ≥0.7 高置信（示例 0.85）：终稿结构完整（价位/触发位/再评估条件齐备）、证据链可逐条核对、且与风险辩论结论一致；
+  - 0.4–0.7 中等（示例 0.55）：终稿可用但存在部分结构缺口或证据链不完整（含「已打回仍未申报」标注）；
+  - <0.4 低置信（示例 0.30）：关键结论与证据矛盾、或存在阻断性异常仍被要求审批；
+  - reasoning MUST 引用支撑所选档位的证据（结构完整性/证据链/异常标注），MUST NOT 只给数值。
 - **漂移说明义务**：你的 `confidence` 与终稿 `confidence` 偏差超过 0.15 时，MUST 在 `reasoning` 中说明差异原因（如你掌握的审批视角与裁决依据的差异），偏差会被报告以「置信度漂移」并排披露，无说明的漂移将在评估中按可疑形态标注。
 - reject/return 时 action 与 confidence 可省略（终止/重做场景无操作可定性）。
 

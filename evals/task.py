@@ -72,6 +72,12 @@ def _run_deep(inp: dict) -> dict:
     # add-debate-argument-anchors：论点锚点覆盖率（零 LLM）+ 拆项进实验输出；
     # 无论点（quick/旧 trace）→ None，不计入均值
     anchor = anchor_coverage(state.get("debate_anchor_checks") or [])
+    # calibrate-decision-confidence：confidence 分布是校准观测（不进 judge 口径），
+    # 从终稿取 action/confidence 透传给实验汇总，缺失时为 None 不计入。
+    decision = state.get("final_trade_decision")
+    if hasattr(decision, "model_dump"):
+        decision = decision.model_dump()
+    decision = decision if isinstance(decision, dict) else {}
     return {
         "report": state.get("final_report"),
         # ticker_match 输出侧是 input 回显（#55 文档化:管线无标的解析节点,
@@ -82,6 +88,10 @@ def _run_deep(inp: dict) -> dict:
         "judge_vars": extract_judge_vars(state, query=inp.get("query", "")),
         "mode": "deep",
         "skipped": None,
+        "decision": {
+            "action": decision.get("action"),
+            "confidence": decision.get("confidence"),
+        },
         # harden-citation-semantic-coverage：引用指标进实验报告（citation_pass
         # 布尔转 0/1；citation_coverage 缺失→None 不计入）
         "citation_pass": (
