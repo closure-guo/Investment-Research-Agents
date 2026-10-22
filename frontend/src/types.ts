@@ -1210,6 +1210,28 @@ export interface FactorResearchLauncher {
   detail?: string | null
 }
 
+/** distro 探活块（delta add-factor-research-distro-liveness-probe） */
+export interface FactorResearchDistroProbe {
+  available: boolean
+  /** available=false 时如实二分：missing（未探活）/ corrupt */
+  reason?: 'missing' | 'corrupt'
+  probed_at?: string | null
+  probed_at_epoch?: number | null
+  distro?: string | null
+  /** 探活是否成功（distro 能否执行） */
+  ok?: boolean | null
+  exit_code?: number | null
+  /** 失败时可判读摘要 */
+  detail?: string | null
+  /** 连续探活失败次数 */
+  consecutive_failures?: number | null
+  terminated_at?: string | null
+  terminated_at_epoch?: number | null
+  terminate_count?: number | null
+  age_seconds?: number
+  fresh?: boolean
+}
+
 export interface FactorResearchControl {
   /** 期望态（控制文件缺失/不可解析 → null，如实不猜） */
   desired_running: boolean | null
@@ -1264,6 +1286,8 @@ export interface FactorResearchStatusResponse {
   launcher?: FactorResearchLauncher | null
   /** 控制块（delta add-factor-research-control；快照不可用/陈旧时同样返回） */
   control?: FactorResearchControl | null
+  /** distro 探活块（delta add-factor-research-distro-liveness-probe） */
+  distro?: FactorResearchDistroProbe | null
 }
 
 // ── 执行台账只读契约（delta add-broker-console：GET /api/broker/*） ──

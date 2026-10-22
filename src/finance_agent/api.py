@@ -4243,6 +4243,40 @@ def _factor_research_launcher_payload() -> dict[str, Any]:
     return payload
 
 
+FACTOR_RESEARCH_DISTRO_PROBE_FRESH_AFTER_S = 300  # 2× 启动器节拍（120s）+ 余量
+
+
+def _factor_research_distro_payload() -> dict[str, Any]:
+    """distro 探活块：透传 + 派生 ``available`` / ``age_seconds`` / ``fresh``。
+
+    只读披露：本函数 MUST NOT 触发任何处置（不重启、不终止、不写控制文件）。
+    """
+    path = Path(
+        os.environ.get(
+            "FACTOR_RESEARCH_DISTRO_PROBE_PATH", "data/factor_research/distro_probe.json"
+        )
+    )
+    if not path.is_file():
+        return {"available": False, "reason": "missing"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("distro probe is not an object")
+        epoch = float(data.get("probed_at_epoch"))
+    except (OSError, ValueError, TypeError):
+        return {"available": False, "reason": "corrupt"}
+    age = max(0, int(time.time() - epoch))
+    payload = dict(data)
+    payload.update(
+        {
+            "available": True,
+            "age_seconds": age,
+            "fresh": age <= FACTOR_RESEARCH_DISTRO_PROBE_FRESH_AFTER_S,
+        }
+    )
+    return payload
+
+
 def _factor_research_honor(
     snapshot: dict[str, Any], launcher: dict[str, Any]
 ) -> tuple[str, int | None]:
@@ -4401,6 +4435,7 @@ def _factor_research_status_payload() -> dict[str, Any]:
         "config": _factor_research_config_block(),
         "launcher": launcher,
         "control": _factor_research_control_block(snapshot, launcher),
+        "distro": _factor_research_distro_payload(),
     }
 
 

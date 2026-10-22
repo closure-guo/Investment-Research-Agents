@@ -40,6 +40,9 @@ $helperDir = Join-Path $env:LOCALAPPDATA 'FinanceAgent\launcher'
 $helperSource = Join-Path $PSScriptRoot 'FinanceAgentLauncher.cs'
 $helperExe = Join-Path $helperDir 'FinanceAgentLauncher.exe'
 $taskLog = Join-Path $repoRoot 'data\factor_research\launcher-task.log'
+# delta add-factor-research-distro-liveness-probe：探活文件（宿主侧写）与状态快照（判「采集同时停摆」）
+$probeFile = Join-Path $repoRoot 'data\factor_research\distro_probe.json'
+$statusFile = Join-Path $repoRoot 'data\factor_research\status.json'
 
 function Initialize-LauncherExe {
   if (-not (Test-Path $helperSource)) { throw "launcher source not found: $helperSource" }
@@ -53,7 +56,7 @@ function Initialize-LauncherExe {
   New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
   $tmpExe = Join-Path $helperDir 'FinanceAgentLauncher.tmp.exe'
   Remove-Item $tmpExe -ErrorAction SilentlyContinue
-  & $csc /nologo /target:winexe "/out:$tmpExe" "$helperSource" | Out-Null
+  & $csc /nologo /codepage:65001 /target:winexe "/out:$tmpExe" "$helperSource" | Out-Null
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tmpExe)) {
     throw "launcher build failed (csc exit $LASTEXITCODE)"
   }
@@ -74,7 +77,7 @@ function Initialize-LauncherExe {
 Initialize-LauncherExe
 
 $action = New-ScheduledTaskAction -Execute $helperExe `
-  -Argument "$Distro $RemoteScript `"$taskLog`""
+  -Argument "$Distro $RemoteScript `"$taskLog`" `"$probeFile`" `"$statusFile`""
 
 $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
 $triggerEvery = New-ScheduledTaskTrigger -Once -At (Get-Date) `

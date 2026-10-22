@@ -36,6 +36,10 @@ const CONFIG_PATH = path.resolve(
   fileURLToPath(new URL('.', import.meta.url)),
   '../../../../data/test-e2e-factor-research-pipeline.json'
 )
+const DISTRO_PROBE_PATH = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  '../../../../data/test-e2e-factor-research-distro-probe.json'
+)
 
 // 防御：fixture 路径必须测试隔离，绝不落到生产 data/factor_research/status.json 与控制文件
 if (!STATUS_PATH.includes('test-e2e') || !CONTROL_PATH.includes('test-e2e')) {
@@ -46,6 +50,9 @@ if (!LAUNCHER_PATH.includes('test-e2e')) {
 }
 if (!CONFIG_PATH.includes('test-e2e')) {
   throw new Error(`config fixture 路径未隔离: ${CONFIG_PATH}`)
+}
+if (!DISTRO_PROBE_PATH.includes('test-e2e')) {
+  throw new Error(`distro 探活 fixture 路径未隔离: ${DISTRO_PROBE_PATH}`)
 }
 
 function isoAt(epoch: number): string {
@@ -158,6 +165,33 @@ function removeConfig() {
   rmSync(CONFIG_PATH, { force: true })
 }
 
+/** distro 探活 fixture（delta add-factor-research-distro-liveness-probe）。 */
+function writeDistroProbe(overrides: Record<string, unknown> = {}) {
+  const epoch = Math.floor(Date.now() / 1000) - 40
+  mkdirSync(path.dirname(DISTRO_PROBE_PATH), { recursive: true })
+  writeFileSync(
+    DISTRO_PROBE_PATH,
+    JSON.stringify({
+      probed_at: isoAt(epoch),
+      probed_at_epoch: epoch,
+      distro: 'rdagent',
+      ok: false,
+      exit_code: -1,
+      detail: 'Wsl/E_IO_ERROR',
+      consecutive_failures: 8,
+      snapshot_stale: true,
+      terminated_at: null,
+      terminated_at_epoch: 0,
+      terminate_count: 0,
+      ...overrides,
+    })
+  )
+}
+
+function removeDistroProbe() {
+  rmSync(DISTRO_PROBE_PATH, { force: true })
+}
+
 test.beforeEach(() => {
   removeLauncher()
 })
@@ -167,6 +201,7 @@ test.afterAll(() => {
   removeControl()
   removeLauncher()
   removeConfig()
+  removeDistroProbe()
 })
 
 test('1. 运行中：看护徽章/pid/循环·步骤·进度/因子/日志尾/历史表/累计计数', async ({ page }) => {
@@ -530,4 +565,44 @@ test('17. 日志新鲜：不告警且照常显示步骤进度', async ({ page })
   await expect(page.getByTestId('factor-research-progress')).toBeVisible()
   await expect(page.getByTestId('factor-research-stall-banner')).toHaveCount(0)
   await expect(page.getByTestId('factor-research-step-timing')).toContainText('本步已用 9分55秒')
+})
+
+test('18. distro 探活失败 + 快照陈旧：明示 distro 不可用且不误指采集器', async ({ page }) => {
+  const epoch = Math.floor(Date.now() / 1000) - 400
+  writeSnapshot(snapshotBody({ collected_at: isoAt(epoch), collected_at_epoch: epoch }))
+  writeDistroProbe({ ok: false, consecutive_failures: 8 })
+  await page.goto('/factor-research')
+
+  const banner = page.getByTestId('factor-research-distro-probe-banner')
+  await expect(banner).toBeVisible()
+  await expect(banner).toContainText('连续 8 次')
+  await expect(banner).toContainText('distro')
+  await expect(banner).toContainText('采集器并未停止')
+  // 零命令面：横幅内无处置入口
+  await expect(banner.locator('button, a')).toHaveCount(0)
+
+  // 陈旧横幅不得再声称「采集器可能已停止」（incident 049 实测该表述失实）
+  const staleBanner = page.getByTestId('factor-research-stale-banner')
+  await expect(staleBanner).toBeVisible()
+  await expect(staleBanner).not.toContainText('采集器可能已停止')
+  await expect(staleBanner).toContainText('distro 探活失败')
+})
+
+test('19. distro 探活正常：保持既有陈旧表述且无探活提示', async ({ page }) => {
+  const epoch = Math.floor(Date.now() / 1000) - 400
+  writeSnapshot(snapshotBody({ collected_at: isoAt(epoch), collected_at_epoch: epoch }))
+  writeDistroProbe({
+    ok: true,
+    exit_code: 0,
+    detail: null,
+    consecutive_failures: 0,
+    snapshot_stale: false,
+  })
+  await page.goto('/factor-research')
+
+  const staleBanner = page.getByTestId('factor-research-stale-banner')
+  await expect(staleBanner).toBeVisible()
+  await expect(staleBanner).toContainText('采集器可能已停止')
+  await expect(page.getByTestId('factor-research-distro-probe-banner')).toHaveCount(0)
+  removeDistroProbe()
 })

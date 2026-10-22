@@ -170,6 +170,17 @@ export function FactorResearchPage({
   const stalled = data?.progress?.stalled === true
   const logAgeS = data?.progress?.log_age_seconds ?? null
   const collectedAt = data?.collected_at ? formatSessionTime(data.collected_at) : '—'
+  // distro 探活披露（delta add-factor-research-distro-liveness-probe）：
+  // 仅「快照陈旧 + 探活可用且新鲜 + distro 执行失败」同时成立才判定 distro 不可用；
+  // 未探活（available=false）/ 探活不新鲜（fresh=false）/ 探活成功（ok=true）→ 均不冒充结论。
+  const distroDown =
+    data?.stale === true &&
+    data.distro?.available === true &&
+    data.distro?.fresh === true &&
+    data.distro?.ok === false
+  const distroProbe = distroDown ? (data?.distro ?? null) : null
+  const distroName = distroProbe?.distro ?? null
+  const distroFailures = distroProbe?.consecutive_failures ?? null
 
   // 控制面派生（单一共享源：开关位置只取验证过的 actual_state，意图仅作离线披露）
   const view = deriveControlView(data, { submitting, restartSubmitting, channelBlocked })
@@ -399,10 +410,32 @@ export function FactorResearchPage({
                 style={{ background: 'var(--status-warning-default)', color: 'white' }}
               >
                 <i className="fas fa-exclamation-triangle"></i>
-                数据已陈旧（最近采集 {collectedAt}）——采集器可能已停止，以下为最后一次快照
+                {distroDown ? (
+                  <>
+                    数据已陈旧（最近采集 {collectedAt}）——研究侧 distro 探活失败（疑似 WSL
+                    子系统不可用，采集器并未停止），以下为最后一次快照
+                  </>
+                ) : (
+                  <>数据已陈旧（最近采集 {collectedAt}）——采集器可能已停止，以下为最后一次快照</>
+                )}
                 {honor === 'launcher' && launcher?.checked_at != null && (
                   <>；启动器正在按节拍尝试恢复（最近检查 {formatSessionTime(launcher.checked_at)}）</>
                 )}
+              </div>
+            )}
+
+            {/* distro 探活失败披露：只陈述事实与人工恢复动作，不提供可点击处置入口（零命令面） */}
+            {distroDown && (
+              <div
+                data-testid="factor-research-distro-probe-banner"
+                className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs"
+                style={{ background: 'var(--status-danger-default, #b91c1c)', color: 'white' }}
+              >
+                <i className="fas fa-plug-circle-xmark"></i>
+                研究侧 distro{distroName ? `「${distroName}」` : ''} 探活
+                {distroFailures !== null ? `连续 ${distroFailures} 次失败` : '失败'}
+                （最近探活 {formatSessionTime(distroProbe?.probed_at)}）——采集器并未停止；需由人执行
+                wsl --terminate rdagent，下一次节拍会自动重新拉起
               </div>
             )}
 

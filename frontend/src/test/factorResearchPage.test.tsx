@@ -907,3 +907,129 @@ describe('因子研发监控页 · 僵死披露（delta add-factor-research-stal
     expect(document.body.textContent ?? '').not.toContain('进度正常')
   })
 })
+
+/**
+ * distro 探活披露（delta add-factor-research-distro-liveness-probe；spec frontend
+ * 「监控页 distro 探活披露」）。
+ *
+ * - stale=true + 探活新鲜 ok=false → 独立探活横幅（连续失败次数 + 最近探活时刻 +
+ *   「采集器并未停止」+ 由人执行 wsl --terminate rdagent），零可点击处置入口；
+ * - 同条件下陈旧横幅 MUST NOT 再声称「采集器可能已停止」，改指向 distro 探活失败；
+ * - 探活正常 / 不可用 / 不新鲜 / 快照新鲜 → 不展示探活横幅，陈旧横幅保持既有表述。
+ */
+describe('因子研发监控页 · distro 探活披露（delta add-factor-research-distro-liveness-probe）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('探活失败且快照陈旧：展示探活横幅，陈旧横幅不再声称采集器已停止', async () => {
+    mockFetch(
+      snapshotBody({
+        stale: true,
+        age_seconds: 400,
+        collected_at: new Date(Date.now() - 400_000).toISOString(),
+        distro: {
+          available: true,
+          probed_at: '2026-10-22T14:30:00+08:00',
+          probed_at_epoch: 1761114600,
+          distro: 'rdagent',
+          ok: false,
+          exit_code: -1,
+          detail: 'wsl: 无法启动 distro',
+          consecutive_failures: 8,
+          terminated_at: null,
+          terminated_at_epoch: 0,
+          terminate_count: 0,
+          age_seconds: 40,
+          fresh: true,
+        },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const banner = await screen.findByTestId('factor-research-distro-probe-banner')
+    expect(banner.textContent).toContain('连续 8 次')
+    expect(banner.textContent).toContain('distro')
+    // 明示采集器并未停止 + 恢复动作由人发起
+    expect(banner.textContent).toContain('采集器并未停止')
+    expect(banner.textContent).toContain('wsl --terminate rdagent')
+    // 零命令面：探活横幅内无可点击处置入口
+    expect(banner.querySelectorAll('button, a')).toHaveLength(0)
+
+    // 同条件下陈旧横幅改指向 distro 探活失败（MUST NOT 误指采集器）
+    const staleBanner = screen.getByTestId('factor-research-stale-banner')
+    expect(staleBanner.textContent).not.toContain('采集器可能已停止')
+    expect(staleBanner.textContent).toContain('distro 探活失败')
+  })
+
+  it('探活正常（ok=true）：无探活横幅，陈旧横幅保持既有「采集器可能已停止」表述', async () => {
+    mockFetch(
+      snapshotBody({
+        stale: true,
+        age_seconds: 400,
+        distro: {
+          available: true,
+          probed_at: '2026-10-22T14:30:00+08:00',
+          probed_at_epoch: 1761114600,
+          distro: 'rdagent',
+          ok: true,
+          exit_code: 0,
+          detail: null,
+          consecutive_failures: 0,
+          age_seconds: 40,
+          fresh: true,
+        },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const staleBanner = await screen.findByTestId('factor-research-stale-banner')
+    expect(staleBanner.textContent).toContain('采集器可能已停止')
+    expect(screen.queryByTestId('factor-research-distro-probe-banner')).toBeNull()
+  })
+
+  it('探活不可用（available=false）：不冒充结论（无横幅），陈旧横幅保持既有表述', async () => {
+    mockFetch(
+      snapshotBody({
+        stale: true,
+        age_seconds: 400,
+        distro: { available: false, reason: 'missing' },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const staleBanner = await screen.findByTestId('factor-research-stale-banner')
+    expect(staleBanner.textContent).toContain('采集器可能已停止')
+    expect(screen.queryByTestId('factor-research-distro-probe-banner')).toBeNull()
+  })
+
+  it('快照新鲜（stale=false）即便探活失败：无探活横幅，页面照常展示进度', async () => {
+    mockFetch(
+      snapshotBody({
+        stale: false,
+        distro: {
+          available: true,
+          probed_at: '2026-10-22T14:30:00+08:00',
+          probed_at_epoch: 1761114600,
+          distro: 'rdagent',
+          ok: false,
+          exit_code: -1,
+          detail: 'wsl: 无法启动 distro',
+          consecutive_failures: 15,
+          age_seconds: 40,
+          fresh: true,
+        },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-progress')
+    expect(screen.queryByTestId('factor-research-distro-probe-banner')).toBeNull()
+    expect(screen.queryByTestId('factor-research-stale-banner')).toBeNull()
+  })
+})

@@ -60,6 +60,14 @@ def _config_path(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def _distro_probe_path(tmp_path, monkeypatch):
+    """distro 探活文件路径指向 tmp（调用期读 env；delta add-factor-research-distro-liveness-probe）。"""
+    path = tmp_path / "distro_probe.json"
+    monkeypatch.setenv("FACTOR_RESEARCH_DISTRO_PROBE_PATH", str(path))
+    return path
+
+
 _NO_CONTROL = {
     "desired_running": None,
     "requested_at": None,
@@ -74,6 +82,8 @@ _NO_CONTROL = {
 _NO_LAUNCHER = {"available": False, "reason": "missing"}
 # 快照不可用/未上报时的派生块（spec「会话进度僵死派生」：实态不可证 → 不判僵死）。
 _NO_PROGRESS = {"log_age_seconds": None, "stalled": False}
+# distro 探活文件缺失/不可解析时的派生块（spec「distro 探活只读派生」：MUST NOT 伪结论）。
+_NO_DISTRO = {"available": False, "reason": "missing"}
 _DEFAULT_CONFIG_VALUES = {
     "snapshot_interval_s": 15,
     "session_gap_s": 60,
@@ -134,6 +144,22 @@ def _launcher(age_s: int = 40, agent_ok: bool = True) -> dict:
     }
 
 
+def _distro_probe(age_s: int = 40, ok: bool = False, consecutive_failures: int = 3) -> dict:
+    """distro 探活文件 fixture（形状与启动器节拍探活契约一致）。"""
+    epoch = int(time.time() - age_s)
+    return {
+        "probed_at": datetime.fromtimestamp(epoch, tz=_TZ).isoformat(),
+        "probed_at_epoch": epoch,
+        "distro": "rdagent",
+        "ok": ok,
+        "exit_code": 0 if ok else 1,
+        "detail": None if ok else "wsl relay timeout",
+        "consecutive_failures": consecutive_failures,
+        "terminated_at": None,
+        "terminate_count": 0,
+    }
+
+
 def test_missing_file_reports_missing():
     """文件缺失 → 200 + available=false + reason=missing（第一档「未接入」状态）。"""
     resp = TestClient(app).get(_ENDPOINT)
@@ -146,6 +172,7 @@ def test_missing_file_reports_missing():
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
         "progress": _NO_PROGRESS,
+        "distro": _NO_DISTRO,
     }
 
 
@@ -161,6 +188,7 @@ def test_corrupt_text_reports_corrupt(_status_path):
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
         "progress": _NO_PROGRESS,
+        "distro": _NO_DISTRO,
     }
 
 
@@ -174,6 +202,7 @@ def test_non_object_json_reports_corrupt(_status_path):
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
         "progress": _NO_PROGRESS,
+        "distro": _NO_DISTRO,
     }
 
 
@@ -188,6 +217,7 @@ def test_missing_timestamp_reports_corrupt(_status_path):
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
         "progress": _NO_PROGRESS,
+        "distro": _NO_DISTRO,
     }
 
 
@@ -844,3 +874,76 @@ class TestProgressStall:
 
         assert body["available"] is False
         assert body["progress"] == {"log_age_seconds": None, "stalled": False}
+
+
+# ── distro 探活派生块（delta add-factor-research-distro-liveness-probe；
+#    spec「distro 探活只读派生」）──
+#
+# 阈值单源 FACTOR_RESEARCH_DISTRO_PROBE_FRESH_AFTER_S=300（2× 启动器节拍 120s + 余量）。
+# 只读披露：探活块 MUST NOT 改变 actual_state / control.honor，端点零副作用。
+
+
+class TestDistroProbe:
+    """`GET /status` 顶层 distro 派生块：透传 + available/age_seconds/fresh，零状态影响。"""
+
+    def test_probe_passthrough_derived_without_state_impact(self, _status_path, _distro_probe_path):
+        """探活合法且新鲜 + ok=false → 如实透传，且 actual_state / control.honor 不变。"""
+        _status_path.write_text(json.dumps(_snapshot(age_s=40)), encoding="utf-8")
+        client = TestClient(app)
+        # 不带探活文件时的基线（实态与受理判定）
+        baseline = client.get(_ENDPOINT).json()
+        assert not _distro_probe_path.exists()
+
+        probe = _distro_probe(age_s=40)
+        _distro_probe_path.write_text(json.dumps(probe), encoding="utf-8")
+        body = client.get(_ENDPOINT).json()
+
+        distro = body["distro"]
+        assert distro["available"] is True
+        assert 38 <= distro["age_seconds"] <= 45
+        assert distro["fresh"] is True
+        assert distro["ok"] is False
+        assert distro["consecutive_failures"] == 3
+        # 原始字段逐字透传（不是重造）
+        for key in (
+            "probed_at",
+            "probed_at_epoch",
+            "distro",
+            "exit_code",
+            "detail",
+            "consecutive_failures",
+            "terminated_at",
+            "terminate_count",
+        ):
+            assert distro[key] == probe[key]
+        # 只读披露：distro.ok=false MUST NOT 改变实态与受理判定
+        assert body["actual_state"] == baseline["actual_state"]
+        assert body["control"]["honor"] == baseline["control"]["honor"]
+
+    def test_probe_missing_reports_missing(self, _status_path, _distro_probe_path):
+        """探活文件不存在 → available=false + reason=missing（如实不伪结论）。"""
+        _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+        assert not _distro_probe_path.exists()
+
+        assert TestClient(app).get(_ENDPOINT).json()["distro"] == _NO_DISTRO
+
+    def test_probe_corrupt_reports_corrupt(self, _status_path, _distro_probe_path):
+        """探活文件内容非合法 JSON → available=false + reason=corrupt。"""
+        _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+        _distro_probe_path.write_text("not json at all", encoding="utf-8")
+
+        assert TestClient(app).get(_ENDPOINT).json()["distro"] == {
+            "available": False,
+            "reason": "corrupt",
+        }
+
+    def test_probe_stale_not_fresh(self, _status_path, _distro_probe_path):
+        """探活距请求 900 秒 → available=true 但 fresh=false（陈旧不冒充结论）。"""
+        _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+        _distro_probe_path.write_text(json.dumps(_distro_probe(age_s=900)), encoding="utf-8")
+
+        distro = TestClient(app).get(_ENDPOINT).json()["distro"]
+
+        assert distro["available"] is True
+        assert distro["fresh"] is False
+        assert 900 <= distro["age_seconds"] <= 905
