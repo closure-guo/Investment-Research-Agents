@@ -1111,3 +1111,98 @@ class TestScoreSigmaAndReportPeriodFalsePositives:
         assert len(anomalies) == 1
         assert anomalies[0]["kind"] == "deviation"
         assert "18" in anomalies[0]["message"]
+
+
+# ── 自引用夹具：现价 18.1，近期高点 20.58，MA60 18.05 ──
+TI_SELFREF = _indicators(
+    ma5=18.12,
+    ma10=18.09,
+    ma20=17.49,
+    ma60=18.05,
+    boll_upper=18.60,
+    boll_middle=18.05,
+    boll_lower=17.95,
+)
+PL_SELFREF = {
+    "available": True,
+    "entry_ref": 18.10,
+    "recent_high": 20.58,
+    "recent_low": 15.90,
+    "atr": 0.40,
+    "stop_band_long": {"low": 16.82, "high": 17.10},
+    "target_band_long": {"low": 19.80, "high": 20.50},
+    "full_band": [15.90, 21.00],
+}
+CLOSE_SELFREF = 18.10
+
+# ── 自引用夹具 2：现价 240，近期高点 245.48（300033 同花顺量纲）──
+TI_SELFREF2 = _indicators(
+    ma5=238.0,
+    ma10=236.0,
+    ma20=230.0,
+    ma60=215.0,
+    boll_upper=248.0,
+    boll_middle=240.0,
+    boll_lower=232.0,
+)
+PL_SELFREF2 = {
+    "available": True,
+    "entry_ref": 240.0,
+    "recent_high": 245.48,
+    "recent_low": 210.0,
+    "atr": 6.0,
+    "stop_band_long": {"low": 228.0, "high": 232.0},
+    "target_band_long": {"low": 250.0, "high": 255.0},
+    "full_band": [210.0, 255.0],
+}
+CLOSE_SELFREF2 = 240.0
+
+
+class TestSelfReferenceFalsePositives:
+    """打回消息自引用不得二次误报（2026-10-05/06/13 生产阻断实证）。
+
+    模型收到打回后会写「此前价位冲突系'MA60'（60日均线）被误读为数值价位60」
+    「系统打回消息称『文本价位 300 与近期高点 245.48 偏差 22.21%』」——把上一轮
+    的异常数值抄进 reasoning。校验器再扫这段自述，就对着同一个数字二次报警，
+    形成「越改越错」的回路（600845 两连阻断、300033/600015 同族）。
+    处置：**讨论校验本身的句子**（含 打回/误读/校验/修正/澄清…）不进入价位校验；
+    正常行情陈述句（同段「放量突破 260」）仍照常校验。
+    """
+
+    def test_meta_sentence_with_ma60_correction_not_reflagged(self):
+        decision = _decision(
+            reasoning=(
+                "此前价位冲突系'MA60'（60日均线）被误读为数值价位60所致，"
+                "已澄清：该股近期高点约20.58元，MA60为均线指标而非价位。"
+            )
+        )
+        assert check_decision_prices(decision, TI_SELFREF, PL_SELFREF, CLOSE_SELFREF) == []
+
+    def test_quoted_rejection_message_not_reflagged(self):
+        decision = _decision(
+            reasoning=(
+                "系统打回消息称「文本价位 300 与近期高点 245.48 偏差 22.21%」，"
+                "据此把上破触发位改为 246.0。"
+            )
+        )
+        assert check_decision_prices(decision, TI_SELFREF2, PL_SELFREF2, CLOSE_SELFREF2) == []
+
+    def test_normal_trigger_in_same_text_still_checked(self):
+        """护栏：同段「放量突破 25.0」是正常行情陈述，SHALL 照常登记偏差。"""
+        decision = _decision(reasoning="此前曾被打回一次；现在放量突破 25.0 并站稳则重估。")
+        anomalies = check_decision_prices(decision, TI_SELFREF, PL_SELFREF, CLOSE_SELFREF)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert "25" in anomalies[0]["message"]
+
+    def test_rejected_proposal_quote_not_reflagged(self):
+        """被驳回方案里引用的价位不是终稿主张（601066 10-20 生产实证）。
+
+        reasoning 写「激进方的试探仓（止损 20.5、目标 26.0）…不予采纳」，20.5/26.0
+        是**被否决**的第三方方案参数；校验器却把 20.5 当终稿价位、配到最新收盘价
+        22.64 偏差 5.04% → 报告阻断。
+        """
+        decision = _decision(
+            reasoning="激进方的试探仓（止损 20.5、目标 26.0）经 20 日 1σ 校验后赔率不成立，不予采纳。"
+        )
+        assert check_decision_prices(decision, TI_601066, PL_601066, CLOSE_601066) == []

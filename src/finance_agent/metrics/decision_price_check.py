@@ -375,6 +375,48 @@ def _non_price_context(text: str, span: tuple[int, int]) -> bool:
     return any(keyword in window for keyword in _NON_PRICE_KEYWORDS)
 
 
+# 讨论校验本身的句子（自引用）不进入价位校验：模型收到打回后会把上一轮的异常
+# 数值抄进 reasoning（「被误读为数值价位60」「打回消息称『文本价位 300…』」），
+# 若照常扫描就会对同一数字二次报警，形成「越改越错」的回路（2026-10-05/06/13
+# 生产实证：600845 两连阻断、300033/600015 同族）。句子级豁免只作用于含元话语
+# 标记的句子；正常行情陈述（同段的「放量突破 25.0」）照常校验（护栏测试钉死）。
+_META_SENTENCE_DELIMS = "。；;！!？?\n"
+_META_MARKERS: tuple[str, ...] = (
+    "打回",
+    "误读",
+    "校验",
+    "修正",
+    "澄清",
+    "价位冲突",
+    "待核实",
+    "恶化",
+    "上一稿",
+    "上一轮",
+    "驳回",
+    "不予采纳",
+    "rejection",
+    "corrective",
+    "reject",
+)
+
+
+def _in_meta_discussion(text: str, span: tuple[int, int]) -> bool:
+    """数值所在句子是否在讨论校验本身（打回/误读/修正/澄清…）。"""
+    start, end = span
+    left = 0
+    for ch in _META_SENTENCE_DELIMS:
+        idx = text.rfind(ch, 0, start)
+        if idx > left:
+            left = idx + 1
+    right = len(text)
+    for ch in _META_SENTENCE_DELIMS:
+        idx = text.find(ch, end)
+        if 0 <= idx < right:
+            right = idx
+    sentence = text[left:right].lower()
+    return any(marker in sentence for marker in _META_MARKERS)
+
+
 def _median(values: list[float]) -> float | None:
     if not values:
         return None
@@ -507,6 +549,8 @@ def _check_snippet(
         s = (m.start(), m.end())
         if _overlaps(s, exclusions):
             continue
+        if _in_meta_discussion(text, s):
+            continue  # 自引用句里的数字不参与方向预扫（同主循环口径）
         v = float(m.group())
         if 0 < v < 1:
             continue
@@ -517,6 +561,8 @@ def _check_snippet(
         span = (match.start(), match.end())
         if _overlaps(span, exclusions):
             continue  # 指标名成分数字 / 日期
+        if _in_meta_discussion(text, span):
+            continue  # 自引用：讨论打回/校验本身的句子不产生 anomaly
         value = float(match.group())
         if 0 < value < 1:
             continue  # 0-1 区间小数：比值/置信度形态
