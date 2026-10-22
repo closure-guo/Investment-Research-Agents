@@ -36,7 +36,7 @@
 
 1. **详情接口曾整体超时**：`_factor_style_exposure_payload` 无条件构建 500 日 × 全市场面板（实测数分钟），所有因子详情「加载失败」。已加短路（IC 点数 < 30 直接 `null`），本次一并纳入规格约束。
 2. **快照库 WAL 侧车文件**：排查期间从宿主机只读查询 `market_snapshot.db` 生成 `-shm/-wal`，容器侧 `PRAGMA journal_mode=WAL` 报 I/O 错误；停后端删除 0 字节 WAL 与 shm 后恢复（incident 046 同族）。后续快照库只在容器内读。
-3. **全量后端套件**：`pytest -q` 全量运行时间较长（>15 分钟），本报告先记录定向套件结果；全量结果由发布前复核补记。
+3. **全量后端套件**：`pytest -q` 全量运行 26 分钟未结束（网络类用例拖时）后中止；改跑改动相关子集 `tests/factors tests/screening tests/test_api_factors.py tests/test_api_screening.py`：**686 passed / 1 failed**。唯一失败 `tests/screening/test_report_trigger.py::TestCapsAndIdempotency::test_per_report_cap` 与本变更无关（走真实 WebSearch，环境 TLS/网络失败导致候选被过滤，单测单独复跑同样失败），属既有环境性失败。
 
 ## 结论
 
