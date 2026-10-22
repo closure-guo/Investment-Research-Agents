@@ -1370,6 +1370,14 @@ export interface HarvestProgressBlock {
   rejected_in_run: number
   started_at: string | null
   eta_s: number | null
+  /** 批内逐候选心跳（harvest 每处理一条写一次）；缺失或过旧为 null */
+  in_batch?: {
+    processed_in_batch: number
+    total_in_batch: number
+    phase: string
+    updated_at: string | null
+    age_s: number | null
+  } | null
 }
 
 export interface HarvestFunnelBlock {

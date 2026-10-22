@@ -75,6 +75,13 @@ const GATE_LABELS: Record<string, string> = {
   '5': '样本外',
 }
 
+/** 批内阶段（心跳 phase → 中文）。 */
+const PHASE_LABELS: Record<string, string> = {
+  transcribe: '转译中',
+  gate: '过闸中',
+  done: '整批收尾',
+}
+
 function pctText(part: number, whole: number): string {
   if (whole <= 0) return '—'
   return `${Math.round((part / whole) * 100)}%`
@@ -243,6 +250,8 @@ export function FactorResearchPage({
       ? Math.max(0, Math.floor((liveNow - batchStartedMs) / 1000))
       : null
   const batchLabel = (harvest?.progress?.batches_done ?? 0) === 0 ? '本批' : '本轮'
+  const rawInBatch = harvest?.progress?.in_batch ?? null
+  const inBatch = rawInBatch && (rawInBatch.age_s == null || rawInBatch.age_s < 600) ? rawInBatch : null
 
   // 控制面派生（单一共享源：开关位置只取验证过的 actual_state，意图仅作离线披露）
   const view = deriveControlView(data, { submitting, restartSubmitting, channelBlocked })
@@ -688,7 +697,16 @@ export function FactorResearchPage({
                           className="inline-block h-1.5 w-1.5 animate-pulse rounded-full"
                           style={{ background: 'currentColor' }}
                         />
-                        {batchLabel}进行中 · 已 {formatDurationS(batchElapsedS)}（进度按批落盘）
+                        {inBatch ? (
+                          <>
+                            本批 {inBatch.processed_in_batch}/{inBatch.total_in_batch} ·{' '}
+                            {PHASE_LABELS[inBatch.phase] ?? inBatch.phase} · 已 {formatDurationS(batchElapsedS)}
+                          </>
+                        ) : (
+                          <>
+                            {batchLabel}进行中 · 已 {formatDurationS(batchElapsedS)}（进度按批落盘）
+                          </>
+                        )}
                       </div>
                     )}
                     <div className="h-2 w-full overflow-hidden rounded-full" style={{ background: 'var(--bg-overlay-l1)' }}>

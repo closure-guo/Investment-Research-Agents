@@ -1065,6 +1065,13 @@ describe('收割链路区块（add-factor-harvest-ui）', () => {
         rejected_in_run: 65,
         started_at: '2026-10-22T15:55:00+08:00',
         eta_s: 12600,
+        in_batch: {
+          processed_in_batch: 12,
+          total_in_batch: 60,
+          phase: 'transcribe',
+          updated_at: '2026-10-22T19:00:00+08:00',
+          age_s: 5,
+        },
       },
       funnel: {
         candidates: 820,
@@ -1112,8 +1119,8 @@ describe('收割链路区块（add-factor-harvest-ui）', () => {
     expect(progress).toContain('批次 2/12')
     expect(progress).toContain('剩余 380')
     expect(progress).toContain('本轮入库 3')
-    // 批内活性：进度按批落盘，运行中必须显示秒级时钟（否则页面看起来「不动」）
-    expect(screen.getByTestId('factor-research-harvest-live').textContent).toContain('进行中')
+    // 批内活性：心跳显示逐候选进度（进度按批落盘时也不看起来「不动」）
+    expect(screen.getByTestId('factor-research-harvest-live').textContent).toContain('本批 12/60')
     expect(screen.getByTestId('factor-research-harvest-step-candidates').textContent).toContain('820')
     expect(screen.getByTestId('factor-research-harvest-step-admitted').textContent).toContain('7')
     expect(screen.getByTestId('factor-research-harvest-gates').textContent).toContain('ICIR 150')

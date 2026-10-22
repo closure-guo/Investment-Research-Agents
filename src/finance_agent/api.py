@@ -44,6 +44,7 @@ load_dotenv()  # 加载 .env，须在 finance_agent 模块导入前执行（llm.
 # 与 /api/llm-config 占位保持一致；实际管线默认在 agent_factory，后续如需统一另行裁决。
 DEFAULT_LLM_MODEL = "deepseek/deepseek-v4-pro"
 
+from finance_agent import analysis_concurrency  # noqa: E402
 from finance_agent.data.cache import get_shared_cache  # noqa: E402
 from finance_agent.data.monitoring import get_monitor  # noqa: E402
 from finance_agent.data.snapshot import (  # noqa: E402
@@ -3366,9 +3367,9 @@ async def regime_status() -> dict:
 
 # ── 选股（add-screening-pipeline T3；S3/S4：池 / 状态 / 批量深度分析） ──
 
-# 批量分析并发上限：默认 2（Global Constraints），SCREENING_ANALYZE_CONCURRENCY 可配置
-_SCREENING_ANALYZE_CONCURRENCY_DEFAULT = 2
-# 进程内队列单例（懒创建：env 于调用期读取；单 worker 前提同 StreamRegistry）
+# 批量分析并发上限：设置中心「会话管理」可配（delta add-analysis-concurrency-setting）；
+# 来源优先级 = 设置文件 > env SCREENING_ANALYZE_CONCURRENCY > 默认 10。
+# 进程内队列单例（懒创建：值于调用期读取；单 worker 前提同 StreamRegistry）
 _analyze_queue: AnalyzeQueue | None = None
 
 _SCREENING_STATUS_DEGRADED: dict[str, Any] = {
@@ -3380,19 +3381,8 @@ _SCREENING_STATUS_DEGRADED: dict[str, Any] = {
 
 
 def _analyze_concurrency() -> int:
-    """并发上限（默认 2；env 非法值回落默认，不因运维配错打挂端点）。"""
-    raw = os.getenv("SCREENING_ANALYZE_CONCURRENCY")
-    if not raw:
-        return _SCREENING_ANALYZE_CONCURRENCY_DEFAULT
-    try:
-        value = int(raw)
-    except ValueError:
-        _logger.warning("非法 SCREENING_ANALYZE_CONCURRENCY=%r，回落默认 2", raw)
-        return _SCREENING_ANALYZE_CONCURRENCY_DEFAULT
-    if value < 1:
-        _logger.warning("SCREENING_ANALYZE_CONCURRENCY=%r 非正，回落默认 2", raw)
-        return _SCREENING_ANALYZE_CONCURRENCY_DEFAULT
-    return value
+    """并发上限：设置文件 > env > 默认 10（来源解析见 analysis_concurrency）。"""
+    return int(analysis_concurrency.resolve()["value"])
 
 
 def _start_screening_analysis(symbol: str, session_id: str) -> None:
@@ -3440,6 +3430,34 @@ def _reset_analyze_queue() -> None:
     """
     global _analyze_queue
     _analyze_queue = None
+
+
+# ── 批量分析并发设置（delta add-analysis-concurrency-setting）──
+
+
+class AnalysisConcurrencyUpdate(BaseModel):
+    """保存入参：用 Any 接收，再由 analysis_concurrency.validate 统一校验（非法 → 400）。"""
+
+    value: Any = None
+
+
+@app.get("/api/settings/analysis-concurrency")
+async def get_analysis_concurrency() -> dict[str, Any]:
+    """并发设置（只读）：生效值 + 来源（file/env/default）+ 合法区间 + 环境变量披露。"""
+    return await asyncio.to_thread(analysis_concurrency.resolve)
+
+
+@app.put("/api/settings/analysis-concurrency")
+async def put_analysis_concurrency(req: AnalysisConcurrencyUpdate) -> dict[str, Any]:
+    """保存并发设置：校验 1–20 → 原子落盘 → 立即应用到当前队列（提高即补位）。"""
+    try:
+        payload = await asyncio.to_thread(analysis_concurrency.save, req.value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    queue = _get_analyze_queue()
+    if queue.max_concurrency != payload["value"]:
+        queue.set_max_concurrency(int(payload["value"]))
+    return payload
 
 
 # 降级披露文案（add-screening-empty-library-fallback：单源在后端，前端原样渲染；
@@ -4594,6 +4612,39 @@ def _harvest_job_block() -> dict[str, Any]:
     return block
 
 
+def _harvest_heartbeat_block() -> dict[str, Any] | None:
+    """批内逐候选心跳（harvest 每处理一条写一次）；缺失/损坏 → None。"""
+    path = Path(
+        os.environ.get("FACTOR_RESEARCH_HEARTBEAT_PATH", "data/factor_research/harvest_heartbeat.json")
+    )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    processed = data.get("processed_in_batch")
+    total = data.get("total_in_batch")
+    if not isinstance(processed, int) or not isinstance(total, int):
+        return None
+    updated = str(data.get("updated_at") or "")
+    age_s: int | None = None
+    if updated:
+        try:
+            updated_dt = datetime.fromisoformat(updated)
+            now = datetime.now(updated_dt.tzinfo) if updated_dt.tzinfo else datetime.now()
+            age_s = max(0, int((now - updated_dt).total_seconds()))
+        except (TypeError, ValueError):
+            age_s = None
+    return {
+        "processed_in_batch": processed,
+        "total_in_batch": total,
+        "phase": str(data.get("phase") or ""),
+        "updated_at": updated or None,
+        "age_s": age_s,
+    }
+
+
 def _factor_research_harvest_payload() -> dict[str, Any]:
     """收割链路只读载荷：job / progress / funnel / 最近入库与拒收。"""
     job = _harvest_job_block()
@@ -4702,6 +4753,7 @@ def _factor_research_harvest_payload() -> dict[str, Any]:
             "rejected_in_run": rejected_in_run,
             "started_at": started_at,
             "eta_s": eta_s,
+            "in_batch": _harvest_heartbeat_block(),
         },
         "funnel": {
             "candidates": len(candidates),

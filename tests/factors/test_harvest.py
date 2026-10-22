@@ -104,6 +104,9 @@ def _library_db(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "FACTOR_FEEDBACK_PATH", str(tmp_path / "explored_factors.json")
     )
+    monkeypatch.setenv(
+        "FACTOR_RESEARCH_HEARTBEAT_PATH", str(tmp_path / "harvest_heartbeat.json")
+    )
 
 
 class TestTranscriptionPayload:
@@ -213,6 +216,27 @@ class TestRunFactorHarvest:
         payload = json.loads(target.read_text(encoding="utf-8"))
         assert payload["explored"][0]["name"] == "tsmean"
         assert payload["explored"][0]["status"] in {"rejected", "admitted", "untranslatable"}
+
+    def test_writes_in_batch_heartbeat(self, tmp_path):
+        """批内逐候选心跳：整批结束后 phase=done 且 processed==total（观测用，不承载裁决）。"""
+        cand_path = self._write_candidates(tmp_path, [_candidate("a"), _candidate("b")])
+        client = _StubClient(
+            {
+                "a": {"qlib_expression": "Mean($close, 5)"},
+                "b": {"qlib_expression": "Std($close, 5)"},
+            }
+        )
+        run_factor_harvest(
+            candidates_path=cand_path,
+            state_path=tmp_path / "harvest_state.json",
+            client=client,
+            panel=_panel(),
+        )
+        heartbeat = json.loads(
+            (tmp_path / "harvest_heartbeat.json").read_text(encoding="utf-8")
+        )
+        assert heartbeat["phase"] == "done"
+        assert heartbeat["processed_in_batch"] == heartbeat["total_in_batch"] == 2
 
     def test_feedback_export_failure_is_soft(self, tmp_path, monkeypatch):
         """记忆桥是附加产物：导出失败不得让收割批失败。"""

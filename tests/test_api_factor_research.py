@@ -960,6 +960,9 @@ class TestHarvestChainEndpoint:
         monkeypatch.setenv("FACTOR_RESEARCH_CANDIDATES_PATH", str(tmp_path / "candidates.json"))
         monkeypatch.setenv("FACTOR_LIBRARY_DB_PATH", str(tmp_path / "library.db"))
         monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "ops.db"))
+        monkeypatch.setenv(
+            "FACTOR_RESEARCH_HEARTBEAT_PATH", str(tmp_path / "harvest_heartbeat.json")
+        )
         return tmp_path
 
     def _write(self, tmp_path, processed, candidates):
@@ -1059,6 +1062,30 @@ class TestHarvestChainEndpoint:
         assert progress["admitted_in_run"] == 1
         assert progress["rejected_in_run"] == 2
         assert progress["eta_s"] is not None
+
+    def test_in_batch_heartbeat(self, tmp_path):
+        self._write(
+            tmp_path,
+            {"a": {"status": "admitted", "expression": "x", "at": "2026-10-22T16:00:00+08:00"}},
+            [{"name": "a"}, {"name": "b"}],
+        )
+        (tmp_path / "harvest_heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "batch_started_at": "2026-10-22T19:00:00+08:00",
+                    "processed_in_batch": 7,
+                    "total_in_batch": 60,
+                    "phase": "transcribe",
+                    "updated_at": "2026-10-22T19:05:00+08:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = TestClient(app).get(self._HARVEST).json()
+        in_batch = payload["progress"]["in_batch"]
+        assert in_batch["processed_in_batch"] == 7
+        assert in_batch["total_in_batch"] == 60
+        assert in_batch["phase"] == "transcribe"
 
     def test_recent_admitted_uses_library_rows(self, tmp_path, monkeypatch):
         self._write(

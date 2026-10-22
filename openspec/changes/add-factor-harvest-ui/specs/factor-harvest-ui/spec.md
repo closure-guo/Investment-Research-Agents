@@ -33,7 +33,6 @@ MUST NOT 以 500 或编造数字冒充。
 - **AND** `progress.eta_s` 按 `剩余 / (本轮处理数 / 已运行时长)` 估算；不足一批或时长为 0 → `null`
 
 ### Requirement: 前端收割链路区块
-
 `/factor-research` 页 SHALL 新增「因子收割链路」区块，含：批次进度条（`batches_done/batch_limit`）、
 已处理/剩余/本轮入库与拒收/预计完成、四段漏斗（候选/已处理/到闸/入库，含相对候选占比）、
 按闸拒收分布、最近入库与最近拒收两列。区块 MUST 只读，不提供任何写操作入口。
@@ -58,6 +57,7 @@ MUST NOT 以 500 或编造数字冒充。
 - **GIVEN** `job.status=running`、`progress.started_at=T0`
 - **WHEN** 打开页面并停留
 - **THEN** 区块显示秒级时钟「本批/本轮进行中 · 已 X（进度按批落盘）」
+- **AND** 若心跳文件新鲜（`in_batch` 且 `age_s < 600`），SHALL 显示「本批 n/total · 阶段 · 已 X」逐候选进度
 - **AND** 时钟每秒更新，MUST NOT 因为批次数字未变而让区块看起来静止
 
 #### Scenario: 区块级失败不拖垮整页

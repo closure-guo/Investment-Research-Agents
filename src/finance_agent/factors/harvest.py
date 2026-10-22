@@ -49,6 +49,8 @@ DEFAULT_CANDIDATES_PATH = "data/factor_research/candidates.json"
 DEFAULT_STATE_PATH = "data/factor_research/harvest_state.json"
 # 跨会话记忆桥（生成侧读取；导出失败不影响收割结果）
 DEFAULT_FEEDBACK_PATH = "data/factor_research/explored_factors.json"
+# 批内逐候选心跳（监控页展示实时进度；与状态文件分离，崩溃不污染 processed 语义）
+DEFAULT_HEARTBEAT_PATH = "data/factor_research/harvest_heartbeat.json"
 # 单批上限（闸③ BH-FDR 分辨率覆盖 K ≤ 100；留裕度，超量候选顺延下一批）
 DEFAULT_BATCH_LIMIT = 60
 # 单轮日批最多串行几批（每批独立 BH-FDR 家族，≤100 分辨率约束不变）；防单次运行无限拉长
@@ -241,6 +243,33 @@ def _refresh_explored_feedback(state_path: Path, candidates_path: Path) -> None:
         logger.warning("explored feedback export failed", exc_info=True)
 
 
+def _write_harvest_heartbeat(
+    *,
+    batch_started_at: str,
+    processed_in_batch: int,
+    total_in_batch: int,
+    phase: str,
+) -> None:
+    """批内逐候选心跳（best-effort）：供监控页展示实时进度；失败不影响收割裁决。
+
+    与 ``harvest_state.json`` 分离是刻意的：状态文件只在整批结束落盘（崩溃不产生
+    半成品 ``pending_gate``），心跳只用于观测，不承载任何裁决语义。
+    """
+    try:
+        _write_json(
+            Path(os.environ.get("FACTOR_RESEARCH_HEARTBEAT_PATH", DEFAULT_HEARTBEAT_PATH)),
+            {
+                "batch_started_at": batch_started_at,
+                "processed_in_batch": processed_in_batch,
+                "total_in_batch": total_in_batch,
+                "phase": phase,
+                "updated_at": _now(),
+            },
+        )
+    except OSError:
+        logger.debug("harvest heartbeat write failed", exc_info=True)
+
+
 def _candidates_path(explicit: str | Path | None) -> Path:
     if explicit is not None:
         return Path(explicit)
@@ -313,8 +342,21 @@ def run_factor_harvest(
     llm = client if client is not None else GatewayTranscriptionClient()
     payload: list[dict[str, Any]] = []
     verdicts: dict[str, dict[str, Any]] = {}
+    batch_started_at = _now()
+    _write_harvest_heartbeat(
+        batch_started_at=batch_started_at,
+        processed_in_batch=0,
+        total_in_batch=len(pending),
+        phase="transcribe",
+    )
 
-    for candidate in pending:
+    for index, candidate in enumerate(pending, start=1):
+        _write_harvest_heartbeat(
+            batch_started_at=batch_started_at,
+            processed_in_batch=index - 1,
+            total_in_batch=len(pending),
+            phase="transcribe",
+        )
         name = str(candidate["name"])
         description = str(candidate.get("description") or "").strip()
         formulation = str(candidate.get("formulation") or "").strip()
@@ -433,6 +475,12 @@ def run_factor_harvest(
         1 for v in verdicts.values() if v["status"] == "transcription_error"
     )
 
+    _write_harvest_heartbeat(
+        batch_started_at=batch_started_at,
+        processed_in_batch=len(pending),
+        total_in_batch=len(pending),
+        phase="gate",
+    )
     if payload:
         import_summary = run_factor_external_import(
             payload,
@@ -469,6 +517,12 @@ def run_factor_harvest(
             # qlib_expression；一次转译失败的重放若抹掉它，该候选只能再烧一次 LLM 调用。
             verdict["qlib_expression"] = previous["qlib_expression"]
     processed.update(verdicts)
+    _write_harvest_heartbeat(
+        batch_started_at=batch_started_at,
+        processed_in_batch=len(pending),
+        total_in_batch=len(pending),
+        phase="done",
+    )
     _write_json(st_file, {"updated_at": _now(), "processed": processed})
     _refresh_explored_feedback(st_file, cand_file)
     logger.info(
