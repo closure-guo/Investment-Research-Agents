@@ -17,7 +17,7 @@ import json
 import logging
 import os
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -370,6 +370,30 @@ def last_job_run(job_id: str, db_path: str | Path | None = None) -> dict[str, An
             (job_id,),
         ).fetchone()
         return _row_to_dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def job_run_statuses_on(job_id: str, day: str, *, db_path: str | Path | None = None) -> list[str]:
+    """某任务在 ``day``（规范 ``YYYY-MM-DD``）当天全部运行行的状态（开始时刻升序）。
+
+    ``missed_today``（只问「有没有行」）与启动补跑规划（只问「有没有成功行」）共用
+    本读数——一处口径，两处消费，避免状态接口与补偿逻辑各写一套日期过滤而漂移。
+    非规范日期 → ``ValueError``（不猜日期，与 ``snapshot._parse_date_param`` 同纪律）。
+    """
+    start = date.fromisoformat(day)
+    if start.isoformat() != day:
+        raise ValueError(f"day 必须是规范 YYYY-MM-DD: {day!r}")
+    end = (start + timedelta(days=1)).isoformat()
+    init_ops(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT status FROM job_runs WHERE job_id=? AND started_at>=? AND started_at<? "
+            "ORDER BY started_at, run_id",
+            (job_id, start.isoformat(), end),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
     finally:
         conn.close()
 

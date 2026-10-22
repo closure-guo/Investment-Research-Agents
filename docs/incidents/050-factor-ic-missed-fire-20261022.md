@@ -34,8 +34,9 @@
 - **已补跑**：`factor_builtin_register`（20:57→21:07，`registered=0, rejected=5`，全部 gate 2 WEAK_ICIR）；`microcap_screening_daily` 20:57 起重跑（见当日晚间运行记录）。
 - 结论：IC 采集链本身没坏，坏的是「错过触发点后的补偿机制」。
 
-## 防复发（待落）
+## 防复发
 
-1. **启动补跑**：scheduler 启动时对「今天已过点且当天无成功运行」的日批任务补跑一次；必须带白名单 + 时间窗（如 6h）+ 单次上限，避免每次 dev 重启把重任务全跑一遍。
-2. **缺失告警**：`/api/v1/ops/jobs` 暴露 `missed_today` 标志（计划时刻已过且当天无运行），前端/值班可见；本轮只诊断未实现。
-3. **与 046 同族**：进程重建窗口内的长任务（microcap/harvest）应能识别「解释器收尾」并落可读终态，而非线程池异常。
+1. **启动补跑（已落，2026-10-23）**：delta `add-ops-missed-run-catchup` —— 调度器启动时注册一次性 `date` job（启动后 5s），对「当天已过点且当天无成功运行」的白名单日批补跑；白名单 9 项（快照/拥挤度/选股/因子监控/内置注册/判定/盯市/指标快照/完整性），时间窗 6h，单次上限 3 个，`market_snapshot_daily` 返回 `skipped=non_trading_day` 时中止下游链。账务/下单类与 LLM 烧钱类**不**自动重放（仍人工补跑）。`OPS_CATCHUP_ON_STARTUP=0` 可整体关闭。
+   重放验证（只读，`tmp/dryrun_catchup_050.py`）：以 2026-10-22 17:29（当日重建完成时刻）为时点、只取该时刻之前的运行行，规划器输出 `screening_daily`(15:40) / `factor_decay_monitor`(15:45) / `factor_builtin_register`(15:50) 三项——正好覆盖当日被窗口打掉的三件事；其中 `factor_decay_monitor` 就是本次 IC 缺口的直接来源。
+2. **缺失告警（已落，2026-10-23）**：`GET /api/v1/ops/jobs` 每个任务行新增 `missed_today`（当天计划时刻已过且当天无任何运行行，`running` 也算有）。「压根没跑」与「跑了但失败」刻意分列：后者由 `last_run.status` 表达。前端渲染未在本轮（属交互类变更，另立 delta 并配 E2E）。
+3. **与 046 同族（待落）**：进程重建窗口内的长任务（microcap/harvest）应能识别「解释器收尾」并落可读终态，而非线程池异常。`_sweep_stale_running` 目前只把悬挂行改判 `failed`，不提供终态成因。
