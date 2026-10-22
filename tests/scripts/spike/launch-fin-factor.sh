@@ -24,5 +24,16 @@ set -a
 . /root/rdagent-work/.env
 set +a
 
+# 2026-10-22 incident 049：并行 IC 计算的中间文件不得落 /dev/shm。
+# /dev/shm 是 tmpfs，上限 = VM 内存 50%（本机 18GB → 8.8GB），写爆即
+# `OSError: [Errno 28] No space left on device` 崩会话（05:08 实例）。
+# MEMORY_FS_ROOT 必须在本进程 env 里、且在 pandarallel 被 import 前生效
+# （pandarallel/core.py:33 在 import 期读它），故放在 exec 之前。
+export MEMORY_FS_ROOT=/root/rdagent-work/.pandarallel_mem
+mkdir -p "$MEMORY_FS_ROOT"
+# pandarallel worker 数：默认按物理核数自动取，但本 VM 内存固定 18GB 且与生产栈共享，
+# 核数不是合适的默认。需配合 patch-ic-closure.py（去掉 lambda 对 DataFrame 的闭包捕获）。
+export RDAGENT_PANDARALLEL_WORKERS="${RDAGENT_PANDARALLEL_WORKERS:-8}"
+
 cd /root/rdagent-work
 exec /opt/rdagent/bin/rdagent fin_factor

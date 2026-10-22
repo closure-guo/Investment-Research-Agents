@@ -185,3 +185,48 @@ python3 /root/factor_research_agent.py --ensure-daemon --workdir "$W" --control 
 `status.json` 的 `agent.config` 四字段齐全；页面设置分区显示「研究侧实际读取」。
 `git_ignore_folder` / 候选文件 / 会话日志在重启后保持（代理不删除研发产物）。
 
+## 2026-10-22：并行 IC 计算闭包捕获 → OOM / 会话死锁（incident 049）
+
+**失效形态**：`factor_runner.deduplicate_new_factors` 的 `parallel_apply` lambda **按名字引用**
+`SOTA_feature` / `new_feature`（函数局部变量 ⇒ 闭包自由变量），pandarallel 用
+`dill.dumps(user_defined_function)`（core.py:265）把整个闭包**按值**序列化 ⇒
+**每个 worker 各拿一份完整特征矩阵**（同一 lambda 还捕获绑定方法，连带 pickle 整个 runner）：
+
+- 实测 **~5.4GB 匿名内存/worker**，默认 worker 数 = `NB_PHYSICAL_CORES` = 8 ⇒ 撑爆 VM 18GB；
+  OOM 杀掉部分 worker 后 master 等不到结果、其余 worker 等 futex ⇒ **pandarallel 无超时，
+  会话永久死锁**（看护等会话退出才重拉，故永不介入；页面仍显示「运行中」）；
+- 同一份拷贝也写进 chunk 文件 ⇒ `/dev/shm`（tmpfs，上限 = VM 内存 50% = 8.8GB）写爆，
+  报 `OSError: [Errno 28] No space left on device` 崩会话（报错文本会把人误导向磁盘）。
+
+**部署**（宿主侧，`R=<repo>/tests/scripts/spike`）：
+
+```bash
+tr -d '\r' < "$R/patch-ic-closure.py" > /root/patch-ic-closure.py
+python3 /root/patch-ic-closure.py     # 幂等；首次备份 factor_runner.py.bak-ic-closure-patch
+python3 -m py_compile /opt/rdagent/lib/python3.11/site-packages/rdagent/scenarios/qlib/developer/factor_runner.py
+tr -d '\r' < "$R/launch-fin-factor.sh" > /root/launch-fin-factor.sh   # 备份 .bak-20261022
+bash -n /root/launch-fin-factor.sh
+```
+
+补丁做四件事：形状外提成 int、IC 实现提为模块级 `_ic_of_columns`（不捕获 self）、
+`pandarallel.initialize` 显式 `nb_workers=RDAGENT_PANDARALLEL_WORKERS`（默认 8）、
+增一行 IC dedup 尺寸日志。`launch-fin-factor.sh` 另把 `MEMORY_FS_ROOT` 指到磁盘目录
+`/root/rdagent-work/.pandarallel_mem`（**必须在 `exec` 之前**：pandarallel 在 import 期读它）。
+
+**验收**：新会话 `/proc/<pid>/environ` 含 `MEMORY_FS_ROOT` 与 `RDAGENT_PANDARALLEL_WORKERS`；
+`df -h /dev/shm` 占用降到 ~0；会话日志出现 `[incident-049] IC dedup: concat_feature=… GB`；
+`dmesg` 无新增 `Out of memory`。
+
+**死锁排障**（会话「活着」但不动）——注意**不能靠会话时长判断**（历史最长合法会话 4.25h）：
+
+```bash
+ps -o pid,stat,wchan:24,etime,time -p <session_pid>   # wchan=unix_stream_read_generic 且 CPU 时间不涨
+awk '{print $14+$15}' /proc/<session_pid>/stat        # 隔 60s 两次，相同即死锁
+stat -c '%s %y' <session_log>                         # 日志 size/mtime 是否还在推进
+# 解：走设计路径重启（代理停当前会话 + 重拉看护），不要手工 pkill
+curl -X POST http://127.0.0.1:8000/api/factor-research/restart -H 'Content-Type: application/json' -d '{}'
+```
+
+**回滚**：`cp factor_runner.py.bak-ic-closure-patch factor_runner.py`；
+`cp /root/launch-fin-factor.sh.bak-20261022 /root/launch-fin-factor.sh`。
+
