@@ -3215,12 +3215,29 @@ def _now() -> str:
 # ── Agent 设置中心（add-agent-settings-center）──
 
 
-@functools.lru_cache(maxsize=1)
 def _git_commit() -> str | None:
-    """返回当前 git 仓库 HEAD 短哈希（前 12 位）；非 git 环境返回 None。
+    """返回当前版本短哈希（前 12 位）；非 git 环境返回 None。
 
-    从 api.py 所在目录向上逐级寻找含 .git 的仓库根（不同部署布局下
-    __file__ 深度可能不同，故用向上搜索而非固定 parents 下标）。
+    构建期注入的 ``GIT_COMMIT``（Dockerfile ARG → ENV）优先于 git 探测：镜像里
+    没有 ``.git``，原实现恒返回 None（``/api/run-info`` 的 git_commit 长期为空，
+    2026-10-22 观测项）。注入值同样截 12 位，与本地探测口径一致。
+
+    环境变量在调用时读取（不进 lru_cache）：构建期注入是静态的，但测试与
+    本地热切换需要可观察；仓库探测（子进程）单独缓存，避免每请求 fork git。
+    """
+    built = (
+        os.environ.get("GIT_COMMIT") or os.environ.get("FINANCE_AGENT_GIT_COMMIT") or ""
+    ).strip()
+    if built:
+        return built[:12]
+    return _git_commit_from_repo()
+
+
+@functools.lru_cache(maxsize=1)
+def _git_commit_from_repo() -> str | None:
+    """向上搜索仓库根并读 HEAD（本地开发兜底；容器内无 .git 返回 None）。
+
+    不同部署布局下 ``__file__`` 深度可能不同，故用向上搜索而非固定 parents 下标。
     """
     root = Path(__file__).resolve().parent
     for _ in range(8):  # 向上最多找 8 层，防御性边界
@@ -4615,7 +4632,9 @@ def _harvest_job_block() -> dict[str, Any]:
 def _harvest_heartbeat_block() -> dict[str, Any] | None:
     """批内逐候选心跳（harvest 每处理一条写一次）；缺失/损坏 → None。"""
     path = Path(
-        os.environ.get("FACTOR_RESEARCH_HEARTBEAT_PATH", "data/factor_research/harvest_heartbeat.json")
+        os.environ.get(
+            "FACTOR_RESEARCH_HEARTBEAT_PATH", "data/factor_research/harvest_heartbeat.json"
+        )
     )
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -4696,7 +4715,9 @@ def _factor_research_harvest_payload() -> dict[str, Any]:
         )
     rejections.sort(key=lambda item: _harvest_ts(item.get("at")), reverse=True)
 
-    pending = sum(1 for item in candidates if isinstance(item, dict) and item.get("name") not in processed)
+    pending = sum(
+        1 for item in candidates if isinstance(item, dict) and item.get("name") not in processed
+    )
     reached_gates = status_counts["admitted"] + status_counts["rejected"]
 
     started_at = job.get("started_at")
