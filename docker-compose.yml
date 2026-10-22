@@ -28,6 +28,9 @@ services:
     build:
       context: .
       network: host
+      # 构建期版本注入（run-info.git_commit）；未设置时为空，不影响构建
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-}
     ports:
       - "8000:8000"
     env_file: .env

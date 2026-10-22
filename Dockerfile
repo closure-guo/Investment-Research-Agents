@@ -31,6 +31,13 @@ COPY README.md ./
 RUN sed '/^-e \./d' requirements.txt > /tmp/reqs.txt && \
     pip install --no-cache-dir --timeout 60 --retries 5 -r /tmp/reqs.txt
 
+# 预装构建期工具（setuptools 是 editable 安装的构建后端）。
+# 单独成层：供下面的 `pip install -e . --no-build-isolation` 离线复用，
+# 避免 pip 为拉 setuptools 另起隔离环境再联网一次（即本次构建失败的触发点）。
+# --timeout/--retries：2026-10-21 失败原因是 DNS 解析瞬时失败（EAI_AGAIN:
+# Temporary failure in name resolution），默认 5×15s 窗口太短，这里放大到 10×60s。
+RUN pip install --no-cache-dir --timeout 60 --retries 10 "setuptools>=68" wheel
+
 # 拷贝源码
 COPY src ./src
 # evals/ 顶层包：ops_api 模块级依赖（预登记门禁解析 + status_index），
@@ -38,12 +45,18 @@ COPY src ./src
 COPY evals ./evals
 COPY pyproject.toml ./
 
-# 安装当前项目 + fastapi/uvicorn
-RUN pip install --no-cache-dir -e . && \
-    pip install --no-cache-dir fastapi "uvicorn[standard]"
+# 安装当前项目 + fastapi/uvicorn。
+# --no-build-isolation：复用上一步预装的 setuptools，editable 安装全程不联网
+# （api.py 用 importlib.metadata.version("investment-research-agents")，缺 dist-info 会失效）
+RUN pip install --no-cache-dir --no-build-isolation -e . && \
+    pip install --no-cache-dir --timeout 60 --retries 10 fastapi "uvicorn[standard]"
 
 # 运行时环境
 ENV PYTHONUNBUFFERED=1
+
+# 构建期版本注入（/api/run-info 的 git_commit；镜像内无 .git，不注入则恒 null）
+ARG GIT_COMMIT=""
+ENV GIT_COMMIT=${GIT_COMMIT}
 
 EXPOSE 8000
 
