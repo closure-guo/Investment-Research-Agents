@@ -1003,3 +1003,111 @@ class TestTPlusTokenFalsePositives:
         assert len(anomalies) == 1
         assert anomalies[0]["kind"] == "deviation"
         assert anomalies[0]["indicator"] == "近期低点"
+
+
+# ── 601058 形态夹具：现价 15.0，近期高点 15.6（2026-10-22 赛轮轮胎阻断实证）──
+TI_601058 = _indicators(
+    ma5=15.05,
+    ma10=15.02,
+    ma20=14.90,
+    ma60=15.10,
+    boll_upper=15.50,
+    boll_middle=15.00,
+    boll_lower=14.50,
+)
+PL_601058 = {
+    "available": True,
+    "entry_ref": 15.00,
+    "recent_high": 15.60,
+    "recent_low": 10.20,
+    "atr": 0.50,
+    "stop_band_long": {"low": 14.20, "high": 14.60},
+    "target_band_long": {"low": 16.40, "high": 16.80},
+    "full_band": [10.20, 16.80],
+}
+CLOSE_601058 = 15.00
+
+# ── 002916 形态夹具：现价 450，近期高点 459.8（2026-10-06 深南电路阻断实证）──
+TI_002916 = _indicators(
+    ma5=448.0,
+    ma10=445.0,
+    ma20=430.0,
+    ma60=410.0,
+    boll_upper=470.0,
+    boll_middle=450.0,
+    boll_lower=430.0,
+)
+PL_002916 = {
+    "available": True,
+    "entry_ref": 450.0,
+    "recent_high": 459.8,
+    "recent_low": 380.0,
+    "atr": 12.0,
+    "stop_band_long": {"low": 430.0, "high": 440.0},
+    "target_band_long": {"low": 470.0, "high": 480.0},
+    "full_band": [380.0, 480.0],
+}
+CLOSE_002916 = 450.0
+
+# ── 600029 形态夹具：现价 4.67，止损参考带下沿 4.5314（2026-10-22 南方航空阻断实证）──
+TI_600029 = _indicators(
+    ma5=4.70,
+    ma10=4.68,
+    ma20=4.60,
+    ma60=4.90,
+    boll_upper=4.85,
+    boll_middle=4.67,
+    boll_lower=4.49,
+)
+PL_600029 = {
+    "available": True,
+    "entry_ref": 4.67,
+    "recent_high": 5.29,
+    "recent_low": 4.20,
+    "atr": 0.12,
+    "stop_band_long": {"low": 4.5314, "high": 4.62},
+    "target_band_long": {"low": 4.80, "high": 4.90},
+    "full_band": [4.20, 4.90],
+}
+CLOSE_600029 = 4.67
+
+
+class TestScoreSigmaAndReportPeriodFalsePositives:
+    """评分/σ 记号/年份+报告期不是价位（2026-10-22 cohort 生产阻断实证）。
+
+    601058 赛轮轮胎 19:09：reasoning 含「系统健康度仅39.2（warning）」，39.2 被
+    就近配到近期高点 15.6（偏差 151.28%）→ 报告阻断；600029 南方航空 18:40：
+    「20 个交易日 1σ 约 9%」的 1 被配到止损参考带下沿 4.5314（77.93%）→ 阻断；
+    002916 深南电路 10-06：「2026中报净利+65.55%」的年份 2026 被配到近期高点
+    459.8（340.63%）→ 阻断。三类均属 spec「非价格量纲不进入价位校验」，属实现
+    漏排除（意图不变），非决策幻觉。
+    """
+
+    def test_health_score_not_price(self):
+        """「系统健康度仅39.2（warning）」是 0-100 评分量纲，不得与股价比对。"""
+        decision = _decision(
+            reasoning="杠杆抬升、自由现金流连续为负，系统健康度仅39.2（warning），仅作下行缓冲。"
+        )
+        assert check_decision_prices(decision, TI_601058, PL_601058, CLOSE_601058) == []
+
+    def test_sigma_notation_not_price(self):
+        """「1σ」「0.22σ」的标准差记号不是价位。"""
+        decision = _decision(
+            reasoning="按252个交易日折算，20个交易日1σ约9%，参考带内目标空间约0.22σ。"
+        )
+        assert check_decision_prices(decision, TI_600029, PL_600029, CLOSE_600029) == []
+
+    def test_year_with_report_period_not_price(self):
+        """「2026中报」「2025年报」的年份是报告期，不是价位。"""
+        decision = _decision(
+            reasoning="2026中报净利同比+65.55%，2025年报营收+15.69%，均为存量信息。"
+        )
+        assert check_decision_prices(decision, TI_002916, PL_002916, CLOSE_002916) == []
+
+    def test_real_price_after_score_still_checked(self):
+        """护栏：同段文本里的真实漂移价位仍须校验（排除不得过宽）。"""
+        decision = _decision(reasoning="系统健康度仅39.2（warning）；放量站上 18.0 则重估。")
+        anomalies = check_decision_prices(decision, TI_601058, PL_601058, CLOSE_601058)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert "18" in anomalies[0]["message"]
