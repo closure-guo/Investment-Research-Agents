@@ -3,6 +3,7 @@ import type {
   FactorResearchActualState,
   FactorResearchConfigValues,
   FactorResearchStatusResponse,
+  HarvestChainResponse,
 } from '../types'
 
 /**
@@ -104,6 +105,11 @@ async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Pro
 
 export function fetchFactorResearchStatus(): Promise<FactorResearchStatusResponse> {
   return requestJson<FactorResearchStatusResponse>('/api/factor-research/status')
+}
+
+/** 收割链路只读载荷（add-factor-harvest-ui）；与监控快照同节拍轮询。 */
+export function fetchHarvestChain(): Promise<HarvestChainResponse> {
+  return requestJson<HarvestChainResponse>('/api/factor-research/harvest')
 }
 
 export function submitFactorResearchControl(desired: boolean): Promise<{ control: unknown }> {

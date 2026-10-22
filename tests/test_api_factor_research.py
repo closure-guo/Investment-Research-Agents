@@ -947,3 +947,144 @@ class TestDistroProbe:
         assert distro["available"] is True
         assert distro["fresh"] is False
         assert 900 <= distro["age_seconds"] <= 905
+
+
+class TestHarvestChainEndpoint:
+    """收割链路只读端点（add-factor-harvest-ui）：漏斗 / 队列 / 运行窗口 / 降级。"""
+
+    _HARVEST = "/api/factor-research/harvest"
+
+    @pytest.fixture(autouse=True)
+    def _paths(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FACTOR_RESEARCH_HARVEST_STATE_PATH", str(tmp_path / "state.json"))
+        monkeypatch.setenv("FACTOR_RESEARCH_CANDIDATES_PATH", str(tmp_path / "candidates.json"))
+        monkeypatch.setenv("FACTOR_LIBRARY_DB_PATH", str(tmp_path / "library.db"))
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "ops.db"))
+        return tmp_path
+
+    def _write(self, tmp_path, processed, candidates):
+        (tmp_path / "state.json").write_text(
+            json.dumps({"updated_at": "2026-10-22T16:00:00+08:00", "processed": processed}),
+            encoding="utf-8",
+        )
+        (tmp_path / "candidates.json").write_text(
+            json.dumps({"generated_at": "x", "candidates": candidates}), encoding="utf-8"
+        )
+
+    def test_missing_files_degrade_honestly(self, tmp_path):
+        payload = TestClient(app).get(self._HARVEST).json()
+        assert payload["available"] is False
+        assert payload["funnel"] is None
+        assert payload["progress"] is None
+        assert payload["recent_admitted"] == []
+
+    def test_corrupt_state_degrades(self, tmp_path):
+        (tmp_path / "state.json").write_text("{not-json", encoding="utf-8")
+        (tmp_path / "candidates.json").write_text(json.dumps({"candidates": []}), encoding="utf-8")
+        payload = TestClient(app).get(self._HARVEST).json()
+        assert payload["available"] is False
+
+    def test_funnel_pending_and_recent_rejection(self, tmp_path):
+        processed = {
+            "a": {"status": "admitted", "expression": "x", "at": "2026-10-22T16:00:00+08:00"},
+            "b": {
+                "status": "rejected",
+                "expression": "y",
+                "gate": 2,
+                "reason": "WEAK_ICIR",
+                "at": "2026-10-22T16:01:00+08:00",
+            },
+            "c": {
+                "status": "untranslatable",
+                "stage": "llm",
+                "detail": "no cross-sectional op",
+                "at": "2026-10-22T16:02:00+08:00",
+            },
+        }
+        candidates = [{"name": n} for n in ("a", "b", "c", "d", "e")]
+        self._write(tmp_path, processed, candidates)
+
+        payload = TestClient(app).get(self._HARVEST).json()
+
+        assert payload["available"] is True
+        funnel = payload["funnel"]
+        assert funnel["candidates"] == 5
+        assert funnel["processed"] == 3
+        assert funnel["untranslatable"] == 1
+        assert funnel["admitted"] == 1
+        assert funnel["reached_gates"] == 2
+        assert funnel["rejected_by_gate"]["2"] == 1
+        assert payload["progress"]["pending"] == 2
+        assert payload["recent_rejected"][0]["reason"] == "WEAK_ICIR"
+        assert payload["recent_rejected"][0]["gate"] == 2
+
+    def test_run_window_batches_and_admissions(self, tmp_path, monkeypatch):
+        processed = {
+            "a": {"status": "admitted", "expression": "x", "at": "2026-10-22T16:00:00+08:00"},
+            "b": {
+                "status": "rejected",
+                "expression": "y",
+                "gate": 2,
+                "reason": "WEAK_ICIR",
+                "at": "2026-10-22T16:01:00+08:00",
+            },
+        }
+        self._write(tmp_path, processed, [{"name": "a"}, {"name": "b"}, {"name": "c"}])
+        monkeypatch.setattr(
+            "finance_agent.api._harvest_job_block",
+            lambda: {
+                "status": "running",
+                "started_at": "2026-10-22T15:55:00+08:00",
+                "finished_at": None,
+                "schedule": {
+                    "day_of_week": "*",
+                    "hour": 15,
+                    "minute": 55,
+                    "timezone": "Asia/Shanghai",
+                },
+                "next_fire_time": None,
+            },
+        )
+        monkeypatch.setattr(
+            "finance_agent.api.list_ledger_entries",
+            lambda: [
+                {"batch_id": "b1", "admitted": 1, "created_at": "2026-10-22T16:00:00+08:00"},
+                {"batch_id": "b1", "admitted": 0, "created_at": "2026-10-22T16:00:01+08:00"},
+                {"batch_id": "b2", "admitted": 0, "created_at": "2026-10-22T16:30:00+08:00"},
+            ],
+        )
+        payload = TestClient(app).get(self._HARVEST).json()
+        progress = payload["progress"]
+        assert progress["batches_done"] == 2
+        assert progress["admitted_in_run"] == 1
+        assert progress["rejected_in_run"] == 2
+        assert progress["eta_s"] is not None
+
+    def test_recent_admitted_uses_library_rows(self, tmp_path, monkeypatch):
+        self._write(
+            tmp_path,
+            {"a": {"status": "admitted", "expression": "x", "at": "2026-10-22T16:00:00+08:00"}},
+            [],
+        )
+        monkeypatch.setattr(
+            "finance_agent.api.list_factors",
+            lambda: [
+                {
+                    "id": 7,
+                    "expression": "ts_corr(close,volume,10)",
+                    "created_at": "2026-10-22T16:51:10+08:00",
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            "finance_agent.api.recent_ic_stats", lambda rows, window: {7: (0.01, 0.2)}
+        )
+        payload = TestClient(app).get(self._HARVEST).json()
+        assert payload["recent_admitted"] == [
+            {
+                "expression": "ts_corr(close,volume,10)",
+                "factor_id": 7,
+                "created_at": "2026-10-22T16:51:10+08:00",
+                "icir_60d": 0.2,
+            }
+        ]

@@ -671,3 +671,18 @@ class TestEarningsEventLaneRegistration:
         assert outcome["status"] == "ok"
         assert outcome["summary"]["entry"] == {"entered": 2, "deferred": 0}
         assert outcome["summary"]["settle"] == {"settled": 1, "not_due": 1}
+
+
+class TestFactorHarvestDailySchedule:
+    """因子收割：每天（含周末）触发；单次运行内部串行多批直到清空待处理。"""
+
+    def test_runs_every_day_at_1555(self):
+        spec = SCHEDULES["factor_harvest_daily"]
+        assert spec["day_of_week"] == "*"
+        assert (spec["hour"], spec["minute"]) == (15, 55)
+        assert spec["timezone"] == "Asia/Shanghai"
+
+    def test_job_uses_drained_entrypoint(self):
+        from finance_agent.factors.harvest import run_factor_harvest_until_drained
+
+        assert JOB_FUNCS["factor_harvest_daily"] is run_factor_harvest_until_drained

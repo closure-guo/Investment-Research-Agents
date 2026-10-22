@@ -1351,3 +1351,56 @@ export interface BrokerOrderRow {
 export interface BrokerOrdersResponse {
   orders: BrokerOrderRow[]
 }
+
+/** 收割链路只读载荷（add-factor-harvest-ui）。 */
+export interface HarvestJobBlock {
+  status: string | null
+  started_at: string | null
+  finished_at: string | null
+  schedule: { day_of_week: string; hour: number; minute: number; timezone: string } | null
+  next_fire_time: string | null
+}
+
+export interface HarvestProgressBlock {
+  batches_done: number
+  batch_limit: number
+  processed: number
+  pending: number
+  admitted_in_run: number
+  rejected_in_run: number
+  started_at: string | null
+  eta_s: number | null
+}
+
+export interface HarvestFunnelBlock {
+  candidates: number
+  processed: number
+  untranslatable: number
+  transcription_error: number
+  reached_gates: number
+  admitted: number
+  rejected_by_gate: Record<string, number>
+}
+
+export interface HarvestRecentAdmission {
+  expression: string | null
+  factor_id: number
+  created_at: string | null
+  icir_60d: number
+}
+
+export interface HarvestRecentRejection {
+  expression: string | null
+  gate: number | null
+  reason: string | null
+  at: string | null
+}
+
+export interface HarvestChainResponse {
+  available: boolean
+  job: HarvestJobBlock | null
+  progress: HarvestProgressBlock | null
+  funnel: HarvestFunnelBlock | null
+  recent_admitted: HarvestRecentAdmission[]
+  recent_rejected: HarvestRecentRejection[]
+}

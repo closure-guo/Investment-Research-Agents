@@ -47,8 +47,14 @@ PURPOSE_TAG: Purpose = "factor_transcription"
 
 DEFAULT_CANDIDATES_PATH = "data/factor_research/candidates.json"
 DEFAULT_STATE_PATH = "data/factor_research/harvest_state.json"
+# 跨会话记忆桥（生成侧读取；导出失败不影响收割结果）
+DEFAULT_FEEDBACK_PATH = "data/factor_research/explored_factors.json"
 # 单批上限（闸③ BH-FDR 分辨率覆盖 K ≤ 100；留裕度，超量候选顺延下一批）
 DEFAULT_BATCH_LIMIT = 60
+# 单轮日批最多串行几批（每批独立 BH-FDR 家族，≤100 分辨率约束不变）；防单次运行无限拉长
+DEFAULT_MAX_BATCHES_PER_RUN = 12
+# 聚合摘要里保留的拒收明细上限（job_runs 摘要体积保护）
+MAX_AGGREGATED_REJECTIONS = 100
 DEFAULT_CATEGORY = "外部"
 # 转译合同失败重试上限（共 3 次尝试；与「提案输出合同」修复重试上限同款——
 # recover-factor-supply-losses：2026-10-19 实测 2 条候选因 LLM 响应非 JSON 一次性落账）
@@ -218,6 +224,21 @@ def _write_json(path: Path, payload: dict) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _refresh_explored_feedback(state_path: Path, candidates_path: Path) -> None:
+    """刷新跨会话记忆桥（best-effort：失败只告警，不影响收割结果）。"""
+    try:
+        from finance_agent.factors.feedback import export_feedback
+
+        target = os.environ.get("FACTOR_FEEDBACK_PATH", DEFAULT_FEEDBACK_PATH)
+        export_feedback(
+            state_path=state_path,
+            candidates_path=candidates_path,
+            output_path=target,
+        )
+    except Exception:  # noqa: BLE001 - 记忆桥是附加产物，不得让收割批失败
+        logger.warning("explored feedback export failed", exc_info=True)
 
 
 def _candidates_path(explicit: str | Path | None) -> Path:
@@ -449,6 +470,7 @@ def run_factor_harvest(
             verdict["qlib_expression"] = previous["qlib_expression"]
     processed.update(verdicts)
     _write_json(st_file, {"updated_at": _now(), "processed": processed})
+    _refresh_explored_feedback(st_file, cand_file)
     logger.info(
         "factor harvest: proposed=%s transcribed=%s untranslatable=%s admitted=%s rejected=%s errors=%s",
         summary["proposed"],
@@ -459,3 +481,55 @@ def run_factor_harvest(
         summary["errors"],
     )
     return summary
+
+
+def run_factor_harvest_until_drained(
+    *,
+    max_batches: int = DEFAULT_MAX_BATCHES_PER_RUN,
+    limit: int = DEFAULT_BATCH_LIMIT,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """串行循环收割直到无待处理候选（日批入口：每天一次，内部自动多批清积压）。
+
+    约束不变：每批候选数 ≤ ``limit``（默认 60），即闸③ BH-FDR 的 K ≤ 100 分辨率
+    始终成立；多批之间是**独立的检验家族**，不合并 p 值。
+
+    停止条件：``proposed == 0``（已清空当前待处理）或 ``max_batches`` 用尽。
+    任一批异常直接上抛（``run_job`` 记 failed；状态文件幂等，下次从断点继续）。
+    聚合摘要把拒绝明细截断到 ``MAX_AGGREGATED_REJECTIONS``，避免 job_runs 过大。
+    """
+    totals: dict[str, Any] = {
+        "batches": 0,
+        "drained": False,
+        "proposed": 0,
+        "transcribed": 0,
+        "untranslatable": 0,
+        "transcription_errors": 0,
+        "admitted": 0,
+        "rejected": 0,
+        "errors": 0,
+        "rejections": [],
+        "rejections_truncated": False,
+    }
+    for _ in range(max(1, max_batches)):
+        summary = run_factor_harvest(limit=limit, **kwargs)
+        if summary["proposed"] == 0:
+            totals["drained"] = True
+            break
+        totals["batches"] += 1
+        for key in (
+            "proposed",
+            "transcribed",
+            "untranslatable",
+            "transcription_errors",
+            "admitted",
+            "rejected",
+            "errors",
+        ):
+            totals[key] += int(summary[key])
+        for rejection in summary["rejections"]:
+            if len(totals["rejections"]) >= MAX_AGGREGATED_REJECTIONS:
+                totals["rejections_truncated"] = True
+                break
+            totals["rejections"].append(rejection)
+    return totals

@@ -53,11 +53,13 @@ from finance_agent.data.snapshot import (  # noqa: E402
 )
 from finance_agent.execution.brokers.base import ORDER_STATUSES, STATUS_REJECTED  # noqa: E402
 from finance_agent.factors.builtin import BUILTIN_FACTORS  # noqa: E402
+from finance_agent.factors.harvest import DEFAULT_MAX_BATCHES_PER_RUN  # noqa: E402
 from finance_agent.factors.library import (  # noqa: E402
     FACTOR_STATES,
     list_events,
     list_factors,
     list_ic_series,
+    list_ledger_entries,
 )
 from finance_agent.factors.style_exposure import (  # noqa: E402
     compute_style_exposure,
@@ -4547,10 +4549,184 @@ def _factor_research_config_update(req: FactorResearchConfigRequest) -> dict[str
     return {"config": _factor_research_config_block()}
 
 
+# ── 收割链路只读端点（add-factor-harvest-ui）────────────────────────────────
+#
+# 数据面：harvest_state.json（逐候选裁决）+ candidates.json（队列）+ 因子库账本
+# （批次/入库/拒收）。零写入、零业务复制；文件缺失/损坏 → available=false，
+# 各块降级为 null，MUST NOT 编造数字。
+FACTOR_HARVEST_STATE_PATH_DEFAULT = "data/factor_research/harvest_state.json"
+FACTOR_HARVEST_CANDIDATES_PATH_DEFAULT = "data/factor_research/candidates.json"
+FACTOR_HARVEST_RECENT_REJECTIONS = 10
+FACTOR_HARVEST_RECENT_ADMISSIONS = 5
+
+
+def _harvest_ts(value: Any) -> str:
+    """ISO 时间比较键（截到秒；容忍 ``T`` 分隔与是否带偏移）。"""
+    return str(value or "")[:19]
+
+
+def _harvest_job_block() -> dict[str, Any]:
+    """ops 任务行（factor_harvest_daily）→ job 块；不可得如实 null。"""
+    block: dict[str, Any] = {
+        "status": None,
+        "started_at": None,
+        "finished_at": None,
+        "schedule": None,
+        "next_fire_time": None,
+    }
+    try:
+        from finance_agent.ops_api import _next_fire_time
+        from finance_agent.outcome.ops.jobs import SCHEDULES
+        from finance_agent.outcome.ops.model import last_job_run
+
+        run = last_job_run("factor_harvest_daily") or {}
+        block.update(
+            {
+                "status": run.get("status"),
+                "started_at": run.get("started_at"),
+                "finished_at": run.get("finished_at"),
+                "schedule": dict(SCHEDULES["factor_harvest_daily"]),
+                "next_fire_time": _next_fire_time("factor_harvest_daily"),
+            }
+        )
+    except Exception:  # noqa: BLE001 - 任务块不可得不得拖垮整个区块
+        _logger.warning("harvest job block unavailable", exc_info=True)
+    return block
+
+
+def _factor_research_harvest_payload() -> dict[str, Any]:
+    """收割链路只读载荷：job / progress / funnel / 最近入库与拒收。"""
+    job = _harvest_job_block()
+    empty: dict[str, Any] = {
+        "available": False,
+        "job": job,
+        "progress": None,
+        "funnel": None,
+        "recent_admitted": [],
+        "recent_rejected": [],
+    }
+    state_path = Path(
+        os.environ.get("FACTOR_RESEARCH_HARVEST_STATE_PATH", FACTOR_HARVEST_STATE_PATH_DEFAULT)
+    )
+    candidates_path = Path(
+        os.environ.get("FACTOR_RESEARCH_CANDIDATES_PATH", FACTOR_HARVEST_CANDIDATES_PATH_DEFAULT)
+    )
+    try:
+        state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+        candidates_payload = json.loads(candidates_path.read_text(encoding="utf-8"))
+        processed = state_payload.get("processed") or {}
+        candidates = candidates_payload.get("candidates") or []
+    except (OSError, ValueError, AttributeError):
+        return empty
+    if not isinstance(processed, dict) or not isinstance(candidates, list):
+        return empty
+
+    status_counts = {"admitted": 0, "rejected": 0, "untranslatable": 0, "transcription_error": 0}
+    rejected_by_gate = {str(gate): 0 for gate in range(6)}
+    rejections: list[dict[str, Any]] = []
+    for verdict in processed.values():
+        if not isinstance(verdict, dict):
+            continue
+        status = str(verdict.get("status") or "")
+        if status in status_counts:
+            status_counts[status] += 1
+        if status != "rejected":
+            continue
+        gate = verdict.get("gate")
+        if isinstance(gate, int) and 0 <= gate <= 5:
+            rejected_by_gate[str(gate)] += 1
+        rejections.append(
+            {
+                "expression": verdict.get("expression"),
+                "gate": gate if isinstance(gate, int) else None,
+                "reason": verdict.get("reason"),
+                "at": verdict.get("at"),
+            }
+        )
+    rejections.sort(key=lambda item: _harvest_ts(item.get("at")), reverse=True)
+
+    pending = sum(1 for item in candidates if isinstance(item, dict) and item.get("name") not in processed)
+    reached_gates = status_counts["admitted"] + status_counts["rejected"]
+
+    started_at = job.get("started_at")
+    start_key = _harvest_ts(started_at)
+    ledger = list_ledger_entries() if start_key else []
+    in_run = [row for row in ledger if _harvest_ts(row.get("created_at")) >= start_key]
+    batches_done = len({str(row.get("batch_id")) for row in in_run})
+    admitted_in_run = sum(1 for row in in_run if row.get("admitted"))
+    rejected_in_run = len(in_run) - admitted_in_run
+
+    processed_in_run = 0
+    if start_key:
+        processed_in_run = sum(
+            1
+            for verdict in processed.values()
+            if isinstance(verdict, dict) and _harvest_ts(verdict.get("at")) >= start_key
+        )
+    eta_s: int | None = None
+    if start_key and processed_in_run > 0 and pending > 0:
+        try:
+            started_dt = datetime.fromisoformat(str(started_at))
+            now = datetime.now(started_dt.tzinfo) if started_dt.tzinfo else datetime.now()
+            elapsed = max(1.0, (now - started_dt).total_seconds())
+            rate = processed_in_run / elapsed
+            eta_s = int(pending / rate) if rate > 0 else None
+        except (TypeError, ValueError):
+            eta_s = None
+
+    rows = sorted(
+        list_factors(),
+        key=lambda row: _harvest_ts(row.get("created_at")),
+        reverse=True,
+    )[:FACTOR_HARVEST_RECENT_ADMISSIONS]
+    ic_stats = recent_ic_stats(rows, window=FACTOR_IC_WINDOW) if rows else {}
+    recent_admitted = [
+        {
+            "expression": row.get("expression"),
+            "factor_id": int(row["id"]),
+            "created_at": row.get("created_at"),
+            "icir_60d": ic_stats.get(int(row["id"]), (0.0, 0.0))[1],
+        }
+        for row in rows
+    ]
+
+    return {
+        "available": True,
+        "job": job,
+        "progress": {
+            "batches_done": batches_done,
+            "batch_limit": DEFAULT_MAX_BATCHES_PER_RUN,
+            "processed": len(processed),
+            "pending": pending,
+            "admitted_in_run": admitted_in_run,
+            "rejected_in_run": rejected_in_run,
+            "started_at": started_at,
+            "eta_s": eta_s,
+        },
+        "funnel": {
+            "candidates": len(candidates),
+            "processed": len(processed),
+            "untranslatable": status_counts["untranslatable"],
+            "transcription_error": status_counts["transcription_error"],
+            "reached_gates": reached_gates,
+            "admitted": status_counts["admitted"],
+            "rejected_by_gate": rejected_by_gate,
+        },
+        "recent_admitted": recent_admitted,
+        "recent_rejected": rejections[:FACTOR_HARVEST_RECENT_REJECTIONS],
+    }
+
+
 @app.get("/api/factor-research/status")
 async def factor_research_status() -> dict[str, Any]:
     """因子研发监控快照（只读）：快照 + actual_state + config + launcher + control。"""
     return await asyncio.to_thread(_factor_research_status_payload)
+
+
+@app.get("/api/factor-research/harvest")
+async def factor_research_harvest() -> dict[str, Any]:
+    """收割链路只读载荷：job / progress / funnel / 最近入库与拒收（零写入）。"""
+    return await asyncio.to_thread(_factor_research_harvest_payload)
 
 
 @app.put("/api/factor-research/control")

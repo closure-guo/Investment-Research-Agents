@@ -71,7 +71,7 @@ from finance_agent.data.snapshot_job import run_market_snapshot_batch
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.execution.driver import run_execution_daily
 from finance_agent.factors.builtin import run_factor_builtin_register
-from finance_agent.factors.harvest import run_factor_harvest
+from finance_agent.factors.harvest import run_factor_harvest_until_drained
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
@@ -213,12 +213,16 @@ def _factor_builtin_register_job() -> None:
 
 
 def _factor_harvest_job() -> None:
-    """add-factor-harvest-bridge：因子收割日批（15:55，内置注册之后、结算链之前）。
+    """add-factor-harvest-bridge：因子收割日批（每天 15:55，内置注册之后、结算链之前）。
 
-    RD-Agent 候选 → LLM 转译 → 翻译器 → 同一五道闸；无新候选零摘要（非错误）；
-    网关/面板不可得上抛（run_job 记 failed，次日重试；state 幂等不重复消费）。
+    RD-Agent 候选 → LLM 转译 → 翻译器 → 同一五道闸；**内部串行多批直到清空待处理**
+    （每批 ≤60，闸③ BH-FDR 的 K≤100 分辨率不变，批间是独立检验家族）；
+    ``max_batches`` 兜底防无限拉长。无新候选零摘要（非错误）；
+    网关/面板不可得上抛（run_job 记 failed，下次重试；state 幂等不重复消费）。
     """
-    _with_retry("factor_harvest_daily", "factor harvest daily", run_factor_harvest)
+    _with_retry(
+        "factor_harvest_daily", "factor harvest daily", run_factor_harvest_until_drained
+    )
 
 
 def _settle_job() -> None:

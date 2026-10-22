@@ -1033,3 +1033,120 @@ describe('因子研发监控页 · distro 探活披露（delta add-factor-resear
     expect(screen.queryByTestId('factor-research-stale-banner')).toBeNull()
   })
 })
+
+
+describe('收割链路区块（add-factor-harvest-ui）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    window.history.pushState({}, '', '/')
+  })
+
+  it('进度/漏斗/台账渲染（运行中）', async () => {
+    const harvest = {
+      available: true,
+      job: {
+        status: 'running',
+        started_at: '2026-10-22T15:55:00+08:00',
+        finished_at: null,
+        schedule: { day_of_week: '*', hour: 15, minute: 55, timezone: 'Asia/Shanghai' },
+        next_fire_time: null,
+      },
+      progress: {
+        batches_done: 2,
+        batch_limit: 12,
+        processed: 440,
+        pending: 380,
+        admitted_in_run: 3,
+        rejected_in_run: 65,
+        started_at: '2026-10-22T15:55:00+08:00',
+        eta_s: 12600,
+      },
+      funnel: {
+        candidates: 820,
+        processed: 440,
+        untranslatable: 225,
+        transcription_error: 7,
+        reached_gates: 208,
+        admitted: 7,
+        rejected_by_gate: { '2': 150, '4': 30 },
+      },
+      recent_admitted: [
+        {
+          expression: 'ts_corr(close,volume,10)',
+          factor_id: 7,
+          created_at: '2026-10-22T16:51:10+08:00',
+          icir_60d: 0.2,
+        },
+      ],
+      recent_rejected: [
+        {
+          expression: 'sub(div(close,ref(close,20)),1)',
+          gate: 2,
+          reason: 'WEAK_ICIR',
+          at: '2026-10-22T16:00:00+08:00',
+        },
+      ],
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/factor-research/status') return respond(snapshotBody())
+      if (url === '/api/factor-research/harvest') return respond(harvest)
+      if (url === '/api/sessions') return respond({ sessions: [] })
+      if (url === '/api/snapshot/status') {
+        return respond({ latest_date: null, stale: false, message: null, last_error: null, last_error_date: null })
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<FactorResearchPage onBack={() => {}} />)
+
+    const section = await screen.findByTestId('factor-research-harvest')
+    expect(section.textContent).toContain('每天 15:55')
+    expect(screen.getByTestId('factor-research-harvest-status').textContent).toBe('运行中')
+    const progress = screen.getByTestId('factor-research-harvest-progress').textContent ?? ''
+    expect(progress).toContain('批次 2/12')
+    expect(progress).toContain('剩余 380')
+    expect(progress).toContain('本轮入库 3')
+    expect(screen.getByTestId('factor-research-harvest-step-candidates').textContent).toContain('820')
+    expect(screen.getByTestId('factor-research-harvest-step-admitted').textContent).toContain('7')
+    expect(screen.getByTestId('factor-research-harvest-gates').textContent).toContain('ICIR 150')
+    expect(screen.getByTestId('factor-research-harvest-admitted').textContent).toContain(
+      'ts_corr(close,volume,10)'
+    )
+    expect(screen.getByTestId('factor-research-harvest-rejected').textContent).toContain('WEAK_ICIR')
+  })
+
+  it('不可用 → 区块级空态（不拖垮整页）', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/factor-research/status') return respond(snapshotBody())
+      if (url === '/api/factor-research/harvest') {
+        return respond({
+          available: false,
+          job: null,
+          progress: null,
+          funnel: null,
+          recent_admitted: [],
+          recent_rejected: [],
+        })
+      }
+      if (url === '/api/sessions') return respond({ sessions: [] })
+      if (url === '/api/snapshot/status') {
+        return respond({ latest_date: null, stale: false, message: null, last_error: null, last_error_date: null })
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<FactorResearchPage onBack={() => {}} />)
+
+    await screen.findByTestId('factor-research-supervisor')
+    expect(screen.getByTestId('factor-research-harvest-empty').textContent).toContain('未接入')
+    // 主区块不受影响
+    expect(screen.getByTestId('factor-research-supervisor')).toBeTruthy()
+  })
+})

@@ -1,0 +1,532 @@
+{
+ "generated_at": "2026-10-22T13:56:48+0800",
+ "targets": {
+  "($close - Min($low, 20)) / (Max($high, 20) - Min($low, 20)) - 0.5": [
+   "pos20"
+  ],
+  "Mean(($close / Ref($close, 1)) - 1, 20) / (Std(($close / Ref($close, 1)) - 1, 20) + 0.000000000001)": [
+   "retvol20"
+  ],
+  "-1 * Std($close / Ref($close, 1) - 1, 20)": [
+   "lowvol20"
+  ],
+  "Mul(-1, Max(Sub(Div($close, Ref($close, 1)), 1), 20))": [
+   "maxret20"
+  ],
+  "Sum(Sign(Delta($close, 1)) * $volume, 5) / (Mean($volume, 5) + 0.000000000001)": [
+   "obv5"
+  ],
+  "Mul(-1, Power(Div(Sum(Mul(Div(Sub(Sub(Div($close, Ref($close, 1)), 1), Abs(Sub(Div($close, Ref($close, 1)), 1))), 2), Div(Sub(Sub(Div($close, Ref($close, 1)), 1), Abs(Sub(Div($close, Ref($close, 1)), 1))), 2)), 20), 19), 0.5))": [
+   "downvol20"
+  ],
+  "(Sum((((($close / Ref($close, 1)) - 1) + Abs((($close / Ref($close, 1)) - 1))) / 2), 20) / 20) / (Sum(((Abs((($close / Ref($close, 1)) - 1)) - (($close / Ref($close, 1)) - 1)) / 2), 20) / 20 + 0.000000000001)": [
+   "updown20"
+  ],
+  "Mul(-1, Div(Sub($close, Div(Sum(Mul($volume, $close), 5), Sum($volume, 5))), Div(Sum(Mul($volume, $close), 5), Sum($volume, 5))))": [
+   "vwap_rev5"
+  ],
+  "Sum((Sign(Delta($close, 1)) + Abs(Sign(Delta($close, 1)))) / 2, 5) / 5 - 0.5": [
+   "updays5"
+  ],
+  "($close / Ref($close, 5) - 1) - (Ref($close, 5) / Ref($close, 10) - 1)": [
+   "accel5"
+  ],
+  "(Sum((($close / Ref($close, 1) - 1) + Abs($close / Ref($close, 1) - 1)) / 2, 14) / (Sum((($close / Ref($close, 1) - 1) + Abs($close / Ref($close, 1) - 1)) / 2, 14) + Sum((Abs($close / Ref($close, 1) - 1) - ($close / Ref($close, 1) - 1)) / 2, 14))) - 0.5": [
+   "rsi14"
+  ],
+  "Mean($close / Ref($close, 1) - 1, 20) / Std($close / Ref($close, 1) - 1, 20)": [
+   "sharpe_mom20"
+  ],
+  "(Sum((($high+$low+$close)/3)*$volume*((Sign(Delta((($high+$low+$close)/3),1))+Abs(Sign(Delta((($high+$low+$close)/3),1))))/2),14)/(Sum((($high+$low+$close)/3)*$volume*((Sign(Delta((($high+$low+$close)/3),1))+Abs(Sign(Delta((($high+$low+$close)/3),1))))/2),14)+Sum((($high+$low+$close)/3)*$volume*((Abs(Sign(Delta((($high+$low+$close)/3),1)))-Sign(Delta((($high+$low+$close)/3),1)))/2),14)))-0.5": [
+   "mfi14"
+  ],
+  "(20 * (Sum(Log($close), 1) + Sum(Log($close), 2) + Sum(Log($close), 3) + Sum(Log($close), 4) + Sum(Log($close), 5) + Sum(Log($close), 6) + Sum(Log($close), 7) + Sum(Log($close), 8) + Sum(Log($close), 9) + Sum(Log($close), 10) + Sum(Log($close), 11) + Sum(Log($close), 12) + Sum(Log($close), 13) + Sum(Log($close), 14) + Sum(Log($close), 15) + Sum(Log($close), 16) + Sum(Log($close), 17) + Sum(Log($close), 18) + Sum(Log($close), 19)) - 190 * Sum(Log($close), 20)) / 13300": [
+   "trend_slope_20d"
+  ],
+  "Corr(Ref($close / Ref($close, 1) - 1, 1), $close / Ref($close, 1) - 1, 3)": [
+   "ret_autocorr_5d"
+  ],
+  "Corr(Ref(($close/Ref($close,1)-1),1),$close/Ref($close,1)-1,18)": [
+   "ret_autocorr_20d"
+  ],
+  "($close - Min($low, 20)) / (Max($high, 20) - Min($low, 20) + 0.00000001)": [
+   "CLOSE_POS_20D"
+  ],
+  "Mean(Abs($close / Ref($close, 1) - 1) / ($volume * $close + 0.000000000001), 20)": [
+   "AMIHUD_ILLIQ_20D"
+  ],
+  "Corr($close / Ref($close, 1) - 1, $volume / Ref($volume, 1) - 1, 10)": [
+   "PV_CORR_10D"
+  ],
+  "Sum((($close / Ref($close, 1)) - 1) * $volume, 5) / (Sum($volume, 5) + 0.000000000001)": [
+   "VW_RET_5D"
+  ],
+  "Sum((Sign(Delta($close, 1)) + Abs(Sign(Delta($close, 1)))) / 2, 5)": [
+   "UP_DAYS_5D"
+  ],
+  "Std($close / Ref($close, 1) - 1, 10) / (Std($close / Ref($close, 1) - 1, 60) + 0.000000000001)": [
+   "VOL_CONTRACTION_10_60"
+  ],
+  "$close / (Sum($close * $volume, 5) / (Sum($volume, 5) + 0.000000000001)) - 1": [
+   "VWAP_DEV_5D"
+  ],
+  "(Sum($volume * ((Sign(1 - $close / Ref($close, 1)) + Abs(Sign(1 - $close / Ref($close, 1)))) / 2), 20) + 0.000000000001) / (Sum($volume * ((Sign($close / Ref($close, 1) - 1) + Abs(Sign($close / Ref($close, 1) - 1))) / 2), 20) + 0.000000000001)": [
+   "DOWN_UP_VOL_RATIO_20D"
+  ],
+  "((Mean(($close/Ref($close,1)-1)*($close/Ref($close,1)-1)*($close/Ref($close,1)-1)*($close/Ref($close,1)-1),20)-4*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1)*($close/Ref($close,1)-1)*($close/Ref($close,1)-1),20)+6*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1)*($close/Ref($close,1)-1),20)-3*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20))/((Mean(($close/Ref($close,1)-1)*($close/Ref($close,1)-1),20)-Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20))*(Mean(($close/Ref($close,1)-1)*($close/Ref($close,1)-1),20)-Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20))))": [
+   "RET_KURT_20D"
+  ],
+  "Power(Div(Sum(Mul(Div(Sub(Sub(Div($close, Ref($close, 1)), 1), Abs(Sub(Div($close, Ref($close, 1)), 1))), 2), Div(Sub(Sub(Div($close, Ref($close, 1)), 1), Abs(Sub(Div($close, Ref($close, 1)), 1))), 2)), 20), 20), 0.5)": [
+   "DOWNSIDE_VOL_20D"
+  ],
+  "Sum(($close / Ref($close, 1) - 1) * (Sign(($close / Ref($close, 1) - 1)) + Abs(Sign(($close / Ref($close, 1) - 1)))) / 2, 20) / (Sum((Sign(($close / Ref($close, 1) - 1)) + Abs(Sign(($close / Ref($close, 1) - 1)))) / 2, 20) + 0.000000000001) - Sum((1 - $close / Ref($close, 1)) * (Abs(Sign(($close / Ref($close, 1) - 1))) - Sign(($close / Ref($close, 1) - 1))) / 2, 20) / (Sum((Abs(Sign(($close / Ref($close, 1) - 1))) - Sign(($close / Ref($close, 1) - 1))) / 2, 20) + 0.000000000001)": [
+   "UP_DOWN_RET_SPREAD_20D"
+  ],
+  "Abs(Delta($close, 10)) / (Sum(Abs(Delta($close, 1)), 10) + 0.000000000001)": [
+   "EFFICIENCY_RATIO_10D"
+  ],
+  "Corr($close / Ref($close, 1) - 1, Ref($close, 1) / Ref($close, 2) - 1, 10)": [
+   "AUTOCORR_RET_10D"
+  ],
+  "Mean(($open / Ref($close, 1) - 1) * (($close - $open) / ($open + 0.000000000001)), 5)": [
+   "GAP_INTRADAY_COMOVE_5D"
+  ],
+  "((9.5 * $close + 8.5 * Ref($close, 1) + 7.5 * Ref($close, 2) + 6.5 * Ref($close, 3) + 5.5 * Ref($close, 4) + 4.5 * Ref($close, 5) + 3.5 * Ref($close, 6) + 2.5 * Ref($close, 7) + 1.5 * Ref($close, 8) + 0.5 * Ref($close, 9) - 0.5 * Ref($close, 10) - 1.5 * Ref($close, 11) - 2.5 * Ref($close, 12) - 3.5 * Ref($close, 13) - 4.5 * Ref($close, 14) - 5.5 * Ref($close, 15) - 6.5 * Ref($close, 16) - 7.5 * Ref($close, 17) - 8.5 * Ref($close, 18) - 9.5 * Ref($close, 19)) / 665) / (Mean($close, 20) + 0.000000000001)": [
+   "TREND_SLOPE_20D"
+  ],
+  "($close - Mean($close,20) - (9.5*$close + 8.5*Ref($close,1) + 7.5*Ref($close,2) + 6.5*Ref($close,3) + 5.5*Ref($close,4) + 4.5*Ref($close,5) + 3.5*Ref($close,6) + 2.5*Ref($close,7) + 1.5*Ref($close,8) + 0.5*Ref($close,9) - 0.5*Ref($close,10) - 1.5*Ref($close,11) - 2.5*Ref($close,12) - 3.5*Ref($close,13) - 4.5*Ref($close,14) - 5.5*Ref($close,15) - 6.5*Ref($close,16) - 7.5*Ref($close,17) - 8.5*Ref($close,18) - 9.5*Ref($close,19))/70) / (Mean($close,20) + (9.5*$close + 8.5*Ref($close,1) + 7.5*Ref($close,2) + 6.5*Ref($close,3) + 5.5*Ref($close,4) + 4.5*Ref($close,5) + 3.5*Ref($close,6) + 2.5*Ref($close,7) + 1.5*Ref($close,8) + 0.5*Ref($close,9) - 0.5*Ref($close,10) - 1.5*Ref($close,11) - 2.5*Ref($close,12) - 3.5*Ref($close,13) - 4.5*Ref($close,14) - 5.5*Ref($close,15) - 6.5*Ref($close,16) - 7.5*Ref($close,17) - 8.5*Ref($close,18) - 9.5*Ref($close,19))/70 + 0.000000000001)": [
+   "PRICE_RESID_20D"
+  ],
+  "Div(Mean((($close / Ref($close, 1)) - 1), 20), Add(Std((($close / Ref($close, 1)) - 1), 20), 0.000000000001))": [
+   "SHARPE_20D"
+  ],
+  "Mean(Sign(Sign(($close / Ref($close, 1) - 1) - 0.095) + 1), 20)": [
+   "LIMIT_UP_FREQ_20D"
+  ],
+  "Sum((Sign($close / Ref($close, 1) - 1) * $volume), 20) / (Sum($volume, 20) + 0.000000000001)": [
+   "MONEY_FLOW_20D"
+  ],
+  "Mean(Delta($close, 1) * $volume, 13) / (Mean($volume, 13) + 0.000000000001)": [
+   "FORCE_INDEX_13D"
+  ],
+  "Sum((2 * $close - $high - $low) / ($high - $low + 0.00000001) * $volume, 20) / (Sum($volume, 20) + 0.000000000001)": [
+   "ACC_DIST_20D"
+  ],
+  "Mean(Div(Abs(Sub(Div($close, Ref($close, 1)), 1)), Add(Mul($volume, $close), 0.000000000001)), 20)": [
+   "AMIHUD_20D"
+  ],
+  "Sub(100, Div(100, Add(1, Div(Sum(Div(Add(Sub(Div($close, Ref($close, 1)), 1), Abs(Sub(Div($close, Ref($close, 1)), 1))), 2), 14), Add(Sum(Div(Sub(Abs(Sub(Div($close, Ref($close, 1)), 1)), Sub(Div($close, Ref($close, 1)), 1)), 2), 14), 0.000000000001)))))": [
+   "RSI_14D"
+  ],
+  "($close - (Mean($close, 20) - 2 * Std($close, 20))) / (4 * Std($close, 20) + 0.000000000001)": [
+   "BB_PERCENT_B_20D"
+  ],
+  "Mean(Div(Add(Add(Div(Add(Add(Sub($high,$low),Abs(Sub($high,Ref($close,1)))),Abs(Sub(Sub($high,$low),Abs(Sub($high,Ref($close,1)))))),2),Abs(Sub($low,Ref($close,1)))),Abs(Sub(Div(Add(Add(Sub($high,$low),Abs(Sub($high,Ref($close,1)))),Abs(Sub(Sub($high,$low),Abs(Sub($high,Ref($close,1)))))),2),Abs(Sub($low,Ref($close,1)))))),2),14)": [
+   "ATR_14D"
+  ],
+  "100 - 100 / (1 + Sum((Sign(Delta((($high + $low + $close) / 3), 1)) + Sign(Delta((($high + $low + $close) / 3), 1)) * Sign(Delta((($high + $low + $close) / 3), 1))) / 2 * (($high + $low + $close) / 3) * $volume, 14) / (Sum((Sign(Delta((($high + $low + $close) / 3), 1)) * Sign(Delta((($high + $low + $close) / 3), 1)) - Sign(Delta((($high + $low + $close) / 3), 1))) / 2 * (($high + $low + $close) / 3) * $volume, 14) + 0.000000000001))": [
+   "MFI_14D"
+  ],
+  "Div(Sub($close,Div(Sum(Mul($close,$volume),20),Add(Sum($volume,20),0.000000000001))),Add(Div(Sum(Mul($close,$volume),20),Add(Sum($volume,20),0.000000000001)),0.000000000001))": [
+   "VWAP_DEV_20D"
+  ],
+  "$close / (Sum((($high + $low + $close) / 3) * $volume, 5) / Sum($volume, 5)) - 1": [
+   "vwap_deviation_5d"
+  ],
+  "($close - Min($low, 10)) / (Max($high, 10) - Min($low, 10) + 0.000000000001)": [
+   "price_range_position_10d"
+  ],
+  "Corr($close / Ref($close, 1) - 1, Log($volume / Ref($volume, 1) + 1), 10)": [
+   "price_volume_corr_10d"
+  ],
+  "(10/(9*8)) * (Sum((($close / Ref($close, 1)) - 1) * (($close / Ref($close, 1)) - 1) * (($close / Ref($close, 1)) - 1), 10) - 3 * Mean((($close / Ref($close, 1)) - 1), 10) * Sum((($close / Ref($close, 1)) - 1) * (($close / Ref($close, 1)) - 1), 10) + 20 * Mean((($close / Ref($close, 1)) - 1), 10) * Mean((($close / Ref($close, 1)) - 1), 10) * Mean((($close / Ref($close, 1)) - 1), 10)) / (Std((($close / Ref($close, 1)) - 1), 10) * Std((($close / Ref($close, 1)) - 1), 10) * Std((($close / Ref($close, 1)) - 1), 10))": [
+   "Skew10"
+  ],
+  "Power(Mean(Mul(Div(Sub(Sub(Div($close, Ref($close,1)), 1), Abs(Sub(Div($close, Ref($close,1)), 1))), 2), Div(Sub(Sub(Div($close, Ref($close,1)), 1), Abs(Sub(Div($close, Ref($close,1)), 1))), 2)), 20), 0.5)": [
+   "DownVol20"
+  ],
+  "($close - Sum($close * $volume, 5) / Sum($volume, 5)) / (Sum($close * $volume, 5) / Sum($volume, 5))": [
+   "VWAPDev5"
+  ],
+  "Std($close / Ref($close, 1) - 1, 5) / Std($close / Ref($close, 1) - 1, 20)": [
+   "VolRatio5_20"
+  ],
+  "Sum((Sign($close / Ref($close, 1) - 1) + Abs(Sign($close / Ref($close, 1) - 1))) / 2, 10) / 10": [
+   "UpRatio10"
+  ],
+  "Abs($close / Ref($close, 10) - 1) / Sum(Abs($close / Ref($close, 1) - 1), 10)": [
+   "ER10"
+  ],
+  "Sum((($close/Ref($close,1))-1)*$volume,5)/Sum($volume,5)": [
+   "VolumeMom5"
+  ],
+  "((Sum(($close/Ref($close,1)-1)*Ref(($close/Ref($close,1)-1),1),4) - 6*Mean(($close/Ref($close,1)-1),5)*Mean(($close/Ref($close,1)-1),5) + Mean(($close/Ref($close,1)-1),5)*(($close/Ref($close,1)-1)+Ref(($close/Ref($close,1)-1),4))) / (Sum(($close/Ref($close,1)-1)*($close/Ref($close,1)-1),5) - 5*Mean(($close/Ref($close,1)-1),5)*Mean(($close/Ref($close,1)-1),5)))": [
+   "Autocorr5"
+  ],
+  "(Sum(($close / Ref($close, 1) - 1) * ((Sign($close / Ref($close, 1) - 1) + Abs(Sign($close / Ref($close, 1) - 1))) / 2), 5) * Sum((Abs(Sign($close / Ref($close, 1) - 1)) - Sign($close / Ref($close, 1) - 1)) / 2, 5)) / (Sum((Sign($close / Ref($close, 1) - 1) + Abs(Sign($close / Ref($close, 1) - 1))) / 2, 5) * Sum(Abs($close / Ref($close, 1) - 1) * ((Abs(Sign($close / Ref($close, 1) - 1)) - Sign($close / Ref($close, 1) - 1)) / 2), 5))": [
+   "UpDownVol5"
+  ],
+  "100 - 100 / (1 + Mean((($close / Ref($close, 1) - 1) + Abs($close / Ref($close, 1) - 1)) / 2, 14) / Mean((Abs($close / Ref($close, 1) - 1) - ($close / Ref($close, 1) - 1)) / 2, 14))": [
+   "RSI14"
+  ],
+  "((20 * (1 * Ref($close, 1) + 2 * Ref($close, 2) + 3 * Ref($close, 3) + 4 * Ref($close, 4) + 5 * Ref($close, 5) + 6 * Ref($close, 6) + 7 * Ref($close, 7) + 8 * Ref($close, 8) + 9 * Ref($close, 9) + 10 * Ref($close, 10) + 11 * Ref($close, 11) + 12 * Ref($close, 12) + 13 * Ref($close, 13) + 14 * Ref($close, 14) + 15 * Ref($close, 15) + 16 * Ref($close, 16) + 17 * Ref($close, 17) + 18 * Ref($close, 18) + 19 * Ref($close, 19)) - 190 * Sum($close, 20)) / 13300) / (Sum($close, 20) / 20)": [
+   "TrendSlope20"
+  ],
+  "Mean((((($high-$low)+Abs($high-Ref($close,1))+Abs((($high-$low)-Abs($high-Ref($close,1)))))/2)+Abs($low-Ref($close,1))+Abs((((($high-$low)+Abs($high-Ref($close,1))+Abs((($high-$low)-Abs($high-Ref($close,1)))))/2)-Abs($low-Ref($close,1)))))/2,14)/$close": [
+   "ATR14n"
+  ],
+  "Power(Mul(Sum(Mul(Log(Div($high, $low)), Log(Div($high, $low))), 20), Div(1, Mul(80, Log(2)))), 0.5)": [
+   "ParkVol20"
+  ],
+  "Sum($volume * ($close / Ref($close, 1) - 1), 20) / Sum($volume, 20)": [
+   "VPT20"
+  ],
+  "Mul(-1, Std($close / Ref($close, 1) - 1, 20))": [
+   "neg_vol_20d"
+  ],
+  "Mean(Div(Abs(Sub(Div($close, Ref($close, 1)), 1)), Add($volume, 0.000000000001)), 20)": [
+   "amihud_illiq_20d"
+  ],
+  "Corr(($close / Ref($close, 1) - 1), ($volume / Ref($volume, 1) - 1), 20)": [
+   "ret_vol_corr_20d"
+  ],
+  "($close - Min($low, 5)) / (Max($high, 5) - Min($low, 5) + 0.000000000001)": [
+   "range_pos_5d"
+  ]
+ },
+ "control_cap3_translatable": 0,
+ "cap4_translatable": {
+  "($close - Min($low, 20)) / (Max($high, 20) - Min($low, 20)) - 0.5": "sub(div(sub(close,ts_min(low,20)),sub(ts_max(high,20),ts_min(low,20))),0.5)",
+  "-1 * Std($close / Ref($close, 1) - 1, 20)": "sub(0,ts_std(sub(div(close,ref(close,1)),1),20))",
+  "Mul(-1, Max(Sub(Div($close, Ref($close, 1)), 1), 20))": "sub(0,ts_max(sub(div(close,ref(close,1)),1),20))",
+  "Sum(Sign(Delta($close, 1)) * $volume, 5) / (Mean($volume, 5) + 0.000000000001)": "div(ts_sum(mul(sign(delta(close,1)),volume),5),add(ts_mean(volume,5),0.000000000001))",
+  "($close - Min($low, 20)) / (Max($high, 20) - Min($low, 20) + 0.00000001)": "div(sub(close,ts_min(low,20)),add(sub(ts_max(high,20),ts_min(low,20)),0.00000001))",
+  "Mean(Abs($close / Ref($close, 1) - 1) / ($volume * $close + 0.000000000001), 20)": "ts_mean(div(abs(sub(div(close,ref(close,1)),1)),add(mul(volume,close),0.000000000001)),20)",
+  "Sum((Sign(Delta($close, 1)) + Abs(Sign(Delta($close, 1)))) / 2, 5)": "ts_sum(div(add(sign(delta(close,1)),abs(sign(delta(close,1)))),2),5)",
+  "$close / (Sum($close * $volume, 5) / (Sum($volume, 5) + 0.000000000001)) - 1": "sub(div(close,div(ts_sum(mul(close,volume),5),add(ts_sum(volume,5),0.000000000001))),1)",
+  "Abs(Delta($close, 10)) / (Sum(Abs(Delta($close, 1)), 10) + 0.000000000001)": "div(abs(delta(close,10)),add(ts_sum(abs(delta(close,1)),10),0.000000000001))",
+  "Mean(($open / Ref($close, 1) - 1) * (($close - $open) / ($open + 0.000000000001)), 5)": "ts_mean(mul(sub(div(open,ref(close,1)),1),div(sub(close,open),add(open,0.000000000001))),5)",
+  "Mean(Delta($close, 1) * $volume, 13) / (Mean($volume, 13) + 0.000000000001)": "div(ts_mean(mul(delta(close,1),volume),13),add(ts_mean(volume,13),0.000000000001))",
+  "Mean(Div(Abs(Sub(Div($close, Ref($close, 1)), 1)), Add(Mul($volume, $close), 0.000000000001)), 20)": "ts_mean(div(abs(sub(div(close,ref(close,1)),1)),add(mul(volume,close),0.000000000001)),20)",
+  "($close - Min($low, 10)) / (Max($high, 10) - Min($low, 10) + 0.000000000001)": "div(sub(close,ts_min(low,10)),add(sub(ts_max(high,10),ts_min(low,10)),0.000000000001))",
+  "($close - Sum($close * $volume, 5) / Sum($volume, 5)) / (Sum($close * $volume, 5) / Sum($volume, 5))": "div(sub(close,div(ts_sum(mul(close,volume),5),ts_sum(volume,5))),div(ts_sum(mul(close,volume),5),ts_sum(volume,5)))",
+  "Sum((($close/Ref($close,1))-1)*$volume,5)/Sum($volume,5)": "div(ts_sum(mul(sub(div(close,ref(close,1)),1),volume),5),ts_sum(volume,5))",
+  "Power(Mul(Sum(Mul(Log(Div($high, $low)), Log(Div($high, $low))), 20), Div(1, Mul(80, Log(2)))), 0.5)": "sqrt(mul(ts_sum(mul(log(div(high,low)),log(div(high,low))),20),div(1,mul(80,log(2)))))",
+  "Sum($volume * ($close / Ref($close, 1) - 1), 20) / Sum($volume, 20)": "div(ts_sum(mul(volume,sub(div(close,ref(close,1)),1)),20),ts_sum(volume,20))",
+  "Mul(-1, Std($close / Ref($close, 1) - 1, 20))": "sub(0,ts_std(sub(div(close,ref(close,1)),1),20))",
+  "Mean(Div(Abs(Sub(Div($close, Ref($close, 1)), 1)), Add($volume, 0.000000000001)), 20)": "ts_mean(div(abs(sub(div(close,ref(close,1)),1)),add(volume,0.000000000001)),20)",
+  "($close - Min($low, 5)) / (Max($high, 5) - Min($low, 5) + 0.000000000001)": "div(sub(close,ts_min(low,5)),add(sub(ts_max(high,5),ts_min(low,5)),0.000000000001))"
+ },
+ "cap4_still_blocked": {
+  "Mean(($close / Ref($close, 1)) - 1, 20) / (Std(($close / Ref($close, 1)) - 1, 20) + 0.000000000001)": "复杂度超限：自由参数 7 > 上限 4",
+  "Mul(-1, Power(Div(Sum(Mul(Div(Sub(Sub(Div($close, Ref($close, 1)), 1), Abs(Sub(Div($close, Ref($close, 1)), 1))), 2), Div(Sub(Sub(Div($close, Ref($close, 1)), 1), Abs(Sub(Div($close, Ref($close, 1)), 1))), 2)), 20), 19), 0.5))": "复杂度超限：深度 12 > 上限 8；自由参数 13 > 上限 4",
+  "(Sum((((($close / Ref($close, 1)) - 1) + Abs((($close / Ref($close, 1)) - 1))) / 2), 20) / 20) / (Sum(((Abs((($close / Ref($close, 1)) - 1)) - (($close / Ref($close, 1)) - 1)) / 2), 20) / 20 + 0.000000000001)": "复杂度超限：深度 11 > 上限 8；自由参数 15 > 上限 4",
+  "Mul(-1, Div(Sub($close, Div(Sum(Mul($volume, $close), 5), Sum($volume, 5))), Div(Sum(Mul($volume, $close), 5), Sum($volume, 5))))": "复杂度超限：自由参数 5 > 上限 4",
+  "Sum((Sign(Delta($close, 1)) + Abs(Sign(Delta($close, 1)))) / 2, 5) / 5 - 0.5": "复杂度超限：深度 9 > 上限 8；自由参数 6 > 上限 4",
+  "($close / Ref($close, 5) - 1) - (Ref($close, 5) / Ref($close, 10) - 1)": "复杂度超限：自由参数 5 > 上限 4",
+  "(Sum((($close / Ref($close, 1) - 1) + Abs($close / Ref($close, 1) - 1)) / 2, 14) / (Sum((($close / Ref($close, 1) - 1) + Abs($close / Ref($close, 1) - 1)) / 2, 14) + Sum((Abs($close / Ref($close, 1) - 1) - ($close / Ref($close, 1) - 1)) / 2, 14))) - 0.5": "复杂度超限：深度 11 > 上限 8；自由参数 19 > 上限 4",
+  "Mean($close / Ref($close, 1) - 1, 20) / Std($close / Ref($close, 1) - 1, 20)": "复杂度超限：自由参数 6 > 上限 4",
+  "(Sum((($high+$low+$close)/3)*$volume*((Sign(Delta((($high+$low+$close)/3),1))+Abs(Sign(Delta((($high+$low+$close)/3),1))))/2),14)/(Sum((($high+$low+$close)/3)*$volume*((Sign(Delta((($high+$low+$close)/3),1))+Abs(Sign(Delta((($high+$low+$close)/3),1))))/2),14)+Sum((($high+$low+$close)/3)*$volume*((Abs(Sign(Delta((($high+$low+$close)/3),1)))-Sign(Delta((($high+$low+$close)/3),1)))/2),14)))-0.5": "复杂度超限：深度 14 > 上限 8；自由参数 22 > 上限 4；字段种类 4 > 上限 3",
+  "(20 * (Sum(Log($close), 1) + Sum(Log($close), 2) + Sum(Log($close), 3) + Sum(Log($close), 4) + Sum(Log($close), 5) + Sum(Log($close), 6) + Sum(Log($close), 7) + Sum(Log($close), 8) + Sum(Log($close), 9) + Sum(Log($close), 10) + Sum(Log($close), 11) + Sum(Log($close), 12) + Sum(Log($close), 13) + Sum(Log($close), 14) + Sum(Log($close), 15) + Sum(Log($close), 16) + Sum(Log($close), 17) + Sum(Log($close), 18) + Sum(Log($close), 19)) - 190 * Sum(Log($close), 20)) / 13300": "复杂度超限：深度 24 > 上限 8；自由参数 23 > 上限 4",
+  "Corr(Ref($close / Ref($close, 1) - 1, 1), $close / Ref($close, 1) - 1, 3)": "复杂度超限：自由参数 6 > 上限 4",
+  "Corr(Ref(($close/Ref($close,1)-1),1),$close/Ref($close,1)-1,18)": "复杂度超限：自由参数 6 > 上限 4",
+  "Corr($close / Ref($close, 1) - 1, $volume / Ref($volume, 1) - 1, 10)": "复杂度超限：自由参数 5 > 上限 4",
+  "Sum((($close / Ref($close, 1)) - 1) * $volume, 5) / (Sum($volume, 5) + 0.000000000001)": "复杂度超限：自由参数 5 > 上限 4",
+  "Std($close / Ref($close, 1) - 1, 10) / (Std($close / Ref($close, 1) - 1, 60) + 0.000000000001)": "复杂度超限：自由参数 7 > 上限 4",
+  "(Sum($volume * ((Sign(1 - $close / Ref($close, 1)) + Abs(Sign(1 - $close / Ref($close, 1)))) / 2), 20) + 0.000000000001) / (Sum($volume * ((Sign($close / Ref($close, 1) - 1) + Abs(Sign($close / Ref($close, 1) - 1))) / 2), 20) + 0.000000000001)": "复杂度超限：深度 12 > 上限 8；自由参数 14 > 上限 4",
+  "((Mean(($close/Ref($close,1)-1)*($close/Ref($close,1)-1)*($close/Ref($close,1)-1)*($close/Ref($close,1)-1),20)-4*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1)*($close/Ref($close,1)-1)*($close/Ref($close,1)-1),20)+6*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1)*($close/Ref($close,1)-1),20)-3*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20))/((Mean(($close/Ref($close,1)-1)*($close/Ref($close,1)-1),20)-Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20))*(Mean(($close/Ref($close,1)-1)*($close/Ref($close,1)-1),20)-Mean(($close/Ref($close,1)-1),20)*Mean(($close/Ref($close,1)-1),20))))": "复杂度超限：深度 12 > 上限 8；自由参数 67 > 上限 4",
+  "Power(Div(Sum(Mul(Div(Sub(Sub(Div($close, Ref($close, 1)), 1), Abs(Sub(Div($close, Ref($close, 1)), 1))), 2), Div(Sub(Sub(Div($close, Ref($close, 1)), 1), Abs(Sub(Div($close, Ref($close, 1)), 1))), 2)), 20), 20), 0.5)": "复杂度超限：深度 11 > 上限 8；自由参数 12 > 上限 4",
+  "Sum(($close / Ref($close, 1) - 1) * (Sign(($close / Ref($close, 1) - 1)) + Abs(Sign(($close / Ref($close, 1) - 1)))) / 2, 20) / (Sum((Sign(($close / Ref($close, 1) - 1)) + Abs(Sign(($close / Ref($close, 1) - 1)))) / 2, 20) + 0.000000000001) - Sum((1 - $close / Ref($close, 1)) * (Abs(Sign(($close / Ref($close, 1) - 1))) - Sign(($close / Ref($close, 1) - 1))) / 2, 20) / (Sum((Abs(Sign(($close / Ref($close, 1) - 1))) - Sign(($close / Ref($close, 1) - 1))) / 2, 20) + 0.000000000001)": "复杂度超限：深度 12 > 上限 8；自由参数 30 > 上限 4",
+  "Corr($close / Ref($close, 1) - 1, Ref($close, 1) / Ref($close, 2) - 1, 10)": "复杂度超限：自由参数 6 > 上限 4",
+  "((9.5 * $close + 8.5 * Ref($close, 1) + 7.5 * Ref($close, 2) + 6.5 * Ref($close, 3) + 5.5 * Ref($close, 4) + 4.5 * Ref($close, 5) + 3.5 * Ref($close, 6) + 2.5 * Ref($close, 7) + 1.5 * Ref($close, 8) + 0.5 * Ref($close, 9) - 0.5 * Ref($close, 10) - 1.5 * Ref($close, 11) - 2.5 * Ref($close, 12) - 3.5 * Ref($close, 13) - 4.5 * Ref($close, 14) - 5.5 * Ref($close, 15) - 6.5 * Ref($close, 16) - 7.5 * Ref($close, 17) - 8.5 * Ref($close, 18) - 9.5 * Ref($close, 19)) / 665) / (Mean($close, 20) + 0.000000000001)": "复杂度超限：深度 24 > 上限 8；自由参数 42 > 上限 4",
+  "($close - Mean($close,20) - (9.5*$close + 8.5*Ref($close,1) + 7.5*Ref($close,2) + 6.5*Ref($close,3) + 5.5*Ref($close,4) + 4.5*Ref($close,5) + 3.5*Ref($close,6) + 2.5*Ref($close,7) + 1.5*Ref($close,8) + 0.5*Ref($close,9) - 0.5*Ref($close,10) - 1.5*Ref($close,11) - 2.5*Ref($close,12) - 3.5*Ref($close,13) - 4.5*Ref($close,14) - 5.5*Ref($close,15) - 6.5*Ref($close,16) - 7.5*Ref($close,17) - 8.5*Ref($close,18) - 9.5*Ref($close,19))/70) / (Mean($close,20) + (9.5*$close + 8.5*Ref($close,1) + 7.5*Ref($close,2) + 6.5*Ref($close,3) + 5.5*Ref($close,4) + 4.5*Ref($close,5) + 3.5*Ref($close,6) + 2.5*Ref($close,7) + 1.5*Ref($close,8) + 0.5*Ref($close,9) - 0.5*Ref($close,10) - 1.5*Ref($close,11) - 2.5*Ref($close,12) - 3.5*Ref($close,13) - 4.5*Ref($close,14) - 5.5*Ref($close,15) - 6.5*Ref($close,16) - 7.5*Ref($close,17) - 8.5*Ref($close,18) - 9.5*Ref($close,19))/70 + 0.000000000001)": "复杂度超限：深度 26 > 上限 8；自由参数 83 > 上限 4",
+  "Div(Mean((($close / Ref($close, 1)) - 1), 20), Add(Std((($close / Ref($close, 1)) - 1), 20), 0.000000000001))": "复杂度超限：自由参数 7 > 上限 4",
+  "Mean(Sign(Sign(($close / Ref($close, 1) - 1) - 0.095) + 1), 20)": "复杂度超限：深度 9 > 上限 8；自由参数 5 > 上限 4",
+  "Sum((Sign($close / Ref($close, 1) - 1) * $volume), 20) / (Sum($volume, 20) + 0.000000000001)": "复杂度超限：自由参数 5 > 上限 4",
+  "Sum((2 * $close - $high - $low) / ($high - $low + 0.00000001) * $volume, 20) / (Sum($volume, 20) + 0.000000000001)": "复杂度超限：自由参数 5 > 上限 4；字段种类 4 > 上限 3",
+  "Sub(100, Div(100, Add(1, Div(Sum(Div(Add(Sub(Div($close, Ref($close, 1)), 1), Abs(Sub(Div($close, Ref($close, 1)), 1))), 2), 14), Add(Sum(Div(Sub(Abs(Sub(Div($close, Ref($close, 1)), 1)), Sub(Div($close, Ref($close, 1)), 1)), 2), 14), 0.000000000001)))))": "复杂度超限：深度 13 > 上限 8；自由参数 16 > 上限 4",
+  "($close - (Mean($close, 20) - 2 * Std($close, 20))) / (4 * Std($close, 20) + 0.000000000001)": "复杂度超限：自由参数 6 > 上限 4",
+  "Mean(Div(Add(Add(Div(Add(Add(Sub($high,$low),Abs(Sub($high,Ref($close,1)))),Abs(Sub(Sub($high,$low),Abs(Sub($high,Ref($close,1)))))),2),Abs(Sub($low,Ref($close,1)))),Abs(Sub(Div(Add(Add(Sub($high,$low),Abs(Sub($high,Ref($close,1)))),Abs(Sub(Sub($high,$low),Abs(Sub($high,Ref($close,1)))))),2),Abs(Sub($low,Ref($close,1)))))),2),14)": "复杂度超限：深度 13 > 上限 8；自由参数 10 > 上限 4",
+  "100 - 100 / (1 + Sum((Sign(Delta((($high + $low + $close) / 3), 1)) + Sign(Delta((($high + $low + $close) / 3), 1)) * Sign(Delta((($high + $low + $close) / 3), 1))) / 2 * (($high + $low + $close) / 3) * $volume, 14) / (Sum((Sign(Delta((($high + $low + $close) / 3), 1)) * Sign(Delta((($high + $low + $close) / 3), 1)) - Sign(Delta((($high + $low + $close) / 3), 1))) / 2 * (($high + $low + $close) / 3) * $volume, 14) + 0.000000000001))": "复杂度超限：深度 17 > 上限 8；自由参数 22 > 上限 4；字段种类 4 > 上限 3",
+  "Div(Sub($close,Div(Sum(Mul($close,$volume),20),Add(Sum($volume,20),0.000000000001))),Add(Div(Sum(Mul($close,$volume),20),Add(Sum($volume,20),0.000000000001)),0.000000000001))": "复杂度超限：自由参数 7 > 上限 4",
+  "$close / (Sum((($high + $low + $close) / 3) * $volume, 5) / Sum($volume, 5)) - 1": "复杂度超限：深度 9 > 上限 8；字段种类 4 > 上限 3",
+  "Corr($close / Ref($close, 1) - 1, Log($volume / Ref($volume, 1) + 1), 10)": "复杂度超限：自由参数 5 > 上限 4",
+  "(10/(9*8)) * (Sum((($close / Ref($close, 1)) - 1) * (($close / Ref($close, 1)) - 1) * (($close / Ref($close, 1)) - 1), 10) - 3 * Mean((($close / Ref($close, 1)) - 1), 10) * Sum((($close / Ref($close, 1)) - 1) * (($close / Ref($close, 1)) - 1), 10) + 20 * Mean((($close / Ref($close, 1)) - 1), 10) * Mean((($close / Ref($close, 1)) - 1), 10) * Mean((($close / Ref($close, 1)) - 1), 10)) / (Std((($close / Ref($close, 1)) - 1), 10) * Std((($close / Ref($close, 1)) - 1), 10) * Std((($close / Ref($close, 1)) - 1), 10))": "复杂度超限：深度 11 > 上限 8；自由参数 38 > 上限 4",
+  "Power(Mean(Mul(Div(Sub(Sub(Div($close, Ref($close,1)), 1), Abs(Sub(Div($close, Ref($close,1)), 1))), 2), Div(Sub(Sub(Div($close, Ref($close,1)), 1), Abs(Sub(Div($close, Ref($close,1)), 1))), 2)), 20), 0.5)": "复杂度超限：深度 10 > 上限 8；自由参数 11 > 上限 4",
+  "Std($close / Ref($close, 1) - 1, 5) / Std($close / Ref($close, 1) - 1, 20)": "复杂度超限：自由参数 6 > 上限 4",
+  "Sum((Sign($close / Ref($close, 1) - 1) + Abs(Sign($close / Ref($close, 1) - 1))) / 2, 10) / 10": "复杂度超限：深度 10 > 上限 8；自由参数 7 > 上限 4",
+  "Abs($close / Ref($close, 10) - 1) / Sum(Abs($close / Ref($close, 1) - 1), 10)": "复杂度超限：自由参数 5 > 上限 4",
+  "((Sum(($close/Ref($close,1)-1)*Ref(($close/Ref($close,1)-1),1),4) - 6*Mean(($close/Ref($close,1)-1),5)*Mean(($close/Ref($close,1)-1),5) + Mean(($close/Ref($close,1)-1),5)*(($close/Ref($close,1)-1)+Ref(($close/Ref($close,1)-1),4))) / (Sum(($close/Ref($close,1)-1)*($close/Ref($close,1)-1),5) - 5*Mean(($close/Ref($close,1)-1),5)*Mean(($close/Ref($close,1)-1),5)))": "复杂度超限：深度 10 > 上限 8；自由参数 33 > 上限 4",
+  "(Sum(($close / Ref($close, 1) - 1) * ((Sign($close / Ref($close, 1) - 1) + Abs(Sign($close / Ref($close, 1) - 1))) / 2), 5) * Sum((Abs(Sign($close / Ref($close, 1) - 1)) - Sign($close / Ref($close, 1) - 1)) / 2, 5)) / (Sum((Sign($close / Ref($close, 1) - 1) + Abs(Sign($close / Ref($close, 1) - 1))) / 2, 5) * Sum(Abs($close / Ref($close, 1) - 1) * ((Abs(Sign($close / Ref($close, 1) - 1)) - Sign($close / Ref($close, 1) - 1)) / 2), 5))": "复杂度超限：深度 12 > 上限 8；自由参数 28 > 上限 4",
+  "100 - 100 / (1 + Mean((($close / Ref($close, 1) - 1) + Abs($close / Ref($close, 1) - 1)) / 2, 14) / Mean((Abs($close / Ref($close, 1) - 1) - ($close / Ref($close, 1) - 1)) / 2, 14))": "复杂度超限：深度 12 > 上限 8；自由参数 15 > 上限 4",
+  "((20 * (1 * Ref($close, 1) + 2 * Ref($close, 2) + 3 * Ref($close, 3) + 4 * Ref($close, 4) + 5 * Ref($close, 5) + 6 * Ref($close, 6) + 7 * Ref($close, 7) + 8 * Ref($close, 8) + 9 * Ref($close, 9) + 10 * Ref($close, 10) + 11 * Ref($close, 11) + 12 * Ref($close, 12) + 13 * Ref($close, 13) + 14 * Ref($close, 14) + 15 * Ref($close, 15) + 16 * Ref($close, 16) + 17 * Ref($close, 17) + 18 * Ref($close, 18) + 19 * Ref($close, 19)) - 190 * Sum($close, 20)) / 13300) / (Sum($close, 20) / 20)": "复杂度超限：深度 25 > 上限 8；自由参数 44 > 上限 4",
+  "Mean((((($high-$low)+Abs($high-Ref($close,1))+Abs((($high-$low)-Abs($high-Ref($close,1)))))/2)+Abs($low-Ref($close,1))+Abs((((($high-$low)+Abs($high-Ref($close,1))+Abs((($high-$low)-Abs($high-Ref($close,1)))))/2)-Abs($low-Ref($close,1)))))/2,14)/$close": "复杂度超限：深度 14 > 上限 8；自由参数 10 > 上限 4",
+  "Corr(($close / Ref($close, 1) - 1), ($volume / Ref($volume, 1) - 1), 20)": "复杂度超限：自由参数 5 > 上限 4"
+ },
+ "summary": {
+  "admitted": 0,
+  "rejected": 20,
+  "errors": 0,
+  "rejections": [
+   {
+    "expression": "sub(div(sub(close,ts_min(low,20)),sub(ts_max(high,20),ts_min(low,20))),0.5)",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.030141622626428444,
+     "std": 0.14760407249527052,
+     "icir": -0.2042059010763015,
+     "n_samples": 480,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "sub(0,ts_std(sub(div(close,ref(close,1)),1),20))",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": 0.052350614701898314,
+     "std": 0.2284001814444692,
+     "icir": 0.22920566161908365,
+     "n_samples": 479,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "sub(0,ts_max(sub(div(close,ref(close,1)),1),20))",
+    "gate": 4,
+    "reason": "REDUNDANT_WITH_POOL",
+    "detail": {
+     "duplicate_of": 3,
+     "expression": "div(sub(high,low),close)",
+     "correlation": -0.9203131073402157,
+     "threshold": 0.7,
+     "pool_size": 4,
+     "redundancy_checked": [
+      1,
+      2,
+      3
+     ],
+     "redundancy_skipped": [],
+     "orientation": 1,
+     "orientation_basis": "train_segment_ic_sign"
+    }
+   },
+   {
+    "expression": "div(ts_sum(mul(sign(delta(close,1)),volume),5),add(ts_mean(volume,5),0.000000000001))",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.02962441421814789,
+     "std": 0.12274152043804952,
+     "icir": -0.24135609622906715,
+     "n_samples": 494,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "div(sub(close,ts_min(low,20)),add(sub(ts_max(high,20),ts_min(low,20)),0.00000001))",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.030135605947411735,
+     "std": 0.14756592797595033,
+     "icir": -0.20421791372005,
+     "n_samples": 480,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "ts_mean(div(abs(sub(div(close,ref(close,1)),1)),add(mul(volume,close),0.000000000001)),20)",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": 0.03154778088820363,
+     "std": 0.15664663246720006,
+     "icir": 0.20139456808820555,
+     "n_samples": 479,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "ts_sum(div(add(sign(delta(close,1)),abs(sign(delta(close,1)))),2),5)",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.02602165908194983,
+     "std": 0.1164192554911418,
+     "icir": -0.22351679687497908,
+     "n_samples": 494,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "sub(div(close,div(ts_sum(mul(close,volume),5),add(ts_sum(volume,5),0.000000000001))),1)",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.023301441833292302,
+     "std": 0.15545684636939444,
+     "icir": -0.14989009733237307,
+     "n_samples": 495,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "div(abs(delta(close,10)),add(ts_sum(abs(delta(close,1)),10),0.000000000001))",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.005719424533260084,
+     "std": 0.10015283533984341,
+     "icir": -0.05710696570748754,
+     "n_samples": 489,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "ts_mean(mul(sub(div(open,ref(close,1)),1),div(sub(close,open),add(open,0.000000000001))),5)",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": 0.010632163023307977,
+     "std": 0.08191722889697883,
+     "icir": 0.12979153673129315,
+     "n_samples": 494,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "div(ts_mean(mul(delta(close,1),volume),13),add(ts_mean(volume,13),0.000000000001))",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.042891003064113455,
+     "std": 0.1454202027045789,
+     "icir": -0.29494528453688457,
+     "n_samples": 486,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "ts_mean(div(abs(sub(div(close,ref(close,1)),1)),add(mul(volume,close),0.000000000001)),20)",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": 0.03154778088820363,
+     "std": 0.15664663246720006,
+     "icir": 0.20139456808820555,
+     "n_samples": 479,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "div(sub(close,ts_min(low,10)),add(sub(ts_max(high,10),ts_min(low,10)),0.000000000001))",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.02002139160264828,
+     "std": 0.1437891116869,
+     "icir": -0.13924136096093806,
+     "n_samples": 490,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "div(sub(close,div(ts_sum(mul(close,volume),5),ts_sum(volume,5))),div(ts_sum(mul(close,volume),5),ts_sum(volume,5)))",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.023301432977664027,
+     "std": 0.15545685702303402,
+     "icir": -0.14989003009504726,
+     "n_samples": 495,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "div(ts_sum(mul(sub(div(close,ref(close,1)),1),volume),5),ts_sum(volume,5))",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.0425652850960423,
+     "std": 0.14827186788899724,
+     "icir": -0.2870759349164504,
+     "n_samples": 494,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "sqrt(mul(ts_sum(mul(log(div(high,low)),log(div(high,low))),20),div(1,mul(80,log(2)))))",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.05487892138433185,
+     "std": 0.23697697777639304,
+     "icir": -0.23157912595254107,
+     "n_samples": 480,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "div(ts_sum(mul(volume,sub(div(close,ref(close,1)),1)),20),ts_sum(volume,20))",
+    "gate": 5,
+    "reason": "OOS_FAILED",
+    "detail": {
+     "train_fraction": 0.7,
+     "train_days": 350,
+     "val_days": 150,
+     "purged_train_days": 1,
+     "train_start": "2024-09-24",
+     "train_end": "2026-03-10",
+     "val_start": "2026-03-11",
+     "val_end": "2026-10-21",
+     "mean_train": -0.06126778882041926,
+     "mean_val": -0.047475004616416204,
+     "icir_train": -0.4771320130057248,
+     "icir_val": -0.28149848236622277,
+     "sign_train": -1,
+     "sign_val": -1,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "sub(0,ts_std(sub(div(close,ref(close,1)),1),20))",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": 0.052350614701898314,
+     "std": 0.2284001814444692,
+     "icir": 0.22920566161908365,
+     "n_samples": 479,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "ts_mean(div(abs(sub(div(close,ref(close,1)),1)),add(volume,0.000000000001)),20)",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": 0.012465611520042325,
+     "std": 0.13305220806034704,
+     "icir": 0.09368962531150504,
+     "n_samples": 479,
+     "min_abs_icir": 0.3
+    }
+   },
+   {
+    "expression": "div(sub(close,ts_min(low,5)),add(sub(ts_max(high,5),ts_min(low,5)),0.000000000001))",
+    "gate": 2,
+    "reason": "WEAK_ICIR",
+    "detail": {
+     "mean": -0.019477299033982525,
+     "std": 0.14090315882807325,
+     "icir": -0.1382318125156319,
+     "n_samples": 495,
+     "min_abs_icir": 0.3
+    }
+   }
+  ]
+ },
+ "elapsed_s": 60.5
+}

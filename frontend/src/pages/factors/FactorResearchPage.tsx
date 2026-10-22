@@ -16,6 +16,7 @@ import {
   controlErrorMessage,
   deriveControlView,
   fetchFactorResearchStatus,
+  fetchHarvestChain,
   formatDurationS,
   submitFactorResearchControl,
   submitFactorResearchRestart,
@@ -24,6 +25,7 @@ import type {
   FactorResearchCurrentSession,
   FactorResearchSession,
   FactorResearchStatusResponse,
+  HarvestChainResponse,
 } from '../../types'
 
 /**
@@ -63,6 +65,26 @@ function stepLabel(name: string | null): string {
   return STEP_LABELS[name] ?? name
 }
 
+/** 五道闸名称（收割漏斗用；与后端 gate 编号一致）。 */
+const GATE_LABELS: Record<string, string> = {
+  '0': '结构重复',
+  '1': '覆盖率',
+  '2': 'ICIR',
+  '3': 'FDR',
+  '4': '池冗余',
+  '5': '样本外',
+}
+
+function pctText(part: number, whole: number): string {
+  if (whole <= 0) return '—'
+  return `${Math.round((part / whole) * 100)}%`
+}
+
+function pct(part: number, whole: number): number {
+  if (whole <= 0) return 0
+  return Math.max(0, Math.min(100, Math.round((part / whole) * 100)))
+}
+
 function progressText(cur: FactorResearchCurrentSession): string {
   const parts: string[] = []
   if (cur.loop_index !== null) parts.push(`循环 ${cur.loop_index + 1}`)
@@ -98,6 +120,9 @@ export function FactorResearchPage({
   const [controlError, setControlError] = useState<string | null>(null)
   // 409 control_unavailable 后的通道封禁（快照刷新成功即恢复；spec「409 时开关禁用」）
   const [channelBlocked, setChannelBlocked] = useState(false)
+  // 收割链路（add-factor-harvest-ui）：独立取数，失败只降级本区块
+  const [harvest, setHarvest] = useState<HarvestChainResponse | null>(null)
+  const [harvestError, setHarvestError] = useState(false)
   const timerRef = useRef<number | null>(null)
 
   const load = useCallback(async () => {
@@ -123,6 +148,25 @@ export function FactorResearchPage({
       timerRef.current = null
     }
   }, [load, pollIntervalMs])
+
+  // 收割链路取数排在主快照之后：保证首屏两路请求顺序稳定（主监控优先）且互不影响
+  const loadHarvest = useCallback(async () => {
+    try {
+      setHarvest(await fetchHarvestChain())
+      setHarvestError(false)
+    } catch {
+      // 轮询失败保留旧数据；首屏失败显示区块级错误
+      setHarvestError(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadHarvest()
+    const timer = window.setInterval(() => {
+      void loadHarvest()
+    }, pollIntervalMs)
+    return () => window.clearInterval(timer)
+  }, [loadHarvest, pollIntervalMs])
 
   // 控制提交：只发布尔期望态（零命令面）；失败如实提示、位置不翻转（不乐观改状态）
   const submitControl = useCallback(
@@ -181,6 +225,9 @@ export function FactorResearchPage({
   const distroProbe = distroDown ? (data?.distro ?? null) : null
   const distroName = distroProbe?.distro ?? null
   const distroFailures = distroProbe?.consecutive_failures ?? null
+  // 收割台账：后端契约保证数组；防御式兜底避免单次畸形响应拖垮整页
+  const recentAdmitted = harvest?.recent_admitted ?? []
+  const recentRejected = harvest?.recent_rejected ?? []
 
   // 控制面派生（单一共享源：开关位置只取验证过的 actual_state，意图仅作离线披露）
   const view = deriveControlView(data, { submitting, restartSubmitting, channelBlocked })
@@ -557,6 +604,154 @@ export function FactorResearchPage({
                     >
                       {current.log_tail.join('\n')}
                     </pre>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {/* 收割链路（add-factor-harvest-ui）：实时进度 + 漏斗 + 台账 */}
+            <section
+              data-testid="factor-research-harvest"
+              className="rounded-xl border border-border p-4"
+              style={{ background: 'var(--bg-base-secondary)' }}
+            >
+              <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-medium text-foreground">
+                因子收割链路
+                {harvest?.job?.schedule && (
+                  <span className="font-normal" style={{ color: 'var(--text-tertiary)' }}>
+                    每天 {String(harvest.job.schedule.hour).padStart(2, '0')}:{String(harvest.job.schedule.minute).padStart(2, '0')} 自动跑
+                  </span>
+                )}
+                {harvest?.job?.status && (
+                  <span
+                    data-testid="factor-research-harvest-status"
+                    className="rounded-full border border-border px-2 py-0.5 text-[11px] font-normal"
+                  >
+                    {harvest.job.status === 'running' ? '运行中' : harvest.job.status === 'ok' ? '已完成' : harvest.job.status}
+                  </span>
+                )}
+              </div>
+
+              {harvestError && harvest === null && (
+                <div
+                  data-testid="factor-research-harvest-error"
+                  className="flex items-center gap-2 text-xs"
+                  style={{ color: 'var(--status-error-default)' }}
+                >
+                  收割数据加载失败
+                  <Button variant="ghost" size="sm" onClick={() => { void loadHarvest() }}>
+                    重试
+                  </Button>
+                </div>
+              )}
+
+              {harvest !== null && !harvest.available && (
+                <p data-testid="factor-research-harvest-empty" className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                  收割数据未接入（状态文件缺失或损坏）
+                </p>
+              )}
+
+              {harvest !== null && harvest.available && (
+                <div className="space-y-4">
+                  <div data-testid="factor-research-harvest-progress" className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" style={{ color: 'var(--text-secondary)' }}>
+                      <span>批次 {harvest.progress?.batches_done ?? 0}/{harvest.progress?.batch_limit ?? 0}</span>
+                      <span>已处理 {harvest.progress?.processed ?? 0}</span>
+                      <span>剩余 {harvest.progress?.pending ?? 0}</span>
+                      <span>
+                        本轮入库 {harvest.progress?.admitted_in_run ?? 0} · 拒收 {harvest.progress?.rejected_in_run ?? 0}
+                      </span>
+                      {harvest.progress?.eta_s != null && <span>预计还需 {formatDurationS(harvest.progress.eta_s)}</span>}
+                    </div>
+                    <div className="h-2 w-full overflow-hidden rounded-full" style={{ background: 'var(--bg-overlay-l1)' }}>
+                      <div
+                        data-testid="factor-research-harvest-bar"
+                        className="h-full rounded-full transition-all"
+                        style={{
+                          width: `${pct(harvest.progress?.processed ?? 0, harvest.funnel?.candidates ?? 0)}%`,
+                          background: 'var(--status-success-default)',
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div data-testid="factor-research-harvest-funnel" className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                    {[
+                      { key: 'candidates', label: '候选', value: harvest.funnel?.candidates ?? 0 },
+                      { key: 'processed', label: '已处理', value: harvest.funnel?.processed ?? 0 },
+                      { key: 'gates', label: '到闸', value: harvest.funnel?.reached_gates ?? 0 },
+                      { key: 'admitted', label: '入库', value: harvest.funnel?.admitted ?? 0 },
+                    ].map((item) => (
+                      <div
+                        key={item.key}
+                        data-testid={`factor-research-harvest-step-${item.key}`}
+                        className="rounded-lg border border-border px-3 py-2"
+                        style={{ background: 'var(--bg-overlay-l1)' }}
+                      >
+                        <div className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>{item.label}</div>
+                        <div className="text-lg font-semibold text-foreground">{item.value}</div>
+                        <div className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+                          {pctText(item.value, harvest.funnel?.candidates ?? 0)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div
+                    data-testid="factor-research-harvest-gates"
+                    className="flex flex-wrap items-center gap-2 text-[11px]"
+                    style={{ color: 'var(--text-tertiary)' }}
+                  >
+                    拒收分布：
+                    {Object.entries(harvest.funnel?.rejected_by_gate ?? {}).map(([gate, count]) => (
+                      <span key={gate} className="rounded-full border border-border px-2 py-0.5">
+                        {GATE_LABELS[gate] ?? `闸${gate}`} {count}
+                      </span>
+                    ))}
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div data-testid="factor-research-harvest-admitted">
+                      <div className="mb-1 text-xs font-medium text-foreground">最近入库</div>
+                      {recentAdmitted.length === 0 ? (
+                        <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>暂无</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {recentAdmitted.map((item) => (
+                            <li key={item.factor_id} className="flex items-center justify-between gap-2 text-[11px]">
+                              <code className="truncate font-mono" style={{ color: 'var(--text-secondary)' }} title={item.expression ?? ''}>
+                                {item.expression}
+                              </code>
+                              <span className="shrink-0" style={{ color: 'var(--text-tertiary)' }}>
+                                ICIR {item.icir_60d.toFixed(3)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                    <div data-testid="factor-research-harvest-rejected">
+                      <div className="mb-1 text-xs font-medium text-foreground">最近拒收</div>
+                      {recentRejected.length === 0 ? (
+                        <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>暂无</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {recentRejected.map((item, index) => (
+                            <li
+                              key={`${item.expression}-${index}`}
+                              className="flex items-center justify-between gap-2 text-[11px]"
+                            >
+                              <code className="truncate font-mono" style={{ color: 'var(--text-secondary)' }} title={item.expression ?? ''}>
+                                {item.expression}
+                              </code>
+                              <span className="shrink-0" style={{ color: 'var(--text-tertiary)' }}>
+                                {item.gate != null ? (GATE_LABELS[String(item.gate)] ?? `闸${item.gate}`) : '转译'} {item.reason ?? ''}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
