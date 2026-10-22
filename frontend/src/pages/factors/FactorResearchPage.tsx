@@ -165,6 +165,10 @@ export function FactorResearchPage({
   const sessions = data?.sessions ?? []
   const totals = data?.totals ?? null
   const stale = data?.stale === true
+  // 僵死披露（delta add-factor-research-stall-detection）：采集正常但会话日志停更。
+  // 未上报（旧采集器）→ stalled=false 且 logAgeS=null，只能表现为「不可判定」。
+  const stalled = data?.progress?.stalled === true
+  const logAgeS = data?.progress?.log_age_seconds ?? null
   const collectedAt = data?.collected_at ? formatSessionTime(data.collected_at) : '—'
 
   // 控制面派生（单一共享源：开关位置只取验证过的 actual_state，意图仅作离线披露）
@@ -402,6 +406,18 @@ export function FactorResearchPage({
               </div>
             )}
 
+            {stalled && (
+              <div
+                data-testid="factor-research-stall-banner"
+                className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs"
+                style={{ background: 'var(--status-danger-default, #b91c1c)', color: 'white' }}
+              >
+                <i className="fas fa-exclamation-triangle"></i>
+                当前会话无进展 {formatDurationS(logAgeS)}——进程仍存活但日志已停止更新，
+                看护不会自动重拉；需经「重启管线」由人发起
+              </div>
+            )}
+
             {shortSessions && (
               <div
                 data-testid="factor-research-short-sessions"
@@ -467,11 +483,21 @@ export function FactorResearchPage({
                   <div data-testid="factor-research-progress" className="text-sm font-medium text-foreground">
                     {progressText(current)}
                   </div>
-                  {(current.step_elapsed_s !== null || current.step_eta_s !== null) && (
-                    <div data-testid="factor-research-step-timing" className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
-                      本步已用 {formatDurationS(current.step_elapsed_s)}
-                      {current.step_eta_s !== null && <> · 预计剩余 {formatDurationS(current.step_eta_s)}</>}
+                  {stalled ? (
+                    <div
+                      data-testid="factor-research-progress-stale"
+                      className="text-xs"
+                      style={{ color: 'var(--text-tertiary)' }}
+                    >
+                      进度读数来自 {formatDurationS(logAgeS)} 前的日志（会话无进展，读数已定格）
                     </div>
+                  ) : (
+                    (current.step_elapsed_s !== null || current.step_eta_s !== null) && (
+                      <div data-testid="factor-research-step-timing" className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                        本步已用 {formatDurationS(current.step_elapsed_s)}
+                        {current.step_eta_s !== null && <> · 预计剩余 {formatDurationS(current.step_eta_s)}</>}
+                      </div>
+                    )
                   )}
                   <div data-testid="factor-research-factors" className="flex flex-wrap items-center gap-1.5">
                     <span className="text-xs" style={{ color: 'var(--text-tertiary)' }}>本会话因子：</span>

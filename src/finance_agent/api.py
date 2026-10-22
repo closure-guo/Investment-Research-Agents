@@ -4131,6 +4131,7 @@ async def factor_library_detail(factor_id: int) -> dict[str, Any]:
 # 无任意命令/脚本字段。快照缺失/损坏/陈旧 = 控制通道无存活证据 → 409 拒绝（不留
 # 无人受理的请求）。
 FACTOR_RESEARCH_STALE_AFTER_S = 180  # 3× 采集周期（契约 ≤60s）；阈值单源
+FACTOR_RESEARCH_STALL_AFTER_S = 900  # 会话日志静默阈值（实测历史最大静默 602s 的 1.5 倍）
 FACTOR_RESEARCH_LAUNCHER_FRESH_AFTER_S = 300  # 2× 启动器节拍（120s）+ 余量
 FACTOR_RESEARCH_LAUNCHER_HONOR_ETA_S = 180  # 离线受理的披露上界（与陈旧阈值同值）
 
@@ -4150,11 +4151,38 @@ FACTOR_RESEARCH_CONFIG_BOUNDS: dict[str, tuple[int, int]] = {
 }
 
 
+def _factor_research_progress_block(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """进度新鲜度派生块（阈值单源：FACTOR_RESEARCH_STALL_AFTER_S）。
+
+    ``stalled`` 需四条件同时成立：快照可用且非陈旧 + 看护运行中 + 会话存活 + 静默超阈值。
+    看护未运行（日志本就不更新）或会话非存活（正常会话间隔）MUST NOT 判僵死。
+    """
+    session = snapshot.get("current_session")
+    raw = session.get("log_age_s") if isinstance(session, dict) else None
+    log_age = raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else None
+    supervisor = snapshot.get("supervisor")
+    running = bool(supervisor.get("running")) if isinstance(supervisor, dict) else False
+    alive = bool(session.get("alive")) if isinstance(session, dict) else False
+    stalled = bool(
+        snapshot.get("available")
+        and not snapshot.get("stale")
+        and running
+        and alive
+        and log_age is not None
+        and log_age > FACTOR_RESEARCH_STALL_AFTER_S
+    )
+    return {"log_age_seconds": log_age, "stalled": stalled}
+
+
 def _factor_research_snapshot_payload() -> dict[str, Any]:
-    """快照面：透传 + 派生 ``available``/``age_seconds``/``stale``（控制块另行附加）。"""
+    """快照面：透传 + 派生 ``available``/``age_seconds``/``stale``/``progress``。"""
     path = Path(os.environ.get("FACTOR_RESEARCH_STATUS_PATH", "data/factor_research/status.json"))
     if not path.is_file():
-        return {"available": False, "reason": "missing"}
+        return {
+            "available": False,
+            "reason": "missing",
+            "progress": {"log_age_seconds": None, "stalled": False},
+        }
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -4168,7 +4196,11 @@ def _factor_research_snapshot_payload() -> dict[str, Any]:
             epoch = datetime.fromisoformat(iso).timestamp()
         epoch = float(epoch)
     except (OSError, ValueError, TypeError):
-        return {"available": False, "reason": "corrupt"}
+        return {
+            "available": False,
+            "reason": "corrupt",
+            "progress": {"log_age_seconds": None, "stalled": False},
+        }
     age = max(0, int(time.time() - epoch))
     payload = dict(data)
     payload.update(
@@ -4178,6 +4210,7 @@ def _factor_research_snapshot_payload() -> dict[str, Any]:
             "stale": age > FACTOR_RESEARCH_STALE_AFTER_S,
         }
     )
+    payload["progress"] = _factor_research_progress_block(payload)
     return payload
 
 

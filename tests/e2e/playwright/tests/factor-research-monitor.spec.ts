@@ -496,3 +496,38 @@ test('15. 设置中心因子研发配置：实态/节奏配置保存真写文件
     .toBe(30)
   await expect(page.getByTestId('factor-research-settings-config-saved')).toContainText('已保存')
 })
+
+test('16. 会话僵死：明示无进展且不把定格读数当当前进度', async ({ page }) => {
+  // 采集链路正常（快照 40s 前）+ 看护运行中 + 会话存活，但日志静默 3600s（> 900s 阈值）
+  // → 后端派生 progress.stalled=true。fixture 只写**原始读数** log_age_s（阈值单源在后端）。
+  const base = snapshotBody()
+  writeSnapshot({
+    ...base,
+    current_session: { ...(base.current_session as Record<string, unknown>), log_age_s: 3600 },
+  })
+  await page.goto('/factor-research')
+
+  const banner = page.getByTestId('factor-research-stall-banner')
+  await expect(banner).toBeVisible()
+  await expect(banner).toContainText('无进展 1小时0分')
+  // 横幅只披露，零命令面
+  await expect(banner.locator('button, a')).toHaveCount(0)
+  // 定格的步骤读数不得冒充当前进度
+  await expect(page.getByTestId('factor-research-step-timing')).toHaveCount(0)
+  await expect(page.getByTestId('factor-research-progress-stale')).toContainText('1小时0分')
+  // 采集链路正常 → 陈旧横幅不出现（僵死与陈旧互斥，不互相遮蔽）
+  await expect(page.getByTestId('factor-research-stale-banner')).toHaveCount(0)
+})
+
+test('17. 日志新鲜：不告警且照常显示步骤进度', async ({ page }) => {
+  const base = snapshotBody()
+  writeSnapshot({
+    ...base,
+    current_session: { ...(base.current_session as Record<string, unknown>), log_age_s: 42 },
+  })
+  await page.goto('/factor-research')
+
+  await expect(page.getByTestId('factor-research-progress')).toBeVisible()
+  await expect(page.getByTestId('factor-research-stall-banner')).toHaveCount(0)
+  await expect(page.getByTestId('factor-research-step-timing')).toContainText('本步已用 9分55秒')
+})

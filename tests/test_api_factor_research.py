@@ -72,6 +72,8 @@ _NO_CONTROL = {
     "restart_pending": False,
 }
 _NO_LAUNCHER = {"available": False, "reason": "missing"}
+# 快照不可用/未上报时的派生块（spec「会话进度僵死派生」：实态不可证 → 不判僵死）。
+_NO_PROGRESS = {"log_age_seconds": None, "stalled": False}
 _DEFAULT_CONFIG_VALUES = {
     "snapshot_interval_s": 15,
     "session_gap_s": 60,
@@ -143,6 +145,7 @@ def test_missing_file_reports_missing():
         "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
+        "progress": _NO_PROGRESS,
     }
 
 
@@ -157,6 +160,7 @@ def test_corrupt_text_reports_corrupt(_status_path):
         "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
+        "progress": _NO_PROGRESS,
     }
 
 
@@ -169,6 +173,7 @@ def test_non_object_json_reports_corrupt(_status_path):
         "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
+        "progress": _NO_PROGRESS,
     }
 
 
@@ -182,6 +187,7 @@ def test_missing_timestamp_reports_corrupt(_status_path):
         "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
+        "progress": _NO_PROGRESS,
     }
 
 
@@ -766,3 +772,75 @@ def test_config_path_read_at_call_time(tmp_path, monkeypatch):
     monkeypatch.setenv("FACTOR_RESEARCH_CONFIG_PATH", str(second))
     client.put(_CONFIG_ENDPOINT, json={"snapshot_interval_s": 40})
     assert second.exists()
+
+
+# ── progress 派生块（delta add-factor-research-stall-detection；spec「会话进度僵死派生」）──
+#
+# 阈值单源 FACTOR_RESEARCH_STALL_AFTER_S=900（历史 14 会话实测最大静默 602s 的 1.5 倍）。
+# stalled 四条件同时成立：快照可用且非陈旧 + 看护运行中 + 会话存活 + 静默超阈值。
+
+
+class TestProgressStall:
+    """`GET /status` 顶层 progress 派生块：静默超阈值才判僵死，缺一为 false。"""
+
+    def test_log_age_over_threshold_stalled(self, _status_path):
+        """静默 3600s（超阈值）→ stalled=true，且逐字回报 log_age_seconds。"""
+        snap = _snapshot(age_s=40)
+        snap["current_session"]["log_age_s"] = 3600
+        _status_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["progress"] == {"log_age_seconds": 3600, "stalled": True}
+
+    def test_log_age_at_history_upper_bound_not_stalled(self, _status_path):
+        """实测静默上界 602s 在阈值内 → 不告警（阈值 900，严格大于才判僵死）。"""
+        snap = _snapshot(age_s=40)
+        snap["current_session"]["log_age_s"] = 602
+        _status_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["progress"] == {"log_age_seconds": 602, "stalled": False}
+
+    def test_supervisor_not_running_not_stalled(self, _status_path):
+        """看护未运行（日志本就不更新）≠ 会话僵死 → stalled=false。"""
+        snap = _snapshot(age_s=40)
+        snap["supervisor"] = {"running": False, "pid": None, "started_at": None}
+        snap["current_session"]["log_age_s"] = 99999
+        _status_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["progress"] == {"log_age_seconds": 99999, "stalled": False}
+
+    def test_session_not_alive_not_stalled(self, _status_path):
+        """会话非存活（正常会话间隔）→ stalled=false。"""
+        snap = _snapshot(age_s=40)
+        snap["current_session"]["alive"] = False
+        snap["current_session"]["log_age_s"] = 99999
+        _status_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["progress"] == {"log_age_seconds": 99999, "stalled": False}
+
+    def test_old_collector_without_log_age_reports_null(self, _status_path):
+        """旧采集器不报 log_age_s → log_age_seconds=null 且不判僵死（未上报 ≠ 进度正常）。"""
+        snap = _snapshot(age_s=40)
+        snap["current_session"].pop("log_age_s", None)
+        _status_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["available"] is True
+        assert body["progress"] == {"log_age_seconds": None, "stalled": False}
+
+    def test_snapshot_missing_still_returns_progress(self, _status_path):
+        """快照缺失 → available=false，progress 仍须返回（实态不可证时 MUST NOT 报僵死）。"""
+        assert not _status_path.exists()
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["available"] is False
+        assert body["progress"] == {"log_age_seconds": None, "stalled": False}

@@ -1233,6 +1233,13 @@ export interface FactorResearchControl {
 
 export type FactorResearchActualState = 'running' | 'stopped' | 'unverified'
 
+export interface FactorResearchProgress {
+  /** 当前会话日志 mtime 距采集时刻的秒数（旧版采集器未上报 → null） */
+  log_age_seconds: number | null
+  /** 采集正常但会话无进展（阈值单源在后端；未上报 → false 且不可判定） */
+  stalled: boolean
+}
+
 export interface FactorResearchStatusResponse {
   available: boolean
   /** available=false 时如实二分：missing（未接入）/ corrupt（快照损坏） */
@@ -1245,6 +1252,8 @@ export interface FactorResearchStatusResponse {
   actual_state?: FactorResearchActualState
   /** 研发节奏配置块（delta add-factor-research-settings） */
   config?: FactorResearchConfigBlock | null
+  /** 进度新鲜度派生块（delta add-factor-research-stall-detection） */
+  progress?: FactorResearchProgress | null
   supervisor?: FactorResearchSupervisor | null
   current_session?: FactorResearchCurrentSession | null
   sessions?: FactorResearchSession[]

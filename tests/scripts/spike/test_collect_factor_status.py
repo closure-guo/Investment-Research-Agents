@@ -419,3 +419,66 @@ class TestAgentMeta:
             wd, out, state, now_epoch=1_800_000_000.0, session_alive=lambda: True
         )
         assert snap["agent"] is None
+
+
+class TestLogAge:
+    """日志新鲜度原始读数（delta add-factor-research-stall-detection）。
+
+    采集器只报 mtime 距采集时刻的秒数；阈值与「僵死」判定归后端单源。
+    """
+
+    def test_log_age_from_mtime(self, tmp_path):
+        wd = _make_workdir(tmp_path, pid=os.getpid())
+        logdir = wd / "factor_research_logs"
+        (logdir / "session-20261022-120000.log").write_text(
+            "factor_name: ret_5d_reversal\n", encoding="utf-8"
+        )
+        out = tmp_path / "status.json"
+        state = logdir / ".collector_state.json"
+        log = sorted(logdir.glob("session-*.log"))[-1]
+        # mtime 设为采集时刻 42 秒前
+        os.utime(log, (1_800_000_000 - 42, 1_800_000_000 - 42))
+
+        snap = cfs.collect_once(
+            wd, out, state, now_epoch=1_800_000_000.0, session_alive=lambda: True
+        )
+        assert snap["current_session"]["log_age_s"] == 42
+
+    def test_log_age_null_when_stat_fails(self, tmp_path):
+        """无会话日志文件 → current_session 为 null（既有语义不变）。"""
+        wd = _make_workdir(tmp_path, pid=os.getpid())
+        logdir = wd / "factor_research_logs"
+        log = logdir / "session-20261022-120000.log"
+        log.write_text("factor_name: ret_5d_reversal\n", encoding="utf-8")
+        out = tmp_path / "status.json"
+        state = logdir / ".collector_state.json"
+        log.unlink()
+
+        snap = cfs.collect_once(
+            wd, out, state, now_epoch=1_800_000_000.0, session_alive=lambda: True
+        )
+        assert snap["current_session"] is None
+
+    def test_log_age_null_when_stat_raises(self, tmp_path, monkeypatch):
+        """glob 与 stat 之间日志被轮转/删除 → null（不猜、不填 0）。"""
+        wd = _make_workdir(tmp_path, pid=os.getpid())
+        logdir = wd / "factor_research_logs"
+        (logdir / "session-20261022-120000.log").write_text(
+            "factor_name: ret_5d_reversal\n", encoding="utf-8"
+        )
+        log = sorted(logdir.glob("session-*.log"))[-1]
+
+        real_stat = type(log).stat
+
+        def boom(self, *a, **kw):
+            if self == log:
+                raise OSError("simulated rotation")
+            return real_stat(self, *a, **kw)
+
+        monkeypatch.setattr(type(log), "stat", boom)
+        out = tmp_path / "status.json"
+        state = logdir / ".collector_state.json"
+        snap = cfs.collect_once(
+            wd, out, state, now_epoch=1_800_000_000.0, session_alive=lambda: True
+        )
+        assert snap["current_session"]["log_age_s"] is None

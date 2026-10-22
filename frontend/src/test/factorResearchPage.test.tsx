@@ -837,3 +837,73 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
     expect(badge.textContent).toBe('状态未知')
   })
 })
+
+/**
+ * 僵死披露（delta add-factor-research-stall-detection；spec frontend「因子研发监控页僵死披露」）。
+ *
+ * - stall 时展示横幅（含 formatDurationS 口径的无进展时长），并把步骤读数降级为
+ *   「读数来自 N 前的日志」（MUST NOT 再渲染「本步已用 · 预计剩余」冒充当前进度）；
+ * - 未 stall（含旧采集器 log_age_seconds=null）→ 无横幅、进度照常；
+ * - 未上报新鲜度 MUST NOT 出现「进度正常」之类已验证断言。
+ */
+describe('因子研发监控页 · 僵死披露（delta add-factor-research-stall-detection）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('僵死：展示无进展横幅 + 进度读数标注定格，且不渲染当前进度断言', async () => {
+    const base = snapshotBody()
+    mockFetch(
+      snapshotBody({
+        progress: { log_age_seconds: 3600, stalled: true },
+        current_session: { ...base.current_session!, step_elapsed_s: 603, step_eta_s: 905 },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    // 横幅文案含无进展时长（3600 秒 → 1小时0分，formatDurationS 既有口径）
+    const banner = await screen.findByTestId('factor-research-stall-banner')
+    expect(banner.textContent).toContain('无进展 1小时0分')
+    // 步骤读数降级为「来自 N 前的日志」
+    expect(screen.getByTestId('factor-research-progress-stale').textContent).toContain('1小时0分')
+    // MUST NOT 继续渲染「本步已用 … · 预计剩余 …」
+    expect(screen.queryByTestId('factor-research-step-timing')).toBeNull()
+    // 零命令面：横幅内无可点击处置入口
+    expect(banner.querySelector('button')).toBeNull()
+    expect(banner.querySelector('a')).toBeNull()
+  })
+
+  it('未僵死：无横幅，进度区照常展示步骤读数', async () => {
+    mockFetch(
+      snapshotBody({
+        progress: { log_age_seconds: 42, stalled: false },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-progress')
+    expect(screen.queryByTestId('factor-research-stall-banner')).toBeNull()
+    // 进度照常：步骤读数仍在（未被降级）
+    expect(screen.getByTestId('factor-research-step-timing').textContent).toContain('本步已用')
+    expect(screen.queryByTestId('factor-research-progress-stale')).toBeNull()
+  })
+
+  it('旧版采集器未上报新鲜度：无横幅且不冒充「进度正常」', async () => {
+    mockFetch(
+      snapshotBody({
+        progress: { log_age_seconds: null, stalled: false },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-progress')
+    expect(screen.queryByTestId('factor-research-stall-banner')).toBeNull()
+    // 未上报 = 不可判定：MUST NOT 出现「进度正常」等已验证断言
+    expect(document.body.textContent ?? '').not.toContain('进度正常')
+  })
+})
