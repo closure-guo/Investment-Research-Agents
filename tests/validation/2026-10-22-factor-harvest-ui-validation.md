@@ -51,3 +51,15 @@
   `run_job('factor_harvest_daily', source='manual')` 在 17:31:53 重新拉起，验证时状态为 running；
 - 提交：`5cd09cdd`（25 文件）。因 `pre-commit` 锁被其他会话占用（`PermissionError`），本次使用
   `--no-verify`，上述检查均为提交前手工全量执行。
+
+
+## 5. 补充：页面「不动」的端到端诊断（2026-10-22 18:00）
+
+- 现象：批次 0/12 · 已处理 440 · 剩余 398 连续 28 秒不变。
+- E2E 观测（Playwright，真实后端）：28 秒内 4 次 /api/factor-research/harvest 请求，
+  轮询正常；job.status=运行中；数字不变的原因是**进度按批落盘**（约 28 分钟/批），
+  批内不会改写 harvest_state.json（实测 mtime 停在上一批结束时刻）。
+- 修复：前端增加秒级活性时钟「本批进行中 · 已 X（进度按批落盘）」。
+- 复测：同一脚本两次读取 30分7秒 → 30分34秒，	ext_changed=true，4 次轮询。
+- 若需要「批内逐候选」的真实进度，需要新增心跳文件（harvest 每处理 N 条写一次），
+  属后续增量，不在本次范围。

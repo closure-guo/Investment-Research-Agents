@@ -53,6 +53,13 @@ MUST NOT 以 500 或编造数字冒充。
 - **THEN** 区块显示「收割数据未接入」空态
 - **AND** 主监控区块仍正常渲染
 
+#### Scenario: 运行中批内活性
+
+- **GIVEN** `job.status=running`、`progress.started_at=T0`
+- **WHEN** 打开页面并停留
+- **THEN** 区块显示秒级时钟「本批/本轮进行中 · 已 X（进度按批落盘）」
+- **AND** 时钟每秒更新，MUST NOT 因为批次数字未变而让区块看起来静止
+
 #### Scenario: 区块级失败不拖垮整页
 
 - **GIVEN** `/api/factor-research/harvest` 请求失败而主状态端点成功

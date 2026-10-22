@@ -123,6 +123,8 @@ export function FactorResearchPage({
   // 收割链路（add-factor-harvest-ui）：独立取数，失败只降级本区块
   const [harvest, setHarvest] = useState<HarvestChainResponse | null>(null)
   const [harvestError, setHarvestError] = useState(false)
+  // 批内活性时钟：进度按「批」落盘（约 30 分钟一批），批次数字不变时用秒级时钟证明在跑
+  const [liveNow, setLiveNow] = useState(() => Date.now())
   const timerRef = useRef<number | null>(null)
 
   const load = useCallback(async () => {
@@ -167,6 +169,13 @@ export function FactorResearchPage({
     }, pollIntervalMs)
     return () => window.clearInterval(timer)
   }, [loadHarvest, pollIntervalMs])
+
+  const harvestRunning = harvest?.job?.status === 'running'
+  useEffect(() => {
+    if (!harvestRunning) return
+    const timer = window.setInterval(() => setLiveNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [harvestRunning])
 
   // 控制提交：只发布尔期望态（零命令面）；失败如实提示、位置不翻转（不乐观改状态）
   const submitControl = useCallback(
@@ -228,6 +237,12 @@ export function FactorResearchPage({
   // 收割台账：后端契约保证数组；防御式兜底避免单次畸形响应拖垮整页
   const recentAdmitted = harvest?.recent_admitted ?? []
   const recentRejected = harvest?.recent_rejected ?? []
+  const batchStartedMs = harvest?.progress?.started_at ? Date.parse(harvest.progress.started_at) : null
+  const batchElapsedS =
+    harvestRunning && batchStartedMs !== null && Number.isFinite(batchStartedMs)
+      ? Math.max(0, Math.floor((liveNow - batchStartedMs) / 1000))
+      : null
+  const batchLabel = (harvest?.progress?.batches_done ?? 0) === 0 ? '本批' : '本轮'
 
   // 控制面派生（单一共享源：开关位置只取验证过的 actual_state，意图仅作离线披露）
   const view = deriveControlView(data, { submitting, restartSubmitting, channelBlocked })
@@ -663,6 +678,19 @@ export function FactorResearchPage({
                       </span>
                       {harvest.progress?.eta_s != null && <span>预计还需 {formatDurationS(harvest.progress.eta_s)}</span>}
                     </div>
+                    {harvestRunning && batchElapsedS !== null && (
+                      <div
+                        data-testid="factor-research-harvest-live"
+                        className="inline-flex items-center gap-1.5 text-xs"
+                        style={{ color: 'var(--status-success-default)' }}
+                      >
+                        <span
+                          className="inline-block h-1.5 w-1.5 animate-pulse rounded-full"
+                          style={{ background: 'currentColor' }}
+                        />
+                        {batchLabel}进行中 · 已 {formatDurationS(batchElapsedS)}（进度按批落盘）
+                      </div>
+                    )}
                     <div className="h-2 w-full overflow-hidden rounded-full" style={{ background: 'var(--bg-overlay-l1)' }}>
                       <div
                         data-testid="factor-research-harvest-bar"

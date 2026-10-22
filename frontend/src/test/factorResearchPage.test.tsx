@@ -1112,6 +1112,8 @@ describe('收割链路区块（add-factor-harvest-ui）', () => {
     expect(progress).toContain('批次 2/12')
     expect(progress).toContain('剩余 380')
     expect(progress).toContain('本轮入库 3')
+    // 批内活性：进度按批落盘，运行中必须显示秒级时钟（否则页面看起来「不动」）
+    expect(screen.getByTestId('factor-research-harvest-live').textContent).toContain('进行中')
     expect(screen.getByTestId('factor-research-harvest-step-candidates').textContent).toContain('820')
     expect(screen.getByTestId('factor-research-harvest-step-admitted').textContent).toContain('7')
     expect(screen.getByTestId('factor-research-harvest-gates').textContent).toContain('ICIR 150')
