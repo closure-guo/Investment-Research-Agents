@@ -62,6 +62,10 @@ from finance_agent.factors.library import (  # noqa: E402
     list_ic_series,
     list_ledger_entries,
 )
+from finance_agent.factors.readiness import (  # noqa: E402
+    expected_factor_mode_date,
+    factor_signal_payload,
+)
 from finance_agent.factors.style_exposure import (  # noqa: E402
     compute_style_exposure,
     style_exposure_payload,
@@ -86,7 +90,11 @@ from finance_agent.screening.pool_analysis import (  # noqa: E402
     prepare_pool_analysis_batch,
 )
 from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
-from finance_agent.screening.ranker import recent_ic_stats  # noqa: E402
+from finance_agent.screening.ranker import (  # noqa: E402
+    MIN_IC_SAMPLES_FOR_SCORING,
+    ic_sample_counts,
+    recent_ic_stats,
+)
 from finance_agent.screening.store import (  # noqa: E402
     DEFAULT_BATCH_HISTORY_LIMIT,
     MAX_BATCH_HISTORY_LIMIT,
@@ -3484,6 +3492,39 @@ _SCREENING_FALLBACK_NOTICE = (
 )
 
 
+def _factor_signal_block(selection_mode: str | None) -> dict[str, Any]:
+    """池接口的 ``factor_signal``（delta add-factor-ic-visibility）。
+
+    active 因子 + 近 60 日 IC 条数 + 最新 IC 日期 → 逐因子进度与预计恢复日。
+    因子库读取失败时降级为空列表并如实标注，MUST NOT 让选股页因该块 500。
+    """
+    try:
+        active = [row for row in list_factors() if str(row.get("status")) == "active"]
+        active.sort(key=lambda row: int(row["id"]))
+        counts = ic_sample_counts(active)
+        latest: dict[int, str] = {}
+        for row in active:
+            series = list_ic_series(int(row["id"]), limit=1)
+            if series:
+                latest[int(row["id"])] = series[-1][0]
+        return factor_signal_payload(
+            active,
+            counts,
+            latest,
+            selection_mode=selection_mode,
+            min_samples=MIN_IC_SAMPLES_FOR_SCORING,
+        )
+    except Exception:  # noqa: BLE001 - 只读诊断块，失败不得拖垮池接口
+        _logger.exception("因子信号就绪度读取失败，降级返回")
+        return {
+            "selection_mode": selection_mode,
+            "reason": "因子库读取失败",
+            "min_samples": MIN_IC_SAMPLES_FOR_SCORING,
+            "expected_factor_mode_date": None,
+            "factors": [],
+        }
+
+
 def _screening_pool_payload(queue_snapshot: list[dict]) -> dict[str, Any]:
     """池端点载荷（同步体，供 to_thread 包裹）：最近成功池 + 最近尝试状态 + 队列。
 
@@ -3500,6 +3541,7 @@ def _screening_pool_payload(queue_snapshot: list[dict]) -> dict[str, Any]:
         "stale": bool(latest is not None and latest["status"] != "ok"),
         "selection_mode": selection_mode,
         "notice": _SCREENING_FALLBACK_NOTICE if selection_mode == "fallback" else None,
+        "factor_signal": _factor_signal_block(selection_mode),
         "pool": successful["pool"] if successful else [],
         "queue": queue_snapshot,
     }
@@ -4014,6 +4056,7 @@ def _factor_summary_payload(
     events: list[dict[str, Any]],
     ic_stats: dict[int, tuple[float, float]],
     ic_points: int,
+    latest_ic_date: str | None = None,
 ) -> dict[str, Any]:
     """因子行 + 事件 + IC 统计 → 列表/详情共用的摘要载荷。"""
     factor_id = int(row["id"])
@@ -4036,6 +4079,12 @@ def _factor_summary_payload(
         "ic_mean_60d": ic_mean,
         "icir_60d": icir,
         "ic_points": ic_points,
+        # IC 就绪度（delta add-factor-ic-visibility）：窗口/门槛/预计恢复打分日期
+        "ic_window": FACTOR_IC_WINDOW,
+        "min_samples_for_scoring": MIN_IC_SAMPLES_FOR_SCORING,
+        "expected_factor_mode_date": expected_factor_mode_date(
+            latest_ic_date, ic_points, MIN_IC_SAMPLES_FOR_SCORING
+        ),
         "decayed": any(str(event.get("to_status")) == "degraded" for event in events),
         "last_event": _factor_last_event_summary(events),
     }
@@ -4076,15 +4125,19 @@ def _factors_payload() -> list[dict[str, Any]]:
     rows = list_factors()
     events_by_factor = _factor_events_by_factor()
     ic_stats = recent_ic_stats(rows, window=FACTOR_IC_WINDOW)
-    payload = [
-        _factor_summary_payload(
-            row,
-            events=events_by_factor.get(int(row["id"]), []),
-            ic_stats=ic_stats,
-            ic_points=len(list_ic_series(int(row["id"]), limit=FACTOR_IC_WINDOW)),
+    payload: list[dict[str, Any]] = []
+    for row in rows:
+        # 序列只读一次：条数（ic_points）与最新日期（恢复日期推算）同源，避免两次查询漂移
+        series = list_ic_series(int(row["id"]), limit=FACTOR_IC_WINDOW)
+        payload.append(
+            _factor_summary_payload(
+                row,
+                events=events_by_factor.get(int(row["id"]), []),
+                ic_stats=ic_stats,
+                ic_points=len(series),
+                latest_ic_date=series[-1][0] if series else None,
+            )
         )
-        for row in rows
-    ]
     payload.sort(key=lambda item: (-item["icir_60d"], item["id"]))
     return payload
 
@@ -4101,6 +4154,7 @@ def _factor_detail_payload(factor_id: int) -> dict[str, Any] | None:
         events=events,
         ic_stats=recent_ic_stats([row], window=FACTOR_IC_WINDOW),
         ic_points=len(ic_series),
+        latest_ic_date=ic_series[-1][0] if ic_series else None,
     )
     detail["ic_series"] = [
         {"trade_date": trade_date, "rank_ic": rank_ic} for trade_date, rank_ic in ic_series
@@ -4117,6 +4171,13 @@ def _factor_style_exposure_payload(row: dict[str, Any]) -> dict[str, Any] | None
     → **返回 None**（前端如实展示「数据不足」，MUST NOT 用 0 或虚构值冒充）。
     """
     try:
+        from finance_agent.factors.style_exposure import MIN_STYLE_SAMPLES
+
+        # 短路：风格暴露需要「因子 IC × 代理 IC」≥ MIN_STYLE_SAMPLES 个共同交易日；
+        # 因子自身 IC 点数不足时结果必为 None，不得为它构建准入面板——500 日 × 全市场
+        # 面板实测需数分钟，会把因子详情接口拖成超时（详情页全部「加载失败」的根因）。
+        if len(list_ic_series(int(row["id"]), limit=FACTOR_IC_WINDOW)) < MIN_STYLE_SAMPLES:
+            return None
         from finance_agent.factors.dsl import parse as dsl_parse
         from finance_agent.factors.eval_engine import (
             evaluate as dsl_evaluate,

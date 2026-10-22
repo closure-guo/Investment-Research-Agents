@@ -59,6 +59,9 @@ def _screening_db(tmp_path, monkeypatch):
     path = tmp_path / "screening.db"
     monkeypatch.setenv("SCREENING_DB_PATH", str(path))
     monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "market_snapshot.db"))
+    # 因子库一并隔离：池接口的 factor_signal 读 active 因子与 IC 样本，
+    # 不钉死会读开发库 data/factor_library.db（测试依赖生产数据 = 泄漏）。
+    monkeypatch.setenv("FACTOR_LIBRARY_DB_PATH", str(tmp_path / "factor_library.db"))
     return path
 
 
@@ -772,6 +775,30 @@ def test_pool_payload_factor_mode_has_no_notice(pool_seed) -> None:
 
     assert body["selection_mode"] == "factor"
     assert body["notice"] is None
+
+
+def test_pool_payload_factor_signal_reports_progress(monkeypatch, _screening_db) -> None:
+    """池接口披露逐因子 IC 进度与最早恢复日（delta add-factor-ic-visibility）。"""
+    import finance_agent.api as api_module
+
+    monkeypatch.setattr(
+        api_module,
+        "list_factors",
+        lambda: [{"id": 1, "status": "active"}, {"id": 2, "status": "active"}],
+    )
+    monkeypatch.setattr(api_module, "ic_sample_counts", lambda factors, **kwargs: {1: 4, 2: 3})
+    monkeypatch.setattr(
+        api_module, "list_ic_series", lambda factor_id, **kwargs: [("2026-10-21", 0.1)]
+    )
+
+    body = TestClient(app).get("/api/screening/pool").json()
+
+    signal = body["factor_signal"]
+    assert signal["min_samples"] == 10
+    assert [row["ic_samples"] for row in signal["factors"]] == [4, 3]
+    assert [row["eligible"] for row in signal["factors"]] == [False, False]
+    assert signal["expected_factor_mode_date"] == "2026-11-02"
+    assert "IC 样本不足" in signal["reason"]
 
 
 def test_batches_endpoint_includes_selection_mode(_screening_db) -> None:

@@ -26,6 +26,13 @@ function poolBody(overrides: Partial<ScreeningPoolResponse> = {}): ScreeningPool
     stale: false,
     selection_mode: 'factor',
     notice: null,
+    factor_signal: {
+      selection_mode: 'factor',
+      reason: '全部 active 因子 IC 样本达标',
+      min_samples: 10,
+      expected_factor_mode_date: null,
+      factors: [],
+    },
     pool: [
       {
         symbol: '600519',

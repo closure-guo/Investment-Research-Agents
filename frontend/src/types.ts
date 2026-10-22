@@ -881,8 +881,29 @@ export interface ScreeningPoolResponse {
   selection_mode: 'factor' | 'fallback' | null
   // 降级披露文案（后端单源；fallback 时非空，明示「非因子信号」）
   notice: string | null
+  // 因子 IC 就绪度（delta add-factor-ic-visibility）：逐 active 因子进度 + 恢复日
+  factor_signal: ScreeningFactorSignal
   pool: ScreeningPoolRow[]
   queue: ScreeningQueueEntry[]
+}
+
+export interface ScreeningFactorReadiness {
+  id: number
+  /** 近 60 日窗口内 IC 记录数 */
+  ic_samples: number
+  eligible: boolean
+  /** 预计达标日（按工作日推算；已达标/无记录 → null） */
+  expected_eligible_date: string | null
+}
+
+export interface ScreeningFactorSignal {
+  selection_mode: 'factor' | 'fallback' | null
+  /** 降级原因（后端逐字：如「IC 样本不足（门槛 10）」/「无 active 因子」） */
+  reason: string
+  min_samples: number
+  /** 各因子预计达标日的最早值（工作日推算；无则 null） */
+  expected_factor_mode_date: string | null
+  factors: ScreeningFactorReadiness[]
 }
 
 // POST /api/screening/analyze 响应（池空为 409 显式错误）
@@ -1073,6 +1094,12 @@ export interface FactorRow {
   icir_60d: number
   /** 窗口内 IC 记录数：0 → 界面显示「—」而非 0.000 */
   ic_points: number
+  /** IC 窗口（近 N 个交易日；后端 FACTOR_IC_WINDOW=60，delta add-factor-ic-visibility） */
+  ic_window: number
+  /** 参与 L2 打分所需的最少 IC 条数（后端 MIN_IC_SAMPLES_FOR_SCORING=10） */
+  min_samples_for_scoring: number
+  /** 预计恢复因子打分的首个批次日期（按工作日推算、不含节假日；已达标/无记录 → null） */
+  expected_factor_mode_date: string | null
   /** 衰减降级史（事件历史出现过 degraded；退役后标记仍在） */
   decayed: boolean
   last_event: FactorLastEvent | null

@@ -191,6 +191,51 @@ def test_detail_style_exposure_null_without_snapshot(_factors_db) -> None:
     assert resp.json()["style_exposure"] is None
 
 
+def test_detail_exposes_ic_readiness_fields(_factors_db) -> None:
+    """列表/详情披露 IC 就绪度（窗口 60、门槛 10、预计恢复打分日期）。"""
+    from datetime import date
+
+    llm_id, _ = _seed_library()
+
+    body = TestClient(app).get(f"{_FACTORS}/{llm_id}").json()
+
+    assert body["ic_window"] == 60
+    assert body["min_samples_for_scoring"] == 10
+    assert body["ic_points"] == 2
+    expected = body["expected_factor_mode_date"]
+    assert expected is not None
+    assert date.fromisoformat(expected).weekday() < 5  # 工作日口径（跳过周末）
+
+    listed = TestClient(app).get(_FACTORS).json()["factors"]
+    row = next(item for item in listed if item["id"] == llm_id)
+    assert row["ic_points"] == 2
+    assert row["min_samples_for_scoring"] == 10
+    assert row["expected_factor_mode_date"] == expected
+
+
+def test_detail_style_exposure_skips_panel_when_ic_points_below_min(
+    _factors_db, monkeypatch
+) -> None:
+    """IC 点数 < MIN_STYLE_SAMPLES → 直接 None，不得构建准入面板。
+
+    风格暴露需要「因子 IC × 代理 IC」的 ≥30 个共同交易日；因子自身 IC 点数不足时
+    结果必为 None。旧实现仍无条件构建 500 日 × 全市场面板（实测数分钟），把详情
+    接口拖成超时——本用例把面板构造替换为断言，证明不足时零面板开销。
+    """
+    llm_id, _ = _seed_library()
+    import finance_agent.factors.monthly as monthly
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("IC 点数不足时不得构建风格暴露面板")
+
+    monkeypatch.setattr(monthly, "_panel_from_snapshot", _boom)
+
+    resp = TestClient(app).get(f"{_FACTORS}/{llm_id}")
+
+    assert resp.status_code == 200
+    assert resp.json()["style_exposure"] is None
+
+
 def test_detail_series_empty_for_factor_without_ic(_factors_db) -> None:
     """无 IC 记录 → 空序列（不编造占位点）。"""
     _, builtin_id = _seed_library()
