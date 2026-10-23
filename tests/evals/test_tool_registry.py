@@ -30,12 +30,20 @@ class TestToolRegistry:
         assert names <= AGENT_TOOL_NAMES, names - AGENT_TOOL_NAMES
 
     def test_registry_fully_registered(self):
-        """注册表每个工具名都在 agent_factory 中出现（无"评估声明了但 agent 未注册"）。"""
+        """注册表每个工具名都在 agent_factory 中出现（无"评估声明了但 agent 未注册"）。
+
+        P2/P3 起快速模式系统工具经 make_read_tools()/make_write_tools() 动态注册，
+        源码扫描拿不到这些名字，故把动态工厂的键并入实际注册集合。
+        """
         src = Path("src/finance_agent/agent_factory.py").read_text(encoding="utf-8")
         import finance_agent.tool_registry as tr
+        from finance_agent.operator.reads import make_read_tools
+        from finance_agent.operator.writes import make_write_tools
 
         refs = {
             g for pair in re.findall(r"_trace_tool\((\w+)\)|name=(\w+)", src) for g in pair if g
         }
         names = {getattr(tr, r) for r in refs if r and hasattr(tr, r)}
+        names |= set(make_read_tools())
+        names |= set(make_write_tools(session_id="", user_message=""))
         assert names >= AGENT_TOOL_NAMES, AGENT_TOOL_NAMES - names

@@ -293,6 +293,7 @@ async def _agui_run_stream(
     api_key: str | None,
     encoder: EventEncoder,
     llm_config: LLMConfig | None = None,
+    operator_enabled: bool = True,
 ) -> AsyncGenerator[str, None]:
     """内联驱动一次 quick run：落库 user → agent.run() → 翻译 → SSE，三路落库。"""
     from finance_agent.agent_factory import build_agent
@@ -306,7 +307,12 @@ async def _agui_run_stream(
         await asyncio.to_thread(session_store.update_session_status, thread_id, "running")
 
         agent = build_agent(
-            mode="quick", api_key=api_key, session_id=thread_id, llm_config=llm_config
+            mode="quick",
+            api_key=api_key,
+            session_id=thread_id,
+            llm_config=llm_config,
+            operator_enabled=operator_enabled,
+            current_user_message=user_message,
         )
 
         # ADR-0015：Langfuse react_loop span 等价保留（调研 §3.1）
@@ -470,6 +476,7 @@ async def agui_quick(req: _RunAgentInputBody):
 
     api_key: str | None = None
     llm_config: LLMConfig | None = None
+    capability: dict[str, Any] | None = None
     if isinstance(req.forwarded_props, dict):
         key = req.forwarded_props.get("apiKey")
         # 非空字符串即可透传（审查修复：不限定 sk- 前缀，key 形态由上游决定）
@@ -479,6 +486,11 @@ async def agui_quick(req: _RunAgentInputBody):
         # forwardedProps 透传）。仅接受已知字段，畸形载荷静默忽略回退 env。
         raw_cfg = req.forwarded_props.get("llmConfig")
         if isinstance(raw_cfg, dict):
+            # capability 是 probe 事实，不是 LLMConfig 字段（不进 LLMConfig 构造）；
+            # 仅用于判断是否注册系统操作工具。
+            raw_cap = raw_cfg.get("capability")
+            if isinstance(raw_cap, dict):
+                capability = raw_cap
             allowed = {"model", "baseUrl", "apiKey", "thinking", "apiForm", "contextLength"}
             kwargs = {
                 k: v for k, v in raw_cfg.items() if k in allowed and isinstance(v, (str, int))
@@ -486,10 +498,21 @@ async def agui_quick(req: _RunAgentInputBody):
             if kwargs:
                 llm_config = LLMConfig(**kwargs)
 
+    from finance_agent.operator.gating import operator_tools_enabled
+
+    operator_enabled = operator_tools_enabled(capability)
     run_id = req.run_id or uuid.uuid4().hex
     encoder = EventEncoder()
     return StreamingResponse(
-        _agui_run_stream(thread_id, run_id, user_message, api_key, encoder, llm_config=llm_config),
+        _agui_run_stream(
+            thread_id,
+            run_id,
+            user_message,
+            api_key,
+            encoder,
+            llm_config=llm_config,
+            operator_enabled=operator_enabled,
+        ),
         media_type=encoder.get_content_type(),
         headers=_SSE_HEADERS,
     )

@@ -28,10 +28,10 @@ class TestBuildAgentQuick:
         tool_names = agent.tools.get_tool_names()
         assert "run_deep_analysis" not in tool_names
 
-    def test_quick_mode_max_iterations_is_3(self):
-        """快速模式 max_iterations=3。"""
+    def test_quick_mode_max_iterations_is_6(self):
+        """快速模式 max_iterations=6（容纳解析→派单→复述回执）。"""
         agent = build_agent(mode="quick", api_key="test-key")
-        assert agent.max_iterations == 3
+        assert agent.max_iterations == 6
 
 
 class TestBuildAgentDeep:

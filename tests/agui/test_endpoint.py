@@ -527,3 +527,31 @@ def test_api_key_non_sk_prefix_passthrough(isolated_db, monkeypatch):
         )
         assert _types(events)[-1] == "RUN_FINISHED"
         assert captured.get("api_key") is None
+
+
+def test_capability_tool_call_false_disables_operator_tools(isolated_db, monkeypatch):
+    """probe 事实 tool_call=false → build_agent 收到 operator_enabled=False。"""
+    sid = session_store.create_chat_session("能力门禁")
+    captured: dict[str, Any] = {}
+
+    def _fake_build(**kwargs: Any) -> _StubAgent:
+        captured.update(kwargs)
+        return _StubAgent([StreamEvent.answer("ok")])
+
+    monkeypatch.setattr(agent_factory, "build_agent", _fake_build)
+
+    with TestClient(app) as client:
+        events = _post_agui(
+            client,
+            {
+                "threadId": sid,
+                "runId": "run-cap",
+                "messages": [{"id": "m1", "role": "user", "content": "分析茅台"}],
+                "forwardedProps": {
+                    "llmConfig": {"capability": {"tool_call": False, "stream": True}}
+                },
+            },
+        )
+
+    assert _types(events)[-1] == "RUN_FINISHED"
+    assert captured["operator_enabled"] is False

@@ -2102,7 +2102,11 @@ async def _run_chat_task(
         mode = "follow-up" if session.get("session_type") == "analysis" else "quick"
 
         agent = build_agent(
-            mode=mode, api_key=api_key, session_id=session_id, llm_config=llm_config
+            mode=mode,
+            api_key=api_key,
+            session_id=session_id,
+            llm_config=llm_config,
+            current_user_message=req.message,
         )
 
         lastPersistTime = time.time()
@@ -2372,6 +2376,131 @@ async def _run_react_analysis(
         raise
 
 
+async def _start_fast_path_pipeline(
+    *,
+    session_id: str,
+    stock_code: str,
+    stock_name: str,
+    req: AnalyzeRequest,
+    analysis_id: str,
+    start_time: float,
+    display_name: str | None,
+    llm_config: LLMConfig | None,
+) -> None:
+    """fast path 与 operator 工具共用的管线启动装配。
+
+    只负责写用户消息/锚点/状态、发布 session_created、启动 PipelineRunner；
+    事件经 journal 桥接，SSE 侧零改动。
+    """
+    # 追加用户输入到 chat_history
+    await asyncio.to_thread(append_chat, session_id, "user", req.query)
+    # 持久化管线触发锚点：fast path 下 chat_history 仅一条 user，锚点 = 1
+    await asyncio.to_thread(set_pipeline_anchor, session_id)
+    await asyncio.to_thread(
+        update_session_for_clarify,
+        session_id,
+        stock_code=stock_code,
+        stock_name=stock_name,
+        status="running",
+    )
+    # session_created 同步写入 journal（恢复端点重放的事实源；
+    # 在线客户端经 subscribe 重放收到，无需单独直发）。
+    # 同步写避免 await 点：确保 PipelineRunner.start 在客户端断开前执行，
+    # 且 session_created 先于管线事件入 journal（重放顺序正确）
+    append_session_event(
+        session_id,
+        {
+            "type": "session_created",
+            "session_id": session_id,
+            "display_name": display_name,
+            "timestamp": _now(),
+        },
+    )
+    # 管线后台执行：事件经 PipelineRunner._run 的 publish 桥接到 journal，
+    # 客户端断开不中断管线，终态由 _run 的 finally 发布
+    loop = asyncio.get_running_loop()
+    PipelineRunner.start(
+        session_id,
+        lambda: _run_graph_streaming(
+            stock_code,
+            stock_name,
+            req,
+            analysis_id,
+            start_time,
+            session_id=session_id,
+            llm_config=llm_config,
+        ),
+        {
+            "layerTree": build_layer_tree(),
+            "currentNodeId": "",
+            "progress": 0.0,
+            "updatedAt": int(time.time() * 1000),
+            # 管线启动时间戳（毫秒）：前端刷新重建用作「已用时」计时起点
+            "pipeline_start_ts": int(start_time * 1000),
+        },
+        loop=loop,
+    )
+
+
+async def start_analysis_session_for_operator(
+    stock_code: str,
+    stock_name: str = "",
+    *,
+    api_key: str | None = None,
+    llm_config: LLMConfig | None = None,
+) -> dict[str, Any]:
+    """operator 派单：创建独立 analysis 会话并启动管线，返回回执。
+
+    与 /api/analyze fast path 共用 _start_fast_path_pipeline；不在调用方事件流内
+    运行管线，调用方拿到回执即可返回。
+    """
+    symbol = (stock_code or "").strip()
+    name = (stock_name or "").strip()
+    display_name = f"{name or symbol} 深度分析"
+    session_id = await asyncio.to_thread(
+        create_session,
+        stock_code="",
+        stock_name="",
+        display_name=display_name,
+        status="clarifying",
+        session_type="analysis",
+    )
+    analysis_id = str(uuid.uuid4())[:8]
+    start_time = time.time()
+    req = AnalyzeRequest(
+        query=f"分析 {name or symbol}（{symbol}）",
+        stock_code=symbol,
+        stock_name=name or None,
+        api_key=api_key,
+    )
+    try:
+        await _start_fast_path_pipeline(
+            session_id=session_id,
+            stock_code=symbol,
+            stock_name=name,
+            req=req,
+            analysis_id=analysis_id,
+            start_time=start_time,
+            display_name=display_name,
+            llm_config=llm_config,
+        )
+    except Exception as exc:
+        # 派单失败不留「clarifying/running 但无管线」的僵尸会话
+        await asyncio.to_thread(
+            update_session_status,
+            session_id,
+            "failed",
+            failure_reason=f"operator dispatch failed: {type(exc).__name__}: {exc}",
+        )
+        raise
+    return {
+        "session_id": session_id,
+        "display_name": display_name,
+        "status": "running",
+        "symbol": symbol,
+    }
+
+
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeRequest):
     """深度分析 -- Fast path 直走管线，ReAct 路径由 registry 后台任务驱动。
@@ -2417,53 +2546,15 @@ async def analyze(req: AnalyzeRequest):
     # 新会话（未传 session_id）且已解析出股票代码时走 fast path；
     # 追问/复用旧会话时走 ReAct 路径
     if stock_code and not req.session_id:
-        # 追加用户输入到 chat_history
-        await asyncio.to_thread(append_chat, session_id, "user", req.query)
-        # 持久化管线触发锚点：fast path 下 chat_history 仅一条 user，锚点 = 1
-        await asyncio.to_thread(set_pipeline_anchor, session_id)
-        await asyncio.to_thread(
-            update_session_for_clarify,
-            session_id,
+        await _start_fast_path_pipeline(
+            session_id=session_id,
             stock_code=stock_code,
             stock_name=stock_name,
-            status="running",
-        )
-        # session_created 同步写入 journal（恢复端点重放的事实源；
-        # 在线客户端经 subscribe 重放收到，无需单独直发）。
-        # 同步写避免 await 点：确保 PipelineRunner.start 在客户端断开前执行，
-        # 且 session_created 先于管线事件入 journal（重放顺序正确）
-        append_session_event(
-            session_id,
-            {
-                "type": "session_created",
-                "session_id": session_id,
-                "display_name": display_name,
-                "timestamp": _now(),
-            },
-        )
-        # 管线后台执行：事件经 PipelineRunner._run 的 publish 桥接到 journal，
-        # 客户端断开不中断管线，终态由 _run 的 finally 发布
-        loop = asyncio.get_running_loop()
-        PipelineRunner.start(
-            session_id,
-            lambda: _run_graph_streaming(
-                stock_code,
-                stock_name,
-                req,
-                analysis_id,
-                start_time,
-                session_id=session_id,
-                llm_config=llm_config,
-            ),
-            {
-                "layerTree": build_layer_tree(),
-                "currentNodeId": "",
-                "progress": 0.0,
-                "updatedAt": int(time.time() * 1000),
-                # 管线启动时间戳（毫秒）：前端刷新重建用作「已用时」计时起点
-                "pipeline_start_ts": int(start_time * 1000),
-            },
-            loop=loop,
+            req=req,
+            analysis_id=analysis_id,
+            start_time=start_time,
+            display_name=display_name,
+            llm_config=llm_config,
         )
 
         # done 终态补充展示字段：duration_ms 等由端点注入
