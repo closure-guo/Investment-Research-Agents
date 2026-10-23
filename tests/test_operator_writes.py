@@ -29,7 +29,14 @@ async def test_factor_preview_does_not_execute(monkeypatch):
 
     async def fake_control(desired):
         calls.append(desired)
-        return {"control": {"desired_running": desired, "pending": True, "honor": "live", "honor_eta_seconds": 0}}
+        return {
+            "control": {
+                "desired_running": desired,
+                "pending": True,
+                "honor": "live",
+                "honor_eta_seconds": 0,
+            }
+        }
 
     monkeypatch.setattr(writes_mod, "_factor_control", fake_control)
     tool = _tools(message="停止因子研发")["set_factor_research_running"]
@@ -46,7 +53,14 @@ async def test_factor_requires_user_confirmation(monkeypatch):
 
     async def fake_control(desired):
         calls.append(desired)
-        return {"control": {"desired_running": desired, "pending": True, "honor": "live", "honor_eta_seconds": 0}}
+        return {
+            "control": {
+                "desired_running": desired,
+                "pending": True,
+                "honor": "live",
+                "honor_eta_seconds": 0,
+            }
+        }
 
     monkeypatch.setattr(writes_mod, "_factor_control", fake_control)
     tool = _tools(message="停止因子研发")["set_factor_research_running"]
@@ -63,7 +77,14 @@ async def test_factor_executes_after_confirmation(monkeypatch):
 
     async def fake_control(desired):
         calls.append(desired)
-        return {"control": {"desired_running": desired, "pending": True, "honor": "live", "honor_eta_seconds": 0}}
+        return {
+            "control": {
+                "desired_running": desired,
+                "pending": True,
+                "honor": "live",
+                "honor_eta_seconds": 0,
+            }
+        }
 
     monkeypatch.setattr(writes_mod, "_factor_control", fake_control)
     tool = _tools(message="确认执行")["set_factor_research_running"]

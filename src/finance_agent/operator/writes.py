@@ -200,9 +200,7 @@ def make_write_tools(
         await asyncio.sleep(0.2)
         if task.done():
             if task.cancelled():
-                return _success(
-                    action, params, {"job_id": jid, "status": "triggered"}
-                )
+                return _success(action, params, {"job_id": jid, "status": "triggered"})
             exc = task.exception()
             if exc is not None:
                 if type(exc).__name__ == "JobAlreadyRunning":

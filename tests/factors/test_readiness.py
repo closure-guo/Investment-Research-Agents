@@ -64,9 +64,7 @@ def test_factor_signal_payload_reports_progress_and_earliest_date() -> None:
 
 
 def test_factor_signal_payload_without_active_factors() -> None:
-    payload = factor_signal_payload(
-        [], {}, {}, selection_mode="fallback", min_samples=10
-    )
+    payload = factor_signal_payload([], {}, {}, selection_mode="fallback", min_samples=10)
 
     assert payload["factors"] == []
     assert payload["reason"] == "无 active 因子"

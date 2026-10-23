@@ -76,9 +76,7 @@ def make_start_stock_analysis(
                     llm_config=llm_config,
                 )
             else:
-                receipt = await dispatcher(
-                    symbol, (stock_name or "").strip(), api_key, llm_config
-                )
+                receipt = await dispatcher(symbol, (stock_name or "").strip(), api_key, llm_config)
             payload = _receipt(receipt)
         except Exception as exc:  # noqa: BLE001 -- 工具边界必须把失败转成可读结果
             _logger.exception("operator 派单失败 symbol=%s", symbol)

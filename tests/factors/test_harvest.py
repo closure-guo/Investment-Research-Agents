@@ -101,12 +101,8 @@ def _panel(dates: int = 70, codes: int = 40, seed: int = 7) -> MarketPanel:
 def _library_db(tmp_path, monkeypatch):
     """因子库/记忆桥路径指向 tmp（调用期读 env，不落开发库与生产桥文件）。"""
     monkeypatch.setenv("FACTOR_LIBRARY_DB_PATH", str(tmp_path / "factor_library.db"))
-    monkeypatch.setenv(
-        "FACTOR_FEEDBACK_PATH", str(tmp_path / "explored_factors.json")
-    )
-    monkeypatch.setenv(
-        "FACTOR_RESEARCH_HEARTBEAT_PATH", str(tmp_path / "harvest_heartbeat.json")
-    )
+    monkeypatch.setenv("FACTOR_FEEDBACK_PATH", str(tmp_path / "explored_factors.json"))
+    monkeypatch.setenv("FACTOR_RESEARCH_HEARTBEAT_PATH", str(tmp_path / "harvest_heartbeat.json"))
 
 
 class TestTranscriptionPayload:
@@ -232,9 +228,7 @@ class TestRunFactorHarvest:
             client=client,
             panel=_panel(),
         )
-        heartbeat = json.loads(
-            (tmp_path / "harvest_heartbeat.json").read_text(encoding="utf-8")
-        )
+        heartbeat = json.loads((tmp_path / "harvest_heartbeat.json").read_text(encoding="utf-8"))
         assert heartbeat["phase"] == "done"
         assert heartbeat["processed_in_batch"] == heartbeat["total_in_batch"] == 2
 
@@ -642,7 +636,10 @@ class TestUntilDrained:
         path = tmp_path / "candidates.json"
         path.write_text(
             json.dumps(
-                {"generated_at": "2026-10-22T00:00:00+08:00", "candidates": [_candidate(n) for n in names]}
+                {
+                    "generated_at": "2026-10-22T00:00:00+08:00",
+                    "candidates": [_candidate(n) for n in names],
+                }
             ),
             encoding="utf-8",
         )

@@ -287,9 +287,7 @@ def ic_sample_counts(
     counts: dict[int, int] = {}
     for row in factors:
         factor_id = int(row["id"])
-        counts[factor_id] = len(
-            list(list_ic_series(factor_id, limit=window, db_path=db_path))
-        )
+        counts[factor_id] = len(list(list_ic_series(factor_id, limit=window, db_path=db_path)))
     return counts
 
 

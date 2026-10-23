@@ -166,7 +166,9 @@ def run_cohort_batch(
                 _count_skip(skipped_reasons, "duplicate")
                 result["skipped"] += 1
                 continue
-            _record_skipped_safely(universe.version, constituent.ticker, day, preflight_reason, db_path)
+            _record_skipped_safely(
+                universe.version, constituent.ticker, day, preflight_reason, db_path
+            )
             _count_skip(skipped_reasons, preflight_reason)
             result["skipped"] += 1
         result["budget_stopped"] = True

@@ -153,8 +153,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "ranker-ic-sample-boundary",
         "src/finance_agent/screening/ranker.py",
-        "if int(ic_counts.get(int(row[\"id\"]), 0)) >= min_samples:",
-        "if int(ic_counts.get(int(row[\"id\"]), 0)) > min_samples:",
+        'if int(ic_counts.get(int(row["id"]), 0)) >= min_samples:',
+        'if int(ic_counts.get(int(row["id"]), 0)) > min_samples:',
         "tests/screening/test_ranker.py",
         "IC 样本门槛边界（>= → >）",
     ),

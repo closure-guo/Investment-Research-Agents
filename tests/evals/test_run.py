@@ -112,11 +112,23 @@ class TestMeanRows:
     def test_mean_rows_confidence_distribution(self):
         """calibrate-decision-confidence：分布统计只观测，不改 scores。"""
         rows = [
-            {"scores": {}, "judge_failures": 0, "decision": {"action": "watch", "confidence": 0.85}},
-            {"scores": {}, "judge_failures": 0, "decision": {"action": "watch", "confidence": 0.55}},
+            {
+                "scores": {},
+                "judge_failures": 0,
+                "decision": {"action": "watch", "confidence": 0.85},
+            },
+            {
+                "scores": {},
+                "judge_failures": 0,
+                "decision": {"action": "watch", "confidence": 0.55},
+            },
             {"scores": {}, "judge_failures": 0, "decision": {"action": "sell", "confidence": 0.55}},
             {"scores": {}, "judge_failures": 0, "decision": {"action": "watch", "confidence": 0.3}},
-            {"scores": {}, "judge_failures": 0, "decision": {"action": "watch", "confidence": None}},
+            {
+                "scores": {},
+                "judge_failures": 0,
+                "decision": {"action": "watch", "confidence": None},
+            },
             {"scores": {}, "judge_failures": 0, "skipped": "意图澄清"},
         ]
         means = _mean_rows(rows)

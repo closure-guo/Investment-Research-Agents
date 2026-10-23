@@ -232,9 +232,7 @@ def _factor_harvest_job() -> None:
     ``max_batches`` 兜底防无限拉长。无新候选零摘要（非错误）；
     网关/面板不可得上抛（run_job 记 failed，下次重试；state 幂等不重复消费）。
     """
-    _with_retry(
-        "factor_harvest_daily", "factor harvest daily", run_factor_harvest_until_drained
-    )
+    _with_retry("factor_harvest_daily", "factor harvest daily", run_factor_harvest_until_drained)
 
 
 def _settle_job() -> None:

@@ -722,9 +722,7 @@ def test_thin_factor_excluded_but_mature_factor_keeps_factor_mode(ws: _Workspace
 
     assert result["selection_mode"] == "factor"
     pool = list_selection_pool(_AS_OF, db_path=ws.screening_db)
-    contrib_ids = {
-        contrib["factor_id"] for row in pool for contrib in row["factor_contribs"]
-    }
+    contrib_ids = {contrib["factor_id"] for row in pool for contrib in row["factor_contribs"]}
     assert contrib_ids == {mature_id}
 
 

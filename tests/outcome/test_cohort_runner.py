@@ -710,6 +710,7 @@ def test_config_table_enabled_beats_env_unset(tmp_path, monkeypatch):
     assert result["enabled"] is True
     assert runner.calls == ["600519"]
 
+
 # ── 当日额度守卫（add-cohort-quota-guard） ──────────────────────────────────
 
 
@@ -812,9 +813,7 @@ def test_daily_budget_preflight_skips_batch(tmp_path, monkeypatch):
     assert runner.calls == []
     assert result["budget_stopped"] is True
     assert result["skipped_reasons"] == {"budget_daily": 2}
-    assert all(
-        r["failure_reason"] == "budget_daily" for r in _rows(db) if r["status"] == "skipped"
-    )
+    assert all(r["failure_reason"] == "budget_daily" for r in _rows(db) if r["status"] == "skipped")
     assert "budget_daily" in FAILURE_CODES
 
 

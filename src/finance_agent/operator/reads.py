@@ -92,9 +92,7 @@ def _compact_track(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _compact_broker(
-    overview: dict[str, Any], positions_payload: dict[str, Any]
-) -> dict[str, Any]:
+def _compact_broker(overview: dict[str, Any], positions_payload: dict[str, Any]) -> dict[str, Any]:
     positions = positions_payload.get("positions") or []
     rows = [
         {
@@ -125,9 +123,7 @@ def _compact_ops(payload: dict[str, Any]) -> dict[str, Any]:
                 "job_id": row.get("job_id"),
                 "label": row.get("label"),
                 "next_fire_time": row.get("next_fire_time"),
-                "last_run": (
-                    {key: last.get(key) for key in _SUMMARY_KEYS} if last else None
-                ),
+                "last_run": ({key: last.get(key) for key in _SUMMARY_KEYS} if last else None),
             }
         )
     return {

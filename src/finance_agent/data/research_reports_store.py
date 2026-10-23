@@ -770,9 +770,7 @@ def coverage_status(
     }
 
 
-def list_industry_reports(
-    *, limit: int = 5000, db_path: str | Path | None = None
-) -> list[dict]:
+def list_industry_reports(*, limit: int = 5000, db_path: str | Path | None = None) -> list[dict]:
     """行业研报元数据（`report_type='industry'`），按发布日期降序。
 
     行业名归一与时间窗口过滤在读取层（`research_reports.get_industry_digest`）做：

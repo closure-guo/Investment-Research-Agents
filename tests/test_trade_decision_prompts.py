@@ -110,6 +110,7 @@ class TestInactionRationalePromptContract:
         # 继承行同样须钉死与 reasoning 的分工（design D1）
         assert "禁止照抄" in text
 
+
 class TestConfidenceCalibrationPromptContract:
     """calibrate-decision-confidence：三档示例 + 证据判据（不得只给区间描述）。"""
 

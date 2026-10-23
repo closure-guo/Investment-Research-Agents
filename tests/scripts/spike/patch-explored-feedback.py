@@ -25,22 +25,27 @@ TARGET = Path(
     "/opt/rdagent/lib/python3.11/site-packages/rdagent/scenarios/qlib/proposal/factor_proposal.py"
 )
 BACKUP_SUFFIX = ".bak-20261022-explored"
-IMPORT_LINE = "from rdagent.scenarios.qlib.proposal.explored_feedback import render_explored_block\n"
+IMPORT_LINE = (
+    "from rdagent.scenarios.qlib.proposal.explored_feedback import render_explored_block\n"
+)
 MARKER = "render_explored_block()"
 
-OLD = '''        hypothesis_and_feedback = (
+OLD = """        hypothesis_and_feedback = (
             T("scenarios.qlib.prompts:hypothesis_and_feedback").r(
                 trace=trace,
             )
             if len(trace.hist) > 0
             else "No previous hypothesis and feedback available since it's the first round."
-        )'''
+        )"""
 
-NEW = OLD + '''
+NEW = (
+    OLD
+    + '''
         if len(trace.hist) == 0:  # 跨会话记忆只在首轮注入（会话内反馈由 trace 自身承担）
             _explored_block = render_explored_block()
             if _explored_block:
                 hypothesis_and_feedback = f"{hypothesis_and_feedback}\\n\\n{_explored_block}"'''
+)
 
 
 def main() -> int:
