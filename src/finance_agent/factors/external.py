@@ -60,9 +60,20 @@ def run_factor_external_import(
 
     空输入 → 零摘要（无可导入候选，非错误）。预检失败与闸口拒收均计入
     ``rejections``；面板不可得/深度不足 → ``ValueError`` 上抛（fail loud）。
+
+    ``outcomes`` 与**输入顺序逐位对齐**（逐候选裁决，供调用方按位置回填状态；
+    逐字重复的表达式各占一位，MUST NOT 按表达式反查）：预检失败 → ``None``；
+    过闸 → ``{"admitted": True, "factor_id"}``；拒收 → ``{"admitted": False,
+    "gate", "reason", "detail"}``（与 ``rejections`` 同源同读数）。
     """
     if not candidates:
-        return {"admitted": 0, "rejected": 0, "errors": 0, "rejections": []}
+        return {
+            "admitted": 0,
+            "rejected": 0,
+            "errors": 0,
+            "rejections": [],
+            "outcomes": [],
+        }
 
     normalized: list[dict[str, Any]] = [
         {
@@ -82,6 +93,7 @@ def run_factor_external_import(
         }
         for position, reason in sorted(failures.items())
     ]
+    outcomes: list[dict[str, Any] | None] = [None] * len(normalized)
 
     admitted = 0
     if admissible:
@@ -96,20 +108,27 @@ def run_factor_external_import(
         for position, result in zip(positions, results, strict=True):
             if result.factor_id is not None:
                 admitted += 1
+                outcomes[position] = {"admitted": True, "factor_id": result.factor_id}
                 continue
-            rejections.append(
-                {
-                    "expression": normalized[position]["expression"],
-                    "gate": result.rejected_gate,
-                    "reason": _rejection_reason(result),
-                    # 判定读数（阈值/统计量等）：拒收可判读，不再只给原因码
-                    "detail": _rejected_gate_detail(result),
-                }
-            )
+            rejection = {
+                "expression": normalized[position]["expression"],
+                "gate": result.rejected_gate,
+                "reason": _rejection_reason(result),
+                # 判定读数（阈值/统计量等）：拒收可判读，不再只给原因码
+                "detail": _rejected_gate_detail(result),
+            }
+            rejections.append(rejection)
+            outcomes[position] = {
+                "admitted": False,
+                "gate": rejection["gate"],
+                "reason": rejection["reason"],
+                "detail": rejection["detail"],
+            }
 
     return {
         "admitted": admitted,
         "rejected": len(admissible) - admitted,
         "errors": len(failures),
         "rejections": rejections,
+        "outcomes": outcomes,
     }

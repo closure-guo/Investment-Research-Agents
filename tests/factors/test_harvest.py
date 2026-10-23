@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -194,6 +195,55 @@ class TestRunFactorHarvest:
         assert set(state["processed"]) == {"tsmean", "rollmax", "badop"}
         assert state["processed"]["rollmax"]["status"] == "untranslatable"
         assert state["processed"]["badop"]["stage"] == "translator"
+
+    def test_same_batch_duplicate_expression_backfills_by_position(self, tmp_path):
+        """同批两条候选转译出同一 DSL：先入库者必须记 admitted。
+
+        复现缺陷：状态回填曾按表达式字符串反查拒收清单——同表达式碰撞时，
+        已入库候选会被同表达式的闸 0 拒收记录（STRUCTURAL_DUPLICATE，属后入库
+        那条）错标为 rejected，反馈桥随之向生成侧谎报该方向已被拒。
+        面板复用 tests.factors.test_builtin 的强信号面板（delta(close,20) 实测
+        ICIR≈0.82，真实过闸入库），两条候选均转译 ``Delta($close, 20)``。
+        """
+        from tests.factors.test_builtin import _strong_panel
+
+        cand_path = self._write_candidates(
+            tmp_path,
+            [
+                _candidate("dup_mom_a", description="动量", formulation="C_t/C_{t-20}-1"),
+                _candidate("dup_mom_b", description="动量重提", formulation="同左"),
+            ],
+        )
+        state_path = tmp_path / "harvest_state.json"
+        client = _StubClient(
+            {
+                "dup_mom_a": {"qlib_expression": "Delta($close, 20)"},
+                "dup_mom_b": {"qlib_expression": "Delta($close, 20)"},
+            }
+        )
+        summary = run_factor_harvest(
+            candidates_path=cand_path,
+            state_path=state_path,
+            client=client,
+            panel=_strong_panel(),
+        )
+        # 一条入库、一条闸④冗余拒收（同批次先入库者进入池 → 后入库者 ρ=1.0 过阈）
+        assert summary["admitted"] == 1
+        assert summary["rejected"] == 1
+        rejection = next(r for r in summary["rejections"] if r["gate"] is not None)
+        assert rejection["gate"] == 4
+        assert rejection["reason"] == "REDUNDANT_WITH_POOL"
+        # 状态回填按位置对齐：先入库者 admitted，后入库者 rejected（gate 4）
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["processed"]["dup_mom_a"]["status"] == "admitted"
+        assert state["processed"]["dup_mom_b"]["status"] == "rejected"
+        assert state["processed"]["dup_mom_b"]["gate"] == 4
+        # 反馈桥据此向生成侧声明该方向已被采纳（而非谎报被拒）
+        explored = json.loads(
+            Path(str(state_path.parent / "explored_factors.json")).read_text(encoding="utf-8")
+        )
+        entry = next(e for e in explored["explored"] if e["name"] == "dup_mom_a")
+        assert entry["status"] == "admitted"
 
     def test_refreshes_explored_feedback_bridge(self, tmp_path, monkeypatch):
         """收割成功 → 跨会话记忆桥自动刷新（生成侧据此避免重复提案）。"""
