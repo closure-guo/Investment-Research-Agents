@@ -59,15 +59,24 @@ def _screening_db(tmp_path, monkeypatch):
     path = tmp_path / "screening.db"
     monkeypatch.setenv("SCREENING_DB_PATH", str(path))
     monkeypatch.setenv("SNAPSHOT_DB_PATH", str(tmp_path / "market_snapshot.db"))
+    # 因子库一并隔离：池接口的 factor_signal 读 active 因子与 IC 样本，
+    # 不钉死会读开发库 data/factor_library.db（测试依赖生产数据 = 泄漏）。
+    monkeypatch.setenv("FACTOR_LIBRARY_DB_PATH", str(tmp_path / "factor_library.db"))
     return path
 
 
 @pytest.fixture(autouse=True)
-def _fresh_analyze_queue(monkeypatch):
-    """逐用例重置 api 内队列单例（懒创建；避免跨用例残留）。"""
+def _fresh_analyze_queue(monkeypatch, tmp_path):
+    """逐用例重置 api 内队列单例（懒创建；避免跨用例残留）。
+
+    默认并发上限已改为 10（delta add-analysis-concurrency-setting）；本模块的
+    「上限 2」用例显式钉住 env，并隔离设置文件（勿读宿主机 data/settings/）。
+    """
     import finance_agent.api as api_module
 
     monkeypatch.setattr(api_module, "_analyze_queue", None)
+    monkeypatch.setenv("SCREENING_ANALYZE_CONCURRENCY", "2")
+    monkeypatch.setenv("ANALYSIS_CONCURRENCY_PATH", str(tmp_path / "analysis-concurrency.json"))
 
 
 def _pool_rows(count: int = 5) -> list[dict]:
@@ -395,6 +404,52 @@ async def test_queue_seed_sets_display_states(monkeypatch) -> None:
         queue.seed([{"symbol": "300750", "session_id": "s3", "state": "bogus"}])
 
 
+def test_queue_set_max_concurrency_rejects_invalid() -> None:
+    queue = AnalyzeQueue(max_concurrency=2)
+    for bad in (0, -1, True, 2.5):
+        with pytest.raises(ValueError, match="max_concurrency"):
+            queue.set_max_concurrency(bad)  # type: ignore[arg-type]
+
+
+async def test_queue_raise_limit_promotes_queued(monkeypatch) -> None:
+    """提高上限 → 立即补位排队条目（delta add-analysis-concurrency-setting）。"""
+    started: list[str] = []
+    queue = AnalyzeQueue(
+        max_concurrency=1, poll_interval=0.01, starter=lambda symbol, sid: started.append(sid)
+    )
+    monkeypatch.setattr(session_store, "get_session", lambda sid: {"status": "running"})
+    queue.enqueue("600001", "s1")
+    queue.enqueue("600002", "s2")
+    queue.enqueue("600003", "s3")
+    assert started == ["s1"]
+
+    queue.set_max_concurrency(3)
+    assert started == ["s1", "s2", "s3"]
+    assert [item["state"] for item in queue.snapshot()] == ["running", "running", "running"]
+    for entry in queue._entries:
+        if entry.task is not None:
+            entry.task.cancel()
+
+
+async def test_queue_lower_limit_keeps_running(monkeypatch) -> None:
+    """降低上限不终止已运行分析，仅约束后续补位。"""
+    started: list[str] = []
+    queue = AnalyzeQueue(
+        max_concurrency=2, poll_interval=0.01, starter=lambda symbol, sid: started.append(sid)
+    )
+    monkeypatch.setattr(session_store, "get_session", lambda sid: {"status": "running"})
+    queue.enqueue("600001", "s1")
+    queue.enqueue("600002", "s2")
+    queue.enqueue("600003", "s3")
+
+    queue.set_max_concurrency(1)
+    assert started == ["s1", "s2"]  # 运行中不终止
+    assert [item["state"] for item in queue.snapshot()] == ["running", "running", "queued"]
+    for entry in queue._entries:
+        if entry.task is not None:
+            entry.task.cancel()
+
+
 # ── seed 扩展（S6，TESTING=1） ─────────────────────────────────────────────
 
 
@@ -720,6 +775,30 @@ def test_pool_payload_factor_mode_has_no_notice(pool_seed) -> None:
 
     assert body["selection_mode"] == "factor"
     assert body["notice"] is None
+
+
+def test_pool_payload_factor_signal_reports_progress(monkeypatch, _screening_db) -> None:
+    """池接口披露逐因子 IC 进度与最早恢复日（delta add-factor-ic-visibility）。"""
+    import finance_agent.api as api_module
+
+    monkeypatch.setattr(
+        api_module,
+        "list_factors",
+        lambda: [{"id": 1, "status": "active"}, {"id": 2, "status": "active"}],
+    )
+    monkeypatch.setattr(api_module, "ic_sample_counts", lambda factors, **kwargs: {1: 4, 2: 3})
+    monkeypatch.setattr(
+        api_module, "list_ic_series", lambda factor_id, **kwargs: [("2026-10-21", 0.1)]
+    )
+
+    body = TestClient(app).get("/api/screening/pool").json()
+
+    signal = body["factor_signal"]
+    assert signal["min_samples"] == 10
+    assert [row["ic_samples"] for row in signal["factors"]] == [4, 3]
+    assert [row["eligible"] for row in signal["factors"]] == [False, False]
+    assert signal["expected_factor_mode_date"] == "2026-11-02"
+    assert "IC 样本不足" in signal["reason"]
 
 
 def test_batches_endpoint_includes_selection_mode(_screening_db) -> None:

@@ -29,6 +29,7 @@ from finance_agent.llm.registry import (
     Capability,
     ModelProfile,
     get_profile_preset,
+    register_preset,
 )
 from finance_agent.llm.types import Purpose
 
@@ -216,6 +217,59 @@ def _capability_for_model(model: str) -> Capability:
     return _PRESETS["openai-compatible"].capability
 
 
+# env 注入的 fallback 成员（LLM_FALLBACK_*）：主 profile 的 fallback 链成员。
+# 生产 2026-10 的 5xx 断供需要「换一个端点」而不是同端点重试；registry preset 的
+# fallback 只服务命名 preset，env 配置（LLM_*）此前没有成员。
+_FALLBACK_ENV = {
+    "model": "LLM_FALLBACK_MODEL",
+    "base_url": "LLM_FALLBACK_BASE_URL",
+    "api_key": "LLM_FALLBACK_API_KEY",
+}
+_ENV_FALLBACK_CACHE: dict[tuple[str, str, str], ModelProfile] = {}
+
+
+def _env_fallback_profile(env: Mapping[str, str]) -> ModelProfile | None:
+    """``LLM_FALLBACK_*`` → 动态 preset；缺 model 或端点视为未配置（返回 None）。
+
+    半套配置（只有 model 没有端点）不注册：fallback 打错网关比没有 fallback 更危险。
+    """
+    model = (env.get(_FALLBACK_ENV["model"]) or "").strip()
+    base_url = (env.get(_FALLBACK_ENV["base_url"]) or "").strip()
+    if not model or not base_url:
+        return None
+    api_key = (env.get(_FALLBACK_ENV["api_key"]) or "").strip()
+    cache_key = (model, base_url, api_key)
+    cached = _ENV_FALLBACK_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    prefixed = _ensure_prefix(model, base_url)
+    profile = ModelProfile(
+        name=f"env-fallback:{prefixed}",
+        provider=prefixed.split("/", 1)[0],
+        model=prefixed,
+        base_url=base_url,
+        api_key=api_key or None,
+        capability=_capability_for_model(prefixed),
+        default_params={},
+        provider_options=_provider_options_from_env(env, prefixed),
+    )
+    _ENV_FALLBACK_CACHE[cache_key] = profile
+    return profile
+
+
+def _with_env_fallback(
+    profile: ModelProfile, env: Mapping[str, str], *, purpose: Purpose
+) -> ModelProfile:
+    """给 env 解析出的主 profile 挂上 ``LLM_FALLBACK_*`` 成员（judge 不挂）。"""
+    if purpose == "judge":
+        return profile
+    member = _env_fallback_profile(env)
+    if member is None or member.name == profile.name:
+        return profile
+    register_preset(member)
+    return dataclasses.replace(profile, fallback=(member.name,))
+
+
 def resolve_profile(
     *,
     purpose: Purpose = "deep",
@@ -361,15 +415,19 @@ def _resolve_profile_static(
             if model.startswith("deepseek/")
             else get_profile_preset("openai-official")
         )
-        return ModelProfile(
-            name=f"env:{model}",
-            provider=model.split("/", 1)[0],
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            capability=base.capability,
-            default_params={},
-            provider_options=_provider_options_from_env(env, model),
+        return _with_env_fallback(
+            ModelProfile(
+                name=f"env:{model}",
+                provider=model.split("/", 1)[0],
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                capability=base.capability,
+                default_params={},
+                provider_options=_provider_options_from_env(env, model),
+            ),
+            env,
+            purpose=purpose,
         )
     if not base_url:
         # 有 apiKey 无端点仍是半套；有端点无 key 允许（keyless 本地端点）
@@ -379,13 +437,17 @@ def _resolve_profile_static(
         )
     model = _ensure_prefix(model, base_url)
     cap = _capability_for_model(model)
-    return ModelProfile(
-        name=f"env:{model}",
-        provider=model.split("/", 1)[0],
-        model=model,
-        base_url=base_url,
-        api_key=api_key,
-        capability=cap,
-        default_params={},
-        provider_options=_provider_options_from_env(env, model),
+    return _with_env_fallback(
+        ModelProfile(
+            name=f"env:{model}",
+            provider=model.split("/", 1)[0],
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            capability=cap,
+            default_params={},
+            provider_options=_provider_options_from_env(env, model),
+        ),
+        env,
+        purpose=purpose,
     )

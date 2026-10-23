@@ -307,7 +307,7 @@ frontend/src/
 - [PRD](docs/PRD.md) - 产品需求文档（初始设计稿，后续演进见 ADR）
 - [架构设计](docs/architecture.md) - 系统架构详细设计
 - [领域上下文](CONTEXT.md) - 术语表和分析框架定义
-- [ADR](docs/adr/) - 架构决策记录（0001-0020，人工维护，只增不改）
+- [ADR](docs/adr/) - 架构决策记录（0001-0020 起，编号递增；agent 可新建/编辑，改结论须追加修订记录）
 - [专题设计](docs/design/) - LLM Provider Gateway、E2E 方案、评估体系等专项设计档案
 - [评估体系](evals/) - 评估框架（judge/对比/消融/claim 基准），基线说明见 [docs/evals/](docs/evals/)
 - [项目工作流](docs/project-workflow.md) - OpenSpec + Superpowers 双框架实施指南

@@ -51,6 +51,11 @@ from finance_agent.factors.library import list_ic_series
 
 # R2：Σ|ic_mean| 下限——低于此无任何可信方向/强度信息，fail loud 而非任意排序
 _MIN_ABSOLUTE_IC_TOTAL: float = 1e-12
+# IC 样本门槛（add-screening-ic-bootstrap-guard）：单因子近 60 交易日 RankIC 记录
+# 少于此数时不参与打分。3–5 条样本估出的 IC 均值/ICIR 由个别交易日主导，
+# 权重日间摆动会让 L2 排序接近随机（生产 2026-10-21 实测 Top-100 日间重叠 1/100），
+# 与精选池「连续 3 日在榜」门槛相乘即空池。10 条 ≈ 两周，是权重估计的最低可用量。
+MIN_IC_SAMPLES_FOR_SCORING: int = 10
 # 面板日期轴参照字段（六字段契约；as_of 合法性与横截面列集合以该帧为准）
 _DATE_AXIS_FIELD = "close"
 
@@ -254,6 +259,10 @@ def has_scorable_factors(factors: Sequence[dict], ic_stats: dict[int, tuple[floa
     IC 记录——此时 ``rank_universe`` 必拒（fail loud 语义不变），调用方改走显式
     降级；非有限 IC 均值（数据错误）返回 ``True``，交回打分路径原样抛错
     （降级 MUST NOT 吞掉数据错误）。
+
+    注意：本谓词只回答「有没有非零 IC」，**不回答「样本够不够」**；后者由
+    ``ic_sample_counts`` + ``select_scorable_factors`` 在调用打分前过滤
+    （add-screening-ic-bootstrap-guard）。
     """
     total = 0.0
     for row in factors:
@@ -263,6 +272,46 @@ def has_scorable_factors(factors: Sequence[dict], ic_stats: dict[int, tuple[floa
             return True  # 数据错误：交回打分路径 fail loud（不因坏值触发降级）
         total += abs(ic_mean)
     return total >= _MIN_ABSOLUTE_IC_TOTAL
+
+
+def ic_sample_counts(
+    factors: list[dict], *, window: int = 60, db_path: str | Path | None = None
+) -> dict[int, int]:
+    """逐因子近 ``window`` 个交易日的 RankIC 记录条数（无记录 → 0）。
+
+    与 ``recent_ic_stats`` 同一取数口径（``list_ic_series``），只计数不聚合——
+    供 ``select_scorable_factors`` 判断样本是否足以估计权重。
+    """
+    if window < 1:
+        raise ValueError(f"window 必须是正整数: {window!r}")
+    counts: dict[int, int] = {}
+    for row in factors:
+        factor_id = int(row["id"])
+        counts[factor_id] = len(list(list_ic_series(factor_id, limit=window, db_path=db_path)))
+    return counts
+
+
+def select_scorable_factors(
+    factors: list[dict],
+    ic_counts: dict[int, int],
+    *,
+    min_samples: int = MIN_IC_SAMPLES_FOR_SCORING,
+) -> tuple[list[dict], list[dict]]:
+    """按 IC 样本门槛切分因子：``(可打分, 被排除)``，两表均保持 ``factors`` 传入顺序。
+
+    ``min_samples`` 必须为正整数（``>=`` 语义：恰好等于门槛纳入）。被排除因子
+    由调用方披露（日志 / 批次归因），MUST NOT 静默参与打分。
+    """
+    if isinstance(min_samples, bool) or not isinstance(min_samples, int) or min_samples < 1:
+        raise ValueError(f"min_samples 必须是正整数: {min_samples!r}")
+    kept: list[dict] = []
+    excluded: list[dict] = []
+    for row in factors:
+        if int(ic_counts.get(int(row["id"]), 0)) >= min_samples:
+            kept.append(row)
+        else:
+            excluded.append(row)
+    return kept, excluded
 
 
 def liquidity_fallback_rank(

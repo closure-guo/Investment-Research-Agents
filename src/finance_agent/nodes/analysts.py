@@ -781,6 +781,13 @@ def _build_fundamental_context(state: dict) -> str:
         )
     else:
         sections.append("券商研报（state 键 research_reports）: 暂无数据")
+    industry_digest = state.get("industry_report_digest")
+    if industry_digest:
+        from finance_agent.data.research_reports import format_industry_digest
+
+        text = format_industry_digest(industry_digest)
+        if text:
+            sections.append(text)
     sections.append(_consensus_section(state.get("analyst_consensus") or {}))
     digest = state.get("manual_report_digest")
     if digest:

@@ -29,12 +29,15 @@ import pytest
 from finance_agent.factors.eval_engine import MarketPanel
 from finance_agent.factors.library import add_factor, list_factors, record_ic
 from finance_agent.screening.ranker import (
+    MIN_IC_SAMPLES_FOR_SCORING,
     Candidate,
     factor_weights,
     has_scorable_factors,
+    ic_sample_counts,
     liquidity_fallback_rank,
     rank_universe,
     recent_ic_stats,
+    select_scorable_factors,
 )
 
 _DATES = ("2026-03-02", "2026-03-03", "2026-03-04")
@@ -709,3 +712,44 @@ def test_liquidity_fallback_rank_empty_and_guards() -> None:
         )
     with pytest.raises(ValueError, match="重复"):
         liquidity_fallback_rank(amounts_by_code={"a": [1.0]}, passed_codes=["a", "a"], as_of=_AS_OF)
+
+
+# ── IC 样本门槛（add-screening-ic-bootstrap-guard） ─────────────────────────
+
+
+def test_select_scorable_factors_excludes_thin_samples() -> None:
+    """样本 < 10 条的因子被排除；达标的保留；两者按传入顺序切分。"""
+    factors = [_factor(1, "close"), _factor(2, "volume"), _factor(3, "high")]
+    kept, excluded = select_scorable_factors(factors, {1: 10, 2: 9, 3: 0})
+
+    assert [row["id"] for row in kept] == [1]
+    assert [row["id"] for row in excluded] == [2, 3]
+    assert MIN_IC_SAMPLES_FOR_SCORING == 10
+
+
+def test_select_scorable_factors_boundary_and_guards() -> None:
+    """边界 = 阈值本身纳入（>= 语义）；min_samples 必须正整数。"""
+    factors = [_factor(1, "close")]
+    kept, excluded = select_scorable_factors(factors, {1: 9}, min_samples=9)
+    assert [row["id"] for row in kept] == [1] and excluded == []
+    kept, excluded = select_scorable_factors(factors, {1: 8}, min_samples=9)
+    assert kept == [] and [row["id"] for row in excluded] == [1]
+    with pytest.raises(ValueError, match="min_samples"):
+        select_scorable_factors(factors, {1: 1}, min_samples=0)
+
+
+def test_ic_sample_counts_reads_recorded_series(tmp_path) -> None:
+    """计数 = 库内实际 RankIC 记录条数（缺记录 → 0）。"""
+    db = tmp_path / "lib.db"
+    factor_id = add_factor(
+        expression="close",
+        hypothesis="测试用经济学假设：该因子与未来收益存在稳定关系（≥30 字长度达标）。",
+        category="builtin",
+        status="active",
+        db_path=db,
+    )
+    for day in ("2026-03-02", "2026-03-03", "2026-03-04"):
+        record_ic(factor_id, day, 0.01, db_path=db)
+
+    assert ic_sample_counts([{"id": factor_id}], db_path=db) == {factor_id: 3}
+    assert ic_sample_counts([{"id": factor_id + 99}], db_path=db) == {factor_id + 99: 0}

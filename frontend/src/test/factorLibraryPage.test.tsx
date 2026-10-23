@@ -4,6 +4,15 @@ import App from '../App'
 import { FactorLibraryPage } from '../pages/factors/FactorLibraryPage'
 import type { FactorDetail, FactorRow } from '../types'
 
+// ECharts 需要 canvas，jsdom 不支持：stub 组件并捕获 option（trackRecordPage 同款方案）
+const capturedChartOptions: unknown[] = []
+vi.mock('echarts-for-react', () => ({
+  default: ({ option }: { option: unknown }) => {
+    capturedChartOptions.push(option)
+    return <div data-testid="mock-chart" />
+  },
+}))
+
 /**
  * 因子库页单测（delta add-factor-library-page T2.2；spec frontend「因子库页」）。
  *
@@ -37,6 +46,9 @@ const LLM_ROW: FactorRow = {
   ic_mean_60d: 0.041,
   icir_60d: 0.521,
   ic_points: 2,
+  ic_window: 60,
+  min_samples_for_scoring: 10,
+  expected_factor_mode_date: '2026-11-02',
   decayed: false,
   last_event: {
     event: 'status_change',
@@ -63,6 +75,9 @@ const BUILTIN_ROW: FactorRow = {
   ic_mean_60d: 0.0,
   icir_60d: 0.0,
   ic_points: 0, // 无 IC 记录 → 列显示「—」而非 0.000
+  ic_window: 60,
+  min_samples_for_scoring: 10,
+  expected_factor_mode_date: null,
   decayed: true, // 衰减降级史（退役后标记仍在）
   last_event: {
     event: 'status_change',
@@ -177,6 +192,7 @@ describe('因子库页（delta add-factor-library-page T2.2）', () => {
     expect(expression.textContent).toContain(LLM_ROW.expression)
     expect(expression.getAttribute('title')).toBe(LLM_ROW.expression)
     expect(llmRow.getByTestId(`factor-icir-${LLM_ID}`).textContent).toContain('0.521')
+    expect(llmRow.getByTestId(`factor-icir-samples-${LLM_ID}`).textContent).toContain('样本 2')
     expect(llmRow.getByTestId(`factor-gate-${LLM_ID}`).textContent).toContain('准入通过')
 
     // builtin 因子：注册名逐字；无 IC 记录 → ICIR 显示「—」（不把 0.0 冒充为读数）
@@ -256,12 +272,22 @@ describe('因子库页（delta add-factor-library-page T2.2）', () => {
     const detail = within(await screen.findByTestId(`page-shell-row-detail-${LLM_ID}`))
     expect(detail.getByTestId(`factor-detail-expression-${LLM_ID}`).textContent).toContain('ts_rank(close,20)')
 
-    // IC 序列（升序逐点：日期 + 值）
-    const ic = detail.getByTestId(`factor-detail-ic-${LLM_ID}`)
-    expect(ic.textContent).toContain('2026-10-08')
-    expect(ic.textContent).toContain('0.0330')
-    expect(ic.textContent).toContain('2026-10-09')
-    expect(ic.textContent).toContain('0.0490')
+    // IC 序列：折线图（jsdom stub 捕获 option，断言数据点与顺序）
+    expect(detail.getByTestId('factor-ic-chart')).toBeTruthy()
+    const chartOption = capturedChartOptions[
+      capturedChartOptions.length - 1
+    ] as {
+      series: Array<{ data: number[] }>
+      xAxis: { data: string[] }
+    }
+    expect(chartOption.xAxis.data).toEqual(['2026-10-08', '2026-10-09'])
+    expect(chartOption.series[0].data).toEqual([0.033, 0.049])
+
+    // IC 就绪度：窗口 60、门槛 10、预计恢复日、样本不足标注
+    expect(detail.getByTestId(`factor-ic-samples-${LLM_ID}`).textContent).toContain('2/60')
+    expect(detail.getByTestId(`factor-ic-threshold-${LLM_ID}`).textContent).toContain('2/10')
+    expect(detail.getByTestId(`factor-ic-expected-${LLM_ID}`).textContent).toContain('2026-11-02')
+    expect(detail.getByTestId(`factor-ic-insufficient-${LLM_ID}`).textContent).toContain('样本不足（2/10）')
 
     // 事件历史：准入（created candidate → active ADMITTED）+ 时间
     const events = detail.getByTestId(`factor-detail-events-${LLM_ID}`)

@@ -55,7 +55,9 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -71,7 +73,7 @@ from finance_agent.data.snapshot_job import run_market_snapshot_batch
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.execution.driver import run_execution_daily
 from finance_agent.factors.builtin import run_factor_builtin_register
-from finance_agent.factors.harvest import run_factor_harvest
+from finance_agent.factors.harvest import run_factor_harvest_until_drained
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
 from finance_agent.memory.monthly import run_memory_extract_monthly
@@ -84,6 +86,7 @@ from finance_agent.outcome.events.job import (
     run_earnings_triage_daily,
     run_event_settle_daily,
 )
+from finance_agent.outcome.ops.catchup import catch_up_enabled, catch_up_job
 from finance_agent.outcome.ops.jobs import (
     SCHEDULES,
     CohortDisabled,
@@ -107,6 +110,15 @@ _MAX_ATTEMPTS = 3
 # 一次(coalesce),防追赶风暴。注:MemoryJobStore 重启后 job 重注册,该参数
 # 管的是进程活着但调度 loop 延迟的场景。
 _JOB_MISFIRE_KW: dict[str, Any] = {"misfire_grace_time": 3600, "coalesce": True}
+
+# 启动补跑（delta add-ops-missed-run-catchup）：进程重建/冻结会永久丢弃错过的触发点
+# （MemoryJobStore 重启后只按 cron 重注册，不回溯）。补偿用**一次性 date job**在启动
+# 后 5s 触发，而不是裸线程：测试里被 MagicMock 吸收（不触真实库），生产由调度器线程
+# 执行，且与日批共享同一套 misfire/coalesce 语义。白名单、6h 时间窗与上限 3 见
+# ``outcome.ops.catchup``。
+CATCH_UP_JOB_ID = "ops_catch_up_once"
+_CATCH_UP_DELAY = timedelta(seconds=5)
+_CATCH_UP_TZ = ZoneInfo("Asia/Shanghai")
 
 # 进程内 scheduler 句柄(单 worker 前提):reschedule_cohort / get_scheduler 用。
 _scheduler: BackgroundScheduler | None = None
@@ -213,12 +225,14 @@ def _factor_builtin_register_job() -> None:
 
 
 def _factor_harvest_job() -> None:
-    """add-factor-harvest-bridge：因子收割日批（15:55，内置注册之后、结算链之前）。
+    """add-factor-harvest-bridge：因子收割日批（每天 15:55，内置注册之后、结算链之前）。
 
-    RD-Agent 候选 → LLM 转译 → 翻译器 → 同一五道闸；无新候选零摘要（非错误）；
-    网关/面板不可得上抛（run_job 记 failed，次日重试；state 幂等不重复消费）。
+    RD-Agent 候选 → LLM 转译 → 翻译器 → 同一五道闸；**内部串行多批直到清空待处理**
+    （每批 ≤60，闸③ BH-FDR 的 K≤100 分辨率不变，批间是独立检验家族）；
+    ``max_batches`` 兜底防无限拉长。无新候选零摘要（非错误）；
+    网关/面板不可得上抛（run_job 记 failed，下次重试；state 幂等不重复消费）。
     """
-    _with_retry("factor_harvest_daily", "factor harvest daily", run_factor_harvest)
+    _with_retry("factor_harvest_daily", "factor harvest daily", run_factor_harvest_until_drained)
 
 
 def _settle_job() -> None:
@@ -456,6 +470,18 @@ def start_scheduler() -> BackgroundScheduler | None:
     cohort = get_cohort_settings()
     _apply_cohort_schedule(cohort["hour"], cohort["minute"])
     scheduler = BackgroundScheduler()
+    # 启动补跑（add-ops-missed-run-catchup）：一次性 date job，注册在日批之前——
+    # 补跑逻辑按计划时刻自行排序（快照先于下游），与本处注册顺序无关；
+    # ``OPS_CATCHUP_ON_STARTUP=0`` 时不注册（dev 反复重启止血）。
+    if catch_up_enabled():
+        scheduler.add_job(
+            catch_up_job,
+            "date",
+            run_date=datetime.now(_CATCH_UP_TZ) + _CATCH_UP_DELAY,
+            id=CATCH_UP_JOB_ID,
+            replace_existing=True,
+            **_JOB_MISFIRE_KW,
+        )
     # add-market-snapshot：行情快照日批（15:30）先跑——结算/盯市链（16:00 起）
     # 与快照解耦，互不阻塞；job 幂等（同日重跑不二次复权）。
     scheduler.add_job(

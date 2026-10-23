@@ -76,6 +76,7 @@ from pydantic import BaseModel, Field
 from finance_agent.outcome.cohort.model import init_cohort_runs, list_cohort_runs
 from finance_agent.outcome.cohort.runner import _resolve_budget as _cohort_budget
 from finance_agent.outcome.daily_brief import get_daily_brief
+from finance_agent.outcome.ops.catchup import scheduled_fire_time
 from finance_agent.outcome.ops.jobs import (
     JOB_IDS,
     JOB_LABELS,
@@ -98,6 +99,7 @@ from finance_agent.outcome.ops.model import (
     get_cohort_settings,
     get_job_run,
     insert_job_run,
+    job_run_statuses_on,
     last_job_run,
     list_job_runs,
     prune_job_runs,
@@ -314,9 +316,35 @@ def _cohort_block(settings: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _now() -> datetime:
+    """状态接口的时钟（本地时区）；测试 patch 它即可冻结「今天几点」。
+
+    与 ``scheduled_fire_time`` 的 naive 约定一致：naive 时刻按其排程时区解释
+    （本系统所有日批均为 Asia/Shanghai）。
+    """
+    return datetime.now()
+
+
+def _missed_today(job_id: str, spec: dict[str, Any], now: datetime) -> bool:
+    """当天计划时刻已过，且当天**没有任何运行行**（``running`` 也算有）。
+
+    「压根没跑」与「跑了但失败」是两种故障：后者由 ``last_run.status`` 表达，
+    混成一个布尔会让值班分不清该重跑还是该查日志。非排程日（周末 / 月批非排程日）
+    或尚未到点 → ``False``（当天本无触发点，不构成漏跑）。
+    """
+    fire = scheduled_fire_time(spec, now)
+    if fire is None:
+        return False
+    moment = now.replace(tzinfo=fire.tzinfo) if now.tzinfo is None else now.astimezone(fire.tzinfo)
+    if moment < fire:
+        return False
+    return not job_run_statuses_on(job_id, moment.date().isoformat())
+
+
 def _job_rows(cohort: dict[str, Any]) -> list[dict[str, Any]]:
     """六任务状态行(顺序 = JOB_IDS = 调度注册顺序)。"""
     rows: list[dict[str, Any]] = []
+    moment = _now()  # 一次取齐：同一响应内各行不得跨越不同的「今天」
     for job_id in JOB_IDS:
         spec = dict(SCHEDULES[job_id])
         if job_id == "cohort_batch":
@@ -331,6 +359,7 @@ def _job_rows(cohort: dict[str, Any]) -> list[dict[str, Any]]:
                 "next_fire_time": _next_fire_time(job_id),
                 "last_run": last_job_run(job_id),
                 "history": list_job_runs(job_id, limit=HISTORY_LIMIT),
+                "missed_today": _missed_today(job_id, spec, moment),
             }
         )
     return rows

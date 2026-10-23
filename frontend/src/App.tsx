@@ -1064,6 +1064,7 @@ export default function App() {
                           onRunFinished={handleAguiRunFinished}
                           onRunningChange={setQuickRunning}
                           onError={showWarning}
+                          onOpenSession={(id) => { void selectSession(id) }}
                         />
                       )}
                     </>

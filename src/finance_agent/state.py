@@ -4,6 +4,7 @@ from typing import Annotated, Literal, TypedDict
 import pandas as pd
 
 from finance_agent.llm.config import LLMConfig
+from finance_agent.models import HoldingsContext
 
 
 def merge_dicts(left: dict | None, right: dict | None) -> dict:
@@ -23,6 +24,13 @@ class AnalysisState(TypedDict, total=False):
     enable_web_search: bool  # 是否启用实时事件搜索
     api_key: str | None  # 用户自带的 DeepSeek API Key（HF Spaces 用）
     focus: str  # 深度研究意图澄清环节用户填写的关注点（Kimi 风格反问回答）
+    # 受众持仓上下文（add-holdings-context，预留框架）：三态（持有/未持有/未申报）。
+    # 此前未声明族同病：未声明的键被图合并静默丢弃 → 决策层注入与可执行性门禁
+    # 随之哑火（incident 027）
+    holdings_context: HoldingsContext
+    # 未持有受众的 exit 可执行性门禁结论（add-holdings-context）：
+    # {result: pass|fail, note}——打回后改判/仍犯降级，trace 可观测，报告不渲染
+    holdings_executability_check: dict
     # 请求级 LLM 配置（incident 035：曾未声明 → LangGraph 静默过滤输入键，
     # 全部管线节点回退 env 模型，请求级配置整条哑火——027 同族）
     llm_config: LLMConfig | None
@@ -104,6 +112,9 @@ class AnalysisState(TypedDict, total=False):
     strategy_report_digest: (
         dict | None
     )  # 策略/宏观研报观点聚合（宏观分析师消费；无记录/陈旧为 None）
+    industry_report_digest: (
+        dict | None
+    )  # 同行业研报聚合（基本面分析师消费；ok/stale/unmatched 三态；库内无数据为 None）
     share_unlock: list[dict]  # 限售解禁排队
     block_trades: list[dict]  # 大宗交易明细（近 30 天）
 

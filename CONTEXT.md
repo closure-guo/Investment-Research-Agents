@@ -258,7 +258,7 @@ _Avoid_: 让 LLM-as-Judge 判数字对错（评审 LLM 自身会幻觉，ADR-001
 | AKShare    | 免费 A 股数据 API | 三大报表、行情、K线、行业分类、PE/PB、宏观、新闻 | 按数据类型差异化 |
 | 巨潮资讯网 | 年报 PDF          | MD&A、风险披露（pdfplumber 解析） | 到下个财报季     | ❌ v2.0 |
 | Tavily     | 网页搜索 API      | 快速模式 web search、行业新闻、趋势、政策              | 1天              | ✅ v1.1 |
-| Chroma     | 向量数据库        | 研报 embedding，RAG 语义检索      | 永久（知识库）   | ❌ v2.0 |
+| 研报检索   | SQLite 元数据过滤 + 抽取聚合 | 按标的/行业/类别/发布日期选研报；无语义向量检索 | 随库更新        | ✅ 当前（向量库推迟） |
 
 ### Architecture Terms
 

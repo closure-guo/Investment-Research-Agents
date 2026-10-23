@@ -30,12 +30,14 @@ from typing import Any
 from finance_agent.harness import Agent, PermissionMode
 from finance_agent.harness.context import ContextBudget
 from finance_agent.llm import LLMConfig
+from finance_agent.models import HoldingsContext
 from finance_agent.outcome.track_record.ingest import persist_prediction_from_accumulated
 from finance_agent.prompts.loader import PromptInfo, load_prompt_with_meta
 from finance_agent.tool_registry import (
     TOOL_BATCH_WEB_SEARCH,
     TOOL_RUN_DEEP_ANALYSIS,
     TOOL_SEARCH_STOCK,
+    TOOL_START_STOCK_ANALYSIS,
     TOOL_WEB_SEARCH,
 )
 
@@ -573,6 +575,7 @@ def _make_run_deep_analysis(
     session_id: str | None = None,
     web_sources: list[dict] | None = None,
     llm_config: LLMConfig | None = None,
+    holdings: bool | None = None,
 ):
     """创建 run_deep_analysis 流式工具，注入配置闭包。
 
@@ -580,6 +583,8 @@ def _make_run_deep_analysis(
     的 peer_codes），其余参数通过闭包注入。
     返回一个异步生成器，yield StreamEvent（PROGRESS + TOOL_RESULT）。
     session_id 用于 Langfuse session 聚合与 trace 属性（ADR-0015）。
+    holdings：受众持仓三态声明（add-holdings-context，由请求透传），写入
+    initial_state["holdings_context"]——ReAct 路径不得静默降级为「未申报」。
     """
 
     # LLM 工具参数与闭包参数同名：闭包值另存，内层 peer_codes 为 LLM 显式传参
@@ -677,6 +682,9 @@ def _make_run_deep_analysis(
             "enable_web_search": enable_web_search,
             "api_key": api_key,
             "web_sources": web_sources or [],
+            # 受众持仓上下文（add-holdings-context）：始终写入（未申报即 holds=None）——
+            # ReAct 路径同样承载请求声明，省略会让决策层注入行静默失真
+            "holdings_context": HoldingsContext(holds=holdings),
             # 请求级 LLM 配置透传到管线节点（call_llm_streaming / call_llm）
             "llm_config": llm_config,
             # add-report-revision-view：回溯同标的上一份 completed 报告注入 state
@@ -1622,6 +1630,8 @@ def build_agent(
     peer_codes: list | None = None,
     enable_web_search: bool = False,
     llm_config: LLMConfig | None = None,
+    operator_enabled: bool | None = None,
+    current_user_message: str | None = None,
     **kwargs: Any,
 ) -> Agent:
     """构建指定模式的 ReAct Agent。
@@ -1633,6 +1643,9 @@ def build_agent(
         peer_codes: 对标股代码（深度模式，闭包注入）
         enable_web_search: 是否启用搜索（深度模式，闭包注入）
         llm_config: 请求级 LLM 配置（model/baseUrl/apiKey/thinking），覆盖环境变量
+        operator_enabled: 快速模式是否注册系统操作工具；None 时读
+            QUICK_OPERATOR_TOOLS 环境开关（默认开启）
+        current_user_message: 本轮用户消息（写操作确认协议据此判定用户是否明确确认）
         **kwargs: 额外参数（session_id 等）
 
     Returns:
@@ -1674,13 +1687,28 @@ def build_agent(
     context_budget = _build_context_budget(model, effectiveApiKey, effectiveBaseUrl)
 
     if mode == "quick":
-        prompt = _mode_pinfo.template.format(now=_now()) if _mode_pinfo else ""
+        from finance_agent.operator.gating import operator_tools_enabled
+
+        operatorEnabled = (
+            operator_tools_enabled(None) if operator_enabled is None else operator_enabled
+        )
+        operatorNote = (
+            "系统操作工具可用。"
+            if operatorEnabled
+            else "当前模型不支持工具调用，系统操作不可用。请提示用户切换支持工具调用的模型；"
+            "不要调用 start_stock_analysis，也不要伪造派单回执。"
+        )
+        prompt = (
+            _mode_pinfo.template.format(now=_now(), operator_note=operatorNote)
+            if _mode_pinfo
+            else ""
+        )
         agent = Agent(
             model=model,
             api_key=api_key,
             system_prompt=prompt,
             permission_mode=PermissionMode.YOLO,
-            max_iterations=3,
+            max_iterations=6,
             llm=llm_client,
             context_budget=context_budget,
         )
@@ -1692,6 +1720,29 @@ def build_agent(
             _trace_tool(TOOL_WEB_SEARCH)(_stub_web_search if TESTING else _web_search),
             name=TOOL_WEB_SEARCH,
         )
+        if operatorEnabled:
+            from finance_agent.operator.analysis import make_start_stock_analysis
+            from finance_agent.operator.reads import make_read_tools
+            from finance_agent.operator.writes import make_write_tools
+
+            session_id = kwargs.get("session_id") or ""
+            agent.tools.register(
+                _trace_tool(TOOL_SEARCH_STOCK)(_make_search_stock(api_key)),
+                name=TOOL_SEARCH_STOCK,
+            )
+            agent.tools.register(
+                _trace_tool(TOOL_START_STOCK_ANALYSIS)(
+                    make_start_stock_analysis(api_key=api_key, llm_config=llm_config)
+                ),
+                name=TOOL_START_STOCK_ANALYSIS,
+            )
+            for tool_name, tool_fn in make_read_tools().items():
+                agent.tools.register(_trace_tool(tool_fn)(tool_fn), name=tool_name)
+            for tool_name, tool_fn in make_write_tools(
+                session_id=session_id,
+                user_message=current_user_message or "",
+            ).items():
+                agent.tools.register(_trace_tool(tool_fn)(tool_fn), name=tool_name)
         session_id = kwargs.get("session_id")
         if session_id:
             _inject_chat_history(agent, session_id)
@@ -1722,6 +1773,7 @@ def build_agent(
                     session_id=kwargs.get("session_id"),
                     web_sources=web_sources_collector,
                     llm_config=llm_config,
+                    holdings=kwargs.get("holdings"),
                 )
             ),
             name=TOOL_RUN_DEEP_ANALYSIS,

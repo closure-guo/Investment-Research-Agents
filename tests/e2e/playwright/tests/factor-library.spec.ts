@@ -110,7 +110,8 @@ test('种子两因子 → 列表可见（状态/来源徽章、ICIR、衰减标�
   )
   await expect(llmRow.getByTestId(`factor-source-${llmId}`)).toContainText('llm')
   await expect(llmRow.getByTestId(`factor-source-${llmId}`).getByTestId('ai-badge')).toBeVisible()
-  await expect(llmRow.getByTestId(`factor-icir-${llmId}`)).toHaveText('0.732')
+  await expect(llmRow.getByTestId(`factor-icir-${llmId}`)).toContainText('0.732')
+  await expect(llmRow.getByTestId(`factor-icir-samples-${llmId}`)).toContainText('样本 4')
   await expect(llmRow.getByTestId(`factor-gate-${llmId}`)).toContainText('准入通过')
   await expect(llmRow.getByTestId(`factor-decay-${llmId}`)).toHaveText('—')
 
@@ -161,11 +162,13 @@ test('行展开 → 完整表达式 + IC 序列 + 事件历史（含时间）', 
   await expect(detail).toBeVisible()
   await expect(page.getByTestId(`factor-detail-expression-${llmId}`)).toContainText(LLM_EXPRESSION)
 
+  // IC 序列（delta add-factor-ic-visibility）：折线图 + 样本/门槛/预计恢复日
   const icSeries = page.getByTestId(`factor-detail-ic-${llmId}`)
-  await expect(icSeries).toContainText('2026-10-08')
-  await expect(icSeries).toContainText('0.0200')
-  await expect(icSeries).toContainText('2026-10-13')
-  await expect(icSeries).toContainText('-0.0100')
+  await expect(icSeries.getByTestId('factor-ic-chart')).toBeVisible()
+  await expect(page.getByTestId(`factor-ic-samples-${llmId}`)).toContainText('4/60')
+  await expect(page.getByTestId(`factor-ic-threshold-${llmId}`)).toContainText('4/10')
+  await expect(page.getByTestId(`factor-ic-expected-${llmId}`)).toContainText('2026-10-23')
+  await expect(page.getByTestId(`factor-ic-insufficient-${llmId}`)).toContainText('样本不足（4/10）')
 
   const events = page.getByTestId(`factor-detail-events-${llmId}`)
   await expect(events).toContainText('创建') // created 事件

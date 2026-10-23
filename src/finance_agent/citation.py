@@ -881,6 +881,14 @@ def collect_text_sources(state: dict) -> list[str]:
             for item in (digest.get("summaries") or [])
             if isinstance(item, dict) and item.get("summary")
         ]
+    # add-industry-report-context：同行业研报标题进回声源（与策略观点同口径）
+    industry_digest = state.get("industry_report_digest")
+    if isinstance(industry_digest, dict):
+        for doc in industry_digest.get("documents") or []:
+            if isinstance(doc, dict):
+                title = str(doc.get("title") or "").strip()
+                if title:
+                    sources.append(title)
     return sources
 
 

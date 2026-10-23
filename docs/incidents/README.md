@@ -27,6 +27,10 @@
 | [044](044-e2e-config-snapshot-leak-api-wedge-20261017.md) | 2026-10-17 | E2E 隔离配置缺 SNAPSHOT_DB_PATH——本机跑 isolated/timeline 等 7 个套件时其后端读生产快照库，与容器跨挂载 SQLite 争用（#344 读侧变体）→ 生产后端 API 整体卡死 ~40-60min（快照库零损伤） | 已修复（7 配置补隔离 + 套件复跑验证；隔离清单门禁待落） |
 | [045](045-local-e2e-reused-prod-stack-port-shadow-20261018.md) | 2026-10-18 | 本地 E2E 误复用生产栈（外部拉起 + reuseExistingServer 探活）→ 测试会话污染生产库；并发发现 [::1] 端口遮蔽（wslrelay/docker 代理与本地服务争用，浏览器命中容器旧前端，038 同族合并） | 部分修复（写控制文件用例加 fixture 守卫 + 专用端口验证；环境治理三项挂账） |
 | [046](046-sessions-db-wal-handle-index-corruption-20261020.md) | 2026-10-20 | worker 持有已删除 `sessions.db-wal` 句柄（delete-pending）→ 新连接无法进入 WAL 模式，会话/战绩/评分卡/日报/cohort API 全断约 2 小时；并发发现 `idx_session_events_session` 索引损坏（REINDEX 被 malformed 拒绝），按 sqlite_master 导出重建，事件日志抢救 97.5%（丢 28,027 行尾部），355 会话与业务表零丢失；日批全部补跑 | 已恢复（库 integrity ok + 日批补跑；迁 named volume / 健康探针 / 页级校验 / 派发回写挂账） |
+| [047](047-wsl-memory-exhaustion-container-enomem-20261021.md) | 2026-10-21 | WSL VM 12GB 上限 + swap 耗尽（rdagent 常驻进程 RSS 2.5–3.3GB×多个）→ 前端 Vite watcher 与后端 import 相继 `ENOMEM` 退出/启动失败；宿主仍有 19GB 空闲，瓶颈在 VM；手动重启后端首尝试被拒 | 已恢复（停栈 → 重启 Docker Desktop（未 `wsl --shutdown`）→ 起栈；前后端/端点/UI 验证通过；RD-Agent 内存配额挂账） |
+| [048](048-prompt-drift-unmerged-branch-20261022.md) | 2026-10-22 | 生产 Langfuse `trader` prompt 来自未合并分支 `add-holdings-context`，与 main 代码契约错位 9 天（`deploy_prompts.py` 从工作树发布、不校验分支）；eval 门禁拒绝 round14 时暴露，强制按 main 重发后放行 | 已处置（按 git 权威口径重发 production）；分支守卫 / 日常一致性检查待落 |
+| [049](049-pandarallel-dev-shm-exhaustion-distro-io-error-20261022.md) | 2026-10-22 | pandarallel chunk 落 `/dev/shm`（`MEMORY_FS_ROOT` 默认，tmpfs 8.8GB = VM 18GB 的 50%）→ 并行 IC 计算 `Errno 28` 崩会话；随后 distro 进入读/exec 全 EIO 的不可用态，自愈启动器 69 次 SIGBUS 零效果，靠 07:26:31 VM 重启才恢复（2h20m）。**同日 07:40 / 12:19 同一计算改撞 18GB 内存上限**：OOM 杀 worker → master 卡 unix socket、worker 卡 futex，会话死锁且永不退出 ⇒ 看护不重拉，监控因「只探进程存在 + 进度读日志末行」全程显示「运行中」。**源头是 `factor_runner.py:54` 的 lambda 闭包捕获两个 DataFrame**：`dill.dumps` 把整份矩阵按值复制进每个 worker（实测 48MB→0.4KB，每 worker ~5.4GB，默认 8 worker） | 已修复并验收（`patch-ic-closure.py` + `MEMORY_FS_ROOT` 改磁盘 + worker 数上限；12:46 dedup 实跑通过、OOM 零新增）；**僵死判定已交付**（delta `add-factor-research-stall-detection`，阈值 900s）；**distro 探活与自愈已交付**（delta `add-factor-research-distro-liveness-probe`：宿主侧探活 + 三条件合取门控 + 只读 `distro` 块 + 页面独立提示，E2E 19/19、门控真值表 7/7） |
+| [050](050-factor-ic-missed-fire-20261022.md) | 2026-10-22 | 15:45 `factor_decay_monitor` 触发落在进程重建窗口（15:35 后、15:50 前）：APScheduler `MemoryJobStore` 重启后不回溯错过触发点，`misfire_grace_time=3600` 只覆盖「调度器存活但执行延迟」→ 当日 IC 采集零记录，`factor_ic` 停在 10-20，筛选 bootstrap 门槛（≥10 样本）继续不满足、10-21 批次走流动性降级；同窗口 15:50/15:55/16:45 三个长任务被判 `stale_process_restart` 或线程池异常 | 数据已手工补齐（20:55 触发 `recorded=10`）+ 补跑 builtin/microcap；**机制已修复**（delta `add-ops-missed-run-catchup`：启动补跑白名单 9 项/6h 窗/上限 3 + `missed_today`；按 10-22 17:29 重放命中当日三项漏跑）；前端渲染与「解释器收尾可读终态」仍挂账 |
 | 002  | 2026-05-26 | [报告准确性复盘：茅台 FA 分析偏差](002-report-accuracy-20260526.md) | 部分修复 |
 | 003  | 2026-06-03 | [股票名称获取失败 + NaN 处理缺陷](003-stock-name-and-na-handling-20260603.md) | 已修复   |
 | 004  | 2026-06-04 | [数据准确性系统性问题 — efficiency 年份错位 + ROE 口径 + LLM 自算](004-data-accuracy-20260604.md) | 已修复 |
@@ -98,6 +102,11 @@
 - [038](038-e2e-default-suite-hits-production-vite-proxy-20261007.md) E2E 默认套件经 vite 代理（默认 8000）+ reuseExistingServer 打穿到生产后端——本机生产常驻时本地跑门禁必然命中；前端代理目标必须显式、复用前必须核验 TESTING 模式（031「默认不安全」主题的 E2E 侧变体）
 - [039](039-relay-lag-prereport-backlog-20261008.md) thinking 洪峰在 final_report 之前——压缩门槛以消费到 report chunk 为前提，在「消费滞后」这个优化目标场景下恰好失效；复现测试的流序必须取自生产 trace（既有场景 D 手造顺排流绕开了真实语序）
 - [046](046-sessions-db-wal-handle-index-corruption-20261020.md) worker 持有已删除 `sessions.db-wal` 句柄（delete-pending）→ 新连接无法进入 WAL 模式，会话/战绩/日报/cohort 全断约 2 小时；并发发现事件索引损坏，导出重建抢救 97.5%；与 043/044 同属 Windows bind mount 上的 SQLite 易损家族 → 热库迁 named volume 挂账
+
+### 环境与部署
+
+- [047](047-wsl-memory-exhaustion-container-enomem-20261021.md) WSL VM 12GB 上限 + swap 耗尽（rdagent 常驻进程为主）→ 前端 Vite watcher 与后端 import 随机 `ENOMEM`；宿主空闲 19GB 但 VM 无余量；重启生产容器前必须看 `free -m`/`SwapFree`，Swap 满时先重启 Docker Desktop，禁用 `wsl --shutdown`（会杀 rdagent）
+- [048](048-prompt-drift-unmerged-branch-20261022.md) 生产 Langfuse trader prompt 来自未合并分支 `add-holdings-context`（落后 main 104 提交），与 main 代码契约错位 9 天：prompt 要求 `受众持仓` 上下文与 exit 默认，main 代码一律不提供/默认 short；评估门禁才暴露，部署脚本从工作树发布且无分支守卫
 
 ### 测试体系与开发流程
 

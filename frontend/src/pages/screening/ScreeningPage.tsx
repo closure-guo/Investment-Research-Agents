@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '../../components/ui/button'
 import { EventWatchlistCard } from './EventWatchlistCard'
+import { FactorSignalCard } from './FactorSignalCard'
 import { MarketRegimeCard } from './MarketRegimeCard'
 import type {
   ScreeningAnalyzeResponse,
@@ -212,12 +213,33 @@ export function ScreeningPage({
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
-        {/* 市场温度计为全局市场状态，优先级最高：滚动容器首子节点 */}
-        <MarketRegimeCard />
-
-        {/* 事件观察（研究通道）：紧随温度计之后；队列徽标复用本页队列快照与
-            pollIntervalMs 轮询（事件入队后由 onAnalysisStarted 启动） */}
-        <EventWatchlistCard queue={queue} onAnalysisStarted={startPolling} />
+        {/* ① 精选池：页面主体，置顶（此前是裸 <table> 且排在温度计/事件清单之后，
+            首屏看不到选出来的标的） */}
+        <section
+          data-testid="screening-pool-card"
+          className="rounded-lg border p-4"
+          style={{ borderColor: 'var(--border-neutral-l1)' }}
+        >
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <span className="text-sm font-medium text-foreground">精选池</span>
+              <span
+                data-testid="screening-pool-count"
+                className="text-xs tabular-nums"
+                style={{ color: 'var(--text-secondary)' }}
+              >
+                共 {pool?.length ?? 0} 只
+              </span>
+              {batchDate && (
+                <span className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
+                  批次 {batchDate}
+                </span>
+              )}
+            </div>
+            <span className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
+              口径：L3 粗筛 keep ∩ 连续在榜门槛达标
+            </span>
+          </div>
 
         {data?.stale && (
           // spec：当日批次失败 → 页面展示最近成功批次并标注其日期
@@ -359,7 +381,14 @@ export function ScreeningPage({
               })}
             </tbody>
           </table>
-        )}
+          )}
+        </section>
+
+        {/* ③ 上下文卡片：市场温度计 → 因子信号 → 事件观察。
+            它们是解释池子的上下文，排在主体之下；事件清单自带固定高度滚动框。 */}
+        <MarketRegimeCard />
+        {data?.factor_signal && <FactorSignalCard signal={data.factor_signal} />}
+        <EventWatchlistCard queue={queue} onAnalysisStarted={startPolling} />
       </div>
     </div>
   )

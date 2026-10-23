@@ -1,0 +1,58 @@
+"""导出跨会话因子记忆桥（收割状态 → 生成侧可读清单）。
+
+用法::
+
+    uv run python scripts/export_factor_feedback.py
+    uv run python scripts/export_factor_feedback.py --limit 60 --out tmp/explored.json
+
+产物默认 ``data/factor_research/explored_factors.json``；distro 侧
+``rdagent/scenarios/qlib/proposal/explored_feedback.py`` 经 ``FACTOR_FEEDBACK_PATH``
+读取同一路径。脚本只读状态/候选文件，写出单个 JSON（原子替换），不写因子库。
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from finance_agent.factors.feedback import (
+    DEFAULT_LIMIT,
+    DEFAULT_OUTPUT_PATH,
+    export_feedback,
+)
+
+DEFAULT_STATE = "data/factor_research/harvest_state.json"
+DEFAULT_CANDIDATES = "data/factor_research/candidates.json"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="导出跨会话因子记忆桥（explored_factors.json）")
+    parser.add_argument("--state", default=DEFAULT_STATE, help="harvest_state.json 路径")
+    parser.add_argument("--candidates", default=DEFAULT_CANDIDATES, help="candidates.json 路径")
+    parser.add_argument("--out", default=DEFAULT_OUTPUT_PATH, help="输出 JSON 路径")
+    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="清单条目上限")
+    args = parser.parse_args(argv)
+
+    try:
+        payload = export_feedback(
+            state_path=Path(args.state),
+            candidates_path=Path(args.candidates),
+            output_path=Path(args.out),
+            limit=args.limit,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"export failed: {exc}", file=sys.stderr)
+        return 1
+
+    counts = payload["counts"]
+    print(
+        f"wrote {args.out}: explored={payload['total_explored']} returned={payload['returned']} "
+        f"admitted={counts.get('admitted', 0)} rejected={counts.get('rejected', 0)} "
+        f"untranslatable={counts.get('untranslatable', 0)}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

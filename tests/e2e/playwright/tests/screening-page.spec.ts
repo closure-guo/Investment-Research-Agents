@@ -251,3 +251,16 @@ test('点击批量分析 → 池内标的全量入队，显示排队/运行徽�
   await expect(page.getByTestId('screening-queue-badge-600519')).toContainText(/分析中|排队中/)
   await expect(page.getByTestId('screening-queue-badge-000001')).toBeVisible()
 })
+
+test('因子信号状态卡：可见并如实披露样本进度口径', async ({ page, request }) => {
+  await seedPool(request)
+
+  await page.goto('/screening')
+
+  const card = page.getByTestId('factor-signal-card')
+  await expect(card).toBeVisible({ timeout: 15_000 })
+  await expect(card).toContainText('因子信号状态')
+  // 因子库在 E2E 独立库中由 factor-library.spec 串行重置：空态与逐因子进度都是诚实状态，
+  // 断言口径存在（不锁定具体样本数，避免跨 spec 共享库串扰造成假红）。
+  await expect(card).toContainText(/无 active 因子|IC 样本不足|全部 active 因子 IC 样本达标/)
+})

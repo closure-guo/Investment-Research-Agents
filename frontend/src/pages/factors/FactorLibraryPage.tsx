@@ -6,6 +6,7 @@ import { Button } from '../../components/ui/button'
 import type { StatusKey } from '../../design/tokens'
 import { formatSessionTime } from '../../lib/format'
 import type { FactorDetail, FactorLastEvent, FactorListResponse, FactorRow } from '../../types'
+import { IcSeriesChart } from './IcSeriesChart'
 
 /**
  * 因子库页（delta add-factor-library-page T2.1；spec frontend「因子库页」）。
@@ -145,7 +146,18 @@ const COLUMNS: readonly ShellTableColumn<FactorTableRow>[] = [
     tabular: true,
     render: row => (
       // ic_points=0 → 「—」：库内无 IC 记录，不把口径值 0.0 冒充为读数
-      <span data-testid={`factor-icir-${row.id}`}>{row.ic_points > 0 ? row.icir_60d.toFixed(3) : '—'}</span>
+      <span data-testid={`factor-icir-${row.id}`}>
+        {row.ic_points > 0 ? row.icir_60d.toFixed(3) : '—'}
+        {row.ic_points > 0 && (
+          <span
+            data-testid={`factor-icir-samples-${row.id}`}
+            className="ml-1 text-[10px]"
+            style={{ color: 'var(--text-tertiary)' }}
+          >
+            样本 {row.ic_points}
+          </span>
+        )}
+      </span>
     ),
   },
   {
@@ -270,15 +282,31 @@ function FactorDetailPanel({ factorId }: { factorId: number }) {
         <div className="mb-1 font-medium text-foreground">
           IC 序列（近 {detail.ic_series.length} 个交易日，升序）
         </div>
-        {detail.ic_series.length === 0 ? (
-          <div className="text-muted-foreground">暂无 IC 记录（随衰减监控日批落库）</div>
-        ) : (
-          <div className="tabular-nums text-muted-foreground">
-            {detail.ic_series.map(point => (
-              <span key={point.trade_date} className="mr-3 inline-block">
-                {point.trade_date} <span className="text-foreground">{point.rank_ic.toFixed(4)}</span>
-              </span>
-            ))}
+        <IcSeriesChart points={detail.ic_series} />
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1" style={{ color: 'var(--text-tertiary)' }}>
+          <span data-testid={`factor-ic-samples-${factorId}`}>
+            样本 {detail.ic_points}/{detail.ic_window}
+          </span>
+          <span data-testid={`factor-ic-threshold-${factorId}`}>
+            打分门槛 {detail.ic_points}/{detail.min_samples_for_scoring}
+          </span>
+          {detail.expected_factor_mode_date ? (
+            <span data-testid={`factor-ic-expected-${factorId}`}>
+              预计 {detail.expected_factor_mode_date} 恢复因子打分（按工作日推算、不含节假日）
+            </span>
+          ) : (
+            <span data-testid={`factor-ic-expected-${factorId}`}>
+              {detail.ic_points >= detail.min_samples_for_scoring ? '已达标' : '暂无 IC 记录'}
+            </span>
+          )}
+        </div>
+        {detail.ic_points < detail.min_samples_for_scoring && (
+          <div
+            data-testid={`factor-ic-insufficient-${factorId}`}
+            className="mt-1"
+            style={{ color: 'var(--status-warning-default)' }}
+          >
+            样本不足（{detail.ic_points}/{detail.min_samples_for_scoring}），暂不参与 L2 打分
           </div>
         )}
       </div>

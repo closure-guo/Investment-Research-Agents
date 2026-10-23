@@ -837,3 +837,405 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
     expect(badge.textContent).toBe('状态未知')
   })
 })
+
+/**
+ * 僵死披露（delta add-factor-research-stall-detection；spec frontend「因子研发监控页僵死披露」）。
+ *
+ * - stall 时展示横幅（含 formatDurationS 口径的无进展时长），并把步骤读数降级为
+ *   「读数来自 N 前的日志」（MUST NOT 再渲染「本步已用 · 预计剩余」冒充当前进度）；
+ * - 未 stall（含旧采集器 log_age_seconds=null）→ 无横幅、进度照常；
+ * - 未上报新鲜度 MUST NOT 出现「进度正常」之类已验证断言。
+ */
+describe('因子研发监控页 · 僵死披露（delta add-factor-research-stall-detection）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('僵死：展示无进展横幅 + 进度读数标注定格，且不渲染当前进度断言', async () => {
+    const base = snapshotBody()
+    mockFetch(
+      snapshotBody({
+        progress: { log_age_seconds: 3600, stalled: true },
+        current_session: { ...base.current_session!, step_elapsed_s: 603, step_eta_s: 905 },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    // 横幅文案含无进展时长（3600 秒 → 1小时0分，formatDurationS 既有口径）
+    const banner = await screen.findByTestId('factor-research-stall-banner')
+    expect(banner.textContent).toContain('无进展 1小时0分')
+    // 步骤读数降级为「来自 N 前的日志」
+    expect(screen.getByTestId('factor-research-progress-stale').textContent).toContain('1小时0分')
+    // MUST NOT 继续渲染「本步已用 … · 预计剩余 …」
+    expect(screen.queryByTestId('factor-research-step-timing')).toBeNull()
+    // 零命令面：横幅内无可点击处置入口
+    expect(banner.querySelector('button')).toBeNull()
+    expect(banner.querySelector('a')).toBeNull()
+  })
+
+  it('未僵死：无横幅，进度区照常展示步骤读数', async () => {
+    mockFetch(
+      snapshotBody({
+        progress: { log_age_seconds: 42, stalled: false },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-progress')
+    expect(screen.queryByTestId('factor-research-stall-banner')).toBeNull()
+    // 进度照常：步骤读数仍在（未被降级）
+    expect(screen.getByTestId('factor-research-step-timing').textContent).toContain('本步已用')
+    expect(screen.queryByTestId('factor-research-progress-stale')).toBeNull()
+  })
+
+  it('旧版采集器未上报新鲜度：无横幅且不冒充「进度正常」', async () => {
+    mockFetch(
+      snapshotBody({
+        progress: { log_age_seconds: null, stalled: false },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-progress')
+    expect(screen.queryByTestId('factor-research-stall-banner')).toBeNull()
+    // 未上报 = 不可判定：MUST NOT 出现「进度正常」等已验证断言
+    expect(document.body.textContent ?? '').not.toContain('进度正常')
+  })
+})
+
+/**
+ * distro 探活披露（delta add-factor-research-distro-liveness-probe；spec frontend
+ * 「监控页 distro 探活披露」）。
+ *
+ * - stale=true + 探活新鲜 ok=false → 独立探活横幅（连续失败次数 + 最近探活时刻 +
+ *   「采集器并未停止」+ 由人执行 wsl --terminate rdagent），零可点击处置入口；
+ * - 同条件下陈旧横幅 MUST NOT 再声称「采集器可能已停止」，改指向 distro 探活失败；
+ * - 探活正常 / 不可用 / 不新鲜 / 快照新鲜 → 不展示探活横幅，陈旧横幅保持既有表述。
+ */
+describe('因子研发监控页 · distro 探活披露（delta add-factor-research-distro-liveness-probe）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('探活失败且快照陈旧：展示探活横幅，陈旧横幅不再声称采集器已停止', async () => {
+    mockFetch(
+      snapshotBody({
+        stale: true,
+        age_seconds: 400,
+        collected_at: new Date(Date.now() - 400_000).toISOString(),
+        distro: {
+          available: true,
+          probed_at: '2026-10-22T14:30:00+08:00',
+          probed_at_epoch: 1761114600,
+          distro: 'rdagent',
+          ok: false,
+          exit_code: -1,
+          detail: 'wsl: 无法启动 distro',
+          consecutive_failures: 8,
+          terminated_at: null,
+          terminated_at_epoch: 0,
+          terminate_count: 0,
+          age_seconds: 40,
+          fresh: true,
+        },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const banner = await screen.findByTestId('factor-research-distro-probe-banner')
+    expect(banner.textContent).toContain('连续 8 次')
+    expect(banner.textContent).toContain('distro')
+    // 明示采集器并未停止 + 恢复动作由人发起
+    expect(banner.textContent).toContain('采集器并未停止')
+    expect(banner.textContent).toContain('wsl --terminate rdagent')
+    // 零命令面：探活横幅内无可点击处置入口
+    expect(banner.querySelectorAll('button, a')).toHaveLength(0)
+
+    // 同条件下陈旧横幅改指向 distro 探活失败（MUST NOT 误指采集器）
+    const staleBanner = screen.getByTestId('factor-research-stale-banner')
+    expect(staleBanner.textContent).not.toContain('采集器可能已停止')
+    expect(staleBanner.textContent).toContain('distro 探活失败')
+  })
+
+  it('探活正常（ok=true）：无探活横幅，陈旧横幅保持既有「采集器可能已停止」表述', async () => {
+    mockFetch(
+      snapshotBody({
+        stale: true,
+        age_seconds: 400,
+        distro: {
+          available: true,
+          probed_at: '2026-10-22T14:30:00+08:00',
+          probed_at_epoch: 1761114600,
+          distro: 'rdagent',
+          ok: true,
+          exit_code: 0,
+          detail: null,
+          consecutive_failures: 0,
+          age_seconds: 40,
+          fresh: true,
+        },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const staleBanner = await screen.findByTestId('factor-research-stale-banner')
+    expect(staleBanner.textContent).toContain('采集器可能已停止')
+    expect(screen.queryByTestId('factor-research-distro-probe-banner')).toBeNull()
+  })
+
+  it('探活不可用（available=false）：不冒充结论（无横幅），陈旧横幅保持既有表述', async () => {
+    mockFetch(
+      snapshotBody({
+        stale: true,
+        age_seconds: 400,
+        distro: { available: false, reason: 'missing' },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const staleBanner = await screen.findByTestId('factor-research-stale-banner')
+    expect(staleBanner.textContent).toContain('采集器可能已停止')
+    expect(screen.queryByTestId('factor-research-distro-probe-banner')).toBeNull()
+  })
+
+  it('快照新鲜（stale=false）即便探活失败：无探活横幅，页面照常展示进度', async () => {
+    mockFetch(
+      snapshotBody({
+        stale: false,
+        distro: {
+          available: true,
+          probed_at: '2026-10-22T14:30:00+08:00',
+          probed_at_epoch: 1761114600,
+          distro: 'rdagent',
+          ok: false,
+          exit_code: -1,
+          detail: 'wsl: 无法启动 distro',
+          consecutive_failures: 15,
+          age_seconds: 40,
+          fresh: true,
+        },
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-progress')
+    expect(screen.queryByTestId('factor-research-distro-probe-banner')).toBeNull()
+    expect(screen.queryByTestId('factor-research-stale-banner')).toBeNull()
+  })
+})
+
+
+describe('收割链路区块（add-factor-harvest-ui）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    window.history.pushState({}, '', '/')
+  })
+
+  it('进度/漏斗/台账渲染（运行中）', async () => {
+    const harvest = {
+      available: true,
+      job: {
+        status: 'running',
+        started_at: '2026-10-22T15:55:00+08:00',
+        finished_at: null,
+        schedule: { day_of_week: '*', hour: 15, minute: 55, timezone: 'Asia/Shanghai' },
+        next_fire_time: null,
+      },
+      progress: {
+        batches_done: 2,
+        batch_limit: 12,
+        processed: 440,
+        pending: 380,
+        admitted_in_run: 3,
+        rejected_in_run: 65,
+        started_at: '2026-10-22T15:55:00+08:00',
+        eta_s: 12600,
+        in_batch: {
+          processed_in_batch: 12,
+          total_in_batch: 60,
+          phase: 'transcribe',
+          updated_at: '2026-10-22T19:00:00+08:00',
+          age_s: 5,
+        },
+      },
+      funnel: {
+        candidates: 820,
+        processed: 440,
+        untranslatable: 225,
+        transcription_error: 7,
+        reached_gates: 208,
+        admitted: 7,
+        rejected_by_gate: { '2': 150, '4': 30 },
+      },
+      recent_admitted: [
+        {
+          expression: 'ts_corr(close,volume,10)',
+          factor_id: 7,
+          created_at: '2026-10-22T16:51:10+08:00',
+          icir_60d: 0.2,
+        },
+      ],
+      recent_rejected: [
+        {
+          expression: 'sub(div(close,ref(close,20)),1)',
+          gate: 2,
+          reason: 'WEAK_ICIR',
+          at: '2026-10-22T16:00:00+08:00',
+        },
+      ],
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/factor-research/status') return respond(snapshotBody())
+      if (url === '/api/factor-research/harvest') return respond(harvest)
+      if (url === '/api/sessions') return respond({ sessions: [] })
+      if (url === '/api/snapshot/status') {
+        return respond({ latest_date: null, stale: false, message: null, last_error: null, last_error_date: null })
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<FactorResearchPage onBack={() => {}} />)
+
+    // 等**数据块**出现再取句柄：区块外壳（factor-research-harvest）是无条件渲染的，
+    // 等外壳会拿到尚未填充的 DOM，后续一次性读取全是竞态。
+    await screen.findByTestId('factor-research-harvest-status')
+    const section = screen.getByTestId('factor-research-harvest')
+    expect(section.textContent).toContain('每天 15:55')
+    expect(screen.getByTestId('factor-research-harvest-status').textContent).toBe('运行中')
+    const progress = screen.getByTestId('factor-research-harvest-progress').textContent ?? ''
+    expect(progress).toContain('批次 2/12')
+    expect(progress).toContain('剩余 380')
+    expect(progress).toContain('本轮入库 3')
+    // 批内活性：心跳显示逐候选进度（进度按批落盘时也不看起来「不动」）
+    expect(screen.getByTestId('factor-research-harvest-live').textContent).toContain('本批 12/60')
+    // 队列消化进度条：运行中渲染，宽度 = 已处理/候选（440/820 → 54%）
+    expect(screen.getByTestId('factor-research-harvest-bar').style.width).toBe('54%')
+    expect(screen.getByTestId('factor-research-harvest-step-candidates').textContent).toContain('820')
+    expect(screen.getByTestId('factor-research-harvest-step-admitted').textContent).toContain('7')
+    expect(screen.getByTestId('factor-research-harvest-gates').textContent).toContain('ICIR 150')
+    expect(screen.getByTestId('factor-research-harvest-admitted').textContent).toContain(
+      'ts_corr(close,volume,10)'
+    )
+    expect(screen.getByTestId('factor-research-harvest-rejected').textContent).toContain('WEAK_ICIR')
+  })
+
+  it('已收尾：不渲染预计还需，队列归属下次自动跑', async () => {
+    // 旧后端仍会给出外推 eta_s：前端必须自己按 job.status 拒绝渲染「预计还需」，
+    // 否则会出现「已完成 + 预计还需 38 分钟」这种自相矛盾、且只增不减的读数。
+    const harvest = {
+      available: true,
+      job: {
+        status: 'ok',
+        started_at: '2026-10-22T19:55:43+08:00',
+        finished_at: '2026-10-22T21:12:23+08:00',
+        schedule: { day_of_week: '*', hour: 15, minute: 55, timezone: 'Asia/Shanghai' },
+        next_fire_time: '2026-10-23T15:55:00+08:00',
+      },
+      progress: {
+        batches_done: 5,
+        batch_limit: 12,
+        processed: 896,
+        pending: 36,
+        admitted_in_run: 2,
+        rejected_in_run: 64,
+        started_at: '2026-10-22T19:55:43+08:00',
+        eta_s: 2310,
+        in_batch: {
+          processed_in_batch: 4,
+          total_in_batch: 4,
+          phase: 'done',
+          updated_at: '2026-10-22T21:12:23+08:00',
+          age_s: 9261,
+        },
+      },
+      funnel: {
+        candidates: 932,
+        processed: 896,
+        untranslatable: 506,
+        transcription_error: 14,
+        reached_gates: 376,
+        admitted: 11,
+        rejected_by_gate: { '2': 264 },
+      },
+      recent_admitted: [],
+      recent_rejected: [],
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/factor-research/status') return respond(snapshotBody())
+      if (url === '/api/factor-research/harvest') return respond(harvest)
+      if (url === '/api/sessions') return respond({ sessions: [] })
+      if (url === '/api/snapshot/status') {
+        return respond({ latest_date: null, stale: false, message: null, last_error: null, last_error_date: null })
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<FactorResearchPage onBack={() => {}} />)
+
+    // 同上：等数据块（状态徽标）出现，而不是等无条件渲染的区块外壳
+    await screen.findByTestId('factor-research-harvest-status')
+    const section = screen.getByTestId('factor-research-harvest')
+    expect(section.textContent).toContain('已完成')
+    const progress = screen.getByTestId('factor-research-harvest-progress').textContent ?? ''
+    // 本轮窗口统计：批量不带上限分母（12 是单次上限，不是待办总数）
+    expect(progress).toContain('本轮 5 批')
+    expect(progress).toContain('入库 2')
+    expect(progress).toContain('拒收 64')
+    expect(progress).not.toContain('/12')
+    // 队列剩余属于下一次运行，给出下次自动跑时刻
+    expect(progress).toContain('队列剩余 36')
+    expect(progress).toContain('10-23 15:55')
+    // 已收尾不得渲染预计还需（即使端点给出了 eta_s）
+    expect(progress).not.toContain('预计还需')
+    expect(screen.queryByTestId('factor-research-harvest-live')).toBeNull()
+    // 收尾后不得渲染队列消化进度条：候选文件被 RD-Agent 持续追加，896/932（96%）这类全局读数
+    // 配「已完成」徽标只会读成「没跑完」（同 T7 去掉 /batch_limit 分母的判据）
+    expect(screen.queryByTestId('factor-research-harvest-bar')).toBeNull()
+  })
+
+  it('不可用 → 区块级空态（不拖垮整页）', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/factor-research/status') return respond(snapshotBody())
+      if (url === '/api/factor-research/harvest') {
+        return respond({
+          available: false,
+          job: null,
+          progress: null,
+          funnel: null,
+          recent_admitted: [],
+          recent_rejected: [],
+        })
+      }
+      if (url === '/api/sessions') return respond({ sessions: [] })
+      if (url === '/api/snapshot/status') {
+        return respond({ latest_date: null, stale: false, message: null, last_error: null, last_error_date: null })
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<FactorResearchPage onBack={() => {}} />)
+
+    await screen.findByTestId('factor-research-supervisor')
+    expect(screen.getByTestId('factor-research-harvest-empty').textContent).toContain('未接入')
+    // 主区块不受影响
+    expect(screen.getByTestId('factor-research-supervisor')).toBeTruthy()
+  })
+})

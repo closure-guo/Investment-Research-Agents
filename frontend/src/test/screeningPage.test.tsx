@@ -26,6 +26,13 @@ function poolBody(overrides: Partial<ScreeningPoolResponse> = {}): ScreeningPool
     stale: false,
     selection_mode: 'factor',
     notice: null,
+    factor_signal: {
+      selection_mode: 'factor',
+      reason: '全部 active 因子 IC 样本达标',
+      min_samples: 10,
+      expected_factor_mode_date: null,
+      factors: [],
+    },
     pool: [
       {
         symbol: '600519',
@@ -201,6 +208,24 @@ describe('选股页（add-screening-pipeline T4）', () => {
 
     fireEvent.mouseLeave(screen.getByTestId('screening-score-600519'))
     await waitFor(() => expect(screen.queryByTestId('screening-contribs-tooltip')).toBeNull())
+  })
+
+  it('精选池置顶：池卡片先于温度计/事件观察，且带标题与数量', async () => {
+    mockFetch()
+    render(<ScreeningPage onBack={() => {}} />)
+
+    const card = await screen.findByTestId('screening-pool-card')
+    expect(card.textContent).toContain('精选池')
+    expect(screen.getByTestId('screening-pool-count').textContent).toContain('2')
+    expect(card.textContent).toContain(BATCH_DATE)
+
+    const regime = await screen.findByTestId('market-regime-card')
+    const events = await screen.findByTestId('event-watchlist-card')
+    // 页面主体优先：池卡片在上下文卡片之前（DOCUMENT_POSITION_FOLLOWING = 参数节点在后）
+    const precedes = (first: HTMLElement, second: HTMLElement) =>
+      Boolean(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(precedes(card, regime)).toBe(true)
+    expect(precedes(card, events)).toBe(true)
   })
 
   it('批次 stale → 横幅标注最近成功批次日期', async () => {

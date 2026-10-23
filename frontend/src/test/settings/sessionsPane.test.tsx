@@ -9,6 +9,18 @@ import { SessionsPane } from '../../pages/settings/panes/SessionsPane'
 function stubFetch(calls: Array<{ url: string; init?: RequestInit }>) {
   vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
     calls.push({ url, init })
+    if (url.endsWith('/api/settings/analysis-concurrency')) {
+      if (init?.method === 'PUT') {
+        const value = (JSON.parse(String(init.body)) as { value: number }).value
+        return Promise.resolve(new Response(JSON.stringify({
+          value, source: 'file', default: 10, min: 1, max: 20, env_value: null, file_status: 'ok',
+        })))
+      }
+      return Promise.resolve(new Response(JSON.stringify({
+        value: 10, source: 'default', default: 10, min: 1, max: 20,
+        env_value: null, file_status: 'missing',
+      })))
+    }
     if (url.endsWith('/api/sessions/clear-all')) {
       return Promise.resolve(new Response(JSON.stringify({ cleared: 3 })))
     }
@@ -86,5 +98,31 @@ describe('SessionsPane 会话管理分区', () => {
     render(<SessionsPane />)
     expect(await screen.findByTestId('sessions-pane-error')).toBeInTheDocument()
     expect(screen.getByText('会话列表加载失败')).toBeInTheDocument()
+  })
+
+  it('展示并发设置默认值并可保存', async () => {
+    render(<SessionsPane />)
+    const input = await screen.findByTestId('sessions-concurrency-input')
+    expect(input).toHaveValue(10)
+
+    fireEvent.change(input, { target: { value: '7' } })
+    fireEvent.click(screen.getByTestId('sessions-concurrency-save'))
+
+    expect(await screen.findByTestId('sessions-concurrency-saved')).toBeInTheDocument()
+    expect(input).toHaveValue(7)
+    const put = captureCalls().find(c => c.url === '/api/settings/analysis-concurrency' && c.init?.method === 'PUT')
+    expect(put).toBeTruthy()
+    expect(JSON.parse(String(put?.init?.body))).toEqual({ value: 7 })
+  })
+
+  it('越界输入不发起 PUT 并显示错误', async () => {
+    render(<SessionsPane />)
+    const input = await screen.findByTestId('sessions-concurrency-input')
+
+    fireEvent.change(input, { target: { value: '21' } })
+    fireEvent.click(screen.getByTestId('sessions-concurrency-save'))
+
+    expect(await screen.findByTestId('sessions-concurrency-save-error')).toBeInTheDocument()
+    expect(captureCalls().some(c => c.init?.method === 'PUT')).toBe(false)
   })
 })

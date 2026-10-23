@@ -20,7 +20,7 @@ LangGraph 多 Agent A 股分析系统：FastAPI 后端 + React 18/Vite 前端。
 - 前端 `frontend/`（React + TS + Tailwind + ECharts）
 - 链路追踪：Langfuse `http://localhost:3000`
 - StreamRegistry 为进程内内存结构 → 后端必须单 uvicorn worker（不可 `--workers N`）
-- 架构详情见 `docs/architecture.md`；ADR 见 `docs/adr/`（人工维护，agent 不得新建）
+- 架构详情见 `docs/architecture.md`；ADR 见 `docs/adr/`（编号递增；agent 可新建/编辑，改既有结论须在文末追加修订记录，不得静默改写历史）
 
 ---
 
@@ -47,7 +47,7 @@ cd frontend && npm test               # 前端测试
 | 新功能 / 行为变更 | 系统新增能力，或 `openspec/specs/` 中行为未定义 | OpenSpec delta + Superpowers | `project-workflow.md` §3 |
 | 修 bug · 意图不变 | `openspec/specs/` 已写明正确行为，代码未做到 | systematic-debugging + 复现测试 | `project-workflow.md` §4.1 |
 | 修 bug · 意图变更 | `openspec/specs/` 无对应条目，或条目需修改 | 同新功能 | `project-workflow.md` §4.2 |
-| 重大架构决策 | 涉及架构层面取舍 | 手动落 `docs/adr/` | — |
+| 重大架构决策 | 涉及架构层面取舍 | 落 `docs/adr/`（agent 可新建；改既有 ADR 须追加修订记录） | — |
 | 小改动 | typo / 文案 / 配置 | 直接改 | — |
 
 **交互类变更判别**：delta 涉及前端 UI、SSE 流式、会话切换、状态流转中任一者 → 走 `project-workflow.md` §3 完整管线（含 E2E 门禁）。

@@ -5,7 +5,7 @@
 > 权威源约定（与 AGENTS.md 红线一致）：
 > - **系统行为真相** = `openspec/specs/`（28 个 capability，只经 delta 编辑 + sync 合并，禁止手改）
 > - **prompt 权威源** = `src/finance_agent/prompts/*.md`（git 跟踪；Langfuse 为部署产物快照）
-> - **架构决策** = `docs/adr/`（人工维护，编号只增不改，agent 不得新建）
+> - **架构决策** = `docs/adr/`（编号递增；agent 可新建/编辑，改既有结论须追加修订记录）
 > - **运行时产物**（`reports/`、`tmp/`、`.superpowers/`）不入库，本索引不收录
 
 ## 顶层文档

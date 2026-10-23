@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from finance_agent.outcome.ops.catchup import catch_up_job
 from finance_agent.outcome.ops.jobs import JOB_IDS, SCHEDULES, JobAlreadyRunning
 from finance_agent.outcome.ops.model import (
     COHORT_ENABLED_KEY,
@@ -21,6 +22,7 @@ from finance_agent.outcome.ops.model import (
     set_config,
 )
 from finance_agent.outcome.scheduler import (
+    CATCH_UP_JOB_ID,
     _cron_from_spec,
     get_scheduler,
     reschedule_cohort,
@@ -180,11 +182,12 @@ class TestSchedulerRegistryMirror:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert set(ids) == set(JOB_IDS), (
+        # 注册面 = JOB_IDS（日批/月批真源）+ 1 个一次性启动补跑 job（不进 JOB_IDS/状态接口）
+        assert set(ids) - {CATCH_UP_JOB_ID} == set(JOB_IDS), (
             f"调度器注册面与 JOB_IDS 不一致:未注册={set(JOB_IDS) - set(ids)},"
-            f"多余注册={set(ids) - set(JOB_IDS)}"
+            f"多余注册={set(ids) - set(JOB_IDS) - {CATCH_UP_JOB_ID}}"
         )
-        assert len(ids) == len(JOB_IDS), f"注册数不一致(有重复?):{ids}"
+        assert len(ids) == len(JOB_IDS) + 1, f"注册数不一致(有重复?):{ids}"
 
 
 class TestCohortJobRegistration:
@@ -199,9 +202,10 @@ class TestCohortJobRegistration:
         mock_sched_cls.return_value = sched
         assert start_scheduler() is sched
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 28, (
+        assert len(ids) == 29, (
             ids
-        )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
+        )  # 27 日批/月批 + 1 个一次性启动补跑 job（ops_catch_up_once，非 JOB_IDS 成员）
+        # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
         # 12→13：+factor_builtin_register（内置因子注册接线）；
@@ -217,7 +221,7 @@ class TestCohortJobRegistration:
         # 23→27：+research_report_inbox_daily（16:58）+analyst_claim_settle_daily（17:00）
         # +auto_pool_analysis_daily（16:22）+daily_brief_daily（20:30）
         assert ids[-2:] == ["cohort_batch", "daily_brief_daily"]
-        assert set(ids) == {
+        assert set(ids) - {CATCH_UP_JOB_ID} == {
             "decision_settle_daily",
             "paper_execute_daily",
             "paper_settle_daily",
@@ -550,9 +554,10 @@ class TestMisfireHardening:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 28, (
+        assert len(ids) == 29, (
             ids
-        )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
+        )  # 27 日批/月批 + 1 个一次性启动补跑 job（须同样带 misfire/coalesce）
+        # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
         # 12→13：+factor_builtin_register（内置因子注册接线）；
@@ -978,3 +983,39 @@ class TestEarningsEventJobsRegistration:
             assert row["status"] == "failed" and row["kind"] == "scheduled"
             assert "events source down" in row["error"]
         assert mock_sleep.call_count == 6  # 3 job × 2 次退避
+
+
+class TestCatchUpOnStartup:
+    """delta add-ops-missed-run-catchup：启动时拉起一次性补跑 job。
+
+    用 APScheduler 一次性 ``date`` job（启动后 5s）而非裸线程——测试里被 MagicMock
+    吸收，不会碰真实库；生产在 scheduler.start() 后由调度器线程执行。
+    """
+
+    @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
+    @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
+    def test_registers_one_shot_catch_up_job(self, mock_sched_cls):
+        sched = MagicMock()
+        mock_sched_cls.return_value = sched
+        start_scheduler()
+        call = _job_call(sched, CATCH_UP_JOB_ID)
+        assert call.args[0] is catch_up_job
+        assert call.args[1] == "date"
+        assert call.kwargs["replace_existing"] is True
+        assert CATCH_UP_JOB_ID not in JOB_IDS  # 不是日批任务，不进状态接口
+
+    @patch.dict(
+        os.environ,
+        {"TESTING": "", "DECISION_SETTLE_ENABLED": "1", "OPS_CATCHUP_ON_STARTUP": "0"},
+    )
+    @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
+    def test_env_switch_skips_registration(self, mock_sched_cls):
+        sched = MagicMock()
+        mock_sched_cls.return_value = sched
+        start_scheduler()
+        ids = [c.kwargs.get("id") for c in sched.add_job.call_args_list]
+        assert "ops_catch_up_once" not in ids
+
+    @patch.dict(os.environ, {"TESTING": "1"})
+    def test_testing_registers_nothing(self):
+        assert start_scheduler() is None

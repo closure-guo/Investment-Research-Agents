@@ -11,6 +11,7 @@ from datetime import date
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from finance_agent.data import research_reports as rr
 from finance_agent.data import research_reports_store as store
@@ -423,6 +424,65 @@ class TestExtraction:
         # 已有抽取时不重复调用
         rr.extract_document("k1", db_path=db)
         assert len(calls) == 1
+
+    def test_extract_document_retries_once_on_non_json(self, tmp_path, monkeypatch):
+        """首次响应非 JSON（空正文/纯散文）→ 一次强化重试；仍失败才抛出。"""
+        db = tmp_path / "rr.db"
+        store.upsert_document(
+            {
+                "doc_key": "k2",
+                "filename": "b.pdf",
+                "text": "研报全文",
+                "page_count": 1,
+                "char_count": 4,
+                "title": "b",
+            },
+            db_path=db,
+        )
+        monkeypatch.setattr(
+            "finance_agent.prompts.loader.load_prompt_with_meta",
+            lambda name: SimpleNamespace(
+                template="抽取 {{document_text}}", prompt_name=name, prompt_version=7
+            ),
+        )
+        responses = ["抱歉，无法抽取。", json.dumps(self._payload(), ensure_ascii=False)]
+        prompts: list[str] = []
+
+        def fake_complete(messages, **kwargs):
+            prompts.append(messages[0]["content"])
+            return responses[len(prompts) - 1], {"model": "fake-model"}
+
+        monkeypatch.setattr("finance_agent.llm.gateway.complete_text", fake_complete)
+        got = rr.extract_document("k2", db_path=db)
+        assert got["broker"] == "国信证券"
+        assert len(prompts) == 2
+        assert "只输出一个 JSON 对象" in prompts[1]
+
+    def test_extract_document_non_json_twice_raises(self, tmp_path, monkeypatch):
+        db = tmp_path / "rr.db"
+        store.upsert_document(
+            {
+                "doc_key": "k3",
+                "filename": "c.pdf",
+                "text": "研报全文",
+                "page_count": 1,
+                "char_count": 4,
+                "title": "c",
+            },
+            db_path=db,
+        )
+        monkeypatch.setattr(
+            "finance_agent.prompts.loader.load_prompt_with_meta",
+            lambda name: SimpleNamespace(
+                template="抽取 {{document_text}}", prompt_name=name, prompt_version=7
+            ),
+        )
+        monkeypatch.setattr(
+            "finance_agent.llm.gateway.complete_text",
+            lambda messages, **kwargs: ("仍然不是 JSON", {"model": "fake-model"}),
+        )
+        with pytest.raises(json.JSONDecodeError):
+            rr.extract_document("k3", db_path=db)
 
     def test_ingest_extraction_failure_degrades_but_keeps_doc(self, tmp_path, monkeypatch):
         db = tmp_path / "rr.db"

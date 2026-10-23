@@ -1609,3 +1609,58 @@ class TestScorecardsUnified:
         assert foreign["hit_rate"] is not None
         assert foreign["net_score"] == 0.5
         assert "win_rate" not in foreign
+
+
+class TestMissedToday:
+    """delta add-ops-missed-run-catchup：``/jobs`` 的 ``missed_today`` 口径。
+
+    「压根没跑」与「跑了但失败」刻意分开：后者由 ``last_run.status`` 表达，
+    否则值班要在一堆徽章里分辨是哪种故障。
+    """
+
+    THURSDAY_1610 = datetime(2026, 10, 22, 16, 10)
+    SATURDAY_1700 = datetime(2026, 10, 24, 17, 0)
+
+    def _freeze(self, monkeypatch, moment: datetime) -> None:
+        monkeypatch.setattr(ops_api, "_now", lambda: moment)
+
+    def _field(self, client: TestClient, job_id: str) -> dict:
+        return _job(client.get(f"{BASE}/jobs").json(), job_id)
+
+    def test_true_when_past_fire_and_no_run(self, client, monkeypatch):
+        self._freeze(monkeypatch, self.THURSDAY_1610)
+        assert self._field(client, "factor_decay_monitor")["missed_today"] is True
+
+    def test_false_before_fire_time(self, client, monkeypatch):
+        self._freeze(monkeypatch, datetime(2026, 10, 22, 15, 0))
+        assert self._field(client, "factor_decay_monitor")["missed_today"] is False
+
+    def test_false_when_run_recorded_even_if_failed(self, client, monkeypatch):
+        run_id = _seed_run("factor_decay_monitor", status="failed", error="boom")
+        _backdate_started_at(run_id, "2026-10-22T15:46:00")
+        self._freeze(monkeypatch, self.THURSDAY_1610)
+        job = self._field(client, "factor_decay_monitor")
+        assert job["missed_today"] is False
+        assert job["last_run"]["status"] == "failed"  # 失败仍由 last_run 表达
+
+    def test_running_row_counts_as_having_run(self, client, monkeypatch):
+        run_id = insert_job_run("screening_daily", "scheduled", "running", db_path=_db())
+        _backdate_started_at(run_id, "2026-10-22T15:41:00")
+        mark_run_active(run_id, db_path=_db())  # 防悬挂清扫改判，保住 running 态
+        try:
+            self._freeze(monkeypatch, self.THURSDAY_1610)
+            assert self._field(client, "screening_daily")["missed_today"] is False
+        finally:
+            mark_run_finished(run_id, db_path=_db())
+
+    def test_false_on_weekend(self, client, monkeypatch):
+        self._freeze(monkeypatch, self.SATURDAY_1700)
+        assert self._field(client, "factor_decay_monitor")["missed_today"] is False
+
+    def test_monthly_job_false_off_its_day(self, client, monkeypatch):
+        self._freeze(monkeypatch, self.THURSDAY_1610)
+        assert self._field(client, "memory_extract_monthly")["missed_today"] is False
+
+    def test_field_present_on_every_row(self, client):
+        jobs = client.get(f"{BASE}/jobs").json()["jobs"]
+        assert all(isinstance(job["missed_today"], bool) for job in jobs)

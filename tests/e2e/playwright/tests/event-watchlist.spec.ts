@@ -232,6 +232,9 @@ test('造数三条（三态）→ 区块全要素渲染，空态不冒充', asyn
   await expect(firstRow).toContainText('理由：预增 60% ~ 90%，净利润大幅增长')
 
   // 来源相关要素卡（业绩预告三要素：报告期 / 预告类型 / 净利润变动幅度区间）
+  // 明细默认折叠（固定高度滚动框内）：断言要素与证据前先展开对应行
+  await page.getByTestId(`event-row-toggle-${a.id}`).click()
+  await page.getByTestId(`event-row-toggle-${c.id}`).click()
   await expect(page.getByTestId(`event-element-${a.id}-report_period`)).toContainText('2025-03-31')
   await expect(page.getByTestId(`event-element-${a.id}-forecast_type`)).toContainText('预增')
   await expect(page.getByTestId(`event-element-${a.id}-change`)).toContainText('60.0% ~ 90.0%')

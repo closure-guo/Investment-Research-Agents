@@ -14,7 +14,7 @@
 | -------- | ----------------------------- | ------------------------------------------------------------------- |
 | L1 前端  | React 18 + Vite               | 表单输入（股票搜索+分析类型+对标股）+ 报告展示 + 文件下载           |
 | L2 Agent | LangGraph                     | 5 层架构: 4 分析师并行 + Bull/Bear 辩论 + Trader + Risk Management 辩论 + Fund Manager |
-| L3 数据  | pandas + SQLite               | AKShare 数据拉取 + 全部计算 + SQLite 缓存（v2.0 计划 Chroma）       |
+| L3 数据  | pandas + SQLite               | AKShare 数据拉取 + 全部计算 + SQLite 缓存（研报检索走元数据过滤 + 结构化抽取聚合，未引入向量库）       |
 | L4 LLM   | DeepSeek (deepseek-v4-pro 深度 / deepseek-chat 快速) | LiteLLM 路由                                              |
 
 ### 1.2 核心原则
@@ -235,7 +235,9 @@ stateDiagram-v2
 - **Step 1 并行**：三大报表 + 行情 + 行业归属 + 预计算指标 + 日K线 + 沪深300K线 + 宏观指标 + 新闻列表（AKShare，无依赖）
 - **Step 2 依赖**：同业公司财务数据（需要 Step 1 的行业归属 + 同业列表）
 
-> v2.0 增加：巨潮 PDF 解析、Chroma 研报 RAG（Tavily 搜索已于 v1.1 纳入快速模式）
+> v2.0 增加：巨潮 PDF 解析、研报全文 RAG（Tavily 搜索已于 v1.1 纳入快速模式）。
+>
+> 注：v2.0 原计划「Chroma 向量库」，截至 2026-10 未引入。研报链路当前是「入库时 LLM 结构化抽取 → 确定性聚合 → 整段注入」，检索靠 SQLite 元数据过滤（标的/类别/发布日期），不依赖向量索引。是否引入向量检索的触发条件见 §九「检索与 RAG 边界」。
 
 ---
 
@@ -425,7 +427,7 @@ def after_fund_manager(state):
 | LLM 路由  | LiteLLM（关在 llm/adapters/**） | 自定义          | 100+ 模型统一接口               |
 | PDF       | pdfplumber        | Unstructured.io | 表格准确率 98.3%，速度快 6x     |
 | 数据      | AKShare           | Tushare         | 免费无 API Key                  |
-| 向量      | Chroma            | FAISS           | 本地零配置                      |
+| 研报检索  | SQLite 元数据过滤 + 结构化抽取聚合 | Chroma / FAISS（推迟） | 当前语料规模无需向量索引；语义召回缺口尚未在 eval 上证实 |
 | 关系      | SQLite            | PostgreSQL      | 零配置单文件                    |
 | 搜索      | Tavily            | Brave           | 为 LLM 优化                     |
 | Word      | python-docx       | —               | 程序化生成                      |
@@ -459,9 +461,14 @@ def after_fund_manager(state):
 
 - **State 使用 TypedDict**：LangGraph 原生一等公民，Reducer/Checkpoint/节点返回值零摩擦
 - **实施 4 阶段**：P0 骨架(脚手架+空图+happy path) -> P1 数据层(AKShare+20指标+缓存) -> P2 分析层(Agent+prompt+报告模板) -> P3 输出层(Word/PPT+前端打磨)
-- **MVP 范围**：AKShare 数据源 + Tavily 搜索（v1.1 纳入快速模式），无 Chroma/巨潮PDF/DCF 定量计算。v2.0 扩展 DCF、RAG、图表
+- **MVP 范围**：AKShare 数据源 + Tavily 搜索（v1.1 纳入快速模式），无向量库/巨潮PDF/DCF 定量计算。v2.0 扩展 DCF、研报全文 RAG（待触发条件满足）、图表
 - **分析年份跨度**：动态，尽量拉 5 年，不足则有多少用多少，最低 2 年（保证同比变化率可计算），低于 2 年报错
 - **同业选择**：默认申万同三级行业市值 Top 5；用户可手动输入对标股票代码覆盖自动选取
 - **数据降级策略**：必需数据（三大报表）缺失→报错终止；非必需（同业、研报、搜索）缺失→标记 N/A 继续
 - **DCF 参数**：预测期 5 年，终端增长率 2%，市场风险溢价 7%（硬编码），无风险利率动态拉取（失败降级 1.8%），FCF 分阶段增长（前 3 年历史均值，后 2 年线性衰减至 g）
 - **DCF 输出原则**：输出估值区间 + 敏感性分析（WACC ±1%、g ±0.5%），不输出单一精确数字
+- **检索与 RAG 边界**：研报检索当前不引入向量数据库，主路径是「元数据过滤（标的/行业/类别/`published_at`）+ 结构化抽取确定性聚合」。向量检索推迟到以下任一条件成立再评估：
+  1. 全文库 > 2000 篇或切片 > 10 万（向量索引的规模收益开始显现）；
+  2. golden set 显示元数据过滤 + FTS5 的召回不达标，且缺口确实来自语义模糊匹配（不是缺某类研报没接入）；
+  3. 单篇必须做段落级引用且全文超出上下文预算（此时需要 chunk + `page_offsets` 页码对齐）。
+  届时优先嵌入式方案（sqlite-vec / LanceDB），不新增独立服务；**不得复用 Langfuse 的 Postgres 实例做 pgvector**（生命周期与迁移耦合）。语义检索一旦引入，`published_at < as_of` 必须是硬过滤而非排序偏好（防前视偏差）。

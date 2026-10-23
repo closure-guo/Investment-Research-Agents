@@ -390,6 +390,38 @@ def focus_hint(state: dict) -> str:
     return f"用户关注点: {focus}"
 
 
+def holdings_holds(state: dict) -> bool | None:
+    """读取受众持仓三态（add-holdings-context）。HoldingsContext 对象与 dict 两形态兼容。
+
+    契约：非 bool 值 ⇒ 未申报（None）。缺键、显式 None、以及误传的非 bool 值
+    （如字符串 "yes"）一律归为未申报——返回类型恒为 bool | None，调用方不得据此
+    臆测受众持有 / 未持有。
+    """
+    ctx = state.get("holdings_context")
+    holds = ctx.get("holds") if isinstance(ctx, dict) else getattr(ctx, "holds", None)
+    return holds if isinstance(holds, bool) else None
+
+
+def holdings_context_line(state: dict) -> str:
+    """受众持仓上下文注入行（add-holdings-context）。
+
+    与 focus_hint 的空则零注入刻意不同：三态均返回非空行——「未申报」本身是
+    决策所需信息（决定看空按 exit 表达还是按 watch 表达），MUST NOT 省略。
+    """
+    holds = holdings_holds(state)
+    if holds is True:
+        return "受众持仓: 已申报持有该标的——看空结论请按持有者减仓（sell_type=exit）表达"
+    if holds is False:
+        return (
+            "受众持仓: 已申报未持有该标的——无敞口可退，MUST NOT 输出 exit；"
+            "看空请按观望（watch）表达，除非受众明确要求做空研究"
+        )
+    return (
+        "受众持仓: 未申报——受众是否持有未知；看空结论请按持有者减仓（exit）表达，"
+        "并在理由中说明未持有情形的对应处置"
+    )
+
+
 # ── migrate-off-legacy-llm-shim Task 2：直连 gateway.complete_stream ──
 #
 # call_llm_streaming 不再经 legacy.call_llm_stream 薄壳，直接消费

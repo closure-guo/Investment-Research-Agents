@@ -2119,6 +2119,11 @@ assistant 消息 hover SHALL 显示复制与重新生成操作；管线进度时
 
 系统 SHALL 提供 `/screening` 路由页，展示最近成功批次的候选池表格，列含：标的、综合分、连续在榜天数、L3 verdict 与 reason、批次日期；综合分列 SHALL 支持 hover 展示因子贡献分解（factor_id 与 contribution）；页面 SHALL 提供「对精选池跑深度分析」按钮，触发后复用现有 SSE 管线时间轴展示各标的分析进度；选择模式为 `fallback` 的批次 SHALL 在页面展示降级披露横幅（明示「因子库无可打分因子、按近 20 日日均成交额排序、非因子信号」），且综合分列 SHALL 切换为「近 20 日日均成交额」语义呈现（标题与数值口径同步切换）。
 
+页面 SHALL 把精选池作为主体置顶：池容器 MUST 是滚动内容区的首个区块，SHALL 以卡片呈现并含「精选池」标题、候选数量、批次日期与口径说明（L3 粗筛 keep ∩ 连续在榜门槛达标）。
+市场温度计、因子信号与事件观察 SHALL 作为解释池子的上下文排在池之后，MUST NOT 置于池之前；陈旧横幅、降级横幅与时效性移除清单 SHALL 留在池卡片内，与池同屏可读。
+
+(Previously: 只要求页面展示候选池表格与降级横幅，未规定区块顺序；实际实现把裸 `<table>` 放在温度计/事件清单之后，首屏看不到池。)
+
 #### Scenario: 贡献分解 hover
 
 - **GIVEN** 候选池表格中标的 C 综合分 1.823
@@ -2131,6 +2136,21 @@ assistant 消息 hover SHALL 显示复制与重新生成操作；管线进度时
 - **WHEN** 用户打开选股页
 - **THEN** 页面展示降级披露横幅，文案含「非因子信号」
 - **AND** 综合分列标题切换为「近 20 日日均成交额（亿元）」且数值按成交额口径呈现
+
+#### Scenario: 精选池置顶
+
+- **GIVEN** 端点返回成功批次与 3 只候选
+- **WHEN** 打开 `/screening`
+- **THEN** 滚动内容区首个子节点是 `screening-pool-card`，含「精选池」「共 3 只」与批次日期
+- **AND** 市场温度计与事件观察区块排在池卡片之后
+- **AND** 降级/陈旧横幅位于池卡片内
+
+#### Scenario: 空池与失败态仍在池卡片内
+
+- **GIVEN** 批次无候选或池端点失败
+- **WHEN** 打开 `/screening`
+- **THEN** 空态/失败态文案渲染在 `screening-pool-card` 内
+- **AND** 页面其余区块不因此消失
 
 ### Requirement: 涨跌语义令牌（A 股惯例）
 
@@ -2502,4 +2522,196 @@ MUST NOT 显示成功。重启请求发出后若 `restart_pending` 持续为真�
 - **WHEN** 打开配置页
 - **THEN** 启停/重启/保存配置禁用并明示「控制通道暂不可用」
 - **AND** 展示宿主机恢复命令文案，且无可点击执行入口
+
+### Requirement: 因子研发监控页僵死披露
+
+`/factor-research` 监控页 SHALL 如实披露「采集正常但会话无进展」这一状态：当端点
+`progress.stalled=true` 时，页面 SHALL 在进度区展示醒目提示
+（`data-testid="factor-research-stall-banner"`），文案 SHALL 含无进展时长（由
+`progress.log_age_seconds` 经既有 `formatDurationS` 口径格式化，如 3600 秒 → 「1小时0分」）；
+同时页面 MUST NOT 把快照里的步骤进度读数当作**当前**进度展示——`step_elapsed_s` / `step_eta_s`
+取自日志末行，日志冻结后即为旧值，故 SHALL 改为标注该读数的时刻（如「进度读数来自 N 分钟前的
+日志」），MUST NOT 继续渲染「预计剩余 X」冒充进展。
+
+当 `progress.stalled=false` 时，页面 MUST NOT 展示该提示（不无端告警）。当
+`progress.log_age_seconds=null`（旧版采集器未上报新鲜度）时，页面 MUST NOT 展示该提示，
+亦 MUST NOT 以「进度正常」等断言冒充已验证——未上报只能表现为「不可判定」。
+
+僵死提示与既有陈旧快照提示语义互斥且 MUST NOT 互相替代：`stale=true`（采集器/代理停摆）时
+按既有陈旧披露展示，此时 `stalled=false`（实态不可证）；`stalled=true` 专指采集链路正常、
+会话进程存活但日志停更。僵死提示 MUST NOT 提供任何可点击的处置入口（零命令面不变），解除僵死
+只能经既有控制通道由人发起。
+
+#### Scenario: 僵死提示可见且进度不冒充
+
+- **GIVEN** 端点返回 `available=true`、`stale=false`、`actual_state="running"`、
+  `progress.log_age_seconds=3600`、`progress.stalled=true`，且快照含
+  `step_elapsed_s=603`、`step_eta_s=905`
+- **WHEN** 打开监控页
+- **THEN** 展示 `factor-research-stall-banner`，文案含「无进展 1小时0分」（由 3600 秒经 `formatDurationS` 格式化）
+- **AND** 步骤进度读数被标注为来自 60 分钟前的日志
+- **AND** MUST NOT 继续展示「预计剩余 15 分钟」这类当前进度断言
+- **AND** 横幅内无可点击的处置入口
+
+#### Scenario: 未僵死不提示
+
+- **GIVEN** 端点返回 `progress.stalled=false`（`log_age_seconds=42`）
+- **WHEN** 打开监控页
+- **THEN** MUST NOT 展示 `factor-research-stall-banner`
+- **AND** 进度区照常展示步骤进度
+
+#### Scenario: 旧版采集器未上报新鲜度
+
+- **GIVEN** 端点返回 `progress.log_age_seconds=null`、`progress.stalled=false`，且会话存活
+- **WHEN** 打开监控页
+- **THEN** MUST NOT 展示 `factor-research-stall-banner`
+- **AND** MUST NOT 展示「进度正常」等已验证断言（未上报 = 不可判定）
+
+#### Scenario: 与陈旧快照披露互不替代
+
+- **GIVEN** 端点返回 `stale=true`（快照陈旧）且 `progress.stalled=false`
+- **WHEN** 打开监控页
+- **THEN** 展示既有「数据已陈旧」提示
+- **AND** MUST NOT 以僵死提示替代或遮蔽陈旧提示
+
+### Requirement: 监控页 distro 探活披露
+
+`/factor-research` 页面 SHALL 在探活新鲜且 `ok=false` 时展示独立提示
+（`data-testid="factor-research-distro-probe-banner"`）：文案 SHALL 含连续失败次数与最近一次探活
+时刻，并 SHALL 明示**采集器并未停止、疑似 WSL 子系统（distro）不可用**，以及恢复动作由人发起
+（`wsl --terminate rdagent` 后下一次节拍自动拉起）。该提示 MUST NOT 提供任何可点击的处置入口
+（零命令面不变）。
+
+快照陈旧（`stale=true`）且探活新鲜 `ok=false` 时，既有「数据已陈旧」横幅的文案 SHALL 改为指向
+distro 不可用——MUST NOT 继续声称「采集器可能已停止」（2026-10-22 incident 049 实测该表述失实：
+采集器没停，是 distro 不可用）。探活不可用（`available=false`）、不新鲜（`fresh=false`）或
+`ok=true` 时，陈旧横幅 SHALL 保持既有表述，且 MUST NOT 展示探活提示。
+
+#### Scenario: 探活失败且快照陈旧 → 提示可见且不误指采集器
+
+- **GIVEN** 端点返回 `stale=true`，且 `distro.available=true`、`fresh=true`、`ok=false`、
+  `consecutive_failures=8`
+- **WHEN** 打开监控页
+- **THEN** 展示 `factor-research-distro-probe-banner`，文案含「连续 8 次」与「distro」
+- **AND** 陈旧横幅 MUST NOT 出现「采集器可能已停止」字样
+- **AND** 探活提示内无可点击的处置入口
+
+#### Scenario: 探活正常时保持既有表述
+
+- **GIVEN** 端点返回 `stale=true`，且 `distro.ok=true`
+- **WHEN** 打开监控页
+- **THEN** 陈旧横幅保持既有「采集器可能已停止」表述
+- **AND** MUST NOT 展示 `factor-research-distro-probe-banner`
+
+#### Scenario: 探活不可用或不新鲜不冒充结论
+
+- **GIVEN** 端点返回 `distro.available=false`（或 `fresh=false`）
+- **WHEN** 打开监控页
+- **THEN** MUST NOT 展示 `factor-research-distro-probe-banner`
+- **AND** 陈旧横幅保持既有表述（未探活 ≠ distro 不可用）
+
+#### Scenario: 采集链路正常时不展示探活提示
+
+- **GIVEN** 端点返回 `stale=false`（快照新鲜）且 `distro.ok=false`
+- **WHEN** 打开监控页
+- **THEN** MUST NOT 展示 `factor-research-distro-probe-banner`
+- **AND** 页面照常展示研发进度（探活失败不足以判定 distro 不可用——见 monitor 判据依据）
+
+### Requirement: 战绩页策略族成绩单区块
+
+战绩页 SHALL 新增策略族成绩单区块：族切换控件、四槽卡片（期望值毛/净与样本量、最大回撤、容量提示、极端样本数）、极端样本明细表（标的 / 结算日 / 收益）、口径注释随行展示；样本不足（`insufficient_sample` 标注）SHALL 展示专用文案，MUST NOT 显示 0 或空白冒充；族无数据 SHALL 展示空态文案（与样本不足文案区分）；区块主位 SHALL 为四槽，胜率类字段 MUST NOT 占据区块主指标位置；数据缺失或请求失败 SHALL 如实展示对应空态/错误态，MUST NOT 显示骨架屏冒充。
+
+#### Scenario: 四槽渲染
+
+- **GIVEN** 端点返回观点线四槽完整读数
+- **WHEN** 打开战绩页
+- **THEN** 四槽卡片分别展示期望值（毛/净 + 样本量）、最大回撤、容量提示与极端样本数
+- **AND** 极端样本明细表渲染对应条目
+
+#### Scenario: 样本不足文案
+
+- **GIVEN** 端点返回 `insufficient_sample` 标注
+- **WHEN** 打开战绩页
+- **THEN** 展示「样本不足」文案
+- **AND** MUST NOT 显示 0 值或空白冒充读数
+
+#### Scenario: 空数据族空态
+
+- **GIVEN** 端点返回某族 null 读数
+- **WHEN** 切换至该族
+- **THEN** 展示空态文案，MUST NOT 显示错误提示冒充
+
+### Requirement: 选股页市场温度计区块
+
+选股页 SHALL 新增市场温度计区块：状态徽章（`normal` / `elevated` / `danger` 三态，按语义色区分）、总仓位系数、四指标卡（小市值组成交额占比 / 涨跌家数 / 涨停跌停家数 / 全市场成交额，各含当日值与历史分位）、近一年指标曲线（复用既有图表设施）、一句话理由（取判定 `reasons` 拼接展示）。数据缺失（`available=false`）SHALL 展示「温度计未接入」空态并按原因码（`missing` / `corrupt`）区分文案，MUST NOT 显示骨架屏或错误提示冒充；`stale=true` SHALL 明示「数据已陈旧」（含 `as_of`）。区块 MUST NOT 提供手动覆盖系数或开关的控制入口（v1 只读）。
+
+#### Scenario: 三态与系数渲染
+
+- **GIVEN** 端点返回 `state=danger`、`multiplier=0`、四指标与历史序列
+- **WHEN** 打开选股页
+- **THEN** 状态徽章为 danger 语义色、系数展示为 0
+- **AND** 四指标卡与近一年曲线渲染，理由行展示触发原因
+
+#### Scenario: 陈旧披露
+
+- **GIVEN** 端点返回 `stale=true`、`as_of` 为 10 天前
+- **WHEN** 打开选股页
+- **THEN** 区块明示「数据已陈旧」并展示 `as_of`
+- **AND** 指标内容仍可见（标注为陈旧，MUST NOT 隐藏）
+
+#### Scenario: 未接入空态
+
+- **GIVEN** 端点返回 `available=false, reason=missing`
+- **WHEN** 打开选股页
+- **THEN** 展示「温度计未接入」空态文案，MUST NOT 显示骨架屏或错误提示冒充
+
+#### Scenario: 只读无控制件
+
+- **GIVEN** 温度计区块渲染完成
+- **WHEN** 检查区块内交互控件
+- **THEN** 无任何可切换状态或覆盖系数的控制入口
+
+### Requirement: 选股页事件观察区块
+
+选股页 SHALL 新增事件观察区块：清单列表（来源标识、标的与名称、来源相关要素[业绩预告：报告期/预告类型/净利润变动幅度区间；条款事件：现价/转股溢价率/强赎倒计时]、分诊或标注结论三态[`outperform` / `in_line` / `risk`，按语义色区分]、理由与证据引用、公告日期、清单状态[是否已发起深度分析及排队/运行状态]）；条目 SHALL 提供「发起深度分析」入口（入既有队列，成功后展示排队状态）。空清单 SHALL 展示空态文案；请求失败 SHALL 如实展示错误态，MUST NOT 显示骨架屏或伪数据冒充。结论 SHALL 附口径注释（研究标记，非投资建议）。
+
+清单 SHALL 渲染在固定高度的滚动框内（高度上限 420px、内部滚动），MUST NOT 以全量平铺把页面撑长；条目 SHALL 默认折叠（仅展示来源、标的与名称、公告日期、结论徽章与理由一行），点击行标题 SHALL 展开来源要素与证据引用（展开后字段口径与未折叠时一致，MUST NOT 因折叠丢字段）；清单 SHALL 展示总条数并分页式渲染（首屏 50 条 + 「加载更多」逐次追加），MUST NOT 一次性挂载全部条目。
+
+(Previously: 要求清单展示全部要素，未规定高度与渲染策略；实现为 `items.map` 全量平铺且条目默认展开，432 条即撑出约 8 万 px 页面。)
+
+#### Scenario: 清单渲染
+
+- **GIVEN** 端点返回 3 条条目（结论分别覆盖三态中至少两态）
+- **WHEN** 打开选股页并展开行
+- **THEN** 列表渲染各条目全要素，结论按三态语义色区分
+- **AND** 附口径注释文案
+
+#### Scenario: 发起深度分析
+
+- **GIVEN** 一条未发起分析的条目
+- **WHEN** 点击发起深度分析
+- **THEN** 条目状态变为排队/运行中并展示关联信息
+- **AND** 重复点击 MUST NOT 产生重复队列条目
+
+#### Scenario: 空态
+
+- **GIVEN** 清单为空
+- **WHEN** 打开选股页
+- **THEN** 展示空态文案，MUST NOT 显示骨架屏冒充
+
+#### Scenario: 固定高度滚动而非平铺全部
+
+- **GIVEN** 清单返回 60 条
+- **WHEN** 打开选股页
+- **THEN** 清单容器是固定高度滚动框（`data-max-height=420`，`overflow-y-auto`）
+- **AND** 首屏只渲染前 50 条，点击「加载更多」后渲染 60 条且按钮消失
+- **AND** 区块标题旁展示「共 60 条」
+
+#### Scenario: 条目默认折叠，展开后要素齐全
+
+- **GIVEN** 一条带来源要素与证据的清单条目
+- **WHEN** 打开选股页
+- **THEN** 默认不渲染来源要素格与证据行，理由以一行展示
+- **AND** 点击行标题后渲染来源要素与证据，再次点击收起
+- **AND** 结论徽章与发起按钮在任何折叠态下都可见可操作
 

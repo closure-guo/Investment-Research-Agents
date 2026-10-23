@@ -881,8 +881,29 @@ export interface ScreeningPoolResponse {
   selection_mode: 'factor' | 'fallback' | null
   // 降级披露文案（后端单源；fallback 时非空，明示「非因子信号」）
   notice: string | null
+  // 因子 IC 就绪度（delta add-factor-ic-visibility）：逐 active 因子进度 + 恢复日
+  factor_signal: ScreeningFactorSignal
   pool: ScreeningPoolRow[]
   queue: ScreeningQueueEntry[]
+}
+
+export interface ScreeningFactorReadiness {
+  id: number
+  /** 近 60 日窗口内 IC 记录数 */
+  ic_samples: number
+  eligible: boolean
+  /** 预计达标日（按工作日推算；已达标/无记录 → null） */
+  expected_eligible_date: string | null
+}
+
+export interface ScreeningFactorSignal {
+  selection_mode: 'factor' | 'fallback' | null
+  /** 降级原因（后端逐字：如「IC 样本不足（门槛 10）」/「无 active 因子」） */
+  reason: string
+  min_samples: number
+  /** 各因子预计达标日的最早值（工作日推算；无则 null） */
+  expected_factor_mode_date: string | null
+  factors: ScreeningFactorReadiness[]
 }
 
 // POST /api/screening/analyze 响应（池空为 409 显式错误）
@@ -1073,6 +1094,12 @@ export interface FactorRow {
   icir_60d: number
   /** 窗口内 IC 记录数：0 → 界面显示「—」而非 0.000 */
   ic_points: number
+  /** IC 窗口（近 N 个交易日；后端 FACTOR_IC_WINDOW=60，delta add-factor-ic-visibility） */
+  ic_window: number
+  /** 参与 L2 打分所需的最少 IC 条数（后端 MIN_IC_SAMPLES_FOR_SCORING=10） */
+  min_samples_for_scoring: number
+  /** 预计恢复因子打分的首个批次日期（按工作日推算、不含节假日；已达标/无记录 → null） */
+  expected_factor_mode_date: string | null
   /** 衰减降级史（事件历史出现过 degraded；退役后标记仍在） */
   decayed: boolean
   last_event: FactorLastEvent | null
@@ -1210,6 +1237,28 @@ export interface FactorResearchLauncher {
   detail?: string | null
 }
 
+/** distro 探活块（delta add-factor-research-distro-liveness-probe） */
+export interface FactorResearchDistroProbe {
+  available: boolean
+  /** available=false 时如实二分：missing（未探活）/ corrupt */
+  reason?: 'missing' | 'corrupt'
+  probed_at?: string | null
+  probed_at_epoch?: number | null
+  distro?: string | null
+  /** 探活是否成功（distro 能否执行） */
+  ok?: boolean | null
+  exit_code?: number | null
+  /** 失败时可判读摘要 */
+  detail?: string | null
+  /** 连续探活失败次数 */
+  consecutive_failures?: number | null
+  terminated_at?: string | null
+  terminated_at_epoch?: number | null
+  terminate_count?: number | null
+  age_seconds?: number
+  fresh?: boolean
+}
+
 export interface FactorResearchControl {
   /** 期望态（控制文件缺失/不可解析 → null，如实不猜） */
   desired_running: boolean | null
@@ -1233,6 +1282,13 @@ export interface FactorResearchControl {
 
 export type FactorResearchActualState = 'running' | 'stopped' | 'unverified'
 
+export interface FactorResearchProgress {
+  /** 当前会话日志 mtime 距采集时刻的秒数（旧版采集器未上报 → null） */
+  log_age_seconds: number | null
+  /** 采集正常但会话无进展（阈值单源在后端；未上报 → false 且不可判定） */
+  stalled: boolean
+}
+
 export interface FactorResearchStatusResponse {
   available: boolean
   /** available=false 时如实二分：missing（未接入）/ corrupt（快照损坏） */
@@ -1245,6 +1301,8 @@ export interface FactorResearchStatusResponse {
   actual_state?: FactorResearchActualState
   /** 研发节奏配置块（delta add-factor-research-settings） */
   config?: FactorResearchConfigBlock | null
+  /** 进度新鲜度派生块（delta add-factor-research-stall-detection） */
+  progress?: FactorResearchProgress | null
   supervisor?: FactorResearchSupervisor | null
   current_session?: FactorResearchCurrentSession | null
   sessions?: FactorResearchSession[]
@@ -1255,6 +1313,8 @@ export interface FactorResearchStatusResponse {
   launcher?: FactorResearchLauncher | null
   /** 控制块（delta add-factor-research-control；快照不可用/陈旧时同样返回） */
   control?: FactorResearchControl | null
+  /** distro 探活块（delta add-factor-research-distro-liveness-probe） */
+  distro?: FactorResearchDistroProbe | null
 }
 
 // ── 执行台账只读契约（delta add-broker-console：GET /api/broker/*） ──
@@ -1317,4 +1377,65 @@ export interface BrokerOrderRow {
 
 export interface BrokerOrdersResponse {
   orders: BrokerOrderRow[]
+}
+
+/** 收割链路只读载荷（add-factor-harvest-ui）。 */
+export interface HarvestJobBlock {
+  status: string | null
+  started_at: string | null
+  finished_at: string | null
+  schedule: { day_of_week: string; hour: number; minute: number; timezone: string } | null
+  next_fire_time: string | null
+}
+
+export interface HarvestProgressBlock {
+  batches_done: number
+  batch_limit: number
+  processed: number
+  pending: number
+  admitted_in_run: number
+  rejected_in_run: number
+  started_at: string | null
+  eta_s: number | null
+  /** 批内逐候选心跳（harvest 每处理一条写一次）；缺失或过旧为 null */
+  in_batch?: {
+    processed_in_batch: number
+    total_in_batch: number
+    phase: string
+    updated_at: string | null
+    age_s: number | null
+  } | null
+}
+
+export interface HarvestFunnelBlock {
+  candidates: number
+  processed: number
+  untranslatable: number
+  transcription_error: number
+  reached_gates: number
+  admitted: number
+  rejected_by_gate: Record<string, number>
+}
+
+export interface HarvestRecentAdmission {
+  expression: string | null
+  factor_id: number
+  created_at: string | null
+  icir_60d: number
+}
+
+export interface HarvestRecentRejection {
+  expression: string | null
+  gate: number | null
+  reason: string | null
+  at: string | null
+}
+
+export interface HarvestChainResponse {
+  available: boolean
+  job: HarvestJobBlock | null
+  progress: HarvestProgressBlock | null
+  funnel: HarvestFunnelBlock | null
+  recent_admitted: HarvestRecentAdmission[]
+  recent_rejected: HarvestRecentRejection[]
 }

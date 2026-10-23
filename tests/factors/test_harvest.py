@@ -28,6 +28,7 @@ from finance_agent.factors.harvest import (
     build_transcription_prompt,
     parse_transcription_payload,
     run_factor_harvest,
+    run_factor_harvest_until_drained,
     transcribe_candidate,
 )
 from finance_agent.llm.errors import OutputTruncatedError
@@ -98,8 +99,10 @@ def _panel(dates: int = 70, codes: int = 40, seed: int = 7) -> MarketPanel:
 
 @pytest.fixture(autouse=True)
 def _library_db(tmp_path, monkeypatch):
-    """因子库路径指向 tmp（library 调用期读 env，不落开发库）。"""
+    """因子库/记忆桥路径指向 tmp（调用期读 env，不落开发库与生产桥文件）。"""
     monkeypatch.setenv("FACTOR_LIBRARY_DB_PATH", str(tmp_path / "factor_library.db"))
+    monkeypatch.setenv("FACTOR_FEEDBACK_PATH", str(tmp_path / "explored_factors.json"))
+    monkeypatch.setenv("FACTOR_RESEARCH_HEARTBEAT_PATH", str(tmp_path / "harvest_heartbeat.json"))
 
 
 class TestTranscriptionPayload:
@@ -191,6 +194,57 @@ class TestRunFactorHarvest:
         assert set(state["processed"]) == {"tsmean", "rollmax", "badop"}
         assert state["processed"]["rollmax"]["status"] == "untranslatable"
         assert state["processed"]["badop"]["stage"] == "translator"
+
+    def test_refreshes_explored_feedback_bridge(self, tmp_path, monkeypatch):
+        """收割成功 → 跨会话记忆桥自动刷新（生成侧据此避免重复提案）。"""
+        target = tmp_path / "explored.json"
+        monkeypatch.setenv("FACTOR_FEEDBACK_PATH", str(target))
+        cand_path = self._write_candidates(
+            tmp_path, [_candidate("tsmean", description="5 日均价", formulation="mean(C,5)")]
+        )
+        client = _StubClient({"tsmean": {"qlib_expression": "Mean($close, 5)"}})
+        run_factor_harvest(
+            candidates_path=cand_path,
+            state_path=tmp_path / "harvest_state.json",
+            client=client,
+            panel=_panel(),
+        )
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        assert payload["explored"][0]["name"] == "tsmean"
+        assert payload["explored"][0]["status"] in {"rejected", "admitted", "untranslatable"}
+
+    def test_writes_in_batch_heartbeat(self, tmp_path):
+        """批内逐候选心跳：整批结束后 phase=done 且 processed==total（观测用，不承载裁决）。"""
+        cand_path = self._write_candidates(tmp_path, [_candidate("a"), _candidate("b")])
+        client = _StubClient(
+            {
+                "a": {"qlib_expression": "Mean($close, 5)"},
+                "b": {"qlib_expression": "Std($close, 5)"},
+            }
+        )
+        run_factor_harvest(
+            candidates_path=cand_path,
+            state_path=tmp_path / "harvest_state.json",
+            client=client,
+            panel=_panel(),
+        )
+        heartbeat = json.loads((tmp_path / "harvest_heartbeat.json").read_text(encoding="utf-8"))
+        assert heartbeat["phase"] == "done"
+        assert heartbeat["processed_in_batch"] == heartbeat["total_in_batch"] == 2
+
+    def test_feedback_export_failure_is_soft(self, tmp_path, monkeypatch):
+        """记忆桥是附加产物：导出失败不得让收割批失败。"""
+        blocked = tmp_path / "as_directory"
+        blocked.mkdir()
+        monkeypatch.setenv("FACTOR_FEEDBACK_PATH", str(blocked))
+        cand_path = self._write_candidates(tmp_path, [_candidate("a")])
+        state_path = tmp_path / "harvest_state.json"
+        client = _StubClient({"a": {"qlib_expression": "Mean($close, 5)"}})
+        summary = run_factor_harvest(
+            candidates_path=cand_path, state_path=state_path, client=client, panel=_panel()
+        )
+        assert summary["proposed"] == 1
+        assert state_path.exists()
 
     def test_idempotent_second_run(self, tmp_path):
         cand_path = self._write_candidates(tmp_path, [_candidate("a")])
@@ -572,3 +626,65 @@ class TestRetryStatusesReplay(_HarvestFixtures):
 def test_gateway_client_is_default_llm_entry():
     """默认客户端经 gateway complete_text（唯一生产 LLM 入口）——仅断言可构造。"""
     assert GatewayTranscriptionClient() is not None
+
+
+class TestUntilDrained:
+    """日批入口：内部串行多批，直到无待处理（每批 ≤limit，独立 FDR 家族）。"""
+
+    @staticmethod
+    def _write(tmp_path, names):
+        path = tmp_path / "candidates.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "generated_at": "2026-10-22T00:00:00+08:00",
+                    "candidates": [_candidate(n) for n in names],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_loops_until_no_pending(self, tmp_path):
+        names = [f"f{i}" for i in range(5)]
+        cand_path = self._write(tmp_path, names)
+        client = _StubClient({n: {"qlib_expression": "Mean($close, 5)"} for n in names})
+        summary = run_factor_harvest_until_drained(
+            limit=2,
+            candidates_path=cand_path,
+            state_path=tmp_path / "harvest_state.json",
+            client=client,
+            panel=_panel(),
+        )
+        assert summary["batches"] == 3  # 2 + 2 + 1
+        assert summary["proposed"] == 5
+        assert summary["drained"] is True
+        assert client.calls == names
+
+    def test_stops_at_max_batches(self, tmp_path):
+        names = [f"f{i}" for i in range(5)]
+        cand_path = self._write(tmp_path, names)
+        client = _StubClient({n: {"qlib_expression": "Mean($close, 5)"} for n in names})
+        summary = run_factor_harvest_until_drained(
+            limit=2,
+            max_batches=1,
+            candidates_path=cand_path,
+            state_path=tmp_path / "harvest_state.json",
+            client=client,
+            panel=_panel(),
+        )
+        assert summary["batches"] == 1
+        assert summary["proposed"] == 2
+        assert summary["drained"] is False
+
+    def test_zero_pending_marks_drained(self, tmp_path):
+        cand_path = self._write(tmp_path, [])
+        summary = run_factor_harvest_until_drained(
+            limit=60,
+            candidates_path=cand_path,
+            state_path=tmp_path / "harvest_state.json",
+            client=_StubClient({}),
+            panel=_panel(),
+        )
+        assert summary["batches"] == 0
+        assert summary["drained"] is True

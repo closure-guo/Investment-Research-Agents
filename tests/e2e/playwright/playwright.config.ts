@@ -78,6 +78,17 @@ export default defineConfig({
     // 独占单进程后端+共享 SQLite 写窗口致流式用例随机红（issue #252，trace 实证）——
     // 迁入 playwright.eval-ops.config.ts 专属端口对（8005/5178）物理隔离，默认套件恢复并行门禁
     'eval-ops-console.spec.ts',
+    // 收割链路 UI（add-factor-harvest-ui T8）迁入 playwright.harvest.config.ts 专属套件
+    // （端口对 8007/5180）：它需要一份监控快照 fixture，而本套件里那份
+    // FACTOR_RESEARCH_STATUS_PATH 归 factor-research-monitor.spec.ts 写/删——两文件并行时
+    // 收割用例过不过取决于调度时序（单跑本 config 必红，随套件跑靠 race 偶过）。
+    // 详见该 config 头部说明。
+    'factor-harvest-ui.spec.ts',
+    // 快速模式系统操作（add-quick-mode-operator）依赖后端 STUB_SCENARIO=operator 的
+    // 工具调用场景（start_stock_analysis / get_daily_ops_status）；默认套件无该场景，
+    // 模型只会给普通文本答复，工具横幅断言必红（CI run 39922401849 实证）。
+    // 由 playwright.operator.config.ts（端口对 8006/5179 + 独立 test-e2e-operator-* 库）运行。
+    'quick-operator.spec.ts',
   ],
   timeout: 30_000,
   expect: { timeout: 5_000 },
@@ -110,12 +121,18 @@ export default defineConfig({
       // （delta add-factor-research-selfheal：心跳 fixture 也不得落生产 launcher.json）
       // CONFIG_PATH 同纪律（delta add-factor-research-settings：节奏配置 fixture 也不得落
       // 生产 pipeline.json）
+      // FACTOR_RESEARCH_HARVEST_STATE_PATH / _CANDIDATES_PATH / _HEARTBEAT_PATH 同纪律
+      // （add-factor-harvest-ui T8）：收割数据面 fixture 不得落生产 data/factor_research/。
+      // data/ 不入库 → CI 全新检出没有这些文件 → 端点 available=false → 数据形态用例恒 skip，
+      // E2E 侧抓不到「完成态不渲染进度条」回归；隔离后由 spec 自己写真实 fixture 文件。
       // REGIME_DB_PATH 同理（delta add-crowding-regime-positioning T8）：市场温度计 E2E 的
       // seed/regime_reset 会清 regime_daily 全表，绝不能落到开发库 data/regime.db
       // EVENTS_DB_PATH 同理（delta add-event-driven-lane T8）：事件观察区块 E2E 的
       // seed/events_reset 会清事件线四表，绝不能落到开发库 data/events.db
+      // ANALYSIS_CONCURRENCY_PATH 同理（delta add-analysis-concurrency-setting）：并发
+      // 设置 E2E 会真写设置文件，绝不能落到生产 data/settings/analysis_concurrency.json
       command: 'uv run uvicorn finance_agent.api:app --port 8000',
-      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', RESEARCH_REPORTS_DB_PATH: 'data/test-e2e-research-reports.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', REGIME_DB_PATH: 'data/test-e2e-regime.db', EVENTS_DB_PATH: 'data/test-e2e-events.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json', FACTOR_RESEARCH_LAUNCHER_PATH: 'data/test-e2e-factor-research-launcher.json', FACTOR_RESEARCH_CONFIG_PATH: 'data/test-e2e-factor-research-pipeline.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
+      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', RESEARCH_REPORTS_DB_PATH: 'data/test-e2e-research-reports.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', REGIME_DB_PATH: 'data/test-e2e-regime.db', EVENTS_DB_PATH: 'data/test-e2e-events.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json', FACTOR_RESEARCH_LAUNCHER_PATH: 'data/test-e2e-factor-research-launcher.json', FACTOR_RESEARCH_CONFIG_PATH: 'data/test-e2e-factor-research-pipeline.json', FACTOR_RESEARCH_DISTRO_PROBE_PATH: 'data/test-e2e-factor-research-distro-probe.json', FACTOR_RESEARCH_HARVEST_STATE_PATH: 'data/test-e2e-factor-research-harvest-state.json', FACTOR_RESEARCH_CANDIDATES_PATH: 'data/test-e2e-factor-research-candidates.json', FACTOR_RESEARCH_HEARTBEAT_PATH: 'data/test-e2e-factor-research-heartbeat.json', ANALYSIS_CONCURRENCY_PATH: 'data/test-e2e-analysis-concurrency.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
       url: 'http://localhost:8000/api/health',
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,

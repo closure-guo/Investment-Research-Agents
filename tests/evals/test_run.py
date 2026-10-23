@@ -109,6 +109,36 @@ class TestMeanRows:
         assert means["b"] == 4.0  # None 不计入均值
         assert means["judge_failures"] == 1
 
+    def test_mean_rows_confidence_distribution(self):
+        """calibrate-decision-confidence：分布统计只观测，不改 scores。"""
+        rows = [
+            {
+                "scores": {},
+                "judge_failures": 0,
+                "decision": {"action": "watch", "confidence": 0.85},
+            },
+            {
+                "scores": {},
+                "judge_failures": 0,
+                "decision": {"action": "watch", "confidence": 0.55},
+            },
+            {"scores": {}, "judge_failures": 0, "decision": {"action": "sell", "confidence": 0.55}},
+            {"scores": {}, "judge_failures": 0, "decision": {"action": "watch", "confidence": 0.3}},
+            {
+                "scores": {},
+                "judge_failures": 0,
+                "decision": {"action": "watch", "confidence": None},
+            },
+            {"scores": {}, "judge_failures": 0, "skipped": "意图澄清"},
+        ]
+        means = _mean_rows(rows)
+        assert means["confidence_n"] == 4
+        assert means["confidence_median"] == 0.55
+        assert means["confidence_ge_070_rate"] == 0.25
+        assert means["confidence_lt_040_rate"] == 0.25
+        assert means["confidence_hist"] == {"0.3": 1, "0.5": 2, "0.8": 1}
+        assert "a" not in means
+
 
 class TestJudgeFailureCategorical:
     """#54 观测层修复的配套语义：行侧 scores 只收数值、judge_failures 数

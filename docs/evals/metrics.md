@@ -456,6 +456,27 @@ positioning/sentiment 取方向符号 × 置信度；`direction=neutral|unknown`
 **统一视图**：`GET /api/v1/ops/research/scorecards` 返回 `{domestic, foreign}` 两块；
 任一块为空显式 `status=empty`。两套分数均为只读观测，MUST NOT 进入分析师上下文或决策路径。
 
+### 1.20 决策 confidence 分布（delta `calibrate-decision-confidence`，2026-10-22 登记）
+
+**口径**：每次 hosted 实验从 `final_trade_decision` 取 `action` 与 `confidence`（缺失不计入），
+在产物 JSON 的 `means` 中登记：
+
+| 字段 | 口径 |
+|---|---|
+| `confidence_n` | 有值的决策条数（skipped / 无终稿不计） |
+| `confidence_median` | 中位数（偶数取中间两值均值） |
+| `confidence_ge_070_rate` | `confidence ≥ 0.70` 占比（高置信尾部） |
+| `confidence_lt_040_rate` | `confidence < 0.40` 占比（低置信尾部） |
+| `confidence_hist` | 按 0.1 分桶计数（键为下界，`0.5` 含 [0.5,0.6)） |
+
+**定位**：校准观测，MUST NOT 作为 judge 维度或新增 Langfuse Score；judge 四维只作健康检查，
+成败判据是**分布形状**（尾部占比与 action 分桶），不比较单条数值。跨 prompt 版本比较时须声明
+口径切点（2026-10-22 起三决策节点 prompt 改为三档判据 + 示例 0.85/0.55/0.30）。
+
+**首轮读数（2026-10-22，round15 单变量）**：n=9，median 0.55，`hist={0.5: 9}`，`≥0.7` 0%、
+`<0.4` 0%；action 9/9 watch。三档 prompt 校准**未移动分布**（假设证伪），机制归因为决策策略
+均衡带 + 样本构成，下一轮候选见 `tests/validation/2026-10-22-calibrate-decision-confidence-validation.md`。
+
 ---
 
 ## 2. 时间线（每轮一行，收口时追加）
@@ -515,6 +536,8 @@ positioning/sentiment 取方向符号 × 置信度；`direction=neutral|unknown`
 | r8 09-13 21:32Z | cdca5b1+027+v7 | 基线重建轮（三变量：v7 rubric / 派生指标喂回 / 027 价位校验回路激活）；dg 3.56 系 v7 归属+解读失当扣分生效（契约抽验 4 条低分全中 v7 规则）；blocked 4/9 | 5.0 | 4.22 | 3.56 | 4.89 | 0.556（blocked 4/9） | 0.835 | 4/9｜1.22/条｜5.33/条 | 0 |
 | r9 09-14 00:37Z | afd9d1f+v8 | 混合变量轮（材料升级：consistency 补 Trader 方案节 + debate 收敛骨架行；rubric v8 三版本两判例）；审计：dg 归属扣分全为真错安（判例无误放）、Trader→RJ 静默推翻核对首次可判、debate 5 分档仍漏判 ≥3 行（v9 候选：强制枚举）；blocked 6/9 | 5.0 | 4.67 | 3.44 | 4.67 | 0.333（blocked 6/9） | 0.843 | 6/9｜1.44/条｜6.33/条 | 0 |
 | r13 09-23 02:02Z | 356feb4（三 delta 合入后） | **新口径首轮**：K=3 均值 + quick 停评 + relevance v4（跨 09-22 两切点，绝对分不与 r1–r9 直接比较）；生产栈含 bear 锚点 prompt/v28 契约/赔率自检；**blocked 9/9 + 真错 4.0/条为系列新高，待分桶归因不处置** | 5.0 | 4.0 | 3.52 | 4.78 | 0.0（blocked 9/9） | 0.786 | 9/9｜4.0/条｜7.44/条 | 0 |
+| r14 10-22 07:34Z | 124102c3+工作区（trader prompt v34） | **跨版本轮（非单变量）**：trader prompt 由未合并分支 v33 切回 main v34（incident 048）+ 东财封禁/AKShare 全程连接失败（数据链降级）+ 新增 provider fallback 未触发；relevance 首次跌破 5（4.556）、dg 回升 4.37、citation 真错与归一同步 ×3（12.0/条、22.2/条）**待分桶归因不处置** | 4.556 | 4.111 | 4.370 | 4.815 | 0.0（blocked 9/9） | 0.911 | 9/9｜12.0/条｜22.2/条 | 0 |
+| r15 10-22 09:36Z | 124102c3+工作区（confidence 三档） | **单变量轮**：三决策节点 confidence 段改三档判据+示例（trader/risk_judge v35、FM v32）；**阴性**：confidence 仍 9/9 落 0.5–0.58（≥0.7 0%、<0.4 0%、9/9 watch），judge 四维同量级；机制归因均衡带+样本构成，不再叠加 prompt 补丁 | 4.778 | 4.185 | 4.296 | 4.741 | 0.0（blocked 9/9） | 0.901 | 9/9｜17.1/条｜23.3/条 | 0 |
 
 人工校准：round8 盲标环节改为**维护者代裁**（owner 拒绝再投入标注时间；非盲审计口径，不能当独立 MAE）——41 行逐条核对：36 行一致、5 行分歧全部 ±1 档且方向均为 judge 偏严/规则执行不一致、无虚高，维护者口径 MAE 0.122 / 方向一致率 100%。**judge 自 round7 起可用结论维持**；两条 v8 候选改动见下方待决策。详见 [2026-09-13-round8-维护者代裁报告.md](2026-09-13-round8-维护者代裁报告.md)。
 ## 2.2 round8 预登记（基线重建轮，2026-09-13 启动）

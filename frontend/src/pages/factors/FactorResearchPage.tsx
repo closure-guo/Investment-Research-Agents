@@ -16,6 +16,7 @@ import {
   controlErrorMessage,
   deriveControlView,
   fetchFactorResearchStatus,
+  fetchHarvestChain,
   formatDurationS,
   submitFactorResearchControl,
   submitFactorResearchRestart,
@@ -24,6 +25,7 @@ import type {
   FactorResearchCurrentSession,
   FactorResearchSession,
   FactorResearchStatusResponse,
+  HarvestChainResponse,
 } from '../../types'
 
 /**
@@ -63,6 +65,52 @@ function stepLabel(name: string | null): string {
   return STEP_LABELS[name] ?? name
 }
 
+/** 五道闸名称（收割漏斗用；与后端 gate 编号一致）。 */
+const GATE_LABELS: Record<string, string> = {
+  '0': '结构重复',
+  '1': '覆盖率',
+  '2': 'ICIR',
+  '3': 'FDR',
+  '4': '池冗余',
+  '5': '样本外',
+}
+
+/** 批内阶段（心跳 phase → 中文）。 */
+const PHASE_LABELS: Record<string, string> = {
+  transcribe: '转译中',
+  gate: '过闸中',
+  done: '整批收尾',
+}
+
+function pctText(part: number, whole: number): string {
+  if (whole <= 0) return '—'
+  return `${Math.round((part / whole) * 100)}%`
+}
+
+function pct(part: number, whole: number): number {
+  if (whole <= 0) return 0
+  return Math.max(0, Math.min(100, Math.round((part / whole) * 100)))
+}
+
+/**
+ * 下次自动跑的墙钟时刻（收割链路完成态用）。
+ *
+ * 直接取 ISO 串自身的日期/时间片段，不做时区换算——`next_fire_time` 带的就是
+ * 调度时区（Asia/Shanghai）的墙钟，换算到浏览器本地只会引入跨日/偏差歧义。
+ * 缺失时退化为调度块的 `hour:minute`（仍不给具体日期），都没有则 null。
+ */
+function formatNextFire(
+  nextFire: string | null,
+  schedule: { hour: number; minute: number } | null
+): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(nextFire ?? '')
+  if (m) return `${m[2]}-${m[3]} ${m[4]}:${m[5]}`
+  if (schedule) {
+    return `${String(schedule.hour).padStart(2, '0')}:${String(schedule.minute).padStart(2, '0')}`
+  }
+  return null
+}
+
 function progressText(cur: FactorResearchCurrentSession): string {
   const parts: string[] = []
   if (cur.loop_index !== null) parts.push(`循环 ${cur.loop_index + 1}`)
@@ -98,6 +146,11 @@ export function FactorResearchPage({
   const [controlError, setControlError] = useState<string | null>(null)
   // 409 control_unavailable 后的通道封禁（快照刷新成功即恢复；spec「409 时开关禁用」）
   const [channelBlocked, setChannelBlocked] = useState(false)
+  // 收割链路（add-factor-harvest-ui）：独立取数，失败只降级本区块
+  const [harvest, setHarvest] = useState<HarvestChainResponse | null>(null)
+  const [harvestError, setHarvestError] = useState(false)
+  // 批内活性时钟：进度按「批」落盘（约 30 分钟一批），批次数字不变时用秒级时钟证明在跑
+  const [liveNow, setLiveNow] = useState(() => Date.now())
   const timerRef = useRef<number | null>(null)
 
   const load = useCallback(async () => {
@@ -123,6 +176,32 @@ export function FactorResearchPage({
       timerRef.current = null
     }
   }, [load, pollIntervalMs])
+
+  // 收割链路取数排在主快照之后：保证首屏两路请求顺序稳定（主监控优先）且互不影响
+  const loadHarvest = useCallback(async () => {
+    try {
+      setHarvest(await fetchHarvestChain())
+      setHarvestError(false)
+    } catch {
+      // 轮询失败保留旧数据；首屏失败显示区块级错误
+      setHarvestError(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadHarvest()
+    const timer = window.setInterval(() => {
+      void loadHarvest()
+    }, pollIntervalMs)
+    return () => window.clearInterval(timer)
+  }, [loadHarvest, pollIntervalMs])
+
+  const harvestRunning = harvest?.job?.status === 'running'
+  useEffect(() => {
+    if (!harvestRunning) return
+    const timer = window.setInterval(() => setLiveNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [harvestRunning])
 
   // 控制提交：只发布尔期望态（零命令面）；失败如实提示、位置不翻转（不乐观改状态）
   const submitControl = useCallback(
@@ -165,7 +244,42 @@ export function FactorResearchPage({
   const sessions = data?.sessions ?? []
   const totals = data?.totals ?? null
   const stale = data?.stale === true
+  // 僵死披露（delta add-factor-research-stall-detection）：采集正常但会话日志停更。
+  // 未上报（旧采集器）→ stalled=false 且 logAgeS=null，只能表现为「不可判定」。
+  const stalled = data?.progress?.stalled === true
+  const logAgeS = data?.progress?.log_age_seconds ?? null
   const collectedAt = data?.collected_at ? formatSessionTime(data.collected_at) : '—'
+  // distro 探活披露（delta add-factor-research-distro-liveness-probe）：
+  // 仅「快照陈旧 + 探活可用且新鲜 + distro 执行失败」同时成立才判定 distro 不可用；
+  // 未探活（available=false）/ 探活不新鲜（fresh=false）/ 探活成功（ok=true）→ 均不冒充结论。
+  const distroDown =
+    data?.stale === true &&
+    data.distro?.available === true &&
+    data.distro?.fresh === true &&
+    data.distro?.ok === false
+  const distroProbe = distroDown ? (data?.distro ?? null) : null
+  const distroName = distroProbe?.distro ?? null
+  const distroFailures = distroProbe?.consecutive_failures ?? null
+  // 收割台账：后端契约保证数组；防御式兜底避免单次畸形响应拖垮整页
+  const recentAdmitted = harvest?.recent_admitted ?? []
+  const recentRejected = harvest?.recent_rejected ?? []
+  const batchStartedMs = harvest?.progress?.started_at ? Date.parse(harvest.progress.started_at) : null
+  const batchElapsedS =
+    harvestRunning && batchStartedMs !== null && Number.isFinite(batchStartedMs)
+      ? Math.max(0, Math.floor((liveNow - batchStartedMs) / 1000))
+      : null
+  const batchLabel = (harvest?.progress?.batches_done ?? 0) === 0 ? '本批' : '本轮'
+  // 收割口径分流（add-factor-harvest-ui）：运行中展示批次进度 + ETA；已收尾改本轮汇总 +
+  // 队列归属下次自动跑。批次上限 / 外推 ETA 只在运行中有意义——收尾后它们读起来像「没跑完」。
+  const harvestStatus = harvest?.job?.status ?? null
+  const harvestFinished = harvestStatus === 'ok' || harvestStatus === 'failed'
+  const nextFire = formatNextFire(
+    harvest?.job?.next_fire_time ?? null,
+    harvest?.job?.schedule ?? null
+  )
+  const nextRunText = nextFire ? `待下次 ${nextFire} 自动跑` : null
+  const rawInBatch = harvest?.progress?.in_batch ?? null
+  const inBatch = rawInBatch && (rawInBatch.age_s == null || rawInBatch.age_s < 600) ? rawInBatch : null
 
   // 控制面派生（单一共享源：开关位置只取验证过的 actual_state，意图仅作离线披露）
   const view = deriveControlView(data, { submitting, restartSubmitting, channelBlocked })
@@ -395,10 +509,44 @@ export function FactorResearchPage({
                 style={{ background: 'var(--status-warning-default)', color: 'white' }}
               >
                 <i className="fas fa-exclamation-triangle"></i>
-                数据已陈旧（最近采集 {collectedAt}）——采集器可能已停止，以下为最后一次快照
+                {distroDown ? (
+                  <>
+                    数据已陈旧（最近采集 {collectedAt}）——研究侧 distro 探活失败（疑似 WSL
+                    子系统不可用，采集器并未停止），以下为最后一次快照
+                  </>
+                ) : (
+                  <>数据已陈旧（最近采集 {collectedAt}）——采集器可能已停止，以下为最后一次快照</>
+                )}
                 {honor === 'launcher' && launcher?.checked_at != null && (
                   <>；启动器正在按节拍尝试恢复（最近检查 {formatSessionTime(launcher.checked_at)}）</>
                 )}
+              </div>
+            )}
+
+            {/* distro 探活失败披露：只陈述事实与人工恢复动作，不提供可点击处置入口（零命令面） */}
+            {distroDown && (
+              <div
+                data-testid="factor-research-distro-probe-banner"
+                className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs"
+                style={{ background: 'var(--status-danger-default, #b91c1c)', color: 'white' }}
+              >
+                <i className="fas fa-plug-circle-xmark"></i>
+                研究侧 distro{distroName ? `「${distroName}」` : ''} 探活
+                {distroFailures !== null ? `连续 ${distroFailures} 次失败` : '失败'}
+                （最近探活 {formatSessionTime(distroProbe?.probed_at)}）——采集器并未停止；需由人执行
+                wsl --terminate rdagent，下一次节拍会自动重新拉起
+              </div>
+            )}
+
+            {stalled && (
+              <div
+                data-testid="factor-research-stall-banner"
+                className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs"
+                style={{ background: 'var(--status-danger-default, #b91c1c)', color: 'white' }}
+              >
+                <i className="fas fa-exclamation-triangle"></i>
+                当前会话无进展 {formatDurationS(logAgeS)}——进程仍存活但日志已停止更新，
+                看护不会自动重拉；需经「重启管线」由人发起
               </div>
             )}
 
@@ -467,11 +615,21 @@ export function FactorResearchPage({
                   <div data-testid="factor-research-progress" className="text-sm font-medium text-foreground">
                     {progressText(current)}
                   </div>
-                  {(current.step_elapsed_s !== null || current.step_eta_s !== null) && (
-                    <div data-testid="factor-research-step-timing" className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
-                      本步已用 {formatDurationS(current.step_elapsed_s)}
-                      {current.step_eta_s !== null && <> · 预计剩余 {formatDurationS(current.step_eta_s)}</>}
+                  {stalled ? (
+                    <div
+                      data-testid="factor-research-progress-stale"
+                      className="text-xs"
+                      style={{ color: 'var(--text-tertiary)' }}
+                    >
+                      进度读数来自 {formatDurationS(logAgeS)} 前的日志（会话无进展，读数已定格）
                     </div>
+                  ) : (
+                    (current.step_elapsed_s !== null || current.step_eta_s !== null) && (
+                      <div data-testid="factor-research-step-timing" className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                        本步已用 {formatDurationS(current.step_elapsed_s)}
+                        {current.step_eta_s !== null && <> · 预计剩余 {formatDurationS(current.step_eta_s)}</>}
+                      </div>
+                    )
                   )}
                   <div data-testid="factor-research-factors" className="flex flex-wrap items-center gap-1.5">
                     <span className="text-xs" style={{ color: 'var(--text-tertiary)' }}>本会话因子：</span>
@@ -498,6 +656,203 @@ export function FactorResearchPage({
                     >
                       {current.log_tail.join('\n')}
                     </pre>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {/* 收割链路（add-factor-harvest-ui）：实时进度 + 漏斗 + 台账 */}
+            <section
+              data-testid="factor-research-harvest"
+              className="rounded-xl border border-border p-4"
+              style={{ background: 'var(--bg-base-secondary)' }}
+            >
+              <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-medium text-foreground">
+                因子收割链路
+                {harvest?.job?.schedule && (
+                  <span className="font-normal" style={{ color: 'var(--text-tertiary)' }}>
+                    每天 {String(harvest.job.schedule.hour).padStart(2, '0')}:{String(harvest.job.schedule.minute).padStart(2, '0')} 自动跑
+                  </span>
+                )}
+                {harvest?.job?.status && (
+                  <span
+                    data-testid="factor-research-harvest-status"
+                    className="rounded-full border border-border px-2 py-0.5 text-[11px] font-normal"
+                  >
+                    {harvest.job.status === 'running' ? '运行中' : harvest.job.status === 'ok' ? '已完成' : harvest.job.status}
+                  </span>
+                )}
+              </div>
+
+              {harvestError && harvest === null && (
+                <div
+                  data-testid="factor-research-harvest-error"
+                  className="flex items-center gap-2 text-xs"
+                  style={{ color: 'var(--status-error-default)' }}
+                >
+                  收割数据加载失败
+                  <Button variant="ghost" size="sm" onClick={() => { void loadHarvest() }}>
+                    重试
+                  </Button>
+                </div>
+              )}
+
+              {harvest !== null && !harvest.available && (
+                <p data-testid="factor-research-harvest-empty" className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                  收割数据未接入（状态文件缺失或损坏）
+                </p>
+              )}
+
+              {harvest !== null && harvest.available && (
+                <div className="space-y-4">
+                  <div data-testid="factor-research-harvest-progress" className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" style={{ color: 'var(--text-secondary)' }}>
+                      {harvestRunning ? (
+                        <>
+                          <span>批次 {harvest.progress?.batches_done ?? 0}/{harvest.progress?.batch_limit ?? 0}</span>
+                          <span>已处理 {harvest.progress?.processed ?? 0}</span>
+                          <span>剩余 {harvest.progress?.pending ?? 0}</span>
+                          <span>
+                            本轮入库 {harvest.progress?.admitted_in_run ?? 0} · 拒收 {harvest.progress?.rejected_in_run ?? 0}
+                          </span>
+                          {harvest.progress?.eta_s != null && (
+                            <span>预计还需 {formatDurationS(harvest.progress.eta_s)}</span>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          {harvestFinished && (
+                            <span>
+                              本轮 {harvest.progress?.batches_done ?? 0} 批 · 入库 {harvest.progress?.admitted_in_run ?? 0} · 拒收{' '}
+                              {harvest.progress?.rejected_in_run ?? 0}
+                            </span>
+                          )}
+                          <span>已处理 {harvest.progress?.processed ?? 0}</span>
+                          {/* 队列剩余是「下一次运行」的待办，不是本轮尾巴；MUST NOT 配「预计还需」 */}
+                          <span data-testid="factor-research-harvest-queue">
+                            队列剩余 {harvest.progress?.pending ?? 0}
+                            {nextRunText ? ` · ${nextRunText}` : ''}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    {harvestRunning && batchElapsedS !== null && (
+                      <div
+                        data-testid="factor-research-harvest-live"
+                        className="inline-flex items-center gap-1.5 text-xs"
+                        style={{ color: 'var(--status-success-default)' }}
+                      >
+                        <span
+                          className="inline-block h-1.5 w-1.5 animate-pulse rounded-full"
+                          style={{ background: 'currentColor' }}
+                        />
+                        {inBatch ? (
+                          <>
+                            本批 {inBatch.processed_in_batch}/{inBatch.total_in_batch} ·{' '}
+                            {PHASE_LABELS[inBatch.phase] ?? inBatch.phase} · 已 {formatDurationS(batchElapsedS)}
+                          </>
+                        ) : (
+                          <>
+                            {batchLabel}进行中 · 已 {formatDurationS(batchElapsedS)}（进度按批落盘）
+                          </>
+                        )}
+                      </div>
+                    )}
+                    {/* 队列消化进度条只在运行中渲染：候选文件由 RD-Agent 持续追加，
+                        `processed / candidates` 是全局消化率而非单轮完成度——收尾后新候选入场
+                        会让它回落，配「已完成」徽标只会读成「没跑完」（同 T7 去掉 /batch_limit
+                        分母的判据）。收尾态的未消化读数由「已处理 N」+「队列剩余 M」如实承担。 */}
+                    {harvestRunning && (
+                      <div className="h-2 w-full overflow-hidden rounded-full" style={{ background: 'var(--bg-overlay-l1)' }}>
+                        <div
+                          data-testid="factor-research-harvest-bar"
+                          className="h-full rounded-full transition-all"
+                          style={{
+                            width: `${pct(harvest.progress?.processed ?? 0, harvest.funnel?.candidates ?? 0)}%`,
+                            background: 'var(--status-success-default)',
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  <div data-testid="factor-research-harvest-funnel" className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                    {[
+                      { key: 'candidates', label: '候选', value: harvest.funnel?.candidates ?? 0 },
+                      { key: 'processed', label: '已处理', value: harvest.funnel?.processed ?? 0 },
+                      { key: 'gates', label: '到闸', value: harvest.funnel?.reached_gates ?? 0 },
+                      { key: 'admitted', label: '入库', value: harvest.funnel?.admitted ?? 0 },
+                    ].map((item) => (
+                      <div
+                        key={item.key}
+                        data-testid={`factor-research-harvest-step-${item.key}`}
+                        className="rounded-lg border border-border px-3 py-2"
+                        style={{ background: 'var(--bg-overlay-l1)' }}
+                      >
+                        <div className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>{item.label}</div>
+                        <div className="text-lg font-semibold text-foreground">{item.value}</div>
+                        <div className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+                          {pctText(item.value, harvest.funnel?.candidates ?? 0)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div
+                    data-testid="factor-research-harvest-gates"
+                    className="flex flex-wrap items-center gap-2 text-[11px]"
+                    style={{ color: 'var(--text-tertiary)' }}
+                  >
+                    拒收分布：
+                    {Object.entries(harvest.funnel?.rejected_by_gate ?? {}).map(([gate, count]) => (
+                      <span key={gate} className="rounded-full border border-border px-2 py-0.5">
+                        {GATE_LABELS[gate] ?? `闸${gate}`} {count}
+                      </span>
+                    ))}
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div data-testid="factor-research-harvest-admitted">
+                      <div className="mb-1 text-xs font-medium text-foreground">最近入库</div>
+                      {recentAdmitted.length === 0 ? (
+                        <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>暂无</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {recentAdmitted.map((item) => (
+                            <li key={item.factor_id} className="flex items-center justify-between gap-2 text-[11px]">
+                              <code className="truncate font-mono" style={{ color: 'var(--text-secondary)' }} title={item.expression ?? ''}>
+                                {item.expression}
+                              </code>
+                              <span className="shrink-0" style={{ color: 'var(--text-tertiary)' }}>
+                                ICIR {item.icir_60d.toFixed(3)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                    <div data-testid="factor-research-harvest-rejected">
+                      <div className="mb-1 text-xs font-medium text-foreground">最近拒收</div>
+                      {recentRejected.length === 0 ? (
+                        <p className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>暂无</p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {recentRejected.map((item, index) => (
+                            <li
+                              key={`${item.expression}-${index}`}
+                              className="flex items-center justify-between gap-2 text-[11px]"
+                            >
+                              <code className="truncate font-mono" style={{ color: 'var(--text-secondary)' }} title={item.expression ?? ''}>
+                                {item.expression}
+                              </code>
+                              <span className="shrink-0" style={{ color: 'var(--text-tertiary)' }}>
+                                {item.gate != null ? (GATE_LABELS[String(item.gate)] ?? `闸${item.gate}`) : '转译'} {item.reason ?? ''}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}

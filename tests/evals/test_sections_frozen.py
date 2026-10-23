@@ -40,7 +40,9 @@ class TestFrozen:
 
     def test_prompt_report_section_words_covered(self):
         """prompt 中「## X分析」形态的章节词应被词典覆盖（allowlist 放行已知例外）。"""
-        allowlist = {"分析要点", "分析方法论"}
+        # quick_mode「股票深度分析」是操作模式标题（深度分析 vs 只读查询），
+        # 不是报告正文章节——与「分析要点/方法论」同性质，放行
+        allowlist = {"分析要点", "分析方法论", "股票深度分析"}
         uncovered = []
         for md in Path("src/finance_agent/prompts").glob("*.md"):
             text = md.read_text(encoding="utf-8")

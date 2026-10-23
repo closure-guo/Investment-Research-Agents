@@ -1,0 +1,48 @@
+{
+  "generated_at": "2026-10-22T14:05:00+08:00",
+  "method": "ground truth = 140 processed candidates with DSL, canonicalized (epsilon<1e-6->0, add/mul operand sort, exact duplicates only); heuristics evaluated pair-wise",
+  "ground_truth": {
+    "rows_with_dsl": 140,
+    "unique_canonical_expressions": 83,
+    "duplicate_rows": 57,
+    "duplicate_pairs": 101,
+    "note": "代数等价但写法不同的对（如 1-x 与 0-(x-1)）未被归一，57 是重复量下界"
+  },
+  "c1_description_jaccard": {
+    "thresholds_tested": [0.75, 0.8, 0.85, 0.9, 0.95],
+    "best_f1": 0.019,
+    "best_threshold": 0.9,
+    "true_pairs_hit": 1,
+    "recall": 0.01,
+    "backlog": 463,
+    "dup_of_processed": 0,
+    "internal_dup": 2,
+    "reclaimable": 2,
+    "reclaimable_pct": 0.4
+  },
+  "c2_signature_family_windows_fields": {
+    "predicted_pairs": 64,
+    "true_pairs": 101,
+    "true_positives": 44,
+    "precision": 0.688,
+    "recall": 0.436,
+    "backlog_sig_match_processed": 147,
+    "backlog_internal_sig_dup": 37,
+    "reclaimable_upper_bound": 184,
+    "reclaimable_pct": 39.7,
+    "false_positive_examples": [
+      "IntradayRet1 div(sub(close,open),open) <-> Gap1 sub(div(open,ref(close,1)),1)",
+      "overnight_ret_5d ts_mean(sub(div(open,ref(close,1)),1),5) <-> intraday_ret_5d ts_mean(sub(div(close,open),1),5)"
+    ],
+    "note": "部分误伤实为代数等价（1-x vs 0-(x-1)），真实精度高于 0.688，但仍不足以安全自动删"
+  },
+  "c3_dsl_level_post_translation": {
+    "gate_calls": 140,
+    "unique_expressions": 83,
+    "wasted_gate_calls": 57,
+    "wasted_pct": 41,
+    "llm_slots_saved": 0,
+    "note": "转译后去重只省闸门算力与账本噪声，不省每日 60 个 LLM 转译名额"
+  },
+  "conclusion": "候选级去重不可安全自动化；转译后 DSL 去重安全但只治标；重复的根源在生成侧缺少已探索因子记忆"
+}

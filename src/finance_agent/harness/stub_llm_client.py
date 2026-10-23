@@ -73,6 +73,8 @@ class StubLLMClient:
         self.scenario = scenario
         # ReAct 轮次计数：tool_call 场景下区分第 1 轮（思考1+tool_call）与第 2 轮（思考2+回答）
         self._round = 0
+        # operator 场景选中的工具（第 1 轮决定，第 2 轮据此给固定回答）
+        self._operator_tool = ""
 
     async def chat_stream(
         self,
@@ -92,6 +94,60 @@ class StubLLMClient:
         # LLM 失败场景：raise 异常，模拟 LLM 调用失败（harden-react-path-resilience）
         if self.scenario == "llm_failure":
             raise RuntimeError("STUB LLM 模拟失败")
+
+        # operator 场景：快速模式系统操作，用于 E2E 验证
+        # 「工具横幅 + 回执/查询结果」链路。按最后一条用户消息选择工具：
+        # 含「日批」→ get_daily_ops_status；其余 → start_stock_analysis。
+        if self.scenario == "operator" and self._round == 1:
+            last_user = next(
+                (
+                    str(message.get("content") or "")
+                    for message in reversed(messages)
+                    if message.get("role") == "user"
+                ),
+                "",
+            )
+            if "日批" in last_user:
+                self._operator_tool = "get_daily_ops_status"
+                yield LLMResponse(reasoning_delta="用户询问日批状态，先读取调度器与任务状态。")
+                yield LLMResponse(
+                    tool_calls=[
+                        ToolCallRequest(
+                            id="stub_operator_ops_1",
+                            name="get_daily_ops_status",
+                            arguments={},
+                        )
+                    ],
+                    is_finished=True,
+                )
+                return
+            self._operator_tool = "start_stock_analysis"
+            yield LLMResponse(reasoning_delta="用户要求分析 600519，先派单到独立分析会话。")
+            yield LLMResponse(
+                tool_calls=[
+                    ToolCallRequest(
+                        id="stub_operator_1",
+                        name="start_stock_analysis",
+                        arguments={"stock_code": "600519", "stock_name": "贵州茅台"},
+                    )
+                ],
+                is_finished=True,
+            )
+            return
+
+        if self.scenario == "operator" and self._round >= 2:
+            if self._operator_tool == "get_daily_ops_status":
+                yield LLMResponse(reasoning_delta="日批状态已读取，向用户摘要。")
+                yield LLMResponse(text_delta="日批状态已读取（测试场景）。")
+                yield LLMResponse(is_finished=True)
+                return
+            yield LLMResponse(reasoning_delta="派单完成，复述回执给用户。")
+            yield LLMResponse(
+                text_delta="已启动贵州茅台(600519)的深度分析，任务号见回执。"
+                "请在左侧会话列表点进去查看进度。"
+            )
+            yield LLMResponse(is_finished=True)
+            return
 
         # pipeline 场景：深度分析完整链路 search_stock -> run_deep_analysis -> 回答
         if self.scenario == "pipeline" and self._round == 1:

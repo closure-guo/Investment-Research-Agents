@@ -69,6 +69,12 @@ export default defineConfig({
         FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json',
         FACTOR_RESEARCH_LAUNCHER_PATH: 'data/test-e2e-factor-research-launcher.json',
         FACTOR_RESEARCH_CONFIG_PATH: 'data/test-e2e-factor-research-pipeline.json',
+        // distro 探活文件（delta add-factor-research-distro-liveness-probe）：隔离配置同样
+        // 不得读生产 data/factor_research/distro_probe.json（启动器会周期刷新它）
+        FACTOR_RESEARCH_DISTRO_PROBE_PATH: 'data/test-e2e-factor-research-distro-probe.json',
+        // 并发设置文件（delta add-analysis-concurrency-setting：隔离配置同样不得读写
+        // 生产 data/settings/analysis_concurrency.json）
+        ANALYSIS_CONCURRENCY_PATH: 'data/test-e2e-analysis-concurrency.json',
         // 隔离报告落盘目录，避免 E2E 副作用污染 reports/
         REPORTS_DIR: 'tmp/e2e-reports-8001',
       },

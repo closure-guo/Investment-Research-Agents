@@ -770,6 +770,26 @@ def coverage_status(
     }
 
 
+def list_industry_reports(*, limit: int = 5000, db_path: str | Path | None = None) -> list[dict]:
+    """行业研报元数据（`report_type='industry'`），按发布日期降序。
+
+    行业名归一与时间窗口过滤在读取层（`research_reports.get_industry_digest`）做：
+    库内存的是原始名（如「白酒Ⅱ」），归一规则必须与消费端一致，不在 SQL 里重复实现。
+    """
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT report_key, title, org, analyst, publish_date, industry, depth_class"
+            " FROM research_reports WHERE report_type='industry'"
+            " ORDER BY publish_date DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
+
 def get_consensus(code: str, db_path: str | Path | None = None) -> dict:
     """一致预期三态：covered / no_coverage / missing（数据面尚未跑过快照）。"""
     init_db(db_path)

@@ -1,9 +1,9 @@
 """批量深度分析队列（add-screening-pipeline T3；S3 逐字）。
 
-进程内队列（单 worker 前提同 StreamRegistry）：并发上限默认 2
-（``SCREENING_ANALYZE_CONCURRENCY`` 可配置），超出部分排队；**补位者才真正启动**
-（并发上限因而约束真实在跑的分析数，而非仅标签）：每个补位条目经 ``starter``
-回调启动后台管线，随后由 ``session_store.get_session`` 状态轮询至终态
+进程内队列（单 worker 前提同 StreamRegistry）：并发上限默认 10
+（设置中心可改，env ``SCREENING_ANALYZE_CONCURRENCY`` 为回退），超出部分排队；
+**补位者才真正启动**（并发上限因而约束真实在跑的分析数，而非仅标签）：每个补位条目经
+``starter`` 回调启动后台管线，随后由 ``session_store.get_session`` 状态轮询至终态
 （``completed``/``failed``/``interrupted``）后自动补位下一个（FIFO）。
 
 纪律：本模块只调度会话，不碰 SSE——每个 session 的进度经既有 journal/subscribe
@@ -21,11 +21,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from finance_agent import session_store
+from finance_agent.analysis_concurrency import DEFAULT_MAX_CONCURRENCY
 
 _logger = logging.getLogger("finance_agent.screening.queue")
 
-# 并发上限默认（Global Constraints：默认 2；env SCREENING_ANALYZE_CONCURRENCY 可配置）
-DEFAULT_MAX_CONCURRENCY = 2
+# 并发上限默认值由设置模块单一来源提供（delta add-analysis-concurrency-setting：
+# 默认 10，设置中心可改；env SCREENING_ANALYZE_CONCURRENCY 为未保存时的回退）。
 
 # 终态判定沿用 session status 语义（S3；其余状态视为仍在进行）
 TERMINAL_STATES = frozenset({"completed", "failed", "interrupted"})
@@ -80,6 +81,13 @@ class AnalyzeQueue:
     @property
     def max_concurrency(self) -> int:
         return self._max_concurrency
+
+    def set_max_concurrency(self, value: int) -> None:
+        """运行期调整并发上限：提高 → 立即补位；降低 → 只约束后续补位，绝不终止运行中。"""
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"max_concurrency 必须是正整数: {value!r}")
+        self._max_concurrency = value
+        self._promote()
 
     def enqueue(self, symbol: str, session_id: str) -> None:
         """入队并尽量补位（补位者经 ``starter`` 真启动 + 建后台轮询任务）。

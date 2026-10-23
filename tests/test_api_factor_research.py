@@ -60,6 +60,14 @@ def _config_path(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def _distro_probe_path(tmp_path, monkeypatch):
+    """distro 探活文件路径指向 tmp（调用期读 env；delta add-factor-research-distro-liveness-probe）。"""
+    path = tmp_path / "distro_probe.json"
+    monkeypatch.setenv("FACTOR_RESEARCH_DISTRO_PROBE_PATH", str(path))
+    return path
+
+
 _NO_CONTROL = {
     "desired_running": None,
     "requested_at": None,
@@ -72,6 +80,10 @@ _NO_CONTROL = {
     "restart_pending": False,
 }
 _NO_LAUNCHER = {"available": False, "reason": "missing"}
+# 快照不可用/未上报时的派生块（spec「会话进度僵死派生」：实态不可证 → 不判僵死）。
+_NO_PROGRESS = {"log_age_seconds": None, "stalled": False}
+# distro 探活文件缺失/不可解析时的派生块（spec「distro 探活只读派生」：MUST NOT 伪结论）。
+_NO_DISTRO = {"available": False, "reason": "missing"}
 _DEFAULT_CONFIG_VALUES = {
     "snapshot_interval_s": 15,
     "session_gap_s": 60,
@@ -132,6 +144,22 @@ def _launcher(age_s: int = 40, agent_ok: bool = True) -> dict:
     }
 
 
+def _distro_probe(age_s: int = 40, ok: bool = False, consecutive_failures: int = 3) -> dict:
+    """distro 探活文件 fixture（形状与启动器节拍探活契约一致）。"""
+    epoch = int(time.time() - age_s)
+    return {
+        "probed_at": datetime.fromtimestamp(epoch, tz=_TZ).isoformat(),
+        "probed_at_epoch": epoch,
+        "distro": "rdagent",
+        "ok": ok,
+        "exit_code": 0 if ok else 1,
+        "detail": None if ok else "wsl relay timeout",
+        "consecutive_failures": consecutive_failures,
+        "terminated_at": None,
+        "terminate_count": 0,
+    }
+
+
 def test_missing_file_reports_missing():
     """文件缺失 → 200 + available=false + reason=missing（第一档「未接入」状态）。"""
     resp = TestClient(app).get(_ENDPOINT)
@@ -143,6 +171,8 @@ def test_missing_file_reports_missing():
         "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
+        "progress": _NO_PROGRESS,
+        "distro": _NO_DISTRO,
     }
 
 
@@ -157,6 +187,8 @@ def test_corrupt_text_reports_corrupt(_status_path):
         "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
+        "progress": _NO_PROGRESS,
+        "distro": _NO_DISTRO,
     }
 
 
@@ -169,6 +201,8 @@ def test_non_object_json_reports_corrupt(_status_path):
         "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
+        "progress": _NO_PROGRESS,
+        "distro": _NO_DISTRO,
     }
 
 
@@ -182,6 +216,8 @@ def test_missing_timestamp_reports_corrupt(_status_path):
         "config": _NO_CONFIG,
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
+        "progress": _NO_PROGRESS,
+        "distro": _NO_DISTRO,
     }
 
 
@@ -766,3 +802,349 @@ def test_config_path_read_at_call_time(tmp_path, monkeypatch):
     monkeypatch.setenv("FACTOR_RESEARCH_CONFIG_PATH", str(second))
     client.put(_CONFIG_ENDPOINT, json={"snapshot_interval_s": 40})
     assert second.exists()
+
+
+# ── progress 派生块（delta add-factor-research-stall-detection；spec「会话进度僵死派生」）──
+#
+# 阈值单源 FACTOR_RESEARCH_STALL_AFTER_S=900（历史 14 会话实测最大静默 602s 的 1.5 倍）。
+# stalled 四条件同时成立：快照可用且非陈旧 + 看护运行中 + 会话存活 + 静默超阈值。
+
+
+class TestProgressStall:
+    """`GET /status` 顶层 progress 派生块：静默超阈值才判僵死，缺一为 false。"""
+
+    def test_log_age_over_threshold_stalled(self, _status_path):
+        """静默 3600s（超阈值）→ stalled=true，且逐字回报 log_age_seconds。"""
+        snap = _snapshot(age_s=40)
+        snap["current_session"]["log_age_s"] = 3600
+        _status_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["progress"] == {"log_age_seconds": 3600, "stalled": True}
+
+    def test_log_age_at_history_upper_bound_not_stalled(self, _status_path):
+        """实测静默上界 602s 在阈值内 → 不告警（阈值 900，严格大于才判僵死）。"""
+        snap = _snapshot(age_s=40)
+        snap["current_session"]["log_age_s"] = 602
+        _status_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["progress"] == {"log_age_seconds": 602, "stalled": False}
+
+    def test_supervisor_not_running_not_stalled(self, _status_path):
+        """看护未运行（日志本就不更新）≠ 会话僵死 → stalled=false。"""
+        snap = _snapshot(age_s=40)
+        snap["supervisor"] = {"running": False, "pid": None, "started_at": None}
+        snap["current_session"]["log_age_s"] = 99999
+        _status_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["progress"] == {"log_age_seconds": 99999, "stalled": False}
+
+    def test_session_not_alive_not_stalled(self, _status_path):
+        """会话非存活（正常会话间隔）→ stalled=false。"""
+        snap = _snapshot(age_s=40)
+        snap["current_session"]["alive"] = False
+        snap["current_session"]["log_age_s"] = 99999
+        _status_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["progress"] == {"log_age_seconds": 99999, "stalled": False}
+
+    def test_old_collector_without_log_age_reports_null(self, _status_path):
+        """旧采集器不报 log_age_s → log_age_seconds=null 且不判僵死（未上报 ≠ 进度正常）。"""
+        snap = _snapshot(age_s=40)
+        snap["current_session"].pop("log_age_s", None)
+        _status_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["available"] is True
+        assert body["progress"] == {"log_age_seconds": None, "stalled": False}
+
+    def test_snapshot_missing_still_returns_progress(self, _status_path):
+        """快照缺失 → available=false，progress 仍须返回（实态不可证时 MUST NOT 报僵死）。"""
+        assert not _status_path.exists()
+
+        body = TestClient(app).get(_ENDPOINT).json()
+
+        assert body["available"] is False
+        assert body["progress"] == {"log_age_seconds": None, "stalled": False}
+
+
+# ── distro 探活派生块（delta add-factor-research-distro-liveness-probe；
+#    spec「distro 探活只读派生」）──
+#
+# 阈值单源 FACTOR_RESEARCH_DISTRO_PROBE_FRESH_AFTER_S=300（2× 启动器节拍 120s + 余量）。
+# 只读披露：探活块 MUST NOT 改变 actual_state / control.honor，端点零副作用。
+
+
+class TestDistroProbe:
+    """`GET /status` 顶层 distro 派生块：透传 + available/age_seconds/fresh，零状态影响。"""
+
+    def test_probe_passthrough_derived_without_state_impact(self, _status_path, _distro_probe_path):
+        """探活合法且新鲜 + ok=false → 如实透传，且 actual_state / control.honor 不变。"""
+        _status_path.write_text(json.dumps(_snapshot(age_s=40)), encoding="utf-8")
+        client = TestClient(app)
+        # 不带探活文件时的基线（实态与受理判定）
+        baseline = client.get(_ENDPOINT).json()
+        assert not _distro_probe_path.exists()
+
+        probe = _distro_probe(age_s=40)
+        _distro_probe_path.write_text(json.dumps(probe), encoding="utf-8")
+        body = client.get(_ENDPOINT).json()
+
+        distro = body["distro"]
+        assert distro["available"] is True
+        assert 38 <= distro["age_seconds"] <= 45
+        assert distro["fresh"] is True
+        assert distro["ok"] is False
+        assert distro["consecutive_failures"] == 3
+        # 原始字段逐字透传（不是重造）
+        for key in (
+            "probed_at",
+            "probed_at_epoch",
+            "distro",
+            "exit_code",
+            "detail",
+            "consecutive_failures",
+            "terminated_at",
+            "terminate_count",
+        ):
+            assert distro[key] == probe[key]
+        # 只读披露：distro.ok=false MUST NOT 改变实态与受理判定
+        assert body["actual_state"] == baseline["actual_state"]
+        assert body["control"]["honor"] == baseline["control"]["honor"]
+
+    def test_probe_missing_reports_missing(self, _status_path, _distro_probe_path):
+        """探活文件不存在 → available=false + reason=missing（如实不伪结论）。"""
+        _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+        assert not _distro_probe_path.exists()
+
+        assert TestClient(app).get(_ENDPOINT).json()["distro"] == _NO_DISTRO
+
+    def test_probe_corrupt_reports_corrupt(self, _status_path, _distro_probe_path):
+        """探活文件内容非合法 JSON → available=false + reason=corrupt。"""
+        _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+        _distro_probe_path.write_text("not json at all", encoding="utf-8")
+
+        assert TestClient(app).get(_ENDPOINT).json()["distro"] == {
+            "available": False,
+            "reason": "corrupt",
+        }
+
+    def test_probe_stale_not_fresh(self, _status_path, _distro_probe_path):
+        """探活距请求 900 秒 → available=true 但 fresh=false（陈旧不冒充结论）。"""
+        _status_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+        _distro_probe_path.write_text(json.dumps(_distro_probe(age_s=900)), encoding="utf-8")
+
+        distro = TestClient(app).get(_ENDPOINT).json()["distro"]
+
+        assert distro["available"] is True
+        assert distro["fresh"] is False
+        assert 900 <= distro["age_seconds"] <= 905
+
+
+class TestHarvestChainEndpoint:
+    """收割链路只读端点（add-factor-harvest-ui）：漏斗 / 队列 / 运行窗口 / 降级。"""
+
+    _HARVEST = "/api/factor-research/harvest"
+
+    @pytest.fixture(autouse=True)
+    def _paths(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FACTOR_RESEARCH_HARVEST_STATE_PATH", str(tmp_path / "state.json"))
+        monkeypatch.setenv("FACTOR_RESEARCH_CANDIDATES_PATH", str(tmp_path / "candidates.json"))
+        monkeypatch.setenv("FACTOR_LIBRARY_DB_PATH", str(tmp_path / "library.db"))
+        monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "ops.db"))
+        monkeypatch.setenv(
+            "FACTOR_RESEARCH_HEARTBEAT_PATH", str(tmp_path / "harvest_heartbeat.json")
+        )
+        return tmp_path
+
+    def _write(self, tmp_path, processed, candidates):
+        (tmp_path / "state.json").write_text(
+            json.dumps({"updated_at": "2026-10-22T16:00:00+08:00", "processed": processed}),
+            encoding="utf-8",
+        )
+        (tmp_path / "candidates.json").write_text(
+            json.dumps({"generated_at": "x", "candidates": candidates}), encoding="utf-8"
+        )
+
+    def test_missing_files_degrade_honestly(self, tmp_path):
+        payload = TestClient(app).get(self._HARVEST).json()
+        assert payload["available"] is False
+        assert payload["funnel"] is None
+        assert payload["progress"] is None
+        assert payload["recent_admitted"] == []
+
+    def test_corrupt_state_degrades(self, tmp_path):
+        (tmp_path / "state.json").write_text("{not-json", encoding="utf-8")
+        (tmp_path / "candidates.json").write_text(json.dumps({"candidates": []}), encoding="utf-8")
+        payload = TestClient(app).get(self._HARVEST).json()
+        assert payload["available"] is False
+
+    def test_funnel_pending_and_recent_rejection(self, tmp_path):
+        processed = {
+            "a": {"status": "admitted", "expression": "x", "at": "2026-10-22T16:00:00+08:00"},
+            "b": {
+                "status": "rejected",
+                "expression": "y",
+                "gate": 2,
+                "reason": "WEAK_ICIR",
+                "at": "2026-10-22T16:01:00+08:00",
+            },
+            "c": {
+                "status": "untranslatable",
+                "stage": "llm",
+                "detail": "no cross-sectional op",
+                "at": "2026-10-22T16:02:00+08:00",
+            },
+        }
+        candidates = [{"name": n} for n in ("a", "b", "c", "d", "e")]
+        self._write(tmp_path, processed, candidates)
+
+        payload = TestClient(app).get(self._HARVEST).json()
+
+        assert payload["available"] is True
+        funnel = payload["funnel"]
+        assert funnel["candidates"] == 5
+        assert funnel["processed"] == 3
+        assert funnel["untranslatable"] == 1
+        assert funnel["admitted"] == 1
+        assert funnel["reached_gates"] == 2
+        assert funnel["rejected_by_gate"]["2"] == 1
+        assert payload["progress"]["pending"] == 2
+        assert payload["recent_rejected"][0]["reason"] == "WEAK_ICIR"
+        assert payload["recent_rejected"][0]["gate"] == 2
+
+    def test_run_window_batches_and_admissions(self, tmp_path, monkeypatch):
+        processed = {
+            "a": {"status": "admitted", "expression": "x", "at": "2026-10-22T16:00:00+08:00"},
+            "b": {
+                "status": "rejected",
+                "expression": "y",
+                "gate": 2,
+                "reason": "WEAK_ICIR",
+                "at": "2026-10-22T16:01:00+08:00",
+            },
+        }
+        self._write(tmp_path, processed, [{"name": "a"}, {"name": "b"}, {"name": "c"}])
+        monkeypatch.setattr(
+            "finance_agent.api._harvest_job_block",
+            lambda: {
+                "status": "running",
+                "started_at": "2026-10-22T15:55:00+08:00",
+                "finished_at": None,
+                "schedule": {
+                    "day_of_week": "*",
+                    "hour": 15,
+                    "minute": 55,
+                    "timezone": "Asia/Shanghai",
+                },
+                "next_fire_time": None,
+            },
+        )
+        monkeypatch.setattr(
+            "finance_agent.api.list_ledger_entries",
+            lambda: [
+                {"batch_id": "b1", "admitted": 1, "created_at": "2026-10-22T16:00:00+08:00"},
+                {"batch_id": "b1", "admitted": 0, "created_at": "2026-10-22T16:00:01+08:00"},
+                {"batch_id": "b2", "admitted": 0, "created_at": "2026-10-22T16:30:00+08:00"},
+            ],
+        )
+        payload = TestClient(app).get(self._HARVEST).json()
+        progress = payload["progress"]
+        assert progress["batches_done"] == 2
+        assert progress["admitted_in_run"] == 1
+        assert progress["rejected_in_run"] == 2
+        assert progress["eta_s"] is not None
+
+    @pytest.mark.parametrize("status", ["ok", "failed"])
+    def test_finished_run_reports_no_eta(self, tmp_path, monkeypatch, status):
+        """已收尾的运行不得外推剩余时间（add-factor-harvest-ui「运行结束后不冒充预计」）。
+
+        本轮处理数已冻结、自 started_at 的时长仍在增长，外推结果只增不减；队列里的未处理
+        候选属于下一次运行，不能算作本次运行的尾巴。
+        """
+        self._write(
+            tmp_path,
+            {"a": {"status": "admitted", "expression": "x", "at": "2026-10-22T20:00:00+08:00"}},
+            [{"name": "a"}, {"name": "b"}],
+        )
+        monkeypatch.setattr(
+            "finance_agent.api._harvest_job_block",
+            lambda: {
+                "status": status,
+                "started_at": "2026-10-22T19:55:00+08:00",
+                "finished_at": "2026-10-22T21:12:00+08:00",
+                "schedule": {
+                    "day_of_week": "*",
+                    "hour": 15,
+                    "minute": 55,
+                    "timezone": "Asia/Shanghai",
+                },
+                "next_fire_time": "2026-10-23T15:55:00+08:00",
+            },
+        )
+        payload = TestClient(app).get(self._HARVEST).json()
+        progress = payload["progress"]
+
+        assert progress["pending"] == 1  # 队列读数照实返回，不因收尾而清零
+        assert progress["eta_s"] is None
+
+    def test_in_batch_heartbeat(self, tmp_path):
+        self._write(
+            tmp_path,
+            {"a": {"status": "admitted", "expression": "x", "at": "2026-10-22T16:00:00+08:00"}},
+            [{"name": "a"}, {"name": "b"}],
+        )
+        (tmp_path / "harvest_heartbeat.json").write_text(
+            json.dumps(
+                {
+                    "batch_started_at": "2026-10-22T19:00:00+08:00",
+                    "processed_in_batch": 7,
+                    "total_in_batch": 60,
+                    "phase": "transcribe",
+                    "updated_at": "2026-10-22T19:05:00+08:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = TestClient(app).get(self._HARVEST).json()
+        in_batch = payload["progress"]["in_batch"]
+        assert in_batch["processed_in_batch"] == 7
+        assert in_batch["total_in_batch"] == 60
+        assert in_batch["phase"] == "transcribe"
+
+    def test_recent_admitted_uses_library_rows(self, tmp_path, monkeypatch):
+        self._write(
+            tmp_path,
+            {"a": {"status": "admitted", "expression": "x", "at": "2026-10-22T16:00:00+08:00"}},
+            [],
+        )
+        monkeypatch.setattr(
+            "finance_agent.api.list_factors",
+            lambda: [
+                {
+                    "id": 7,
+                    "expression": "ts_corr(close,volume,10)",
+                    "created_at": "2026-10-22T16:51:10+08:00",
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            "finance_agent.api.recent_ic_stats", lambda rows, window: {7: (0.01, 0.2)}
+        )
+        payload = TestClient(app).get(self._HARVEST).json()
+        assert payload["recent_admitted"] == [
+            {
+                "expression": "ts_corr(close,volume,10)",
+                "factor_id": 7,
+                "created_at": "2026-10-22T16:51:10+08:00",
+                "icir_60d": 0.2,
+            }
+        ]

@@ -44,6 +44,7 @@ load_dotenv()  # 加载 .env，须在 finance_agent 模块导入前执行（llm.
 # 与 /api/llm-config 占位保持一致；实际管线默认在 agent_factory，后续如需统一另行裁决。
 DEFAULT_LLM_MODEL = "deepseek/deepseek-v4-pro"
 
+from finance_agent import analysis_concurrency  # noqa: E402
 from finance_agent.data.cache import get_shared_cache  # noqa: E402
 from finance_agent.data.monitoring import get_monitor  # noqa: E402
 from finance_agent.data.snapshot import (  # noqa: E402
@@ -53,11 +54,17 @@ from finance_agent.data.snapshot import (  # noqa: E402
 )
 from finance_agent.execution.brokers.base import ORDER_STATUSES, STATUS_REJECTED  # noqa: E402
 from finance_agent.factors.builtin import BUILTIN_FACTORS  # noqa: E402
+from finance_agent.factors.harvest import DEFAULT_MAX_BATCHES_PER_RUN  # noqa: E402
 from finance_agent.factors.library import (  # noqa: E402
     FACTOR_STATES,
     list_events,
     list_factors,
     list_ic_series,
+    list_ledger_entries,
+)
+from finance_agent.factors.readiness import (  # noqa: E402
+    expected_factor_mode_date,
+    factor_signal_payload,
 )
 from finance_agent.factors.style_exposure import (  # noqa: E402
     compute_style_exposure,
@@ -74,6 +81,7 @@ from finance_agent.memory.semantic import (  # noqa: E402
     list_clauses,
     reject_clause,
 )
+from finance_agent.models import HoldingsContext  # noqa: E402
 from finance_agent.pipeline_runner import PipelineRunner, build_layer_tree  # noqa: E402
 from finance_agent.screening.freshness import screening_freshness_removals  # noqa: E402
 from finance_agent.screening.pipeline import (  # noqa: E402
@@ -83,7 +91,11 @@ from finance_agent.screening.pool_analysis import (  # noqa: E402
     prepare_pool_analysis_batch,
 )
 from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
-from finance_agent.screening.ranker import recent_ic_stats  # noqa: E402
+from finance_agent.screening.ranker import (  # noqa: E402
+    MIN_IC_SAMPLES_FOR_SCORING,
+    ic_sample_counts,
+    recent_ic_stats,
+)
 from finance_agent.screening.store import (  # noqa: E402
     DEFAULT_BATCH_HISTORY_LIMIT,
     MAX_BATCH_HISTORY_LIMIT,
@@ -348,6 +360,9 @@ class AnalyzeRequest(BaseModel):
     api_key: str | None = None
     session_id: str | None = None  # 追问时传入会话 ID
     focus: str = ""  # 深度研究意图澄清环节用户填写的关注点（Kimi 风格反问回答）
+    # 受众是否持有该标的（add-holdings-context）：False=未持有、True=持有、
+    # None=未申报（默认）。未申报按可执行默认（exit）表达并要求说明未持有处置
+    holdings: bool | None = None
     user_id: str | None = None  # Langfuse user 聚合（ADR-0015）
     llm_config: LLMConfigRequest | None = None  # 请求级 LLM 配置（model/baseUrl/apiKey/thinking）
 
@@ -1590,6 +1605,10 @@ def _run_graph_streaming(
         "enable_web_search": req.enable_web_search,
         "api_key": req.api_key,
         "focus": focus_value,
+        # 受众持仓上下文（add-holdings-context）：始终写入（未申报即 holds=None）。
+        # 省略该键不会让注入行哑火（holdings_holds 会兜底为「未申报」），而是
+        # 静默失真：已声明持仓（True/False）被降级为「未申报」文案，方向表达纪律失效
+        "holdings_context": HoldingsContext(holds=req.holdings),
         # 请求级 LLM 配置透传到管线节点（call_llm_streaming / call_llm）
         "llm_config": llm_config,
     }
@@ -2083,7 +2102,11 @@ async def _run_chat_task(
         mode = "follow-up" if session.get("session_type") == "analysis" else "quick"
 
         agent = build_agent(
-            mode=mode, api_key=api_key, session_id=session_id, llm_config=llm_config
+            mode=mode,
+            api_key=api_key,
+            session_id=session_id,
+            llm_config=llm_config,
+            current_user_message=req.message,
         )
 
         lastPersistTime = time.time()
@@ -2201,6 +2224,9 @@ async def _run_react_analysis(
             enable_web_search=req.enable_web_search,
             session_id=session_id,
             llm_config=llm_config,
+            # 受众持仓声明随 ReAct 路径透传到 run_deep_analysis（add-holdings-context）：
+            # 缺这步时显式 holds=False 会在追问路径被静默降级为「未申报」
+            holdings=req.holdings,
         )
 
         def on_metadata_cb(metadata: dict) -> None:
@@ -2350,6 +2376,131 @@ async def _run_react_analysis(
         raise
 
 
+async def _start_fast_path_pipeline(
+    *,
+    session_id: str,
+    stock_code: str,
+    stock_name: str,
+    req: AnalyzeRequest,
+    analysis_id: str,
+    start_time: float,
+    display_name: str | None,
+    llm_config: LLMConfig | None,
+) -> None:
+    """fast path 与 operator 工具共用的管线启动装配。
+
+    只负责写用户消息/锚点/状态、发布 session_created、启动 PipelineRunner；
+    事件经 journal 桥接，SSE 侧零改动。
+    """
+    # 追加用户输入到 chat_history
+    await asyncio.to_thread(append_chat, session_id, "user", req.query)
+    # 持久化管线触发锚点：fast path 下 chat_history 仅一条 user，锚点 = 1
+    await asyncio.to_thread(set_pipeline_anchor, session_id)
+    await asyncio.to_thread(
+        update_session_for_clarify,
+        session_id,
+        stock_code=stock_code,
+        stock_name=stock_name,
+        status="running",
+    )
+    # session_created 同步写入 journal（恢复端点重放的事实源；
+    # 在线客户端经 subscribe 重放收到，无需单独直发）。
+    # 同步写避免 await 点：确保 PipelineRunner.start 在客户端断开前执行，
+    # 且 session_created 先于管线事件入 journal（重放顺序正确）
+    append_session_event(
+        session_id,
+        {
+            "type": "session_created",
+            "session_id": session_id,
+            "display_name": display_name,
+            "timestamp": _now(),
+        },
+    )
+    # 管线后台执行：事件经 PipelineRunner._run 的 publish 桥接到 journal，
+    # 客户端断开不中断管线，终态由 _run 的 finally 发布
+    loop = asyncio.get_running_loop()
+    PipelineRunner.start(
+        session_id,
+        lambda: _run_graph_streaming(
+            stock_code,
+            stock_name,
+            req,
+            analysis_id,
+            start_time,
+            session_id=session_id,
+            llm_config=llm_config,
+        ),
+        {
+            "layerTree": build_layer_tree(),
+            "currentNodeId": "",
+            "progress": 0.0,
+            "updatedAt": int(time.time() * 1000),
+            # 管线启动时间戳（毫秒）：前端刷新重建用作「已用时」计时起点
+            "pipeline_start_ts": int(start_time * 1000),
+        },
+        loop=loop,
+    )
+
+
+async def start_analysis_session_for_operator(
+    stock_code: str,
+    stock_name: str = "",
+    *,
+    api_key: str | None = None,
+    llm_config: LLMConfig | None = None,
+) -> dict[str, Any]:
+    """operator 派单：创建独立 analysis 会话并启动管线，返回回执。
+
+    与 /api/analyze fast path 共用 _start_fast_path_pipeline；不在调用方事件流内
+    运行管线，调用方拿到回执即可返回。
+    """
+    symbol = (stock_code or "").strip()
+    name = (stock_name or "").strip()
+    display_name = f"{name or symbol} 深度分析"
+    session_id = await asyncio.to_thread(
+        create_session,
+        stock_code="",
+        stock_name="",
+        display_name=display_name,
+        status="clarifying",
+        session_type="analysis",
+    )
+    analysis_id = str(uuid.uuid4())[:8]
+    start_time = time.time()
+    req = AnalyzeRequest(
+        query=f"分析 {name or symbol}（{symbol}）",
+        stock_code=symbol,
+        stock_name=name or None,
+        api_key=api_key,
+    )
+    try:
+        await _start_fast_path_pipeline(
+            session_id=session_id,
+            stock_code=symbol,
+            stock_name=name,
+            req=req,
+            analysis_id=analysis_id,
+            start_time=start_time,
+            display_name=display_name,
+            llm_config=llm_config,
+        )
+    except Exception as exc:
+        # 派单失败不留「clarifying/running 但无管线」的僵尸会话
+        await asyncio.to_thread(
+            update_session_status,
+            session_id,
+            "failed",
+            failure_reason=f"operator dispatch failed: {type(exc).__name__}: {exc}",
+        )
+        raise
+    return {
+        "session_id": session_id,
+        "display_name": display_name,
+        "status": "running",
+        "symbol": symbol,
+    }
+
+
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeRequest):
     """深度分析 -- Fast path 直走管线，ReAct 路径由 registry 后台任务驱动。
@@ -2395,53 +2546,15 @@ async def analyze(req: AnalyzeRequest):
     # 新会话（未传 session_id）且已解析出股票代码时走 fast path；
     # 追问/复用旧会话时走 ReAct 路径
     if stock_code and not req.session_id:
-        # 追加用户输入到 chat_history
-        await asyncio.to_thread(append_chat, session_id, "user", req.query)
-        # 持久化管线触发锚点：fast path 下 chat_history 仅一条 user，锚点 = 1
-        await asyncio.to_thread(set_pipeline_anchor, session_id)
-        await asyncio.to_thread(
-            update_session_for_clarify,
-            session_id,
+        await _start_fast_path_pipeline(
+            session_id=session_id,
             stock_code=stock_code,
             stock_name=stock_name,
-            status="running",
-        )
-        # session_created 同步写入 journal（恢复端点重放的事实源；
-        # 在线客户端经 subscribe 重放收到，无需单独直发）。
-        # 同步写避免 await 点：确保 PipelineRunner.start 在客户端断开前执行，
-        # 且 session_created 先于管线事件入 journal（重放顺序正确）
-        append_session_event(
-            session_id,
-            {
-                "type": "session_created",
-                "session_id": session_id,
-                "display_name": display_name,
-                "timestamp": _now(),
-            },
-        )
-        # 管线后台执行：事件经 PipelineRunner._run 的 publish 桥接到 journal，
-        # 客户端断开不中断管线，终态由 _run 的 finally 发布
-        loop = asyncio.get_running_loop()
-        PipelineRunner.start(
-            session_id,
-            lambda: _run_graph_streaming(
-                stock_code,
-                stock_name,
-                req,
-                analysis_id,
-                start_time,
-                session_id=session_id,
-                llm_config=llm_config,
-            ),
-            {
-                "layerTree": build_layer_tree(),
-                "currentNodeId": "",
-                "progress": 0.0,
-                "updatedAt": int(time.time() * 1000),
-                # 管线启动时间戳（毫秒）：前端刷新重建用作「已用时」计时起点
-                "pipeline_start_ts": int(start_time * 1000),
-            },
-            loop=loop,
+            req=req,
+            analysis_id=analysis_id,
+            start_time=start_time,
+            display_name=display_name,
+            llm_config=llm_config,
         )
 
         # done 终态补充展示字段：duration_ms 等由端点注入
@@ -3212,12 +3325,29 @@ def _now() -> str:
 # ── Agent 设置中心（add-agent-settings-center）──
 
 
-@functools.lru_cache(maxsize=1)
 def _git_commit() -> str | None:
-    """返回当前 git 仓库 HEAD 短哈希（前 12 位）；非 git 环境返回 None。
+    """返回当前版本短哈希（前 12 位）；非 git 环境返回 None。
 
-    从 api.py 所在目录向上逐级寻找含 .git 的仓库根（不同部署布局下
-    __file__ 深度可能不同，故用向上搜索而非固定 parents 下标）。
+    构建期注入的 ``GIT_COMMIT``（Dockerfile ARG → ENV）优先于 git 探测：镜像里
+    没有 ``.git``，原实现恒返回 None（``/api/run-info`` 的 git_commit 长期为空，
+    2026-10-22 观测项）。注入值同样截 12 位，与本地探测口径一致。
+
+    环境变量在调用时读取（不进 lru_cache）：构建期注入是静态的，但测试与
+    本地热切换需要可观察；仓库探测（子进程）单独缓存，避免每请求 fork git。
+    """
+    built = (
+        os.environ.get("GIT_COMMIT") or os.environ.get("FINANCE_AGENT_GIT_COMMIT") or ""
+    ).strip()
+    if built:
+        return built[:12]
+    return _git_commit_from_repo()
+
+
+@functools.lru_cache(maxsize=1)
+def _git_commit_from_repo() -> str | None:
+    """向上搜索仓库根并读 HEAD（本地开发兜底；容器内无 .git 返回 None）。
+
+    不同部署布局下 ``__file__`` 深度可能不同，故用向上搜索而非固定 parents 下标。
     """
     root = Path(__file__).resolve().parent
     for _ in range(8):  # 向上最多找 8 层，防御性边界
@@ -3364,9 +3494,9 @@ async def regime_status() -> dict:
 
 # ── 选股（add-screening-pipeline T3；S3/S4：池 / 状态 / 批量深度分析） ──
 
-# 批量分析并发上限：默认 2（Global Constraints），SCREENING_ANALYZE_CONCURRENCY 可配置
-_SCREENING_ANALYZE_CONCURRENCY_DEFAULT = 2
-# 进程内队列单例（懒创建：env 于调用期读取；单 worker 前提同 StreamRegistry）
+# 批量分析并发上限：设置中心「会话管理」可配（delta add-analysis-concurrency-setting）；
+# 来源优先级 = 设置文件 > env SCREENING_ANALYZE_CONCURRENCY > 默认 10。
+# 进程内队列单例（懒创建：值于调用期读取；单 worker 前提同 StreamRegistry）
 _analyze_queue: AnalyzeQueue | None = None
 
 _SCREENING_STATUS_DEGRADED: dict[str, Any] = {
@@ -3378,19 +3508,8 @@ _SCREENING_STATUS_DEGRADED: dict[str, Any] = {
 
 
 def _analyze_concurrency() -> int:
-    """并发上限（默认 2；env 非法值回落默认，不因运维配错打挂端点）。"""
-    raw = os.getenv("SCREENING_ANALYZE_CONCURRENCY")
-    if not raw:
-        return _SCREENING_ANALYZE_CONCURRENCY_DEFAULT
-    try:
-        value = int(raw)
-    except ValueError:
-        _logger.warning("非法 SCREENING_ANALYZE_CONCURRENCY=%r，回落默认 2", raw)
-        return _SCREENING_ANALYZE_CONCURRENCY_DEFAULT
-    if value < 1:
-        _logger.warning("SCREENING_ANALYZE_CONCURRENCY=%r 非正，回落默认 2", raw)
-        return _SCREENING_ANALYZE_CONCURRENCY_DEFAULT
-    return value
+    """并发上限：设置文件 > env > 默认 10（来源解析见 analysis_concurrency）。"""
+    return int(analysis_concurrency.resolve()["value"])
 
 
 def _start_screening_analysis(symbol: str, session_id: str) -> None:
@@ -3440,11 +3559,72 @@ def _reset_analyze_queue() -> None:
     _analyze_queue = None
 
 
+# ── 批量分析并发设置（delta add-analysis-concurrency-setting）──
+
+
+class AnalysisConcurrencyUpdate(BaseModel):
+    """保存入参：用 Any 接收，再由 analysis_concurrency.validate 统一校验（非法 → 400）。"""
+
+    value: Any = None
+
+
+@app.get("/api/settings/analysis-concurrency")
+async def get_analysis_concurrency() -> dict[str, Any]:
+    """并发设置（只读）：生效值 + 来源（file/env/default）+ 合法区间 + 环境变量披露。"""
+    return await asyncio.to_thread(analysis_concurrency.resolve)
+
+
+@app.put("/api/settings/analysis-concurrency")
+async def put_analysis_concurrency(req: AnalysisConcurrencyUpdate) -> dict[str, Any]:
+    """保存并发设置：校验 1–20 → 原子落盘 → 立即应用到当前队列（提高即补位）。"""
+    try:
+        payload = await asyncio.to_thread(analysis_concurrency.save, req.value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    queue = _get_analyze_queue()
+    if queue.max_concurrency != payload["value"]:
+        queue.set_max_concurrency(int(payload["value"]))
+    return payload
+
+
 # 降级披露文案（add-screening-empty-library-fallback：单源在后端，前端原样渲染；
 # MUST 明示「非因子信号」——spec「无可打分因子降级通道」披露义务）
 _SCREENING_FALLBACK_NOTICE = (
     "因子库无可打分因子：本次为降级模式，按近 20 日日均成交额排序（非因子信号）"
 )
+
+
+def _factor_signal_block(selection_mode: str | None) -> dict[str, Any]:
+    """池接口的 ``factor_signal``（delta add-factor-ic-visibility）。
+
+    active 因子 + 近 60 日 IC 条数 + 最新 IC 日期 → 逐因子进度与预计恢复日。
+    因子库读取失败时降级为空列表并如实标注，MUST NOT 让选股页因该块 500。
+    """
+    try:
+        active = [row for row in list_factors() if str(row.get("status")) == "active"]
+        active.sort(key=lambda row: int(row["id"]))
+        counts = ic_sample_counts(active)
+        latest: dict[int, str] = {}
+        for row in active:
+            series = list_ic_series(int(row["id"]), limit=1)
+            if series:
+                latest[int(row["id"])] = series[-1][0]
+        return factor_signal_payload(
+            active,
+            counts,
+            latest,
+            selection_mode=selection_mode,
+            min_samples=MIN_IC_SAMPLES_FOR_SCORING,
+        )
+    except Exception:  # noqa: BLE001 - 只读诊断块，失败不得拖垮池接口
+        _logger.exception("因子信号就绪度读取失败，降级返回")
+        return {
+            "selection_mode": selection_mode,
+            "reason": "因子库读取失败",
+            "min_samples": MIN_IC_SAMPLES_FOR_SCORING,
+            "expected_factor_mode_date": None,
+            "factors": [],
+        }
 
 
 def _screening_pool_payload(queue_snapshot: list[dict]) -> dict[str, Any]:
@@ -3463,6 +3643,7 @@ def _screening_pool_payload(queue_snapshot: list[dict]) -> dict[str, Any]:
         "stale": bool(latest is not None and latest["status"] != "ok"),
         "selection_mode": selection_mode,
         "notice": _SCREENING_FALLBACK_NOTICE if selection_mode == "fallback" else None,
+        "factor_signal": _factor_signal_block(selection_mode),
         "pool": successful["pool"] if successful else [],
         "queue": queue_snapshot,
     }
@@ -3977,6 +4158,7 @@ def _factor_summary_payload(
     events: list[dict[str, Any]],
     ic_stats: dict[int, tuple[float, float]],
     ic_points: int,
+    latest_ic_date: str | None = None,
 ) -> dict[str, Any]:
     """因子行 + 事件 + IC 统计 → 列表/详情共用的摘要载荷。"""
     factor_id = int(row["id"])
@@ -3999,6 +4181,12 @@ def _factor_summary_payload(
         "ic_mean_60d": ic_mean,
         "icir_60d": icir,
         "ic_points": ic_points,
+        # IC 就绪度（delta add-factor-ic-visibility）：窗口/门槛/预计恢复打分日期
+        "ic_window": FACTOR_IC_WINDOW,
+        "min_samples_for_scoring": MIN_IC_SAMPLES_FOR_SCORING,
+        "expected_factor_mode_date": expected_factor_mode_date(
+            latest_ic_date, ic_points, MIN_IC_SAMPLES_FOR_SCORING
+        ),
         "decayed": any(str(event.get("to_status")) == "degraded" for event in events),
         "last_event": _factor_last_event_summary(events),
     }
@@ -4039,15 +4227,19 @@ def _factors_payload() -> list[dict[str, Any]]:
     rows = list_factors()
     events_by_factor = _factor_events_by_factor()
     ic_stats = recent_ic_stats(rows, window=FACTOR_IC_WINDOW)
-    payload = [
-        _factor_summary_payload(
-            row,
-            events=events_by_factor.get(int(row["id"]), []),
-            ic_stats=ic_stats,
-            ic_points=len(list_ic_series(int(row["id"]), limit=FACTOR_IC_WINDOW)),
+    payload: list[dict[str, Any]] = []
+    for row in rows:
+        # 序列只读一次：条数（ic_points）与最新日期（恢复日期推算）同源，避免两次查询漂移
+        series = list_ic_series(int(row["id"]), limit=FACTOR_IC_WINDOW)
+        payload.append(
+            _factor_summary_payload(
+                row,
+                events=events_by_factor.get(int(row["id"]), []),
+                ic_stats=ic_stats,
+                ic_points=len(series),
+                latest_ic_date=series[-1][0] if series else None,
+            )
         )
-        for row in rows
-    ]
     payload.sort(key=lambda item: (-item["icir_60d"], item["id"]))
     return payload
 
@@ -4064,6 +4256,7 @@ def _factor_detail_payload(factor_id: int) -> dict[str, Any] | None:
         events=events,
         ic_stats=recent_ic_stats([row], window=FACTOR_IC_WINDOW),
         ic_points=len(ic_series),
+        latest_ic_date=ic_series[-1][0] if ic_series else None,
     )
     detail["ic_series"] = [
         {"trade_date": trade_date, "rank_ic": rank_ic} for trade_date, rank_ic in ic_series
@@ -4080,6 +4273,13 @@ def _factor_style_exposure_payload(row: dict[str, Any]) -> dict[str, Any] | None
     → **返回 None**（前端如实展示「数据不足」，MUST NOT 用 0 或虚构值冒充）。
     """
     try:
+        from finance_agent.factors.style_exposure import MIN_STYLE_SAMPLES
+
+        # 短路：风格暴露需要「因子 IC × 代理 IC」≥ MIN_STYLE_SAMPLES 个共同交易日；
+        # 因子自身 IC 点数不足时结果必为 None，不得为它构建准入面板——500 日 × 全市场
+        # 面板实测需数分钟，会把因子详情接口拖成超时（详情页全部「加载失败」的根因）。
+        if len(list_ic_series(int(row["id"]), limit=FACTOR_IC_WINDOW)) < MIN_STYLE_SAMPLES:
+            return None
         from finance_agent.factors.dsl import parse as dsl_parse
         from finance_agent.factors.eval_engine import (
             evaluate as dsl_evaluate,
@@ -4131,6 +4331,7 @@ async def factor_library_detail(factor_id: int) -> dict[str, Any]:
 # 无任意命令/脚本字段。快照缺失/损坏/陈旧 = 控制通道无存活证据 → 409 拒绝（不留
 # 无人受理的请求）。
 FACTOR_RESEARCH_STALE_AFTER_S = 180  # 3× 采集周期（契约 ≤60s）；阈值单源
+FACTOR_RESEARCH_STALL_AFTER_S = 900  # 会话日志静默阈值（实测历史最大静默 602s 的 1.5 倍）
 FACTOR_RESEARCH_LAUNCHER_FRESH_AFTER_S = 300  # 2× 启动器节拍（120s）+ 余量
 FACTOR_RESEARCH_LAUNCHER_HONOR_ETA_S = 180  # 离线受理的披露上界（与陈旧阈值同值）
 
@@ -4150,11 +4351,38 @@ FACTOR_RESEARCH_CONFIG_BOUNDS: dict[str, tuple[int, int]] = {
 }
 
 
+def _factor_research_progress_block(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """进度新鲜度派生块（阈值单源：FACTOR_RESEARCH_STALL_AFTER_S）。
+
+    ``stalled`` 需四条件同时成立：快照可用且非陈旧 + 看护运行中 + 会话存活 + 静默超阈值。
+    看护未运行（日志本就不更新）或会话非存活（正常会话间隔）MUST NOT 判僵死。
+    """
+    session = snapshot.get("current_session")
+    raw = session.get("log_age_s") if isinstance(session, dict) else None
+    log_age = raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else None
+    supervisor = snapshot.get("supervisor")
+    running = bool(supervisor.get("running")) if isinstance(supervisor, dict) else False
+    alive = bool(session.get("alive")) if isinstance(session, dict) else False
+    stalled = bool(
+        snapshot.get("available")
+        and not snapshot.get("stale")
+        and running
+        and alive
+        and log_age is not None
+        and log_age > FACTOR_RESEARCH_STALL_AFTER_S
+    )
+    return {"log_age_seconds": log_age, "stalled": stalled}
+
+
 def _factor_research_snapshot_payload() -> dict[str, Any]:
-    """快照面：透传 + 派生 ``available``/``age_seconds``/``stale``（控制块另行附加）。"""
+    """快照面：透传 + 派生 ``available``/``age_seconds``/``stale``/``progress``。"""
     path = Path(os.environ.get("FACTOR_RESEARCH_STATUS_PATH", "data/factor_research/status.json"))
     if not path.is_file():
-        return {"available": False, "reason": "missing"}
+        return {
+            "available": False,
+            "reason": "missing",
+            "progress": {"log_age_seconds": None, "stalled": False},
+        }
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -4168,7 +4396,11 @@ def _factor_research_snapshot_payload() -> dict[str, Any]:
             epoch = datetime.fromisoformat(iso).timestamp()
         epoch = float(epoch)
     except (OSError, ValueError, TypeError):
-        return {"available": False, "reason": "corrupt"}
+        return {
+            "available": False,
+            "reason": "corrupt",
+            "progress": {"log_age_seconds": None, "stalled": False},
+        }
     age = max(0, int(time.time() - epoch))
     payload = dict(data)
     payload.update(
@@ -4178,6 +4410,7 @@ def _factor_research_snapshot_payload() -> dict[str, Any]:
             "stale": age > FACTOR_RESEARCH_STALE_AFTER_S,
         }
     )
+    payload["progress"] = _factor_research_progress_block(payload)
     return payload
 
 
@@ -4205,6 +4438,40 @@ def _factor_research_launcher_payload() -> dict[str, Any]:
             "available": True,
             "age_seconds": age,
             "fresh": age <= FACTOR_RESEARCH_LAUNCHER_FRESH_AFTER_S,
+        }
+    )
+    return payload
+
+
+FACTOR_RESEARCH_DISTRO_PROBE_FRESH_AFTER_S = 300  # 2× 启动器节拍（120s）+ 余量
+
+
+def _factor_research_distro_payload() -> dict[str, Any]:
+    """distro 探活块：透传 + 派生 ``available`` / ``age_seconds`` / ``fresh``。
+
+    只读披露：本函数 MUST NOT 触发任何处置（不重启、不终止、不写控制文件）。
+    """
+    path = Path(
+        os.environ.get(
+            "FACTOR_RESEARCH_DISTRO_PROBE_PATH", "data/factor_research/distro_probe.json"
+        )
+    )
+    if not path.is_file():
+        return {"available": False, "reason": "missing"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("distro probe is not an object")
+        epoch = float(data.get("probed_at_epoch"))
+    except (OSError, ValueError, TypeError):
+        return {"available": False, "reason": "corrupt"}
+    age = max(0, int(time.time() - epoch))
+    payload = dict(data)
+    payload.update(
+        {
+            "available": True,
+            "age_seconds": age,
+            "fresh": age <= FACTOR_RESEARCH_DISTRO_PROBE_FRESH_AFTER_S,
         }
     )
     return payload
@@ -4368,6 +4635,7 @@ def _factor_research_status_payload() -> dict[str, Any]:
         "config": _factor_research_config_block(),
         "launcher": launcher,
         "control": _factor_research_control_block(snapshot, launcher),
+        "distro": _factor_research_distro_payload(),
     }
 
 
@@ -4479,10 +4747,230 @@ def _factor_research_config_update(req: FactorResearchConfigRequest) -> dict[str
     return {"config": _factor_research_config_block()}
 
 
+# ── 收割链路只读端点（add-factor-harvest-ui）────────────────────────────────
+#
+# 数据面：harvest_state.json（逐候选裁决）+ candidates.json（队列）+ 因子库账本
+# （批次/入库/拒收）。零写入、零业务复制；文件缺失/损坏 → available=false，
+# 各块降级为 null，MUST NOT 编造数字。
+FACTOR_HARVEST_STATE_PATH_DEFAULT = "data/factor_research/harvest_state.json"
+FACTOR_HARVEST_CANDIDATES_PATH_DEFAULT = "data/factor_research/candidates.json"
+FACTOR_HARVEST_RECENT_REJECTIONS = 10
+FACTOR_HARVEST_RECENT_ADMISSIONS = 5
+
+
+def _harvest_ts(value: Any) -> str:
+    """ISO 时间比较键（截到秒；容忍 ``T`` 分隔与是否带偏移）。"""
+    return str(value or "")[:19]
+
+
+def _harvest_job_block() -> dict[str, Any]:
+    """ops 任务行（factor_harvest_daily）→ job 块；不可得如实 null。"""
+    block: dict[str, Any] = {
+        "status": None,
+        "started_at": None,
+        "finished_at": None,
+        "schedule": None,
+        "next_fire_time": None,
+    }
+    try:
+        from finance_agent.ops_api import _next_fire_time
+        from finance_agent.outcome.ops.jobs import SCHEDULES
+        from finance_agent.outcome.ops.model import last_job_run
+
+        run = last_job_run("factor_harvest_daily") or {}
+        block.update(
+            {
+                "status": run.get("status"),
+                "started_at": run.get("started_at"),
+                "finished_at": run.get("finished_at"),
+                "schedule": dict(SCHEDULES["factor_harvest_daily"]),
+                "next_fire_time": _next_fire_time("factor_harvest_daily"),
+            }
+        )
+    except Exception:  # noqa: BLE001 - 任务块不可得不得拖垮整个区块
+        _logger.warning("harvest job block unavailable", exc_info=True)
+    return block
+
+
+def _harvest_heartbeat_block() -> dict[str, Any] | None:
+    """批内逐候选心跳（harvest 每处理一条写一次）；缺失/损坏 → None。"""
+    path = Path(
+        os.environ.get(
+            "FACTOR_RESEARCH_HEARTBEAT_PATH", "data/factor_research/harvest_heartbeat.json"
+        )
+    )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    processed = data.get("processed_in_batch")
+    total = data.get("total_in_batch")
+    if not isinstance(processed, int) or not isinstance(total, int):
+        return None
+    updated = str(data.get("updated_at") or "")
+    age_s: int | None = None
+    if updated:
+        try:
+            updated_dt = datetime.fromisoformat(updated)
+            now = datetime.now(updated_dt.tzinfo) if updated_dt.tzinfo else datetime.now()
+            age_s = max(0, int((now - updated_dt).total_seconds()))
+        except (TypeError, ValueError):
+            age_s = None
+    return {
+        "processed_in_batch": processed,
+        "total_in_batch": total,
+        "phase": str(data.get("phase") or ""),
+        "updated_at": updated or None,
+        "age_s": age_s,
+    }
+
+
+def _factor_research_harvest_payload() -> dict[str, Any]:
+    """收割链路只读载荷：job / progress / funnel / 最近入库与拒收。"""
+    job = _harvest_job_block()
+    empty: dict[str, Any] = {
+        "available": False,
+        "job": job,
+        "progress": None,
+        "funnel": None,
+        "recent_admitted": [],
+        "recent_rejected": [],
+    }
+    state_path = Path(
+        os.environ.get("FACTOR_RESEARCH_HARVEST_STATE_PATH", FACTOR_HARVEST_STATE_PATH_DEFAULT)
+    )
+    candidates_path = Path(
+        os.environ.get("FACTOR_RESEARCH_CANDIDATES_PATH", FACTOR_HARVEST_CANDIDATES_PATH_DEFAULT)
+    )
+    try:
+        state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+        candidates_payload = json.loads(candidates_path.read_text(encoding="utf-8"))
+        processed = state_payload.get("processed") or {}
+        candidates = candidates_payload.get("candidates") or []
+    except (OSError, ValueError, AttributeError):
+        return empty
+    if not isinstance(processed, dict) or not isinstance(candidates, list):
+        return empty
+
+    status_counts = {"admitted": 0, "rejected": 0, "untranslatable": 0, "transcription_error": 0}
+    rejected_by_gate = {str(gate): 0 for gate in range(6)}
+    rejections: list[dict[str, Any]] = []
+    for verdict in processed.values():
+        if not isinstance(verdict, dict):
+            continue
+        status = str(verdict.get("status") or "")
+        if status in status_counts:
+            status_counts[status] += 1
+        if status != "rejected":
+            continue
+        gate = verdict.get("gate")
+        if isinstance(gate, int) and 0 <= gate <= 5:
+            rejected_by_gate[str(gate)] += 1
+        rejections.append(
+            {
+                "expression": verdict.get("expression"),
+                "gate": gate if isinstance(gate, int) else None,
+                "reason": verdict.get("reason"),
+                "at": verdict.get("at"),
+            }
+        )
+    rejections.sort(key=lambda item: _harvest_ts(item.get("at")), reverse=True)
+
+    pending = sum(
+        1 for item in candidates if isinstance(item, dict) and item.get("name") not in processed
+    )
+    reached_gates = status_counts["admitted"] + status_counts["rejected"]
+
+    started_at = job.get("started_at")
+    start_key = _harvest_ts(started_at)
+    ledger = list_ledger_entries() if start_key else []
+    in_run = [row for row in ledger if _harvest_ts(row.get("created_at")) >= start_key]
+    batches_done = len({str(row.get("batch_id")) for row in in_run})
+    admitted_in_run = sum(1 for row in in_run if row.get("admitted"))
+    rejected_in_run = len(in_run) - admitted_in_run
+
+    processed_in_run = 0
+    if start_key:
+        processed_in_run = sum(
+            1
+            for verdict in processed.values()
+            if isinstance(verdict, dict) and _harvest_ts(verdict.get("at")) >= start_key
+        )
+    eta_s: int | None = None
+    # 运行态门控（add-factor-harvest-ui「运行结束后不冒充预计」）：运行已收尾时本轮处理数已冻结、
+    # 自 started_at 的时长仍在增长，按「剩余 /（本轮处理数 / 已运行时长）」外推只会单调变大；
+    # 且此时队列里的未处理候选属于下一次运行，不是本次运行的尾巴。
+    if (
+        str(job.get("status") or "") == "running"
+        and start_key
+        and processed_in_run > 0
+        and pending > 0
+    ):
+        try:
+            started_dt = datetime.fromisoformat(str(started_at))
+            now = datetime.now(started_dt.tzinfo) if started_dt.tzinfo else datetime.now()
+            elapsed = max(1.0, (now - started_dt).total_seconds())
+            rate = processed_in_run / elapsed
+            eta_s = int(pending / rate) if rate > 0 else None
+        except (TypeError, ValueError):
+            eta_s = None
+
+    rows = sorted(
+        list_factors(),
+        key=lambda row: _harvest_ts(row.get("created_at")),
+        reverse=True,
+    )[:FACTOR_HARVEST_RECENT_ADMISSIONS]
+    ic_stats = recent_ic_stats(rows, window=FACTOR_IC_WINDOW) if rows else {}
+    recent_admitted = [
+        {
+            "expression": row.get("expression"),
+            "factor_id": int(row["id"]),
+            "created_at": row.get("created_at"),
+            "icir_60d": ic_stats.get(int(row["id"]), (0.0, 0.0))[1],
+        }
+        for row in rows
+    ]
+
+    return {
+        "available": True,
+        "job": job,
+        "progress": {
+            "batches_done": batches_done,
+            "batch_limit": DEFAULT_MAX_BATCHES_PER_RUN,
+            "processed": len(processed),
+            "pending": pending,
+            "admitted_in_run": admitted_in_run,
+            "rejected_in_run": rejected_in_run,
+            "started_at": started_at,
+            "eta_s": eta_s,
+            "in_batch": _harvest_heartbeat_block(),
+        },
+        "funnel": {
+            "candidates": len(candidates),
+            "processed": len(processed),
+            "untranslatable": status_counts["untranslatable"],
+            "transcription_error": status_counts["transcription_error"],
+            "reached_gates": reached_gates,
+            "admitted": status_counts["admitted"],
+            "rejected_by_gate": rejected_by_gate,
+        },
+        "recent_admitted": recent_admitted,
+        "recent_rejected": rejections[:FACTOR_HARVEST_RECENT_REJECTIONS],
+    }
+
+
 @app.get("/api/factor-research/status")
 async def factor_research_status() -> dict[str, Any]:
     """因子研发监控快照（只读）：快照 + actual_state + config + launcher + control。"""
     return await asyncio.to_thread(_factor_research_status_payload)
+
+
+@app.get("/api/factor-research/harvest")
+async def factor_research_harvest() -> dict[str, Any]:
+    """收割链路只读载荷：job / progress / funnel / 最近入库与拒收（零写入）。"""
+    return await asyncio.to_thread(_factor_research_harvest_payload)
 
 
 @app.put("/api/factor-research/control")

@@ -54,6 +54,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -73,12 +74,26 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_UNIVERSE_PATH = Path("data/cohort/universe-v1.json")
 _DEFAULT_MAX_TOKENS = 2_000_000
+# 当日额度守卫（add-cohort-quota-guard）：当日 cohort 消耗 + 单只预估超过此值 → 跳过
+_DEFAULT_DAILY_TOKENS = 3_000_000
+# 单只预估成本：无历史成功样本时的保守默认（≈ 一次 deep 分析）
+_DEFAULT_ESTIMATED_RUN_TOKENS = 250_000
+# 额度耗尽特征（provider 的 5 小时滚动上限/速率限制）；只用于失败归因，不解析具体额度
+_QUOTA_PATTERN = re.compile(r"使用上限|速率限制|rate\s*limit|429|额度|quota", re.IGNORECASE)
 # 累计「usage 真值缺失」运行数达此限 → 停止剩余标的（budget_unknown）
 _UNKNOWN_USAGE_LIMIT = 3
 # failure_reason 稳定码全集（Task 6 聚合键必须有限；异常消息只进日志）。
 # 注：`duplicate` 仅体现在 run_cohort_batch 的返回值 skipped_reasons（重复分支
 # continue，**不写行**），不会出现在 cohort_runs.failure_reason / 读数 skipped_reasons 桶。
-FAILURE_CODES = ("no_report_ready", "exception", "budget", "budget_unknown", "duplicate")
+FAILURE_CODES = (
+    "no_report_ready",
+    "exception",
+    "budget",
+    "budget_unknown",
+    "budget_daily",
+    "quota",
+    "duplicate",
+)
 
 
 def run_cohort_batch(
@@ -120,6 +135,15 @@ def run_cohort_batch(
 
     init_cohort_runs(db_path)
     existing = _successful_tickers(universe.version, day, db_path)
+    daily_budget = _resolve_daily_budget()
+    estimate = _estimate_run_tokens(db_path)
+    today_tokens = _today_tokens(universe.version, day, db_path)
+    preflight_reason = _preflight_skip_reason(
+        today_tokens=today_tokens,
+        budget=daily_budget,
+        estimate=estimate,
+        quota_failed_today=_has_quota_failure_today(universe.version, day, db_path),
+    )
 
     result: dict[str, Any] = {
         "enabled": True,
@@ -131,8 +155,33 @@ def run_cohort_batch(
         "skipped_reasons": {},
         "tokens_total": 0,
         "budget_stopped": False,
+        "daily_budget": daily_budget,
     }
     skipped_reasons: dict[str, int] = {}
+
+    # 预检：当日已撞额度 → 整批跳过（硬证据）；当日余量不足 → 整批跳过（保守下界）。
+    if preflight_reason is not None:
+        for constituent in universe.constituents:
+            if not force and constituent.ticker in existing:
+                _count_skip(skipped_reasons, "duplicate")
+                result["skipped"] += 1
+                continue
+            _record_skipped_safely(
+                universe.version, constituent.ticker, day, preflight_reason, db_path
+            )
+            _count_skip(skipped_reasons, preflight_reason)
+            result["skipped"] += 1
+        result["budget_stopped"] = True
+        result["skipped_reasons"] = skipped_reasons
+        logger.warning(
+            "cohort 当日额度守卫跳过整批（reason=%s today_tokens=%s estimate=%s budget=%s）",
+            preflight_reason,
+            today_tokens,
+            estimate,
+            daily_budget,
+        )
+        return result
+
     spent = 0
     unknown_usage_runs = 0
     stop_reason: str | None = None
@@ -142,6 +191,16 @@ def run_cohort_batch(
             _count_skip(skipped_reasons, "duplicate")
             result["skipped"] += 1
             continue
+        if stop_reason is None and today_tokens + spent + estimate > daily_budget:
+            stop_reason = "budget_daily"
+            result["budget_stopped"] = True
+            logger.warning(
+                "cohort 当日余量不足（reason=budget_daily today_tokens=%s spent=%s estimate=%s budget=%s）",
+                today_tokens,
+                spent,
+                estimate,
+                daily_budget,
+            )
         if stop_reason is not None:
             _record_skipped_safely(universe.version, constituent.ticker, day, stop_reason, db_path)
             _count_skip(skipped_reasons, stop_reason)
@@ -157,17 +216,21 @@ def run_cohort_batch(
             unknown_usage_runs += 1
         result["success" if outcome["status"] == "success" else "failure"] += 1
 
-        if spent >= budget:
+        if outcome.get("failure_reason") == "quota":
+            # 撞额度后继续逐只尝试只会把同一窗口的失败摊开（2026-10-20 实测 4 次）
+            stop_reason = "quota"
+        elif spent >= budget:
             stop_reason = "budget"
         elif unknown_usage_runs >= _UNKNOWN_USAGE_LIMIT:
             stop_reason = "budget_unknown"
         if stop_reason is not None:
             result["budget_stopped"] = True
             logger.warning(
-                "cohort 单轮熔断（reason=%s spent=%s budget=%s unknown_usage_runs=%s）",
+                "cohort 单轮熔断（reason=%s spent=%s budget=%s today_tokens=%s unknown_usage_runs=%s）",
                 stop_reason,
                 spent,
                 budget,
+                today_tokens,
                 unknown_usage_runs,
             )
 
@@ -191,6 +254,68 @@ def _resolve_budget(max_tokens: int | None) -> int:
         return _DEFAULT_MAX_TOKENS
 
 
+def _resolve_daily_budget() -> int:
+    """当日额度预算：``COHORT_DAILY_TOKEN_BUDGET``，非数值 WARN 回退默认。"""
+    raw = os.getenv("COHORT_DAILY_TOKEN_BUDGET")
+    if raw is None:
+        return _DEFAULT_DAILY_TOKENS
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "COHORT_DAILY_TOKEN_BUDGET 非数值（%r），回退默认 %d", raw, _DEFAULT_DAILY_TOKENS
+        )
+        return _DEFAULT_DAILY_TOKENS
+
+
+def _today_tokens(version: str, day: str, db_path: str | Path | None) -> int:
+    """当日（该池版本）已记录的 token 合计；NULL 记账按 0（真值缺失不虚增余量）。"""
+    rows = list_cohort_runs(universe_version=version, trade_date=day, db_path=db_path)
+    return sum(int(row["tokens_total"] or 0) for row in rows)
+
+
+def _has_quota_failure_today(version: str, day: str, db_path: str | Path | None) -> bool:
+    """当日是否已撞过额度（硬证据；只有 ``quota`` 归因算）。"""
+    return any(
+        row["status"] == "failure" and row.get("failure_reason") == "quota"
+        for row in list_cohort_runs(universe_version=version, trade_date=day, db_path=db_path)
+    )
+
+
+def _estimate_run_tokens(db_path: str | Path | None) -> int:
+    """单只预估成本：历史成功 run 的 token **p75**（避免中位数低估导致越过当日预算）；
+    无样本回退保守默认。"""
+    values = [
+        int(row["tokens_total"])
+        for row in list_cohort_runs(db_path=db_path)
+        if row["status"] == "success" and row.get("tokens_total")
+    ]
+    if not values:
+        return _DEFAULT_ESTIMATED_RUN_TOKENS
+    ordered = sorted(values)
+    return ordered[int(round(0.75 * (len(ordered) - 1)))]
+
+
+def _preflight_skip_reason(
+    *,
+    today_tokens: int,
+    budget: int,
+    estimate: int,
+    quota_failed_today: bool,
+) -> str | None:
+    """批次预检：撞额度优先（硬证据），其次当日余量不足（保守下界）。"""
+    if quota_failed_today:
+        return "quota"
+    if today_tokens + estimate > budget:
+        return "budget_daily"
+    return None
+
+
+def _is_quota_error(message: object) -> bool:
+    """额度耗尽特征匹配（5 小时滚动上限 / 速率限制 / 429）；只做归因，不解析额度。"""
+    return bool(message) and bool(_QUOTA_PATTERN.search(str(message)))
+
+
 def _empty_result() -> dict[str, Any]:
     return {
         "enabled": False,
@@ -202,6 +327,7 @@ def _empty_result() -> dict[str, Any]:
         "skipped_reasons": {},
         "tokens_total": 0,
         "budget_stopped": False,
+        "daily_budget": None,
     }
 
 
@@ -282,7 +408,11 @@ def _run_one(
             _log_no_report_ready(constituent.ticker, error_event)
             return {
                 "status": "failure",
-                "failure_reason": "no_report_ready",
+                "failure_reason": (
+                    "quota"
+                    if _is_quota_error((error_event or {}).get("message"))
+                    else "no_report_ready"
+                ),
                 "session_id": session_id,
                 "langfuse_trace_id": trace_id or _session_trace_id(session_id),
                 "trigger_time": trigger,
@@ -302,7 +432,7 @@ def _run_one(
         _persist_session_trace(session_id, trace_id)
         return {
             "status": "failure",
-            "failure_reason": "exception",  # 稳定码；异常消息只进日志
+            "failure_reason": "quota" if _is_quota_error(exc) else "exception",
             "session_id": session_id,
             "langfuse_trace_id": trace_id or _session_trace_id(session_id),
             "trigger_time": trigger,

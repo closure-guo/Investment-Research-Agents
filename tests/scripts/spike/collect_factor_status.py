@@ -399,6 +399,12 @@ def collect_once(
     new_state = _load_state(state_path)
     if session_files:
         latest = session_files[-1]
+        # 进度新鲜度原始读数：日志 mtime 距采集时刻的秒数（采集器只报读数，判定归后端）
+        log_age_s = None
+        try:
+            log_age_s = max(0, int(now_epoch - latest.stat().st_mtime))
+        except OSError:
+            log_age_s = None
         factors, blocks, new_state = _incremental_factors(latest, new_state)
         if blocks:
             candidates_path = (
@@ -425,6 +431,7 @@ def collect_once(
             "steps_total": progress.get("steps_total"),
             "step_elapsed_s": progress.get("step_elapsed_s"),
             "step_eta_s": progress.get("step_eta_s"),
+            "log_age_s": log_age_s,
             "factors": factors,
             "log_tail": _normalized_tail_lines(_read_tail(latest, TAIL_BYTES)),
         }

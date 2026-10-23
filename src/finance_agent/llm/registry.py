@@ -181,5 +181,14 @@ def get_profile_preset(name: str) -> ModelProfile:
     return _PRESETS[name]
 
 
+def register_preset(profile: ModelProfile) -> None:
+    """运行时注册 preset（env 注入的 fallback 成员用；同名覆盖幂等）。
+
+    fallback 链成员的解析路径是「名字 → registry preset」，env 注入的成员必须先
+    注册再挂到主 profile 的 ``fallback`` 上，否则链装配时查不到。
+    """
+    _PRESETS[profile.name] = profile
+
+
 def list_presets() -> list[str]:
     return list(_PRESETS)
