@@ -352,6 +352,10 @@ def run_factor_harvest(
         "admitted": 0,
         "rejected": 0,
         "errors": 0,
+        # errors 桶构成披露（refine-harvest-errors-caliber，issue #465）：占位 =
+        # 本批不可翻译/转译失败（留痕语义不变，已被上两键单列）；real = 真实
+        # 预检失败（已转译候选意外未过预检——正常恒 0，>0 是翻译器/编排缺陷信号）
+        "errors_breakdown": {"placeholders": 0, "real": 0},
         "rejections": [],
     }
     if not pending:
@@ -514,6 +518,14 @@ def run_factor_harvest(
         summary["rejected"] = import_summary["rejected"]
         summary["errors"] = import_summary["errors"]
         summary["rejections"] = import_summary["rejections"]
+        # errors 构成分列（refine-harvest-errors-caliber）：占位条目在导入预检中
+        # 必失败（原始公式/Qlib 形态非合法 DSL）→ real 即「已转译候选意外未过
+        # 预检」；下截 0 防未来口径漂移把 real 推成负数。
+        placeholders = summary["untranslatable"] + summary["transcription_errors"]
+        summary["errors_breakdown"] = {
+            "placeholders": placeholders,
+            "real": max(0, int(import_summary["errors"]) - placeholders),
+        }
         # 回填按 ``outcomes`` 的**位置**对齐，MUST NOT 按表达式反查：同批逐字重复的
         # 表达式各占一位（先入库者 admitted、后入库者被闸口拒收）——按表达式反查
         # 会让已入库候选被同表达式的拒收记录错标 rejected，状态文件与反馈桥随之
