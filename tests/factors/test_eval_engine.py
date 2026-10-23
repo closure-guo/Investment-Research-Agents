@@ -564,8 +564,9 @@ def test_ts_rank_vectorized_matches_pandas_reference():
     values[20, :] = np.round(values[20, :])  # 更多并列
     values[30:33, 5] = np.nan  # NaN 注入（窗口含 NaN → NaN）
     values[50, 8] = np.nan
-    close = pd.DataFrame(values, index=[f"d{i:02d}" for i in range(80)],
-                         columns=[f"c{i:02d}" for i in range(12)])
+    close = pd.DataFrame(
+        values, index=[f"d{i:02d}" for i in range(80)], columns=[f"c{i:02d}" for i in range(12)]
+    )
 
     def _reference(frame: pd.DataFrame, window: int) -> pd.DataFrame:
         def _last_pct_rank(window_values: np.ndarray) -> float:
