@@ -75,7 +75,7 @@ jobs:
           npx playwright install chromium --with-deps
         working-directory: tests/e2e/playwright
 
-      # 套件顺序 = 耗时升序（update-ci-pipeline R2）：eval-ops → 战绩页 → 默认 →
+      # 套件顺序 = 耗时升序（update-ci-pipeline R2）：eval-ops → 战绩页 → 收割链路 → 默认 →
       # 时间轴，最快失败最快反馈；~12 分钟的时间轴殿后，不遮挡快套件失败。
       # 每套件同时落 JSON 报告（R4）：PLAYWRIGHT_JSON_OUTPUT_NAME 相对 configDir
       # 解析（playwright 1.62 实跑实证），reporter 自动建父目录。
@@ -98,6 +98,18 @@ jobs:
           CI: "true"
           PLAYWRIGHT_JSON_OUTPUT_NAME: flaky-reports/track-record.json
 
+      # 收割链路 UI（add-factor-harvest-ui T8）：专属 config + 独立端口对 8007/5180。
+      # 为什么必须独立成套：收割区块整块挂在主快照的 data.available 门控下，而默认套件里
+      # 那份 FACTOR_RESEARCH_STATUS_PATH fixture 归 factor-research-monitor.spec.ts 所有、
+      # 并在其 afterAll 删除——两个文件在默认套件并行时，收割用例过不过取决于调度时序
+      # （「绿灯但靠运气」）。缘由详见 playwright.harvest.config.ts 头部。
+      - name: Run Playwright E2E (harvest suite)
+        run: npx playwright test --config=playwright.harvest.config.ts --reporter=list --reporter=json
+        working-directory: tests/e2e/playwright
+        env:
+          CI: "true"
+          PLAYWRIGHT_JSON_OUTPUT_NAME: flaky-reports/harvest.json
+
       - name: Run Playwright E2E (stub suite)
         run: npx playwright test --reporter=list --reporter=html --reporter=json
         working-directory: tests/e2e/playwright
@@ -118,7 +130,7 @@ jobs:
       # 被并发取消的 run 不收（半截数据无归因价值）
       - name: Collect flaky stats
         if: ${{ !cancelled() }}
-        run: uv run python scripts/ci/collect_flaky.py --reports-dir tests/e2e/playwright/flaky-reports --out-dir reports/e2e-flaky --expect eval-ops,track-record,default,timeline
+        run: uv run python scripts/ci/collect_flaky.py --reports-dir tests/e2e/playwright/flaky-reports --out-dir reports/e2e-flaky --expect eval-ops,track-record,harvest,default,timeline
 
       # overwrite: rerun（attempt≥2）时同名 artifact 已存在——v4 制品不可变，
       # 不加 overwrite 会让上传步骤在 rerun 上假红；覆盖后 artifact 恒为最新

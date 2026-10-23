@@ -92,6 +92,8 @@
 | `factor-research-harvest-bar` 计数 | 1（宽度 93%，`已完成` 徽标并存） | 0 |
 | 真实端点读数 | `status=ok`、`processed=896`、`candidates=958`、`pending=62`、`eta_s=null` | 同（数字随 RD-Agent 增长，10:44 已 960/64） |
 | `npx playwright test tests/factor-harvest-ui.spec.ts` | 1 failed（`toHaveCount(0)` 收到 1） | 1 passed / 2 skipped（「已收尾：不渲染队列消化进度条」ok） |
+| `npx playwright test --config=playwright.harvest.config.ts`（专属套件·CI 形态） | — | 2 passed / 1 skipped（8007/5180，stub 栈） |
+| 变异验证（摘掉 `harvestRunning &&` 守卫） | — | 1 failed（命中 `toHaveCount(0)`）；复原后 2 passed |
 | `npx vitest run src/test/factorResearchPage.test.tsx` | 1 failed / 40 passed | 41 passed |
 | `uv run pytest tests/test_api_factor_research.py -q` | — | 70 passed（后端未改，回归确认） |
 | `npx vitest run`（全量前端） | — | 102 files / 916 passed |
@@ -106,11 +108,14 @@
   `factor-research-harvest-status` 而挂死；新写法按收尾口径断言（进度条不得出现），可正常通过。
 - 回归捕捉力：收尾分支的 `await expect(bar).toHaveCount(0)` 就是本次 bug 的捕获断言——修复前
   在真实栈上实测 1 failed（`Received: 1`），修复后转绿；该断言未因 spec 重写而削弱。
-- E2E 覆盖边界（评审 P1-1，已知遗留）：`data/factor_research/*.json` 不入库，CI 全新鲜检出时
-  `available=false` → 数据形态用例在 CI 恒 skip（本机/真实栈因数据文件在而实跑）。
-  即 **CI 侧该回归由 RTL 用例守住**（`frontend/src/test/factorResearchPage.test.tsx`，`ci.yml` 的 `npm test`），
-  E2E 侧目前只在真实栈生效。补齐需给 `playwright.config.ts` 增收割路径隔离 + spec 侧 seed，
-  已记入 `openspec/changes/add-factor-harvest-ui/tasks.md` 的 T8 遗留项。
+- E2E 覆盖边界（评审 P1-1，2026-10-23 已补）：`data/factor_research/*.json` 不入库，CI 全新检出时
+  `available=false`；再往下挖还有一层——收割区块整块挂在主快照 `data.available` 门控下
+  （`FactorResearchPage.tsx:503-896`），所以还需要 `FACTOR_RESEARCH_STATUS_PATH` 快照 fixture，
+  而那份 fixture 在默认套件归 `factor-research-monitor.spec.ts` 写/删。结论：自 `59e8b9da` 起该 spec
+  在 CI 属**时序碰运气**（单跑默认 config 必红，随套件跑可能靠 race 过），不是稳定门禁。
+  已改为**专属套件** `playwright.harvest.config.ts`（8007/5180、workers=1、status+收割 fixture 全隔离、
+  不误连本机 8000/5173），CI workflow 增 `harvest suite` 一步 + `collect_flaky --expect` 加 `harvest`。
+  `data/test-e2e-harvest-sessions.db` 已入 `.gitignore`。
 
 - 部署：仅重建前端镜像（生产形态 nginx：`docker compose -f docker-compose.yml build frontend`）
   并重建 frontend 容器（bundle 由 `index-B40QdUkn.js` → `index-Bxae_6oK.js`）；重建前

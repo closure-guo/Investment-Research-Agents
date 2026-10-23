@@ -84,9 +84,19 @@
       运行中/已收尾拆成各自命名的用例（「已收尾：不渲染队列消化进度条」，回归断言不再可能被静默挪走）、
       `fetchHarvest` 移到 `page.goto` 之后（消除与页面 10s 轮询的分支翻转竞态）、
       RTL 等待句柄由区块外壳改为数据块（`factor-research-harvest-status`）
-- [ ] 遗留 P1-1（**不在本次范围**，待另开变更）：CI 全新鲜检出无 `data/factor_research/*.json`
-      （gitignored），端点 `available=false` → 收割 E2E 的数据形态用例在 CI 恒 skip，E2E 侧抓不到回归；
-      修法＝`playwright.config.ts` 增 `FACTOR_RESEARCH_HARVEST_STATE_PATH` / `_CANDIDATES_PATH` /
-      `_HEARTBEAT_PATH` 测试隔离路径 + spec 侧 seed（参照 `factor-research-monitor.spec.ts`）。
-      注意「空态用例删 fixture」在 `fullyParallel: true` 下会与数据用例互踩，需另设端口对或 serial 化。
-      CI 侧该回归目前由 `frontend/src/test/factorResearchPage.test.tsx` 守住（`ci.yml` 的 `npm test`）
+- [x] P1-1 已补（2026-10-23 同一变更内做完，未另开）：默认 config 增 `FACTOR_RESEARCH_HARVEST_STATE_PATH` /
+      `_CANDIDATES_PATH` / `_HEARTBEAT_PATH` 测试隔离路径；`.gitignore` 收敛为
+      `data/test-e2e-factor-research-*.json*`；spec 以**真实文件** seed（不 mock 业务接口）
+- [x] 换 stub 栈实测才暴露的深层依赖：收割区块整块挂在主快照 `data.available` 门控下
+      （`FactorResearchPage.tsx:503` 的块一直包到 `:896`，supervisor/收割/会话历史都在里面），
+      所以收割 E2E 还需要 `FACTOR_RESEARCH_STATUS_PATH` 快照；而那份 fixture 在默认套件里归
+      `factor-research-monitor.spec.ts` 所有（`:122` 每例写、`:199-205` afterAll 删）——
+      两文件在 `fullyParallel` 下并行时，收割用例过不过取决于调度时序（实测：单独跑默认 config
+      必红，随套件跑却可能靠 race 过）。**即自 `59e8b9da` 起该 spec 在 CI 是碰运气，不是稳定门禁**
+- [x] 解法（选专属套件）：`tests/e2e/playwright/playwright.harvest.config.ts`——端口对 8007/5180、
+      `workers: 1` / `fullyParallel: false`、status+收割 fixture 全隔离、`reuseExistingServer: false`
+      （不误连本机 8000/5173 生产栈）；CI 增一步 `harvest suite`（`flaky-reports/harvest.json`）+
+      `collect_flaky --expect` 加 `harvest`
+- [x] 变异验证：临时摘掉前端 `harvestRunning &&` 守卫 → 专属套件 **1 failed**（正好命中
+      `toHaveCount(0)` 回归断言）；`git checkout` 复原后 **2 passed / 1 skipped**
+- [x] 不干扰生产栈：专属套件全程在 8007/5180，docker 8000/5173 未停（`GET /api/sessions` 未受影响）

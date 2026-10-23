@@ -249,6 +249,10 @@ cache.db*
 **/sessions.db-wal
 **/sessions.db-shm
 data/test-e2e-sessions.db*
+# 持仓上下文复现用临时库（data/repro-stub.db 及其 WAL/SHM，本地排查产物不入库）
+data/repro-stub.db*
+# 收割链路 UI 专属套件独立库（playwright.harvest.config.ts 注入 SESSIONS_DB_PATH）
+data/test-e2e-harvest-sessions.db*
 # 行情快照告警横幅 E2E 独立测试库（playwright.config.ts 注入 SNAPSHOT_DB_PATH）
 data/test-e2e-snapshot.db*
 # 跑赢指数对比 E2E 专属测试库（playwright.track-record.config.ts 注入）
@@ -281,8 +285,9 @@ data/factor_library.db*
 # 因子研发监控快照（distro 采集器经 /mnt/d 桥写入的运行时产物）+ E2E fixture 文件
 # （delta add-factor-research-monitor：spec 直接写隔离 fixture，生产快照不得入库）
 data/factor_research/
-data/test-e2e-factor-research-status.json*
-data/test-e2e-factor-research-control.json*
+# 因子研发 E2E fixture 文件（status / control / launcher / pipeline / distro-probe /
+# 收割数据面 state·candidates·heartbeat）：spec 以真实文件写入隔离路径，一律不入库
+data/test-e2e-factor-research-*.json*
 data/execution.db*
 # 业绩预告事件线库（delta add-event-driven-lane：本地运行时数据 + E2E 隔离库，
 # 同 data/screening.db / data/regime.db 处置；env EVENTS_DB_PATH 可覆盖）
