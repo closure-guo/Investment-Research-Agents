@@ -35,6 +35,9 @@ from typing import Any, Protocol
 from finance_agent.factors import qlib_translate
 from finance_agent.factors.eval_engine import MarketPanel
 from finance_agent.factors.external import run_factor_external_import
+from finance_agent.factors.monthly import (  # noqa: PLC2701 - 面板构造口径单一来源（external 同先例）
+    _panel_from_snapshot,
+)
 from finance_agent.llm.contracts import extract_json
 from finance_agent.llm.errors import OutputTruncatedError
 from finance_agent.llm.gateway import complete_text
@@ -283,6 +286,37 @@ def _state_path(explicit: str | Path | None) -> Path:
     return Path(os.environ.get("FACTOR_RESEARCH_HARVEST_STATE_PATH", DEFAULT_STATE_PATH))
 
 
+def _pending_selection(
+    cand_file: Path, st_file: Path, *, limit: int, retry_statuses: Collection[str] | None
+) -> tuple[list[dict[str, Any]], dict[str, Any], set[str]]:
+    """候选文件 × 状态文件 → ``(本批待处理, 已处理表, 重放名集)``。
+
+    选批语义的单一来源：重放（状态命中 ``retry_statuses``）先于未处理候选进入
+    限批截断。``run_factor_harvest`` 的选批与 ``run_factor_harvest_until_drained``
+    的「是否需要预构面板」预判共用本函数——两处语义必须同源，改动须两处同义。
+    """
+    raw_candidates = _load_json(cand_file).get("candidates")
+    all_candidates = (
+        [c for c in raw_candidates if isinstance(c, dict) and c.get("name")]
+        if isinstance(raw_candidates, list)
+        else []
+    )
+    processed: dict[str, Any] = dict(_load_json(st_file).get("processed") or {})
+    retry_set = set(retry_statuses or ())
+    replay = (
+        [
+            candidate
+            for candidate in all_candidates
+            if _recorded_status(processed.get(str(candidate.get("name")))) in retry_set
+        ]
+        if retry_set
+        else []
+    )
+    fresh = [c for c in all_candidates if str(c.get("name")) not in processed]
+    pending = (replay + fresh)[: max(limit, 0)]
+    return pending, processed, {str(c.get("name")) for c in replay}
+
+
 def run_factor_harvest(
     *,
     candidates_path: str | Path | None = None,
@@ -305,26 +339,9 @@ def run_factor_harvest(
     """
     cand_file = _candidates_path(candidates_path)
     st_file = _state_path(state_path)
-    raw_candidates = _load_json(cand_file).get("candidates")
-    all_candidates = (
-        [c for c in raw_candidates if isinstance(c, dict) and c.get("name")]
-        if isinstance(raw_candidates, list)
-        else []
+    pending, processed, replay_names = _pending_selection(
+        cand_file, st_file, limit=limit, retry_statuses=retry_statuses
     )
-    processed: dict[str, Any] = dict(_load_json(st_file).get("processed") or {})
-    retry_set = set(retry_statuses or ())
-    replay = (
-        [
-            candidate
-            for candidate in all_candidates
-            if _recorded_status(processed.get(str(candidate.get("name")))) in retry_set
-        ]
-        if retry_set
-        else []
-    )
-    fresh = [c for c in all_candidates if str(c.get("name")) not in processed]
-    pending = (replay + fresh)[: max(limit, 0)]
-    replay_names = {str(c.get("name")) for c in replay}
 
     summary: dict[str, Any] = {
         "proposed": len(pending),
@@ -557,10 +574,26 @@ def run_factor_harvest_until_drained(
     约束不变：每批候选数 ≤ ``limit``（默认 60），即闸③ BH-FDR 的 K ≤ 100 分辨率
     始终成立；多批之间是**独立的检验家族**，不合并 p 值。
 
+    面板复用：未显式注入 ``panel`` 且存在待处理候选时，准入面板（500 交易日）
+    **每运行只构造一次**并逐批复用——同一次运行内快照数据不变，逐批各建一份
+    是纯重复劳动（与单批同一 ``_panel_from_snapshot`` 路径，fail loud 语义不变）；
+    无待处理候选（空候选文件/全部已处理）不构造，与单批的零面板语义一致。
+
     停止条件：``proposed == 0``（已清空当前待处理）或 ``max_batches`` 用尽。
     任一批异常直接上抛（``run_job`` 记 failed；状态文件幂等，下次从断点继续）。
     聚合摘要把拒绝明细截断到 ``MAX_AGGREGATED_REJECTIONS``，避免 job_runs 过大。
     """
+    panel = kwargs.pop("panel", None)
+    if panel is None:
+        cand_file = _candidates_path(kwargs.get("candidates_path"))
+        st_file = _state_path(kwargs.get("state_path"))
+        has_pending = bool(
+            _pending_selection(
+                cand_file, st_file, limit=limit, retry_statuses=kwargs.get("retry_statuses")
+            )[0]
+        )
+        if has_pending:
+            panel = _panel_from_snapshot(kwargs.get("snapshot_db_path"))
     totals: dict[str, Any] = {
         "batches": 0,
         "drained": False,
@@ -575,7 +608,7 @@ def run_factor_harvest_until_drained(
         "rejections_truncated": False,
     }
     for _ in range(max(1, max_batches)):
-        summary = run_factor_harvest(limit=limit, **kwargs)
+        summary = run_factor_harvest(limit=limit, panel=panel, **kwargs)
         if summary["proposed"] == 0:
             totals["drained"] = True
             break

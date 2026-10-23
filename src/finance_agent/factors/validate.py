@@ -454,13 +454,46 @@ def _aligned_pearson(left: pd.Series, right: pd.Series) -> float | None:
     return float(correlation)
 
 
+@dataclass
+class _PoolEvalCache:
+    """闸④池因子批内求值缓存（键 = 因子 id；``admit_candidates`` 单次调用内复用）。
+
+    池因子在固定面板上的求值帧与现算 IC 序列**与当前候选无关**——逐候选重复
+    ``evaluate``（全面板滚动算子）是闸④的主要计算浪费（60 候选 × 每池因子最多
+    两次求值）。面板与表达式在单次准入调用内不变、因子 id 不复用表达式，缓存
+    天然无失效；本批先入库的因子进入后续候选的池后，首遇时自然入缓存。
+    ``check_pool_increment`` 独立调用方缺省 ``None`` 不缓存（行为不变）。
+    """
+
+    frames: dict[int, pd.DataFrame] = field(default_factory=dict)
+    ic_series: dict[int, pd.Series] = field(default_factory=dict)
+
+
+def _pool_frame(
+    row: dict[str, Any], panel: MarketPanel, cache: _PoolEvalCache | None
+) -> pd.DataFrame:
+    """池因子求值帧（``cache`` 给定且命中 → 复用；``None`` 直算）。"""
+    if cache is None:
+        return evaluate(parse(str(row["expression"])), panel)
+    factor_id = int(row["id"])
+    if factor_id not in cache.frames:
+        cache.frames[factor_id] = evaluate(parse(str(row["expression"])), panel)
+    return cache.frames[factor_id]
+
+
 def _pool_ic_series(
-    row: dict[str, Any], panel: MarketPanel, fwd: pd.DataFrame, *, db_path: str | Path | None
+    row: dict[str, Any],
+    panel: MarketPanel,
+    fwd: pd.DataFrame,
+    *,
+    db_path: str | Path | None,
+    cache: _PoolEvalCache | None = None,
 ) -> pd.Series:
     """池内因子的 IC 序列：优先落库序列（``factor_ic``），不足/缺失则由面板现算。
 
     落库序列覆盖不足 ``MIN_REDUNDANCY_SAMPLES`` 点（本批次刚入库、监控尚未跑过）
     时回退现算——同一口径的同一量（逐日 RankIC），保证冗余检查不因落库时序漏检。
+    现算路径经 ``cache`` 批内复用（``admit_candidates`` 逐候选调用同池不重算）。
     """
     persisted = list_ic_series(int(row["id"]), db_path=db_path)
     if persisted:
@@ -469,7 +502,13 @@ def _pool_ic_series(
         )
         if int(series.dropna().size) >= MIN_REDUNDANCY_SAMPLES:
             return series
-    return rank_ic_series(evaluate(parse(str(row["expression"])), panel), fwd)
+    factor_id = int(row["id"])
+    if cache is not None and factor_id in cache.ic_series:
+        return cache.ic_series[factor_id]
+    computed = rank_ic_series(_pool_frame(row, panel, cache), fwd)
+    if cache is not None:
+        cache.ic_series[factor_id] = computed
+    return computed
 
 
 def _composite_ic(values: list[pd.DataFrame], fwd: pd.DataFrame) -> pd.Series:
@@ -490,6 +529,7 @@ def check_pool_increment(
     panel: MarketPanel,
     *,
     db_path: str | Path | None = None,
+    pool_cache: _PoolEvalCache | None = None,
 ) -> GateResult:
     """闸④：先冗余（|IC 相关| > ``MAX_IC_CORRELATION``）再池级 IR 增量（E5）。
 
@@ -536,7 +576,7 @@ def check_pool_increment(
     redundancy_skipped: list[int] = []
     for row in pool:
         factor_id = int(row["id"])
-        pool_ic = _pool_ic_series(row, panel, fwd, db_path=db_path)
+        pool_ic = _pool_ic_series(row, panel, fwd, db_path=db_path, cache=pool_cache)
         correlation = _aligned_pearson(candidate_ic, pool_ic)
         if correlation is None:
             redundancy_skipped.append(factor_id)
@@ -571,7 +611,7 @@ def check_pool_increment(
     pool_values: list[pd.DataFrame] = []
     for row in pool:
         factor_id = int(row["id"])
-        frame = evaluate(parse(str(row["expression"])), panel)
+        frame = _pool_frame(row, panel, pool_cache)
         train_ic = rank_ic_series(frame.loc[train_index], fwd.loc[train_index]).dropna()
         orientation = (
             _sign(_ic_stats(train_ic)[0]) if train_ic.size >= MIN_REDUNDANCY_SAMPLES else 0
@@ -825,11 +865,16 @@ def admit_candidates(
                 )
 
     # 阶段 C（逐候选）：闸④ → 闸⑤ → 入库前复检 → 入库(active) → 保种
+    # 池因子批内求值缓存（同一面板上池因子的帧/IC 与候选无关；本批先入库者随后续
+    # 候选入池首遇时自然进缓存——键 id 在单次调用内不复用表达式，无失效问题）
+    pool_cache = _PoolEvalCache()
     for item in pending:
         if item.position in outcomes:
             continue
         pool = list_active_factors(db_path=db_path)
-        gate4 = check_pool_increment(item.ic, item.values, pool, panel, db_path=db_path)
+        gate4 = check_pool_increment(
+            item.ic, item.values, pool, panel, db_path=db_path, pool_cache=pool_cache
+        )
         item.gates.append(gate4)
         if not gate4.passed:
             outcomes[item.position] = AdmissionResult(

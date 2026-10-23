@@ -738,3 +738,38 @@ class TestUntilDrained:
         )
         assert summary["batches"] == 0
         assert summary["drained"] is True
+
+    def test_panel_built_once_across_batches(self, tmp_path, monkeypatch):
+        """未注入面板时：准入面板每运行只构一次并逐批复用；无待处理候选不构造。
+
+        旧实现每批在批内各建一份 500 日面板（同次运行快照数据不变，纯重复劳动）。
+        """
+        names = [f"f{i}" for i in range(5)]
+        cand_path = self._write(tmp_path, names)
+        state_path = tmp_path / "harvest_state.json"
+        builds = {"count": 0}
+
+        def _fake_panel(snapshot_db_path):
+            builds["count"] += 1
+            return _panel()
+
+        monkeypatch.setattr("finance_agent.factors.harvest._panel_from_snapshot", _fake_panel)
+        client = _StubClient({n: {"qlib_expression": "Mean($close, 5)"} for n in names})
+        summary = run_factor_harvest_until_drained(
+            limit=2,
+            candidates_path=cand_path,
+            state_path=state_path,
+            client=client,
+        )
+        assert summary["batches"] == 3  # 2 + 2 + 1
+        assert builds["count"] == 1  # 三批共用一次面板构造
+
+        # 全部已处理后的空运行：不再构造面板（与单批零面板语义一致）
+        drained = run_factor_harvest_until_drained(
+            limit=2,
+            candidates_path=cand_path,
+            state_path=state_path,
+            client=client,
+        )
+        assert drained["drained"] is True
+        assert builds["count"] == 1
