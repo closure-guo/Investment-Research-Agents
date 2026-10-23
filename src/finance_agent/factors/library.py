@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from finance_agent.factors.constraints import BUCKET_TOP_K
-from finance_agent.factors.dsl import is_subtree_isomorphic, parse
+from finance_agent.factors.dsl import is_subtree_isomorphic, parse, serialize
 
 # 状态机（逐字；Global Constraints）
 FACTOR_STATES: tuple[str, ...] = ("candidate", "active", "degraded", "retired")
@@ -312,9 +312,15 @@ def find_structural_duplicate(ast_json: str, *, db_path: str | Path | None = Non
     两者 ``parse`` 等价）；比较在 ``is_subtree_isomorphic``（规范化）下进行，
     数字取值忽略。库内行 ``ast_json`` 为 NULL 时回退用 ``expression``。
     解析失败 → ``DSLParseError``（fail loud，不当作无重复）。
+
+    快路径（issue #464）：库内行的 ``ast_json`` 按契约即 ``serialize(parse(...))``
+    规范串——**同串必同构**，规范串精确命中直接返回，免去逐行 parse+同构比对；
+    未命中（含数字变体/交换律变体/``ast_json`` NULL 或非规范的旧数据行）才走
+    全量同构扫描。语义不变，仅免掉命中场景的 O(库大小) 次解析。
     """
     init_library(db_path)
     candidate = parse(ast_json, enforce_complexity=False)
+    canonical = serialize(candidate)
     placeholders = ", ".join("?" * len(_DEDUP_STATES))
     conn = _connect(db_path)
     try:
@@ -326,6 +332,10 @@ def find_structural_duplicate(ast_json: str, *, db_path: str | Path | None = Non
         ).fetchall()
     finally:
         conn.close()
+    for row in rows:
+        stored = row["ast_json"] or row["expression"]
+        if stored == canonical:  # 规范串精确命中 → 必同构（serialize 为规范形）
+            return int(row["id"])
     for row in rows:
         stored = row["ast_json"] or row["expression"]
         if is_subtree_isomorphic(candidate, parse(stored, enforce_complexity=False)):

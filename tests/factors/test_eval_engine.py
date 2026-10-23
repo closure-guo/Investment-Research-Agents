@@ -550,3 +550,30 @@ def test_ts_max_nan_in_window_propagates():
         _eval("ts_max(close, 3)", panel),
         _frame({"A": [_NAN, _NAN, _NAN, _NAN, 13.0]}),
     )
+
+
+def test_ts_rank_vectorized_matches_pandas_reference():
+    """向量化 ts_rank 与 pandas rolling.apply 参考实现逐位一致（issue #463 重构护栏）。
+
+    随机面板（含并列值注入与 NaN 注入）× 多窗口：NaN 传播、热身期 NaN、并列
+    平均秩三种边界都必须与参考实现完全一致。
+    """
+    rng = np.random.default_rng(20261023)
+    values = rng.normal(size=(80, 12))
+    values[10:14, 3] = 7.0  # 并列簇（同值并列 → 平均秩）
+    values[20, :] = np.round(values[20, :])  # 更多并列
+    values[30:33, 5] = np.nan  # NaN 注入（窗口含 NaN → NaN）
+    values[50, 8] = np.nan
+    close = pd.DataFrame(values, index=[f"d{i:02d}" for i in range(80)],
+                         columns=[f"c{i:02d}" for i in range(12)])
+
+    def _reference(frame: pd.DataFrame, window: int) -> pd.DataFrame:
+        def _last_pct_rank(window_values: np.ndarray) -> float:
+            return float(pd.Series(window_values).rank(pct=True).iloc[-1])
+
+        return frame.rolling(window, min_periods=window).apply(_last_pct_rank, raw=True)
+
+    for window in (1, 2, 3, 5, 20, 60):
+        got = _eval(f"ts_rank(close,{window})", _panel(close=close))
+        want = _reference(close, window)
+        pd.testing.assert_frame_equal(got, want, check_exact=True)

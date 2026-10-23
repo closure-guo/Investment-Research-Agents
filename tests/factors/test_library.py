@@ -811,3 +811,43 @@ def test_cumulative_fdr_preview_pure_function(tmp_path):
     # 汇总与家族面一致
     summary = ledger_summary(db_path=db)
     assert summary["tested"] == preview["family_size"]
+
+
+def test_find_structural_duplicate_fast_path_and_variants(tmp_path):
+    """精确串预筛（issue #464）语义不变：规范串命中直接返回；数字/交换律变体与
+    ``ast_json`` NULL 回退仍走同构扫描命中；非同构返回 None。"""
+    db = str(tmp_path / "factor_library.db")
+    exact_id = add_factor(
+        expression="ts_mean(close,10)",
+        hypothesis="测试用经济学假设：均值因子与未来收益存在关系。",
+        category="价量",
+        status="active",
+        db_path=db,
+    )
+    variant_id = add_factor(
+        expression="add(close,volume)",
+        hypothesis="测试用经济学假设：价量相加与未来收益存在关系。",
+        category="价量",
+        status="active",
+        db_path=db,
+    )
+    legacy_id = add_factor(  # ast_json=NULL → 回退 expression（原样保留空格形态）
+        expression="ts_std(close, 5)",
+        hypothesis="测试用经济学假设：波动率因子与未来收益存在关系。",
+        category="价量",
+        status="active",
+        ast_json=None,
+        db_path=db,
+    )
+    # 规范串精确命中（快路径）
+    assert find_structural_duplicate("ts_mean(close,10)", db_path=db) == exact_id
+    # 原始（非规范）输入等价命中
+    assert find_structural_duplicate("ts_mean( close , 10 )", db_path=db) == exact_id
+    # 数字变体（同构、不同串）走扫描
+    assert find_structural_duplicate("ts_mean(close,11)", db_path=db) == exact_id
+    # 交换律变体走扫描
+    assert find_structural_duplicate("add(volume,close)", db_path=db) == variant_id
+    # ast_json NULL → expression 回退（非规范串走扫描）
+    assert find_structural_duplicate("ts_std(close,5)", db_path=db) == legacy_id
+    # 无同构
+    assert find_structural_duplicate("log(amount)", db_path=db) is None
