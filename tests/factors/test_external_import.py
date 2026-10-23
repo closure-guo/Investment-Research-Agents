@@ -103,3 +103,34 @@ def test_shallow_snapshot_panel_fails_loud(tmp_path):
         run_factor_external_import(
             [_candidate(_ADMITTED_EXPRESSION)], db_path=db, snapshot_db_path=snap
         )
+
+
+def test_outcomes_aligned_with_input_order(tmp_path):
+    """``outcomes`` 与输入顺序逐位对齐：预检失败 None / 过闸 admitted / 拒收带闸口读数。
+
+    消费方（收割桥）按位置回填逐候选状态——同批逐字重复的表达式各占一位，
+    不得按表达式反查（碰撞时已入库者会被错标 rejected）。
+    """
+    db = _db(tmp_path)
+
+    summary = run_factor_external_import(
+        [
+            _candidate("foo(close,3)"),
+            _candidate(_ADMITTED_EXPRESSION),
+            _candidate(_REJECTED_EXPRESSION),
+        ],
+        panel=_strong_panel(),
+        seed=_STRONG_SEED,
+        db_path=db,
+    )
+
+    assert len(summary["outcomes"]) == 3
+    assert summary["outcomes"][0] is None  # 预检失败：无闸口裁决
+    admitted = summary["outcomes"][1]
+    assert admitted["admitted"] is True
+    assert isinstance(admitted["factor_id"], int)
+    rejected = summary["outcomes"][2]
+    assert rejected["admitted"] is False
+    assert rejected["gate"] == 2
+    assert rejected["reason"] == "WEAK_ICIR"
+    assert "icir" in rejected["detail"]

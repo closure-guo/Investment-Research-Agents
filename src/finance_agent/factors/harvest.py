@@ -10,7 +10,8 @@
 3. **翻译**（确定性，``factors.qlib_translate`` 映射表可审计）：Qlib → DSL；
    不可翻译/超复杂度逐条留 blocker；
 4. **过闸**：``run_factor_external_import``（与外部导入/月批**同一五道闸**，
-   ``source="external"``，逐条裁决留事件史含闸口读数 ``detail``）；
+   ``source="external"``，逐条裁决留事件史含闸口读数 ``detail``）；状态回填按导入
+   摘要 ``outcomes`` 的**位置**对齐（同批同表达式碰撞时先入库者不被错标）；
 5. **幂等 / 重放**：已处理候选记状态文件（``harvest_state.json``，``FACTOR_RESEARCH_HARVEST_STATE_PATH``
    可覆盖），不重复导入；LLM 网关不可用/编排级异常一律上抛（job 记 failed——fail loud，
    MUST NOT 静默跳过或伪造候选）；转译响应**不合载荷合同**（非法 JSON / 缺字段）按
@@ -342,6 +343,8 @@ def run_factor_harvest(
     llm = client if client is not None else GatewayTranscriptionClient()
     payload: list[dict[str, Any]] = []
     verdicts: dict[str, dict[str, Any]] = {}
+    # pending_gate 候选 → 其在 payload 中的位置（导入裁决按位置回填，见下）
+    pending_payload_index: dict[str, int] = {}
     batch_started_at = _now()
     _write_harvest_heartbeat(
         batch_started_at=batch_started_at,
@@ -468,6 +471,7 @@ def run_factor_harvest(
                 "category": DEFAULT_CATEGORY,
             }
         )
+        pending_payload_index[name] = len(payload) - 1
 
     summary["transcribed"] = sum(1 for v in verdicts.values() if v["status"] == "pending_gate")
     summary["untranslatable"] = sum(1 for v in verdicts.values() if v["status"] == "untranslatable")
@@ -493,18 +497,23 @@ def run_factor_harvest(
         summary["rejected"] = import_summary["rejected"]
         summary["errors"] = import_summary["errors"]
         summary["rejections"] = import_summary["rejections"]
-        rejected_by_expression = {str(r.get("expression")): r for r in import_summary["rejections"]}
-        for verdict in verdicts.values():
+        # 回填按 ``outcomes`` 的**位置**对齐，MUST NOT 按表达式反查：同批逐字重复的
+        # 表达式各占一位（先入库者 admitted、后入库者被闸口拒收）——按表达式反查
+        # 会让已入库候选被同表达式的拒收记录错标 rejected，状态文件与反馈桥随之
+        # 向生成侧谎报该方向已被拒（RD-Agent 同名重提是记录在案的惯性行为）。
+        outcomes = import_summary["outcomes"]
+        for name, verdict in verdicts.items():
             if verdict["status"] != "pending_gate":
                 continue
-            rejection = rejected_by_expression.get(str(verdict["expression"]))
-            if rejection is None:
+            outcome = outcomes[pending_payload_index[name]]
+            if outcome is not None and outcome.get("admitted"):
                 verdict["status"] = "admitted"
             else:
                 verdict["status"] = "rejected"
-                verdict["gate"] = rejection.get("gate")
-                verdict["reason"] = rejection.get("reason")
-                verdict["detail"] = rejection.get("detail")
+                if outcome is not None:
+                    verdict["gate"] = outcome.get("gate")
+                    verdict["reason"] = outcome.get("reason")
+                    verdict["detail"] = outcome.get("detail")
 
     for name, verdict in verdicts.items():
         previous = processed.get(name)
