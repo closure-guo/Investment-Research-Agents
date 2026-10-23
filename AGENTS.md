@@ -63,6 +63,7 @@ cd frontend && npm test               # 前端测试
 - [ ] archive 前置条件：`tasks.md` 全勾 + verification 通过 + E2E 门禁通过（交互类适用）+ 人工验证报告落 `tests/validation/`
 - [ ] 排查 bug 必须同时查后端日志和 Langfuse trace
 - [ ] 重建/重启后端（`docker compose up -d --build` / restart）前先查 `GET /api/sessions` 无 `status=running` 会话；有运行中分析须等其完成或经用户确认再动——宿主机改码不触发容器内 `--reload`（WSL2 bind mount 的 inotify 不传播），手动重建撞上运行中分析会把它杀成 interrupted（2026-10-04 一日三例）
+- [ ] 交易日 15:30–17:10（日批窗口）与 17:55–20:45（cohort/日报）不重建/重启后端——进程内日批被杀即当日断供，且「跑了一半被杀」的僵尸 running 行会被启动补跑的 running-skip 规则挡住、6h 窗内无人接管（2026-10-21~23 连发三例，issue #455）；重启前除查会话外，查 `GET /api/v1/ops/jobs` 无 running 作业
 - [ ] 系统性问题记录到 `docs/incidents/`（编号文档 + 更新 README 索引）
 - [ ] 指标低 ≠ 能力差：任何聚合指标进入处置（重试 / 改 prompt / 判定 agent 缺陷 / 写进报告结论）前，必须先分桶归因、逐条人工终裁；自动化处置只允许挂在终裁为「真错误」的桶上（incident 026）
 - [ ] Issue 一律用 `gh` CLI；标签规范见 `docs/agents/triage-labels.md`

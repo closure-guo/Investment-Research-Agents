@@ -26,8 +26,8 @@
 - [x] 4.4 更新 `docs/incidents/050-factor-ic-missed-fire-20261022.md` 防复发状态 + README 索引
 - [x] 4.5 `openspec validate add-ops-missed-run-catchup --strict` 通过
 
-## 5. 未纳入本轮（记录边界）
+## 5. 未纳入本轮（已移交 issue）
 
-- [ ] 5.1 前端渲染 `missed_today`（交互类 → 另立 delta + E2E）
-- [ ] 5.2 `factor_decay_monitor` 多日回填窗口（改 IC 口径语义，需单独评审）
-- [ ] 5.3 进程收尾可读终态（incident 050 防复发第 3 条，与 046 同族）
+- [x] 5.1 前端渲染 `missed_today`（交互类 → 另立 delta + E2E）→ #453
+- [x] 5.2 `factor_decay_monitor` 多日回填窗口（改 IC 口径语义，需单独评审）→ #454
+- [x] 5.3 进程收尾可读终态（incident 050 防复发第 3 条，与 046 同族）→ #455（2026-10-23 两度实证：僵尸 running 行挡住补跑规划，screening_daily 两次未被接管）
