@@ -811,7 +811,10 @@ def test_errors_breakdown_splits_placeholders_from_real(tmp_path):
     def _fake_import(payload, **kwargs):
         base = _real_import(payload, **kwargs)  # 真源取自 external 模块（未被 patch）
         base["errors"] += 1
-        base["rejections"] = [*base["rejections"], {"expression": "x", "gate": None, "reason": "真实预检失败"}]
+        base["rejections"] = [
+            *base["rejections"],
+            {"expression": "x", "gate": None, "reason": "真实预检失败"},
+        ]
         return base
 
     monkeypatch_target = "finance_agent.factors.harvest.run_factor_external_import"
