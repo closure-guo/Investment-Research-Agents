@@ -190,11 +190,45 @@ afterEach(() => {
 })
 
 describe('EventWatchlistCard 清单渲染', () => {
+  it('固定高度滚动框 + 默认只渲染前 50 条 + 加载更多', async () => {
+    const many = Array.from({ length: 60 }, (_, index) => item({ id: index + 1 }))
+    mockFetch({ watchlist: { items: many } })
+    render(<EventWatchlistCard />)
+
+    const scroll = await screen.findByTestId('event-watchlist-scroll')
+    expect(scroll.className).toContain('overflow-y-auto')
+    expect(scroll.getAttribute('data-max-height')).toBe('420')
+    expect(screen.getByTestId('event-watchlist-count').textContent).toContain('60')
+    expect(screen.getAllByTestId(/^event-watchlist-row-/)).toHaveLength(50)
+
+    fireEvent.click(screen.getByTestId('event-watchlist-load-more'))
+    expect(screen.getAllByTestId(/^event-watchlist-row-/)).toHaveLength(60)
+    expect(screen.queryByTestId('event-watchlist-load-more')).toBeNull()
+  })
+
+  it('行默认折叠：明细不渲染，点击行标题后展开', async () => {
+    mockFetch({ watchlist: { items: [item()] } })
+    render(<EventWatchlistCard />)
+
+    await screen.findByTestId('event-watchlist-row-1')
+    expect(screen.queryByTestId('event-element-1-report_period')).toBeNull()
+    expect(screen.queryByTestId('event-evidence-1')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('event-row-toggle-1'))
+    expect(await screen.findByTestId('event-element-1-report_period')).toBeTruthy()
+    expect(screen.getByTestId('event-evidence-1')).toBeTruthy()
+
+    fireEvent.click(screen.getByTestId('event-row-toggle-1'))
+    await waitFor(() => expect(screen.queryByTestId('event-element-1-report_period')).toBeNull())
+  })
+
   it('渲染条目全要素（来源标识/标的与名称/预告要素/理由与证据/公告日期/发起入口）', async () => {
     mockFetch({ watchlist: { items: [item()] } })
     render(<EventWatchlistCard />)
 
     const row = await screen.findByTestId('event-watchlist-row-1')
+    // 明细默认折叠（固定高度滚动框内），断言要素前先展开
+    fireEvent.click(screen.getByTestId('event-row-toggle-1'))
     expect(screen.getByTestId('event-watchlist-card')).toBeTruthy()
     // 来源标识
     expect(within(row).getByTestId('event-source-badge-1').textContent).toContain('业绩预告')
@@ -261,6 +295,7 @@ describe('EventWatchlistCard 清单渲染', () => {
     render(<EventWatchlistCard />)
 
     const row = await screen.findByTestId('event-watchlist-row-1')
+    fireEvent.click(screen.getByTestId('event-row-toggle-1'))
     expect(within(row).getByTestId('event-element-1-report_period').textContent).toContain('—')
     expect(within(row).getByTestId('event-element-1-forecast_type').textContent).toContain('—')
     expect(within(row).getByTestId('event-element-1-change').textContent).toContain('—')
@@ -280,6 +315,7 @@ describe('EventWatchlistCard 清单渲染', () => {
     render(<EventWatchlistCard />)
 
     const row = await screen.findByTestId('event-watchlist-row-9')
+    fireEvent.click(screen.getByTestId('event-row-toggle-9'))
     expect(within(row).getByTestId('event-source-badge-9').textContent).toContain('条款事件')
     expect(within(row).getByTestId('event-element-9-price').textContent).toContain('108.20')
     expect(within(row).getByTestId('event-element-9-premium_rate').textContent).toContain('12.4%')
@@ -328,6 +364,7 @@ describe('EventWatchlistCard 清单渲染', () => {
       [11, 'event-watchlist-row-11'],
     ] as const) {
       const row = await screen.findByTestId(testId)
+      fireEvent.click(screen.getByTestId(`event-row-toggle-${id}`))
       for (const key of ['price', 'premium_rate', 'remaining_size', 'countdown']) {
         expect(within(row).getByTestId(`event-element-${id}-${key}`).textContent).toContain('—')
       }
@@ -524,7 +561,7 @@ describe('EventWatchlistCard source 过滤', () => {
 })
 
 describe('选股页挂载', () => {
-  it('事件观察区块位于滚动容器内、紧随市场温度计之后', async () => {
+  it('选股页顺序：精选池在滚动容器首位，事件观察排在上下文卡片之后', async () => {
     mockFetch({
       watchlist: { items: [item()] },
       queue: [],
@@ -532,12 +569,17 @@ describe('选股页挂载', () => {
     })
     render(<ScreeningPage onBack={() => {}} />)
 
+    const poolCard = await screen.findByTestId('screening-pool-card')
     const regimeCard = await screen.findByTestId('market-regime-card')
     const eventCard = await screen.findByTestId('event-watchlist-card')
-    const scroll = regimeCard.parentElement
+    const scroll = poolCard.parentElement
     expect(scroll).not.toBeNull()
-    expect(scroll?.firstElementChild).toBe(regimeCard)
-    expect(scroll?.children[1]).toBe(eventCard)
+    // 主体优先：池卡片是滚动容器首子节点
+    expect(scroll?.firstElementChild).toBe(poolCard)
+    const precedes = (first: HTMLElement, second: HTMLElement) =>
+      Boolean(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(precedes(poolCard, regimeCard)).toBe(true)
+    expect(precedes(regimeCard, eventCard)).toBe(true)
     expect(screen.getByTestId('screening-page').contains(eventCard)).toBe(true)
   })
 

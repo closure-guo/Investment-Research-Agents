@@ -104,6 +104,9 @@ class AnalysisState(TypedDict, total=False):
     strategy_report_digest: (
         dict | None
     )  # 策略/宏观研报观点聚合（宏观分析师消费；无记录/陈旧为 None）
+    industry_report_digest: (
+        dict | None
+    )  # 同行业研报聚合（基本面分析师消费；ok/stale/unmatched 三态；库内无数据为 None）
     share_unlock: list[dict]  # 限售解禁排队
     block_trades: list[dict]  # 大宗交易明细（近 30 天）
 

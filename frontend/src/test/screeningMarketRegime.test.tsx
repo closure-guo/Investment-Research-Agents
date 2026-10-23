@@ -346,16 +346,22 @@ describe('MarketRegimeCard 只读', () => {
 })
 
 describe('选股页挂载', () => {
-  it('温度计区块位于滚动容器最顶部（stale 横幅之前）', async () => {
+  it('温度计区块在滚动容器内、排在精选池主体之下（stale 横幅在池卡片内）', async () => {
     mockFetch(availablePayload(), poolBody({ stale: true, batch_status: 'failed' }))
     render(<ScreeningPage onBack={() => {}} />)
 
+    const poolCard = await screen.findByTestId('screening-pool-card')
     const card = await screen.findByTestId('market-regime-card')
     const banner = await screen.findByTestId('screening-batch-stale-banner')
     expect(screen.getByTestId('screening-page').contains(card)).toBe(true)
     const scroll = card.parentElement
     expect(scroll).not.toBeNull()
-    expect(scroll?.firstElementChild).toBe(card)
-    expect(scroll?.contains(banner)).toBe(true)
+    // 主体优先：池卡片在首位，温度计作为上下文卡片排在其后
+    expect(scroll?.firstElementChild).toBe(poolCard)
+    expect(
+      Boolean(poolCard.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ).toBe(true)
+    // 陈旧横幅属于池子的披露，留在池卡片内
+    expect(poolCard.contains(banner)).toBe(true)
   })
 })

@@ -1394,6 +1394,163 @@ def run_backfill(start: date, *, end: date | None = None, db_path: str | None = 
     return {"start": start.isoformat(), "end": end.isoformat(), "rows": total, "per_type": per_type}
 
 
+# ── 行业研报聚合（add-industry-report-context）────────────────────────────────
+# 研报侧行业名是申万 2021 分类（带 Ⅱ/Ⅲ 层级后缀，如「白酒Ⅱ」「银行Ⅱ」），个股侧来自
+# 东财 F10（如「白酒」「多元化保险」）。实测纯等值仅 2/5 命中（见
+# tests/validation/2026-10-22-industry-report-industry-vocab-match.md），故：
+# 归一剥离层级后缀 + 显式别名表（只收录实测确认项）+ 未命中显式 unmatched 状态。
+
+INDUSTRY_DIGEST_MAX_REPORTS = 8
+INDUSTRY_DIGEST_MAX_AGE_DAYS = 90
+INDUSTRY_TITLE_MAX_CHARS = 80
+
+# 键 = 个股行业名（东财 F10，归一后）；值 = 研报词表名（归一后）。
+# 只收录实测确认的词表差异项；值必须存在于 tests/fixtures/industry_report_vocab.tsv。
+INDUSTRY_ALIASES: dict[str, str] = {
+    "多元化保险": "保险",
+}
+
+# NFKC 已把 Ⅱ/Ⅲ 折成 ASCII II/III，按长度降序剥离，避免 III 被切成 I
+_LEVEL_SUFFIXES = ("III", "II")
+
+
+def normalize_industry(name: str | None) -> str:
+    """行业名归一：NFKC + 去全部空白 + 剥离末尾申万层级标识（不做任何模糊匹配）。"""
+    if not name:
+        return ""
+    text = "".join(unicodedata.normalize("NFKC", str(name)).split())
+    for suffix in _LEVEL_SUFFIXES:
+        if len(text) > len(suffix) and text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
+
+
+def _empty_digest(industry: str, status: str) -> dict:
+    return {
+        "industry": industry,
+        "status": status,
+        "report_count": 0,
+        "brokers": [],
+        "latest_report_date": None,
+        "age_days": None,
+        "documents": [],
+    }
+
+
+def get_industry_digest(
+    industry: str | None,
+    *,
+    as_of: str | None = None,
+    db_path: str | Path | None = None,
+    max_reports: int | None = None,
+    max_age_days: int | None = None,
+) -> dict | None:
+    """同行业研报聚合（确定性、零 LLM）。
+
+    三态：ok（窗口内有数据）/ stale（窗口内无、库内有历史）/ unmatched（行业名未覆盖）。
+    只有「库内没有任何行业研报」或「该行业在 as_of 前无任何记录」才返回 None。
+    读库异常 fail-open 返回 None（同 get_strategy_digest 纪律）。
+    """
+    target = normalize_industry(industry)
+    if not target:
+        return None
+    as_of_date = date.fromisoformat(as_of) if as_of else date.today()
+    limit = max_reports or _env_int("INDUSTRY_DIGEST_MAX_REPORTS", INDUSTRY_DIGEST_MAX_REPORTS)
+    age_limit = max_age_days or _env_int(
+        "INDUSTRY_DIGEST_MAX_AGE_DAYS", INDUSTRY_DIGEST_MAX_AGE_DAYS
+    )
+    try:
+        rows = store.list_industry_reports(db_path=db_path)
+    except Exception:  # noqa: BLE001 -- fail-open：读不到库 ≠ 没有行业研报的结论
+        logger.warning("行业研报读取失败（fail-open 空段）: %s", industry, exc_info=True)
+        return None
+    if not rows:
+        return None
+
+    wanted = {target}
+    alias = INDUSTRY_ALIASES.get(target)
+    if alias:
+        wanted.add(normalize_industry(alias))
+
+    matched: list[tuple[date, dict]] = []
+    for row in rows:
+        if normalize_industry(row.get("industry")) not in wanted:
+            continue
+        try:
+            publish = date.fromisoformat(str(row.get("publish_date") or "")[:10])
+        except ValueError:
+            continue
+        matched.append((publish, row))
+    if not matched:
+        return _empty_digest(str(industry), "unmatched")
+
+    history = [(publish, row) for publish, row in matched if publish <= as_of_date]
+    if not history:
+        return None  # 该行业在 as_of 之前没有任何研报：时点正确性优先
+    history.sort(key=lambda item: item[0], reverse=True)
+    latest_date = history[0][0]
+    in_window = [
+        (publish, row) for publish, row in history if (as_of_date - publish).days <= age_limit
+    ][:limit]
+    documents = [
+        {
+            "report_key": row.get("report_key"),
+            "title": str(row.get("title") or "").strip(),
+            "org": str(row.get("org") or "").strip(),
+            "analyst": str(row.get("analyst") or "").strip(),
+            "publish_date": publish.isoformat(),
+            "depth_class": row.get("depth_class"),
+        }
+        for publish, row in in_window
+    ]
+    return {
+        "industry": str(industry),
+        "status": "ok" if documents else "stale",
+        "report_count": len(documents),
+        "brokers": sorted({doc["org"] for doc in documents if doc["org"]}),
+        "latest_report_date": latest_date.isoformat(),
+        "age_days": (as_of_date - latest_date).days,
+        "documents": documents,
+    }
+
+
+def format_industry_digest(digest: dict | None) -> str:
+    """行业研报聚合 → 基本面分析师上下文文本段；无数据返回空串。"""
+    if not digest:
+        return ""
+    industry = str(digest.get("industry") or "").strip() or "未知行业"
+    header = "同行业研报（state 键 industry_report_digest；仅元数据，未读取正文）"
+    status = str(digest.get("status") or "")
+    if status == "unmatched":
+        return (
+            f"{header}: 个股行业「{industry}」，研报库无对应行业口径"
+            "（申万分类未覆盖），本段不提供行业研报线索。"
+        )
+    if status == "stale":
+        latest = digest.get("latest_report_date") or "未知"
+        age = digest.get("age_days")
+        age_text = f"距今 {age} 天" if isinstance(age, int) else "距今天数未知"
+        return (
+            f"{header}: 「{industry}」行业断更——最新一篇 {latest}（{age_text}），"
+            "窗口内无新报告，不列陈旧标题。"
+        )
+    lines = [f"{header}:"]
+    for doc in digest.get("documents") or []:
+        title = str(doc.get("title") or "").strip()
+        if not title:
+            continue
+        if len(title) > INDUSTRY_TITLE_MAX_CHARS:
+            title = title[:INDUSTRY_TITLE_MAX_CHARS] + "…"
+        date_text = str(doc.get("publish_date") or "").strip()
+        org = str(doc.get("org") or "").strip()
+        lines.append(f"- {date_text} {org} | {title}".replace("  ", " "))
+    lines.append(
+        "注意：同行业研报仅提供标题层面线索，正文未读取；标题与机构立场不构成结论依据，"
+        "不得直接作为结论依据，也不得据标题推断报告观点。"
+    )
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="研报数据面采集（免费主干）")
     sub = parser.add_subparsers(dest="command", required=True)

@@ -119,6 +119,7 @@ def _stub_fetch_data(state: dict) -> dict[str, Any]:
         "analyst_consensus": {"status": "missing"},
         "manual_report_digest": None,
         "strategy_report_digest": None,
+        "industry_report_digest": None,
         "share_unlock": [],
         "block_trades": [],
         # 终审 I1（clear-valuation-chain-debts）：真实路径另产出 kline/benchmark_kline/
@@ -191,6 +192,7 @@ def _set_optional_fallback(result: dict, label: str) -> None:
         "analyst_consensus": {"status": "missing"},
         "manual_report_digest": None,
         "strategy_report_digest": None,
+        "industry_report_digest": None,
         "share_unlock": [],
         "block_trades": [],
         # update-financial-freshness-and-valuation Task 4：快照失败降级空 dict
@@ -215,6 +217,31 @@ def _summarize_success_output(value: Any) -> dict:
             columns = columns[:20] + ["..."]
         return {"status": "success", "rows": len(value), "columns": columns}
     return {"status": "success"}
+
+
+def _attach_report_digests(result: dict, code: str) -> None:
+    """一致预期 / 投喂合并 / 策略观点 / 同行业研报（研报数据面消费链）。
+
+    纯读库、零 LLM；任一步抛错由调用方统一 fail-open（分析不阻断）。
+    行业研报按 `result["industry_info"].industry` 选取——该键由 Step 1 的
+    `fetch_industry` 填充，本函数在 Step 2 之后调用，故读得到。
+    """
+    from finance_agent.data.research_reports import (
+        get_consensus_for_analysis,
+        get_industry_digest,
+        get_manual_report_digest,
+        get_strategy_digest,
+    )
+
+    result["analyst_consensus"] = get_consensus_for_analysis(code)
+    # 手工投喂研报合并（个人研究）：纯读库；无投喂记录为 None
+    result["manual_report_digest"] = get_manual_report_digest(code)
+    # 策略/宏观研报观点聚合（宏观分析师消费）：纯读库；无记录/全部陈旧为 None
+    result["strategy_report_digest"] = get_strategy_digest()
+    # 同行业研报聚合（基本面分析师消费）：按标的所属行业；口径未覆盖时显式 unmatched
+    result["industry_report_digest"] = get_industry_digest(
+        (result.get("industry_info") or {}).get("industry")
+    )
 
 
 def fetch_data(state: dict, cache=None, client=None, *, kline_days: int = 250) -> dict:
@@ -390,22 +417,13 @@ def fetch_data(state: dict, cache=None, client=None, *, kline_days: int = 250) -
     # 尚未跑过时按需单次直拉全市场；非必需源，失败不阻断管线。三态由数据层给出：
     # covered / no_coverage（有快照但该股无覆盖）/ missing（快照与直拉都不可得）。
     try:
-        from finance_agent.data.research_reports import (
-            get_consensus_for_analysis,
-            get_manual_report_digest,
-            get_strategy_digest,
-        )
-
-        result["analyst_consensus"] = get_consensus_for_analysis(code)
-        # 手工投喂研报合并（个人研究）：纯读库；无投喂记录为 None
-        result["manual_report_digest"] = get_manual_report_digest(code)
-        # 策略/宏观研报观点聚合（宏观分析师消费）：纯读库；无记录/全部陈旧为 None
-        result["strategy_report_digest"] = get_strategy_digest()
+        _attach_report_digests(result, code)
     except Exception as e:
         logger.warning("一致预期/投喂合并获取失败: %s", e)
         result["analyst_consensus"] = {"status": "missing", "stock_code": code}
         result["manual_report_digest"] = None
         result["strategy_report_digest"] = None
+        result["industry_report_digest"] = None
 
     return result
 

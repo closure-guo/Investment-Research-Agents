@@ -65,6 +65,12 @@ const SOURCE_OPTIONS: Array<{ value: string; label: string }> = [
 
 const CALIBER_NOTE = '研究标记，非投资建议'
 
+// 固定高度滚动框：事件清单是上下文而不是页面主体，MUST NOT 把页面撑成数万像素
+const LIST_MAX_HEIGHT_PX = 420
+// 首屏渲染条数（「加载更多」每次追加同量；432 条全量挂载会拖慢首屏）
+const PAGE_SIZE = 50
+
+
 // 稳定空引用（避免默认值每次渲染换新数组，击穿 useMemo）
 const NO_QUEUE: ScreeningQueueEntry[] = []
 
@@ -147,6 +153,9 @@ export function EventWatchlistCard({ queue = NO_QUEUE, onAnalysisStarted }: Even
   const [failed, setFailed] = useState(false)
   const [source, setSource] = useState('')
   const [reloadToken, setReloadToken] = useState(0)
+  // 清单渲染窗口（分页式追加）与行内展开态（默认折叠，明细按需渲染）
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({})
   // 发起响应（session + queue_state）：即时徽标，随后由页面队列快照接管
   const [startedMeta, setStartedMeta] = useState<Record<number, StartedMeta>>({})
   const [busy, setBusy] = useState<Record<number, boolean>>({})
@@ -167,6 +176,9 @@ export function EventWatchlistCard({ queue = NO_QUEUE, onAnalysisStarted }: Even
           return
         }
         setData(payload.items)
+        // 换来源/重试后回到首屏窗口，折叠态一并复位（旧展开态对新清单无意义）
+        setVisibleCount(PAGE_SIZE)
+        setExpanded({})
       })
       .catch(() => {
         if (!alive) return
@@ -235,6 +247,15 @@ export function EventWatchlistCard({ queue = NO_QUEUE, onAnalysisStarted }: Even
             aria-hidden="true"
           ></i>
           <span className="text-sm font-medium text-foreground">事件观察</span>
+          {data !== null && (
+            <span
+              data-testid="event-watchlist-count"
+              className="text-[10px] tabular-nums"
+              style={{ color: 'var(--text-tertiary)' }}
+            >
+              共 {items.length} 条
+            </span>
+          )}
           <span
             data-testid="event-verdict-caliber-note"
             className="text-[10px]"
@@ -296,8 +317,13 @@ export function EventWatchlistCard({ queue = NO_QUEUE, onAnalysisStarted }: Even
       )}
 
       {!failed && items.length > 0 && (
-        <div className="space-y-2">
-          {items.map(item => {
+        <div
+          data-testid="event-watchlist-scroll"
+          data-max-height={LIST_MAX_HEIGHT_PX}
+          className="max-h-[420px] space-y-2 overflow-y-auto pr-1"
+          style={{ maxHeight: LIST_MAX_HEIGHT_PX }}
+        >
+          {items.slice(0, visibleCount).map(item => {
             const local = startedMeta[item.id]
             const sessionId = item.session_id ?? local?.sessionId ?? null
             // 条款事件（cbb）v1 不提供发起入口（后端 409 同义；空标的分析无意义）
@@ -314,6 +340,7 @@ export function EventWatchlistCard({ queue = NO_QUEUE, onAnalysisStarted }: Even
                 ? VERDICT_META[item.verdict as EventVerdict]
                 : { label: fmtText(item.verdict), color: 'var(--text-tertiary)' }
             const analyzeMessage = analyzeError[item.id]
+            const isExpanded = expanded[item.id] === true
             return (
               <div
                 key={item.id}
@@ -322,7 +349,26 @@ export function EventWatchlistCard({ queue = NO_QUEUE, onAnalysisStarted }: Even
                 style={{ borderColor: 'var(--border-neutral-l1)' }}
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    data-testid={`event-row-toggle-${item.id}`}
+                    aria-expanded={isExpanded}
+                    aria-label={isExpanded ? '收起明细' : '展开明细'}
+                    className="flex cursor-pointer flex-wrap items-center gap-2"
+                    onClick={() => setExpanded(prev => ({ ...prev, [item.id]: !isExpanded }))}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        setExpanded(prev => ({ ...prev, [item.id]: !isExpanded }))
+                      }
+                    }}
+                  >
+                    <i
+                      className={`fas fa-chevron-${isExpanded ? 'down' : 'right'} text-[10px]`}
+                      style={{ color: 'var(--text-tertiary)' }}
+                      aria-hidden="true"
+                    ></i>
                     <span
                       data-testid={`event-source-badge-${item.id}`}
                       className="rounded-full border px-2 py-0.5 text-[10px]"
@@ -379,32 +425,36 @@ export function EventWatchlistCard({ queue = NO_QUEUE, onAnalysisStarted }: Even
                   </div>
                 </div>
 
-                <div className="mt-1 grid grid-cols-1 gap-1 md:grid-cols-3">
-                  {elementCards(item).map(element => (
-                    <div
-                      key={element.key}
-                      data-testid={`event-element-${item.id}-${element.key}`}
-                      className="rounded border px-2 py-1"
-                      style={{ borderColor: 'var(--border-neutral-l1)' }}
-                    >
-                      <div className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
-                        {element.label}
-                      </div>
-                      <div className="text-xs tabular-nums text-foreground">{element.value}</div>
-                    </div>
-                  ))}
-                </div>
-
                 <div className="mt-1 text-xs" style={{ color: 'var(--text-secondary)' }}>
                   理由：{fmtText(item.reason)}
                 </div>
-                <div
-                  data-testid={`event-evidence-${item.id}`}
-                  className="text-[10px]"
-                  style={{ color: 'var(--text-tertiary)' }}
-                >
-                  证据：{fmtEvidence(item.evidence)}
-                </div>
+
+                {isExpanded && (
+                  <>
+                    <div className="mt-1 grid grid-cols-1 gap-1 md:grid-cols-3">
+                      {elementCards(item).map(element => (
+                        <div
+                          key={element.key}
+                          data-testid={`event-element-${item.id}-${element.key}`}
+                          className="rounded border px-2 py-1"
+                          style={{ borderColor: 'var(--border-neutral-l1)' }}
+                        >
+                          <div className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
+                            {element.label}
+                          </div>
+                          <div className="text-xs tabular-nums text-foreground">{element.value}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div
+                      data-testid={`event-evidence-${item.id}`}
+                      className="text-[10px]"
+                      style={{ color: 'var(--text-tertiary)' }}
+                    >
+                      证据：{fmtEvidence(item.evidence)}
+                    </div>
+                  </>
+                )}
 
                 {sessionId !== null && (
                   <div
@@ -428,6 +478,18 @@ export function EventWatchlistCard({ queue = NO_QUEUE, onAnalysisStarted }: Even
               </div>
             )
           })}
+          {items.length > visibleCount && (
+            <div className="flex justify-center pt-1">
+              <Button
+                data-testid="event-watchlist-load-more"
+                variant="outline"
+                size="sm"
+                onClick={() => setVisibleCount(count => count + PAGE_SIZE)}
+              >
+                加载更多（剩余 {items.length - visibleCount} 条）
+              </Button>
+            </div>
+          )}
         </div>
       )}
     </div>
