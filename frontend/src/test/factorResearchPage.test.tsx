@@ -1112,7 +1112,10 @@ describe('收割链路区块（add-factor-harvest-ui）', () => {
     vi.stubGlobal('fetch', fetchMock)
     render(<FactorResearchPage onBack={() => {}} />)
 
-    const section = await screen.findByTestId('factor-research-harvest')
+    // 等**数据块**出现再取句柄：区块外壳（factor-research-harvest）是无条件渲染的，
+    // 等外壳会拿到尚未填充的 DOM，后续一次性读取全是竞态。
+    await screen.findByTestId('factor-research-harvest-status')
+    const section = screen.getByTestId('factor-research-harvest')
     expect(section.textContent).toContain('每天 15:55')
     expect(screen.getByTestId('factor-research-harvest-status').textContent).toBe('运行中')
     const progress = screen.getByTestId('factor-research-harvest-progress').textContent ?? ''
@@ -1121,6 +1124,8 @@ describe('收割链路区块（add-factor-harvest-ui）', () => {
     expect(progress).toContain('本轮入库 3')
     // 批内活性：心跳显示逐候选进度（进度按批落盘时也不看起来「不动」）
     expect(screen.getByTestId('factor-research-harvest-live').textContent).toContain('本批 12/60')
+    // 队列消化进度条：运行中渲染，宽度 = 已处理/候选（440/820 → 54%）
+    expect(screen.getByTestId('factor-research-harvest-bar').style.width).toBe('54%')
     expect(screen.getByTestId('factor-research-harvest-step-candidates').textContent).toContain('820')
     expect(screen.getByTestId('factor-research-harvest-step-admitted').textContent).toContain('7')
     expect(screen.getByTestId('factor-research-harvest-gates').textContent).toContain('ICIR 150')
@@ -1128,6 +1133,81 @@ describe('收割链路区块（add-factor-harvest-ui）', () => {
       'ts_corr(close,volume,10)'
     )
     expect(screen.getByTestId('factor-research-harvest-rejected').textContent).toContain('WEAK_ICIR')
+  })
+
+  it('已收尾：不渲染预计还需，队列归属下次自动跑', async () => {
+    // 旧后端仍会给出外推 eta_s：前端必须自己按 job.status 拒绝渲染「预计还需」，
+    // 否则会出现「已完成 + 预计还需 38 分钟」这种自相矛盾、且只增不减的读数。
+    const harvest = {
+      available: true,
+      job: {
+        status: 'ok',
+        started_at: '2026-10-22T19:55:43+08:00',
+        finished_at: '2026-10-22T21:12:23+08:00',
+        schedule: { day_of_week: '*', hour: 15, minute: 55, timezone: 'Asia/Shanghai' },
+        next_fire_time: '2026-10-23T15:55:00+08:00',
+      },
+      progress: {
+        batches_done: 5,
+        batch_limit: 12,
+        processed: 896,
+        pending: 36,
+        admitted_in_run: 2,
+        rejected_in_run: 64,
+        started_at: '2026-10-22T19:55:43+08:00',
+        eta_s: 2310,
+        in_batch: {
+          processed_in_batch: 4,
+          total_in_batch: 4,
+          phase: 'done',
+          updated_at: '2026-10-22T21:12:23+08:00',
+          age_s: 9261,
+        },
+      },
+      funnel: {
+        candidates: 932,
+        processed: 896,
+        untranslatable: 506,
+        transcription_error: 14,
+        reached_gates: 376,
+        admitted: 11,
+        rejected_by_gate: { '2': 264 },
+      },
+      recent_admitted: [],
+      recent_rejected: [],
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/factor-research/status') return respond(snapshotBody())
+      if (url === '/api/factor-research/harvest') return respond(harvest)
+      if (url === '/api/sessions') return respond({ sessions: [] })
+      if (url === '/api/snapshot/status') {
+        return respond({ latest_date: null, stale: false, message: null, last_error: null, last_error_date: null })
+      }
+      return respond({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<FactorResearchPage onBack={() => {}} />)
+
+    // 同上：等数据块（状态徽标）出现，而不是等无条件渲染的区块外壳
+    await screen.findByTestId('factor-research-harvest-status')
+    const section = screen.getByTestId('factor-research-harvest')
+    expect(section.textContent).toContain('已完成')
+    const progress = screen.getByTestId('factor-research-harvest-progress').textContent ?? ''
+    // 本轮窗口统计：批量不带上限分母（12 是单次上限，不是待办总数）
+    expect(progress).toContain('本轮 5 批')
+    expect(progress).toContain('入库 2')
+    expect(progress).toContain('拒收 64')
+    expect(progress).not.toContain('/12')
+    // 队列剩余属于下一次运行，给出下次自动跑时刻
+    expect(progress).toContain('队列剩余 36')
+    expect(progress).toContain('10-23 15:55')
+    // 已收尾不得渲染预计还需（即使端点给出了 eta_s）
+    expect(progress).not.toContain('预计还需')
+    expect(screen.queryByTestId('factor-research-harvest-live')).toBeNull()
+    // 收尾后不得渲染队列消化进度条：候选文件被 RD-Agent 持续追加，896/932（96%）这类全局读数
+    // 配「已完成」徽标只会读成「没跑完」（同 T7 去掉 /batch_limit 分母的判据）
+    expect(screen.queryByTestId('factor-research-harvest-bar')).toBeNull()
   })
 
   it('不可用 → 区块级空态（不拖垮整页）', async () => {

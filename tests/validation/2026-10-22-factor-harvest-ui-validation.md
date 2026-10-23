@@ -72,3 +72,48 @@
 - 浏览器 E2E：本批 6/60 · 转译中 · 已 59秒 → 本批 7/60 · 转译中 · 已 1分19秒（20 秒内进度前进）。
 - 部署说明：为避免打断 17:31 那轮，镜像先构建、用值守脚本等运行结束再部署；值守在 19:54:24 读到瞬时空状态即触发部署，
   该轮于第 4 批被终结（processed 680 / 本轮入库 2 / 拒收 105），随后已重新拉起并接着处理剩余 198 条。
+
+
+## 7. 完成态进度条修正（2026-10-23 实测「已完成 + 进度条卡 94%」）
+
+- 现象：徽标「已完成」，紧邻的绿色进度条停在 94%，读起来像「没跑完」。
+- 根因：进度条宽度取 `funnel.processed / funnel.candidates`——**全局队列消化率**，不是单轮完成度。
+  上一轮收割（`job_runs.run_id=227`，`summary.drained=true`）已于 10-22 21:12 清空当时队列；
+  此后 RD-Agent 持续追加新候选（10-23 01:09 写入 54 条，10:39 已 62 条待处理），该比值再也回不到 100%。
+- 修复：进度条只在 `job.status=running` 时渲染；收尾态未消化读数由「已处理 896」+
+  「队列剩余 64 · 待下次 10-23 15:55 自动跑」如实承担。漏斗卡片仍展示 已处理 896（93%）——
+  那里是**带标签的全局口径**，与「已完成」不冲突。
+
+证据：
+
+| 项 | 修复前 | 修复后 |
+|---|---|---|
+| 真实栈截图 | `tests/e2e/playwright/tmp/harvest-bar-before-fix.png` | `tests/e2e/playwright/tmp/harvest-section-after-fix.png` |
+| `factor-research-harvest-bar` 计数 | 1（宽度 93%，`已完成` 徽标并存） | 0 |
+| 真实端点读数 | `status=ok`、`processed=896`、`candidates=958`、`pending=62`、`eta_s=null` | 同（数字随 RD-Agent 增长，10:44 已 960/64） |
+| `npx playwright test tests/factor-harvest-ui.spec.ts` | 1 failed（`toHaveCount(0)` 收到 1） | 1 passed / 2 skipped（「已收尾：不渲染队列消化进度条」ok） |
+| `npx vitest run src/test/factorResearchPage.test.tsx` | 1 failed / 40 passed | 41 passed |
+| `uv run pytest tests/test_api_factor_research.py -q` | — | 70 passed（后端未改，回归确认） |
+| `npx vitest run`（全量前端） | — | 102 files / 916 passed |
+| `npx tsc -b` | — | 通过 |
+| `scan.sh`（E2E spec 确定性 P0 扫描） | 1 P0（`#5a` 条件绕过） | 0 hit |
+| `e2e-reviewer` 静态评审（24 反模式） | — | Approved / 无 P0 |
+
+- 顺带清掉 spec 的 P0：原 `if (await progress.isVisible())` 条件绕过（scan `#5a`）让
+  「区块坏成第三种形态」静默通过；改为**端点读数驱动**（`request.get('/api/factor-research/harvest')`
+  + `test.skip(理由)`），空态独立成例。副作用是修好了一个隐患：默认 stub config 的测试库没有
+  `factor_harvest_daily` 运行行（`job.status=null`），原写法会去取不存在的
+  `factor-research-harvest-status` 而挂死；新写法按收尾口径断言（进度条不得出现），可正常通过。
+- 回归捕捉力：收尾分支的 `await expect(bar).toHaveCount(0)` 就是本次 bug 的捕获断言——修复前
+  在真实栈上实测 1 failed（`Received: 1`），修复后转绿；该断言未因 spec 重写而削弱。
+- E2E 覆盖边界（评审 P1-1，已知遗留）：`data/factor_research/*.json` 不入库，CI 全新鲜检出时
+  `available=false` → 数据形态用例在 CI 恒 skip（本机/真实栈因数据文件在而实跑）。
+  即 **CI 侧该回归由 RTL 用例守住**（`frontend/src/test/factorResearchPage.test.tsx`，`ci.yml` 的 `npm test`），
+  E2E 侧目前只在真实栈生效。补齐需给 `playwright.config.ts` 增收割路径隔离 + spec 侧 seed，
+  已记入 `openspec/changes/add-factor-harvest-ui/tasks.md` 的 T8 遗留项。
+
+- 部署：仅重建前端镜像（生产形态 nginx：`docker compose -f docker-compose.yml build frontend`）
+  并重建 frontend 容器（bundle 由 `index-B40QdUkn.js` → `index-Bxae_6oK.js`）；重建前
+  `GET /api/sessions` running=0，**backend 未重启**（容器 8000 全程 healthy，无分析被打断）。
+- 未覆盖：运行中分支（进度条渲染、宽度 = 已处理/候选 = 54%）由单测覆盖；真实「运行中」态未复测——
+  触发真实收割需 LLM 消耗，且会干扰正在跑的研发看护（10:44 该看护 session 进行中）。

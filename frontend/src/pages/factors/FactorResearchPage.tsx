@@ -92,6 +92,25 @@ function pct(part: number, whole: number): number {
   return Math.max(0, Math.min(100, Math.round((part / whole) * 100)))
 }
 
+/**
+ * 下次自动跑的墙钟时刻（收割链路完成态用）。
+ *
+ * 直接取 ISO 串自身的日期/时间片段，不做时区换算——`next_fire_time` 带的就是
+ * 调度时区（Asia/Shanghai）的墙钟，换算到浏览器本地只会引入跨日/偏差歧义。
+ * 缺失时退化为调度块的 `hour:minute`（仍不给具体日期），都没有则 null。
+ */
+function formatNextFire(
+  nextFire: string | null,
+  schedule: { hour: number; minute: number } | null
+): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(nextFire ?? '')
+  if (m) return `${m[2]}-${m[3]} ${m[4]}:${m[5]}`
+  if (schedule) {
+    return `${String(schedule.hour).padStart(2, '0')}:${String(schedule.minute).padStart(2, '0')}`
+  }
+  return null
+}
+
 function progressText(cur: FactorResearchCurrentSession): string {
   const parts: string[] = []
   if (cur.loop_index !== null) parts.push(`循环 ${cur.loop_index + 1}`)
@@ -250,6 +269,15 @@ export function FactorResearchPage({
       ? Math.max(0, Math.floor((liveNow - batchStartedMs) / 1000))
       : null
   const batchLabel = (harvest?.progress?.batches_done ?? 0) === 0 ? '本批' : '本轮'
+  // 收割口径分流（add-factor-harvest-ui）：运行中展示批次进度 + ETA；已收尾改本轮汇总 +
+  // 队列归属下次自动跑。批次上限 / 外推 ETA 只在运行中有意义——收尾后它们读起来像「没跑完」。
+  const harvestStatus = harvest?.job?.status ?? null
+  const harvestFinished = harvestStatus === 'ok' || harvestStatus === 'failed'
+  const nextFire = formatNextFire(
+    harvest?.job?.next_fire_time ?? null,
+    harvest?.job?.schedule ?? null
+  )
+  const nextRunText = nextFire ? `待下次 ${nextFire} 自动跑` : null
   const rawInBatch = harvest?.progress?.in_batch ?? null
   const inBatch = rawInBatch && (rawInBatch.age_s == null || rawInBatch.age_s < 600) ? rawInBatch : null
 
@@ -679,13 +707,34 @@ export function FactorResearchPage({
                 <div className="space-y-4">
                   <div data-testid="factor-research-harvest-progress" className="space-y-2">
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" style={{ color: 'var(--text-secondary)' }}>
-                      <span>批次 {harvest.progress?.batches_done ?? 0}/{harvest.progress?.batch_limit ?? 0}</span>
-                      <span>已处理 {harvest.progress?.processed ?? 0}</span>
-                      <span>剩余 {harvest.progress?.pending ?? 0}</span>
-                      <span>
-                        本轮入库 {harvest.progress?.admitted_in_run ?? 0} · 拒收 {harvest.progress?.rejected_in_run ?? 0}
-                      </span>
-                      {harvest.progress?.eta_s != null && <span>预计还需 {formatDurationS(harvest.progress.eta_s)}</span>}
+                      {harvestRunning ? (
+                        <>
+                          <span>批次 {harvest.progress?.batches_done ?? 0}/{harvest.progress?.batch_limit ?? 0}</span>
+                          <span>已处理 {harvest.progress?.processed ?? 0}</span>
+                          <span>剩余 {harvest.progress?.pending ?? 0}</span>
+                          <span>
+                            本轮入库 {harvest.progress?.admitted_in_run ?? 0} · 拒收 {harvest.progress?.rejected_in_run ?? 0}
+                          </span>
+                          {harvest.progress?.eta_s != null && (
+                            <span>预计还需 {formatDurationS(harvest.progress.eta_s)}</span>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          {harvestFinished && (
+                            <span>
+                              本轮 {harvest.progress?.batches_done ?? 0} 批 · 入库 {harvest.progress?.admitted_in_run ?? 0} · 拒收{' '}
+                              {harvest.progress?.rejected_in_run ?? 0}
+                            </span>
+                          )}
+                          <span>已处理 {harvest.progress?.processed ?? 0}</span>
+                          {/* 队列剩余是「下一次运行」的待办，不是本轮尾巴；MUST NOT 配「预计还需」 */}
+                          <span data-testid="factor-research-harvest-queue">
+                            队列剩余 {harvest.progress?.pending ?? 0}
+                            {nextRunText ? ` · ${nextRunText}` : ''}
+                          </span>
+                        </>
+                      )}
                     </div>
                     {harvestRunning && batchElapsedS !== null && (
                       <div
@@ -709,16 +758,22 @@ export function FactorResearchPage({
                         )}
                       </div>
                     )}
-                    <div className="h-2 w-full overflow-hidden rounded-full" style={{ background: 'var(--bg-overlay-l1)' }}>
-                      <div
-                        data-testid="factor-research-harvest-bar"
-                        className="h-full rounded-full transition-all"
-                        style={{
-                          width: `${pct(harvest.progress?.processed ?? 0, harvest.funnel?.candidates ?? 0)}%`,
-                          background: 'var(--status-success-default)',
-                        }}
-                      />
-                    </div>
+                    {/* 队列消化进度条只在运行中渲染：候选文件由 RD-Agent 持续追加，
+                        `processed / candidates` 是全局消化率而非单轮完成度——收尾后新候选入场
+                        会让它回落，配「已完成」徽标只会读成「没跑完」（同 T7 去掉 /batch_limit
+                        分母的判据）。收尾态的未消化读数由「已处理 N」+「队列剩余 M」如实承担。 */}
+                    {harvestRunning && (
+                      <div className="h-2 w-full overflow-hidden rounded-full" style={{ background: 'var(--bg-overlay-l1)' }}>
+                        <div
+                          data-testid="factor-research-harvest-bar"
+                          className="h-full rounded-full transition-all"
+                          style={{
+                            width: `${pct(harvest.progress?.processed ?? 0, harvest.funnel?.candidates ?? 0)}%`,
+                            background: 'var(--status-success-default)',
+                          }}
+                        />
+                      </div>
+                    )}
                   </div>
 
                   <div data-testid="factor-research-harvest-funnel" className="grid grid-cols-2 gap-2 md:grid-cols-4">

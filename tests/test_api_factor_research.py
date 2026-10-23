@@ -1063,6 +1063,39 @@ class TestHarvestChainEndpoint:
         assert progress["rejected_in_run"] == 2
         assert progress["eta_s"] is not None
 
+    @pytest.mark.parametrize("status", ["ok", "failed"])
+    def test_finished_run_reports_no_eta(self, tmp_path, monkeypatch, status):
+        """已收尾的运行不得外推剩余时间（add-factor-harvest-ui「运行结束后不冒充预计」）。
+
+        本轮处理数已冻结、自 started_at 的时长仍在增长，外推结果只增不减；队列里的未处理
+        候选属于下一次运行，不能算作本次运行的尾巴。
+        """
+        self._write(
+            tmp_path,
+            {"a": {"status": "admitted", "expression": "x", "at": "2026-10-22T20:00:00+08:00"}},
+            [{"name": "a"}, {"name": "b"}],
+        )
+        monkeypatch.setattr(
+            "finance_agent.api._harvest_job_block",
+            lambda: {
+                "status": status,
+                "started_at": "2026-10-22T19:55:00+08:00",
+                "finished_at": "2026-10-22T21:12:00+08:00",
+                "schedule": {
+                    "day_of_week": "*",
+                    "hour": 15,
+                    "minute": 55,
+                    "timezone": "Asia/Shanghai",
+                },
+                "next_fire_time": "2026-10-23T15:55:00+08:00",
+            },
+        )
+        payload = TestClient(app).get(self._HARVEST).json()
+        progress = payload["progress"]
+
+        assert progress["pending"] == 1  # 队列读数照实返回，不因收尾而清零
+        assert progress["eta_s"] is None
+
     def test_in_batch_heartbeat(self, tmp_path):
         self._write(
             tmp_path,

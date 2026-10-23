@@ -73,7 +73,8 @@
 
 三个子块，自带 `data-testid`：
 
-1. `harvest-progress`：批次进度条（`batches_done/batch_limit`）、已处理/剩余、预计完成时刻、任务状态徽标；
+1. `harvest-progress`：队列消化进度条（`funnel.processed / funnel.candidates`，**仅运行中**）、
+   批次进度（`batches_done/batch_limit`，仅运行中）、已处理/剩余、预计完成时刻、任务状态徽标；
 2. `harvest-funnel`：横向漏斗（候选 → 已处理 → 到闸 → 入库），每段显示数值与相对候选的百分比；
 3. `harvest-ledger`：最近入库与最近拒收两列（窄屏堆叠）。
 
@@ -82,6 +83,9 @@
 - 复用页面已有 10s 轮询节拍，单独发请求；区块内失败只显示本区块错误并可重试，不拖垮整页；
 - `available=false` → 区块级「收割数据未接入」空态；
 - 任务从未运行（`job=null` 且 `processed=0`）→ 「收割尚未运行」空态；
+- 已收尾（`job.status=ok`/`failed`）→ 不渲染进度条与 `/batch_limit` 分母，改本轮汇总（批数 · 入库 ·
+  拒收）+ 队列剩余归属「待下次 …自动跑」：候选文件由 RD-Agent 持续追加，全局消化率在收尾后仍会回落，
+  渲染即读成「没跑完」（2026-10-23 T8）；
 - 所有数字来自后端，前端不做任何估算（除百分比展示）。
 
 ## 5. 测试

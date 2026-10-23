@@ -4797,7 +4797,15 @@ def _factor_research_harvest_payload() -> dict[str, Any]:
             if isinstance(verdict, dict) and _harvest_ts(verdict.get("at")) >= start_key
         )
     eta_s: int | None = None
-    if start_key and processed_in_run > 0 and pending > 0:
+    # 运行态门控（add-factor-harvest-ui「运行结束后不冒充预计」）：运行已收尾时本轮处理数已冻结、
+    # 自 started_at 的时长仍在增长，按「剩余 /（本轮处理数 / 已运行时长）」外推只会单调变大；
+    # 且此时队列里的未处理候选属于下一次运行，不是本次运行的尾巴。
+    if (
+        str(job.get("status") or "") == "running"
+        and start_key
+        and processed_in_run > 0
+        and pending > 0
+    ):
         try:
             started_dt = datetime.fromisoformat(str(started_at))
             now = datetime.now(started_dt.tzinfo) if started_dt.tzinfo else datetime.now()
