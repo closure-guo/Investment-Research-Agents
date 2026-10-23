@@ -55,6 +55,7 @@ from finance_agent.factors.validate import (
     AdmissionResult,
     GateResult,
     ReasonCode,
+    _PoolEvalCache,
     admit_candidates,
     benjamini_hochberg_adjust,
     check_computability,
@@ -1341,3 +1342,70 @@ def test_pool_increment_all_pool_orientations_undetermined_equals_empty_pool(tmp
     assert result.detail["pool_size"] == 1
     assert result.detail["ir_pool"] is None
     assert result.detail["orientation"] == 1
+
+
+def test_pool_cache_preserves_gate4_result(tmp_path):
+    """批内缓存与直算判定逐位一致（缓存 MUST NOT 改变闸④结论与读数）。"""
+    db = _empty_db(tmp_path)
+    panel = _pool_panel()
+    direct = check_pool_increment(
+        _factor_ic("amount", panel),
+        evaluate(parse("amount"), panel),
+        [_pool_row(1, "volume")],
+        panel,
+        db_path=db,
+    )
+    cached = check_pool_increment(
+        _factor_ic("amount", panel),
+        evaluate(parse("amount"), panel),
+        [_pool_row(1, "volume")],
+        panel,
+        db_path=db,
+        pool_cache=_PoolEvalCache(),
+    )
+    assert cached.gate == direct.gate
+    assert cached.passed == direct.passed
+    assert cached.reason == direct.reason
+    assert cached.detail == direct.detail
+
+
+def test_pool_cache_reuses_pool_evaluation_across_candidates(tmp_path, monkeypatch):
+    """同批多候选共享缓存：池因子求值帧与现算 IC 各只算一次。
+
+    旧实现逐候选重复 evaluate 池因子（冗余现算 + 方向定向各一次）——60 候选
+    × 每池因子两次全面板求值是闸④的主要计算浪费。
+    """
+    import finance_agent.factors.validate as validate_module
+
+    db = _empty_db(tmp_path)
+    panel = _pool_panel()
+    real_evaluate = validate_module.evaluate
+    pool_evals = {"count": 0}
+
+    def _counting_evaluate(node, pnl):
+        if serialize(node) == "volume":
+            pool_evals["count"] += 1
+        return real_evaluate(node, pnl)
+
+    monkeypatch.setattr(validate_module, "evaluate", _counting_evaluate)
+
+    cache = _PoolEvalCache()
+    for expression in ("amount", "close"):
+        check_pool_increment(
+            _factor_ic(expression, panel),
+            evaluate(parse(expression), panel),
+            [_pool_row(1, "volume")],
+            panel,
+            db_path=db,
+            pool_cache=cache,
+        )
+    assert pool_evals["count"] == 1  # 两次调用共享一次池因子求值
+
+    check_pool_increment(  # 无缓存对照路径：每次调用冗余+定向各求值一次
+        _factor_ic("amount", panel),
+        evaluate(parse("amount"), panel),
+        [_pool_row(1, "volume")],
+        panel,
+        db_path=db,
+    )
+    assert pool_evals["count"] == 3
