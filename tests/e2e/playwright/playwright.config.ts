@@ -84,6 +84,11 @@ export default defineConfig({
     // 收割用例过不过取决于调度时序（单跑本 config 必红，随套件跑靠 race 偶过）。
     // 详见该 config 头部说明。
     'factor-harvest-ui.spec.ts',
+    // 快速模式系统操作（add-quick-mode-operator）依赖后端 STUB_SCENARIO=operator 的
+    // 工具调用场景（start_stock_analysis / get_daily_ops_status）；默认套件无该场景，
+    // 模型只会给普通文本答复，工具横幅断言必红（CI run 39922401849 实证）。
+    // 由 playwright.operator.config.ts（端口对 8006/5179 + 独立 test-e2e-operator-* 库）运行。
+    'quick-operator.spec.ts',
   ],
   timeout: 30_000,
   expect: { timeout: 5_000 },
