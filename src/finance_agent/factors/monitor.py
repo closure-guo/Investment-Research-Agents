@@ -2,11 +2,14 @@
 
 ``run_factor_monitor(panel, as_of, *, db_path=None)`` 两步（E9 逐字）：
 
-1. **记录当日可算 RankIC**：为每个 ``active`` 因子在面板上求值 → 与远期收益
-   ``rank_ic_series`` → 取 ``≤ as_of`` 的最新**可算**交易日记录进 ``factor_ic``
-   （``record_ic`` 幂等：同 ``(factor, date)`` 覆盖）。IC 需要次日收盘价，故
-   ``as_of`` 当日（面板末日）通常不可算，记录的是**上一交易日**的 IC——每个交易日
-   的 IC 在次日批中恰好记录一次，无前视。
+1. **记录可算 RankIC（缺口回填，extend-factor-ic-gap-backfill）**：为每个 ``active``
+   因子在面板上求值 → 与远期收益 ``rank_ic_series`` → 把 ``≤ as_of`` 的**全部
+   可算交易日**中尚缺的日期记录进 ``factor_ic``（``record_ic`` 幂等：同
+   ``(factor, date)`` 覆盖；已存在日期不重写）。IC 需要次日收盘价，故 ``as_of``
+   当日（面板末日）通常不可算——例行日恰好新增最新可算一条、无前视；监控曾
+   连缺多个交易日时，恢复后的首次运行把面板窗口内的缺口**一次补齐**（启动
+   补跑只覆盖当天错过的触发；跨日中断的洞由本步自愈）。超出面板窗口的更早
+   缺口无法回补——诚实留洞，不虚构。
 2. **滚动 IC 降级判定**：取该因子落库 IC 序列的最近
    ``DECAY_WINDOW + DECAY_NEGATIVE_DAYS - 1`` 个交易日；滚动窗口 = ``DECAY_WINDOW``
    （逐日滚动 mean/std，``min_periods=窗口``），对**最后 ``DECAY_NEGATIVE_DAYS``
@@ -70,20 +73,31 @@ def _finite_or_none(value: float) -> float | None:
     return float(value) if math.isfinite(float(value)) else None
 
 
-def _record_latest_ic(
+def _record_missing_ic(
     row: dict[str, Any], panel: MarketPanel, fwd: pd.DataFrame, as_of: str, *, db_path: Any
-) -> tuple[str, float] | None:
-    """记录 ``≤ as_of`` 的最新可算 IC；无可算日 → ``None``（不写坏值）。"""
+) -> tuple[int, int] | None:
+    """记录 ``≤ as_of`` **全部缺失**的可算 IC 日（缺口回填）；无可算日 → ``None``。
+
+    返回 ``(可算日数, 新写入行数)``；已存在日期不重写（``record_ic`` 本身幂等，
+    先查后写只为让 ``days_recorded`` 只计新增）。监控曾连缺多个交易日时（进程
+    重建窗口/调度中断，incident 050 家族——启动补跑只覆盖当天错过的触发），
+    恢复后的首次运行把监控面板窗口内的缺口一次补齐；超出面板窗口
+    （``_PANEL_LOOKBACK_DAYS``）的更早缺口无法回补——诚实留洞，不虚构。
+    """
     factor_id = int(row["id"])
     values = evaluate(parse(str(row["expression"])), panel)
     ic_series = rank_ic_series(values, fwd)
     eligible = ic_series.loc[:as_of].dropna()
     if eligible.empty:
         return None
-    trade_date = str(eligible.index[-1])
-    rank_ic = float(eligible.iloc[-1])
-    record_ic(factor_id, trade_date, rank_ic, db_path=db_path)
-    return trade_date, rank_ic
+    existing = {trade_date for trade_date, _ in list_ic_series(factor_id, db_path=db_path)}
+    written = 0
+    for trade_date, rank_ic in eligible.items():
+        if str(trade_date) in existing:
+            continue
+        record_ic(factor_id, str(trade_date), float(rank_ic), db_path=db_path)
+        written += 1
+    return int(eligible.size), written
 
 
 def _decay_snapshot(factor_id: int, as_of: str, *, db_path: Any) -> dict[str, Any] | None:
@@ -120,12 +134,14 @@ def _decay_snapshot(factor_id: int, as_of: str, *, db_path: Any) -> dict[str, An
 def run_factor_monitor(
     panel: MarketPanel, as_of: str, *, db_path: str | Path | None = None
 ) -> dict[str, Any]:
-    """衰减监控日批（E9）：记录可算 IC → 滚动判定 → 降级落库。
+    """衰减监控日批（E9）：记录可算 IC（缺口回填）→ 滚动判定 → 降级落库。
 
     ``as_of`` 为数据截止交易日，**必须在面板日期内**（否则 ``ValueError``，
     fail loud）；面板须含 ``close`` 字段（``forward_returns`` 输入）。返回
-    ``{"recorded", "checked", "skipped", "degraded": [id...], "judged": [...]}``
-    （``judged`` 为逐因子判定快照，供报告/运维排查；``degraded`` 为本次降级 id）。
+    ``{"recorded", "days_recorded", "checked", "skipped", "degraded": [id...],
+    "judged": [...]}``——``recorded`` = 有可算 IC 的因子数（语义不变），
+    ``days_recorded`` = 本次实际写入的 IC 行数（缺口回填的可观测读数），
+    ``judged`` 为逐因子判定快照（报告/运维排查）；``degraded`` 为本次降级 id。
     """
     if "close" not in panel.fields:
         raise ValueError("面板缺少 close 字段（forward_returns 输入）")
@@ -133,17 +149,20 @@ def run_factor_monitor(
         raise ValueError(f"as_of {as_of!r} 不在面板日期内（禁止跨区间取值）")
     fwd = forward_returns(panel.fields["close"])
     recorded = 0
+    days_recorded = 0
     checked = 0
     skipped = 0
     degraded: list[int] = []
     judged: list[dict[str, Any]] = []
     for row in list_active_factors(db_path=db_path):
         factor_id = int(row["id"])
-        if _record_latest_ic(row, panel, fwd, as_of, db_path=db_path) is None:
+        outcome = _record_missing_ic(row, panel, fwd, as_of, db_path=db_path)
+        if outcome is None:
             skipped += 1
             logger.info("因子 %s 在 %s 前无可用 IC（窗口不足/全 NaN），跳过", factor_id, as_of)
             continue
         recorded += 1
+        days_recorded += outcome[1]
         snapshot = _decay_snapshot(factor_id, as_of, db_path=db_path)
         if snapshot is None:
             skipped += 1
@@ -183,6 +202,7 @@ def run_factor_monitor(
         )
     return {
         "recorded": recorded,
+        "days_recorded": days_recorded,
         "checked": checked,
         "skipped": skipped,
         "degraded": degraded,

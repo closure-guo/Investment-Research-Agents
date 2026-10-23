@@ -244,6 +244,7 @@ def test_run_factor_monitor_empty_library_is_noop(tmp_path):
     result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=_db(tmp_path))
     assert result == {
         "recorded": 0,
+        "days_recorded": 0,
         "checked": 0,
         "skipped": 0,
         "degraded": [],
@@ -376,3 +377,65 @@ def test_run_factor_decay_monitor_loads_panel_from_snapshot(tmp_path):
         as_of=dates[-1], db_path=_db(tmp_path), snapshot_db_path=snapshot_db
     )
     assert result["checked"] == 0 and result["recorded"] == 0
+
+
+def _daily_ic_panel() -> MarketPanel:
+    """81 日 × 200 票面板：每日 volume 二值、次日收益同构二值（逐日 RankIC 可算）。
+
+    与 ``_monitor_panel``（仅 1 个可算 IC 日）互补——缺口回填场景需要面板窗口内
+    每一天都可算，才能断言「中断 N 天后一次补齐 N 条」。
+    """
+    codes = _MONITOR_CODES
+    half = codes // 2
+    volume = np.ones((_MONITOR_DATES, codes))
+    volume[:, :half] = 1.0
+    volume[:, half:] = 0.0
+    returns = np.zeros(codes)
+    returns[:49] = 1.0
+    returns[half : half + 51] = 1.0
+    daily = 1.0 + 0.01 * returns
+    close = 100.0 * np.cumprod(np.tile(daily, (_MONITOR_DATES, 1)), axis=0)
+    amount = volume * 1000.0
+    labels = [_day(offset) for offset in range(_MONITOR_DATES)]
+    code_labels = [f"m{index:03d}" for index in range(codes)]
+
+    def frame(values: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame(values, index=labels, columns=code_labels)
+
+    return MarketPanel(
+        fields={
+            "open": frame(close),
+            "high": frame(close),
+            "low": frame(close),
+            "close": frame(close),
+            "volume": frame(volume),
+            "amount": frame(amount),
+        }
+    )
+
+
+def test_run_factor_monitor_backfills_ic_gap_after_outage(tmp_path):
+    """多日中断恢复：面板窗口内缺失的可算 IC 日一次补齐（缺口不留洞）+ 幂等。"""
+    db, factor_id = _active_factor(tmp_path)
+    # crafted 取正 IC：与面板逐日负 IC 合成后滚动均值不全负，避免触发降级干扰幂等断言
+    _craft_history(db, factor_id, [0.02] * 60)  # 前 60 天已记录；60-79 为缺口
+    result = run_factor_monitor(_daily_ic_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+    assert result["recorded"] == 1
+    assert result["days_recorded"] == 20
+    assert [d for d, _ in list_ic_series(factor_id, db_path=db)] == [
+        _day(offset) for offset in range(80)
+    ]  # 0..79 连续无洞
+
+    rerun = run_factor_monitor(_daily_ic_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+    assert rerun["recorded"] == 1
+    assert rerun["days_recorded"] == 0  # 已存在日期不重写
+    assert len(list_ic_series(factor_id, db_path=db)) == 80
+
+
+def test_run_factor_monitor_routine_day_writes_exactly_one_new_day(tmp_path):
+    """例行日：昨日及以前均已记录 → 恰好新增最新可算日一条（不重写历史）。"""
+    db, factor_id = _active_factor(tmp_path)
+    _craft_history(db, factor_id, [_RECORDED_IC] * 79)  # 0..78 已记录
+    result = run_factor_monitor(_daily_ic_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+    assert result["days_recorded"] == 1
+    assert len(list_ic_series(factor_id, db_path=db)) == 80
