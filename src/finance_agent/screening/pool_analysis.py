@@ -227,11 +227,7 @@ def reconcile_pool_analysis_runs(
             mapped = _SESSION_TERMINAL_STATUS.get(str(session.get("status") or ""))
             if mapped is None:
                 continue
-            error = (
-                str(session.get("failure_reason") or "") or None
-                if mapped == "failed"
-                else None
-            )
+            error = str(session.get("failure_reason") or "") or None if mapped == "failed" else None
             run_day = str(row["trade_date"])
             record_pool_analysis_run(
                 run_day, row["symbol"], session_id, mapped, error, db_path=db_path

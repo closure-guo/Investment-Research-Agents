@@ -124,7 +124,9 @@ class TestSweepUnblocksCatchup:
 class TestCatchUpJobOrder:
     def test_sweep_runs_before_planning(self, monkeypatch):
         calls: list[str] = []
-        monkeypatch.setattr(catchup_module, "sweep_stale_running", lambda **kw: calls.append("sweep"))
+        monkeypatch.setattr(
+            catchup_module, "sweep_stale_running", lambda **kw: calls.append("sweep")
+        )
         monkeypatch.setattr(
             catchup_module,
             "run_catch_up",
