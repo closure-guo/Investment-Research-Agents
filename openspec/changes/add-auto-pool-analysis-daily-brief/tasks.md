@@ -16,3 +16,7 @@
       全量 pytest 无失败跑到 53% 后卡在依赖 Langfuse/网络的长测试，已停止；ruff 全过；
       mypy 新模块全过，仓库存量 api.py/evals 有既有报错）
 - [x] 人工验证报告落 `tests/validation/`（交互类变更）
+- [x] issue #456 修复（2026-10-23）：池新鲜度门槛放宽为「当日或前一交易日」（快照交易日历判定，
+      无历退回仅当日）+ `pool_analysis_runs` 会话终态对账回写（queued/dispatch_failed →
+      completed/failed）+ completed 组合不重复消费；delta 补 4 场景（补跑池/超窗旧池/无历退回/对账回写）；
+      `tests/screening/test_pool_analysis.py` 7 例先红后绿（20 passed）

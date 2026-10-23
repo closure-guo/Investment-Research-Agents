@@ -33,6 +33,7 @@ from finance_agent.outcome.ops.jobs import (
     SCHEDULES,
     JobAlreadyRunning,
     run_job,
+    sweep_stale_running,
 )
 from finance_agent.outcome.ops.model import job_run_statuses_on
 
@@ -229,7 +230,16 @@ def run_catch_up(
 
 
 def catch_up_job() -> dict[str, Any]:
-    """APScheduler 入口（调度器启动后一次性触发）：任何异常只记日志。"""
+    """APScheduler 入口（调度器启动后一次性触发）：任何异常只记日志。
+
+    规划前先做一次悬挂清扫（issue #455）：进程被杀留下的僵尸 ``running`` 行会命中
+    规划的 running-skip、把「跑了一半被杀」的任务挡在补跑窗外——清扫把它收尾为
+    ``failed``（不拦补跑），规划才能接管。清扫自身失败不阻断补跑。
+    """
+    try:
+        sweep_stale_running()
+    except Exception:  # noqa: BLE001 - 旁路铁律：清扫失败不得炸启动链路
+        logger.warning("补跑前置清扫失败（忽略）", exc_info=True)
     try:
         outcome = run_catch_up()
     except Exception as exc:  # noqa: BLE001 - 旁路铁律：补跑不得炸进程

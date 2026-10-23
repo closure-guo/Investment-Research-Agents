@@ -33,8 +33,12 @@
 轴**（``l2_candidates`` 的 DISTINCT ``trade_date``，按 ``pool`` 收窄）逐日查该 symbol 是否在榜，
 返回尾部连续段长度；``as_of`` 当日不在榜（含当日无任何榜单行）→ 0。表里只有
 交易日行 → 非交易日（周末/节假日）天然不在轴内、不打断连续段；中间断档（某交易
-日榜单存在但该 symbol 不在）→ 重新计数。``eligible_for_selection`` = 计数 ≥
-``min_days``（默认 3，可配置）。
+日榜单存在但该 symbol 不在）→ 重新计数。
+
+精选池资格（P0-1 / update-stability-gate-rolling-window）：``eligible_for_selection`` =
+``days_in_top_recent``（**同模式**近 5 个交易日命中数）≥ ``min_days``（默认 3，可配置）——
+换挡（factor↔fallback）不清零重攒，模式内单日跌出不再一票否决；
+``consecutive_days_in_top`` 原语义保留，供精选池 ``consecutive_days`` 信息列。
 
 连接纪律与 ``data/snapshot.py`` 同款：WAL + busy_timeout 短连接，库路径调用期读取
 ``SCREENING_DB_PATH``（默认 ``data/screening.db``），测试经 ``db_path`` 显式注入。
@@ -607,6 +611,77 @@ def consecutive_days_in_top(
     return streak
 
 
+# 稳定性门槛滚动窗（P0-1 / update-stability-gate-rolling-window）：资格 =
+# **同模式**近 N 个交易日命中 ≥ min_days。换挡（factor↔fallback）会把连续计数
+# 清零、池子清空 2–3 天（10-20 池 1 只 / 10-23 池 96 只，11-02 因子模式恢复时
+# 将重演）；同模式轴让另一口径的日子不进轴、也不打断计数。
+STABILITY_WINDOW_DAYS = 5
+
+
+def days_in_top_recent(
+    symbol: str,
+    as_of: str,
+    *,
+    window: int = STABILITY_WINDOW_DAYS,
+    db_path: str | Path | None = None,
+    pool: str = POOL_MAIN,
+) -> int:
+    """``symbol`` 在**同模式**最近 ``window`` 个交易日内的在榜天数（P0-1 滚动门槛）。
+
+    模式口径取自 ``screening_batches.selection_mode``（与 L2 榜同 ``(trade_date,
+    pool)`` 一行）：以 ``as_of`` 当日的模式定义轴，轴内只保留同模式的榜单日——
+    换挡期间另一口径的日子既不计入、也不打断（对比 ``consecutive_days_in_top``
+    的「断档重新计数」）。批次行缺失的日子（存量/造数）按同模式计入（LEFT JOIN
+    宽待，不因缺行重置历史）。``as_of`` 当日不在榜（含当日无榜单行 / 空库）→ 0；
+    ``as_of`` 批次行缺 ``selection_mode`` → 不猜模式，退回全轴滚动（与旧口径
+    兼容的降级态）。窗口不足 ``window`` 天时按实有天数计。
+    """
+    normalized = _parse_trade_date(as_of)
+    if pool not in POOLS:
+        raise ValueError(f"非法池 pool {pool!r}；允许: {list(POOLS)}")
+    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+        raise ValueError(f"window 必须是正整数: {window!r}")
+    init_screening_db(db_path)
+    conn = _connect(db_path)
+    try:
+        mode_row = conn.execute(
+            "SELECT selection_mode FROM screening_batches WHERE trade_date = ? AND pool = ?",
+            (normalized, pool),
+        ).fetchone()
+        mode = str(mode_row[0]) if mode_row and mode_row[0] is not None else None
+        if mode is None:
+            axis_rows = conn.execute(
+                "SELECT DISTINCT trade_date FROM l2_candidates "
+                "WHERE trade_date <= ? AND pool = ? ORDER BY trade_date DESC",
+                (normalized, pool),
+            ).fetchall()
+        else:
+            axis_rows = conn.execute(
+                "SELECT DISTINCT c.trade_date FROM l2_candidates c "
+                "LEFT JOIN screening_batches b ON b.trade_date = c.trade_date AND b.pool = c.pool "
+                "WHERE c.trade_date <= ? AND c.pool = ? "
+                "AND (b.selection_mode IS NULL OR b.selection_mode = ?) "
+                "ORDER BY c.trade_date DESC",
+                (normalized, pool, mode),
+            ).fetchall()
+        window_axis = [str(row[0]) for row in axis_rows][: max(1, int(window))]
+        symbol_dates = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT trade_date FROM l2_candidates "
+                "WHERE symbol = ? AND trade_date <= ? AND pool = ?",
+                (symbol, normalized, pool),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    if not window_axis or window_axis[0] != normalized:
+        return 0
+    if normalized not in symbol_dates:
+        return 0
+    return sum(1 for trade_date in window_axis if trade_date in symbol_dates)
+
+
 def eligible_for_selection(
     symbol: str,
     as_of: str,
@@ -615,13 +690,17 @@ def eligible_for_selection(
     db_path: str | Path | None = None,
     pool: str = POOL_MAIN,
 ) -> bool:
-    """精选池资格：**该档**连续在榜日数 ≥ ``min_days``（默认 3，可配置；须正整数）。
+    """精选池资格：**同模式**近 ``STABILITY_WINDOW_DAYS`` 个交易日命中 ≥ ``min_days``。
 
-    ``pool`` 缺省 ``'main'``（主档门槛口径逐字节不变）。
+    P0-1 滚动门槛（update-stability-gate-rolling-window）：旧口径「连续在榜 ≥
+    ``min_days``」在选股口径换挡时把所有人清零重攒、池子清空 2–3 天；改为同模式
+    滚动命中后，其他口径的日子不进轴也不打断，模式内单日跌出榜不再一票否决。
+    ``min_days`` 可配置语义不变；``pool`` 缺省 ``'main'``（主档口径不变）。
+    ``consecutive_days_in_top`` 保留原语义，仍供精选池 ``consecutive_days`` 信息列。
     """
     if isinstance(min_days, bool) or not isinstance(min_days, int) or min_days < 1:
         raise ValueError(f"min_days 必须是正整数: {min_days!r}")
-    return consecutive_days_in_top(symbol, as_of, db_path=db_path, pool=pool) >= min_days
+    return days_in_top_recent(symbol, as_of, db_path=db_path, pool=pool) >= min_days
 
 
 # ── triage 决策（C5 决策部分） ──────────────────────────────────────────────

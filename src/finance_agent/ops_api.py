@@ -83,11 +83,11 @@ from finance_agent.outcome.ops.jobs import (
     SCHEDULES,
     CohortDisabled,
     JobAlreadyRunning,
-    active_run_ids,
     mark_run_active,
     mark_run_finished,
     run_job,
 )
+from finance_agent.outcome.ops.jobs import sweep_stale_running as sweep_stale_running_shared
 from finance_agent.outcome.ops.model import (
     COHORT_DEFAULT_ENABLED,
     COHORT_DEFAULT_HOUR,
@@ -241,33 +241,11 @@ def _next_fire_time(job_id: str) -> str | None:
 def _sweep_stale_running() -> list[int]:
     """清扫上一进程遗留的悬挂 ``running`` 行 → ``failed``(stale_process_restart)。
 
-    判定条件(须同时满足):①该 run_id **不在本进程对该库的在跑集合**内(所有权是硬证据
-    ——时钟可被回拨/人工回填,单凭时刻会误杀正在跑的补跑/长任务;集合按库作用域,
-    跨库 run_id 撞号不互相干扰,issue #334);②开始时刻早于本进程启动时刻。清扫失败
-    只记日志(状态接口不因它 500)。
+    实现共享自 ``outcome.ops.jobs.sweep_stale_running``(issue #455 起,启动补跑的
+    前置清扫是同一函数):所有权 + 时钟双判据、失败只记日志。本模块的
+    ``_PROCESS_STARTED_AT`` 经参数注入(既有测试从外部 patch 该值)。
     """
-    swept: list[int] = []
-    try:
-        active = active_run_ids()
-        for row in list_job_runs(limit=1000):
-            run_id = int(row["run_id"])
-            if row["status"] != "running" or run_id in active:
-                continue
-            if str(row["started_at"]) >= _PROCESS_STARTED_AT:
-                continue
-            finish_job_run(
-                run_id,
-                status="failed",
-                summary={"stale": True, "reason": "stale_process_restart"},
-                error="stale_process_restart: 进程重启遗留的悬挂运行行,按失败收尾",
-            )
-            swept.append(run_id)
-    except Exception:  # noqa: BLE001 - 清扫是自愈动作,失败不得阻断状态读取
-        logger.exception("悬挂 running 行清扫失败(忽略)")
-        return swept
-    if swept:
-        logger.warning("已清扫进程重启遗留的 running 行 %d 条: %s", len(swept), swept)
-    return swept
+    return sweep_stale_running_shared(process_started_at=_PROCESS_STARTED_AT)
 
 
 def _prune_history() -> int:
