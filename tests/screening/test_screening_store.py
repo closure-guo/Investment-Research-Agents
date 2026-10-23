@@ -23,12 +23,14 @@ from finance_agent.screening.candidate_llm import TriageDecision
 from finance_agent.screening.ranker import Candidate
 from finance_agent.screening.store import (
     consecutive_days_in_top,
+    days_in_top_recent,
     eligible_for_selection,
     init_screening_db,
     list_l2_candidates,
     list_screening_removals,
     list_triage_decisions,
     record_l2_candidates,
+    record_screening_batch,
     record_screening_removals,
     record_triage_decision,
     record_triage_decisions,
@@ -163,7 +165,9 @@ def test_consecutive_days_resets_after_gap_spec_scenario(tmp_path) -> None:
     assert consecutive_days_in_top("Y", _D5, db_path=db) == 2
     assert consecutive_days_in_top("Y", _D4, db_path=db) == 1  # 第 4 日前一段已断
     assert consecutive_days_in_top("Y", _D2, db_path=db) == 2
-    assert eligible_for_selection("Y", _D5, db_path=db) is False
+    # P0-1（update-stability-gate-rolling-window）：资格判定改同模式近 5 日命中 ≥3——
+    # 单日断档不再一票否决（4/5 命中 → 有资格）；连续计数本函数保留原语义不变。
+    assert eligible_for_selection("Y", _D5, db_path=db) is True
 
 
 def test_consecutive_days_returns_zero_when_absent_on_as_of(tmp_path) -> None:
@@ -1141,3 +1145,132 @@ def test_l2_triage_legacy_migration_adds_pool_pk(tmp_path) -> None:
     assert list_l2_candidates("2026-10-01", db_path=db)[0]["symbol"] == "600519"
     assert list_l2_candidates("2026-10-01", db_path=db)[0]["pool"] == "main"
     assert list_triage_decisions(trade_date="2026-10-01", db_path=db)[0]["verdict"] == "keep"
+
+
+# ── 稳定性门槛滚动窗口（P0-1 / update-stability-gate-rolling-window） ─────────
+#
+# 换挡（factor↔fallback）会把所有人的连续在榜计数清零、池子清空 2–3 天
+# （docs/audit/2026-10-23-screening-funnel-review.md P0-1，10-20 池 1 只、10-23 池 96 只）。
+# 资格判定改为「**同模式**近 5 个交易日命中 ≥ min_days 次」：其他口径的日子不进轴、
+# 不打断；模式内单日跌出榜不再一票否决。``consecutive_days_in_top`` 原语义保留
+# （仍供精选池 ``consecutive_days`` 信息列使用）。
+
+
+def _seed_mode(db_path: str, trade_date: str, mode: str, *, pool: str = "main") -> None:
+    record_screening_batch(
+        trade_date,
+        status="ok",
+        started_at=f"{trade_date}T15:40:00",
+        finished_at=f"{trade_date}T16:09:00",
+        l2_top=1,
+        pool_rows=(),
+        selection_mode=mode,
+        pool=pool,
+        db_path=db_path,
+    )
+
+
+def test_days_in_top_recent_counts_within_same_mode_window(tmp_path) -> None:
+    """Y 在 factor 日 1/2/4/5 在榜、fallback 日 3 不在 → 同模式近 5 日命中 4 → 有资格。
+
+    旧连续口径此场景计数 = 2（第 3 日断档）→ 无资格；这正是换挡误伤的形态。
+    """
+    db = str(tmp_path / "screening.db")
+    _seed_mode(db, _D1, "factor")
+    _seed_mode(db, _D2, "factor")
+    _seed_mode(db, _D3, "fallback")
+    _seed_mode(db, _D4, "factor")
+    _seed_mode(db, _D5, "factor")
+    for trade_date in (_D1, _D2, _D4, _D5):
+        _in_top(db, trade_date, "Y")
+    _in_top(db, _D3, "OTHER")  # fallback 榜：Y 不在
+    assert days_in_top_recent("Y", _D5, db_path=db) == 4
+    assert eligible_for_selection("Y", _D5, db_path=db) is True
+
+
+def test_mode_switch_does_not_reset_streak(tmp_path) -> None:
+    """factor(1,2) → fallback(3,4) → factor(5)：第 5 日同模式轴命中 3 → 有资格。
+
+    换挡周不在榜的日子不进轴也不打断——11-02 因子模式恢复时老因子票不再清零重攒。
+    """
+    db = str(tmp_path / "screening.db")
+    _seed_mode(db, _D1, "factor")
+    _seed_mode(db, _D2, "factor")
+    _seed_mode(db, _D3, "fallback")
+    _seed_mode(db, _D4, "fallback")
+    _seed_mode(db, _D5, "factor")
+    for trade_date in (_D1, _D2):
+        _in_top(db, trade_date, "Y")
+    _in_top(db, _D3, "OTHER")
+    _in_top(db, _D4, "OTHER")
+    _in_top(db, _D5, "Y")
+    assert days_in_top_recent("Y", _D5, db_path=db) == 3
+    assert eligible_for_selection("Y", _D5, db_path=db) is True
+    assert consecutive_days_in_top("Y", _D5, db_path=db) == 1  # 信息列仍如实记「连续 1 日」
+
+
+def test_single_day_gap_within_mode_tolerated(tmp_path) -> None:
+    """全 factor：1/2/4/5 在榜、3 出榜 → 4/5 命中 → 有资格（单日跌出不否决）。"""
+    db = str(tmp_path / "screening.db")
+    for trade_date in (_D1, _D2, _D3, _D4, _D5):
+        _seed_mode(db, trade_date, "factor")
+    for trade_date in (_D1, _D2, _D4, _D5):
+        _in_top(db, trade_date, "Y")
+    _in_top(db, _D3, "OTHER")
+    assert days_in_top_recent("Y", _D5, db_path=db) == 4
+    assert eligible_for_selection("Y", _D5, db_path=db) is True
+
+
+def test_below_threshold_still_ineligible(tmp_path) -> None:
+    db = str(tmp_path / "screening.db")
+    for trade_date in (_D1, _D2, _D3, _D4, _D5):
+        _seed_mode(db, trade_date, "factor")
+    for trade_date in (_D1, _D5):
+        _in_top(db, trade_date, "Y")
+    _in_top(db, _D2, "OTHER")
+    _in_top(db, _D3, "OTHER")
+    _in_top(db, _D4, "OTHER")
+    assert days_in_top_recent("Y", _D5, db_path=db) == 2
+    assert eligible_for_selection("Y", _D5, db_path=db) is False
+    assert eligible_for_selection("Y", _D5, min_days=2, db_path=db) is True  # 可配置保留
+
+
+def test_window_rolls_forward(tmp_path) -> None:
+    """窗口滚动：命中集中在早期、近 5 日只够 2 次 → 无资格（防老资格躺赢）。"""
+    db = str(tmp_path / "screening.db")
+    for trade_date in (_D1, _D2, _D3, _D4, _D5):
+        _seed_mode(db, trade_date, "factor")
+    for trade_date in (_D1, _D2, _D4):
+        _in_top(db, trade_date, "Y")
+    _in_top(db, _D3, "OTHER")
+    _in_top(db, _D5, "Y")
+    # 近 5 日（= 全部 5 日）命中 4 → 有资格；再造第 6 日把窗口推走后旧命中出局
+    _D6 = "2026-10-13"
+    _seed_mode(db, _D6, "factor")
+    _in_top(db, _D6, "Y")
+    _in_top(db, _D6, "OTHER2")
+    # 窗口 = D2..D6（D1 已滚出）：命中 D2/D4/D5/D6 = 4（全史命中 5 > 窗口，旧命中出局）
+    assert days_in_top_recent("Y", _D6, db_path=db) == 4
+    # 窗口收紧到 2 = D5..D6：命中 2（更早的命中一律不可见）
+    assert days_in_top_recent("Y", _D6, window=2, db_path=db) == 2
+    assert eligible_for_selection("Y", _D6, db_path=db) is True
+
+
+def test_days_in_top_recent_absent_on_as_of_returns_zero(tmp_path) -> None:
+    db = str(tmp_path / "screening.db")
+    _seed_mode(db, _D1, "factor")
+    _seed_mode(db, _D5, "factor")
+    _in_top(db, _D1, "Y")
+    _in_top(db, _D5, "OTHER")  # as_of 榜单存在但 Y 不在
+    assert days_in_top_recent("Y", _D5, db_path=db) == 0
+    assert eligible_for_selection("Y", _D5, db_path=db) is False
+
+
+def test_missing_batch_mode_falls_back_to_unfiltered_axis(tmp_path) -> None:
+    """批次行缺 selection_mode（如纯 l2 造数的旧库）：退回全轴滚动，不猜模式。"""
+    db = str(tmp_path / "screening.db")
+    for trade_date in (_D1, _D2, _D4, _D5):
+        _in_top(db, trade_date, "Y")
+    _in_top(db, _D3, "OTHER")
+    assert days_in_top_recent("Y", _D5, db_path=db) == 4
+    assert eligible_for_selection("Y", _D5, db_path=db) is True

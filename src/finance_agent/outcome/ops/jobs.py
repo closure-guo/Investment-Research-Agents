@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,7 @@ from finance_agent.outcome.ops.model import (
     finish_job_run,
     get_cohort_settings,
     insert_job_run,
+    list_job_runs,
 )
 from finance_agent.outcome.regime.job import run_regime_daily
 from finance_agent.outcome.track_record.job import settle_open_predictions
@@ -441,6 +443,51 @@ def active_run_ids(*, db_path: str | Path | None = None) -> frozenset[int]:
     db_key = _active_key(0, db_path)[0]
     with _ACTIVE_RUNS_LOCK:
         return frozenset(run_id for key_db, run_id in _ACTIVE_RUN_IDS if key_db == db_key)
+
+
+# 本进程启动时刻(模块首次导入即计):悬挂清扫的时钟判据——上一进程开出的行
+# started_at 必早于此;启动补跑在规划前调用清扫(issue #455),依赖同一判据。
+_PROCESS_STARTED_AT = datetime.now().isoformat()
+
+
+def sweep_stale_running(
+    *, db_path: str | Path | None = None, process_started_at: str | None = None
+) -> list[int]:
+    """清扫上一进程遗留的悬挂 ``running`` 行 → ``failed``(stale_process_restart)。
+
+    判定条件(须同时满足):①该 run_id **不在本进程对该库的在跑集合**内(所有权是硬证据
+    ——时钟可被回拨/人工回填,单凭时刻会误杀正在跑的补跑/长任务;集合按库作用域,
+    跨库 run_id 撞号不互相干扰,issue #334);②开始时刻早于本进程启动时刻
+    (``process_started_at`` 可注入,ops_api 的既有测试从外部patch该值)。
+
+    供两处调用:ops 状态接口的懒清扫、启动补跑规划前的前置清扫(issue #455——
+    进程被杀留下的僵尸 running 行会挡住补跑规划的 running-skip,先清扫再规划才能
+    让「跑了一半被杀」也进 6h 补跑窗)。清扫失败只记日志(不得阻断调用方)。
+    """
+    swept: list[int] = []
+    cutoff = _PROCESS_STARTED_AT if process_started_at is None else process_started_at
+    try:
+        active = active_run_ids(db_path=db_path)
+        for row in list_job_runs(limit=1000, db_path=db_path):
+            run_id = int(row["run_id"])
+            if row["status"] != "running" or run_id in active:
+                continue
+            if str(row["started_at"]) >= cutoff:
+                continue
+            finish_job_run(
+                run_id,
+                status="failed",
+                summary={"stale": True, "reason": "stale_process_restart"},
+                error="stale_process_restart: 进程重启遗留的悬挂运行行,按失败收尾",
+                db_path=db_path,
+            )
+            swept.append(run_id)
+    except Exception:  # noqa: BLE001 - 清扫是自愈动作,失败不得阻断调用方
+        logger.exception("悬挂 running 行清扫失败(忽略)")
+        return swept
+    if swept:
+        logger.warning("已清扫进程重启遗留的 running 行 %d 条: %s", len(swept), swept)
+    return swept
 
 
 def run_job(

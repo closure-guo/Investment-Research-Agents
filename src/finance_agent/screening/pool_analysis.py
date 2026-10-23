@@ -6,12 +6,17 @@
   ``enqueue``。真正的队列补位与管线执行在 API 进程的主事件循环里（``AnalyzeQueue`` +
   ``PipelineRunner``），由 ``api.submit_pool_analysis_batch`` 桥接。这样自动批次与人工
   批次共用同一套 SSE/journal 与并发上限。
-- **只分析当日池**：最近成功批次早于当日即 ``skipped_stale_pool``，避免选股失败日用旧池
-  假装有票。
+- **池新鲜度**：名单取自最近成功批次，且批次日须为「当日或前一交易日」（按快照
+  交易日历判定；无历不猜，退回仅当日）。只认当日会把深夜补跑出的池永久挡在门外
+  （issue #456 缺陷 B：10-21~23 连续三天池分析空转）；更旧的池仍 ``skipped_stale_pool``
+  ——选股连续失败多日时不得拿过期池冒充当日结果。
 - **幂等键 = (trade_date, symbol)**：同一天重复跑（手动补跑/重试）不重复建会话；若上次只
-  是入队失败，复用原 ``session_id`` 重新入队，而不是再建一个会话。
+  是入队失败，复用原 ``session_id`` 重新入队，而不是再建一个会话；已 ``completed`` 的
+  组合不重复烧分析。
 - **失败留痕**：建会话失败 / 入队失败分别记 ``session_failed`` / ``dispatch_failed``，不静默
-  吞掉；当日汇报会读到这些行。
+  吞掉；当日汇报会读到这些行。``reconcile_pool_analysis_runs`` 在每次编排前把已终结
+  会话的终态回写到运行行（issue #456 缺陷 A：会话完成而行停 ``queued``，运维侧无法
+  据此判断链路是否在工作）。
 """
 
 from __future__ import annotations
@@ -25,11 +30,12 @@ from pathlib import Path
 from typing import Any
 
 from finance_agent.screening.freshness import screening_freshness_removals
-from finance_agent.screening.pipeline import latest_successful_pool
+from finance_agent.screening.pipeline import latest_successful_pool, read_snapshot_calendar
 from finance_agent.session_store import (
     append_chat,
     append_session_event,
     create_session,
+    get_session,
     set_pipeline_anchor,
     update_session_for_clarify,
 )
@@ -177,6 +183,81 @@ def _resolve_max_symbols(max_symbols: int | None) -> int:
     return max(1, min(MAX_SYMBOLS_CAP, int(max_symbols)))
 
 
+# 会话终态 → 运行行状态的映射（对账用；在跑态不在映射内、保持原行状态）
+_SESSION_TERMINAL_STATUS: dict[str, str] = {
+    "completed": "completed",
+    "failed": "failed",
+    "interrupted": "failed",
+}
+
+
+def reconcile_pool_analysis_runs(
+    trade_date: str | None = None, *, db_path: str | Path | None = None
+) -> int:
+    """把已终结会话的终态回写到 ``pool_analysis_runs`` 行，返回回写行数。
+
+    ``trade_date=None`` 扫全表（历史僵尸行一并治愈）；否则只扫该分析日。
+    只碰 ``queued`` / ``dispatch_failed`` 且带 ``session_id`` 的行：会话 ``completed``
+    → 行 ``completed``；``failed``/``interrupted`` → 行 ``failed``（error 取会话的
+    ``failure_reason``）。在跑态（running/clarifying）保持原样。幂等：终态行不再进
+    本函数的候选集。读会话失败只记日志（对账是自愈动作，不得阻断编排）。
+    """
+    healed = 0
+    try:
+        if trade_date is None:
+            init_pool_analysis_runs(db_path)
+            with _connect(db_path) as conn:
+                rows = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT trade_date, symbol, session_id, status FROM pool_analysis_runs"
+                    ).fetchall()
+                ]
+        else:
+            rows = list_pool_analysis_runs(trade_date, db_path=db_path)
+        for row in rows:
+            if row["status"] not in ("queued", "dispatch_failed"):
+                continue
+            session_id = str(row["session_id"] or "")
+            if not session_id:
+                continue
+            session = get_session(session_id)
+            if session is None:
+                continue
+            mapped = _SESSION_TERMINAL_STATUS.get(str(session.get("status") or ""))
+            if mapped is None:
+                continue
+            error = (
+                str(session.get("failure_reason") or "") or None
+                if mapped == "failed"
+                else None
+            )
+            run_day = str(row["trade_date"])
+            record_pool_analysis_run(
+                run_day, row["symbol"], session_id, mapped, error, db_path=db_path
+            )
+            healed += 1
+    except Exception:  # noqa: BLE001 - 对账失败不阻断编排
+        logger.exception("池分析运行行对账失败（忽略）")
+        return healed
+    if healed:
+        logger.warning("池分析运行行对账回写 %d 条（%s）", healed, trade_date)
+    return healed
+
+
+def _accept_batch_date(batch_date: str, day: str, calendar: list[str] | None) -> bool:
+    """批次日可接受 = 当日，或（有历且）恰为 ``day`` 的前一交易日。
+
+    无历不猜：日历缺失/不可解析时退回「仅当日」的旧行为（fail-closed）。
+    """
+    if batch_date == day:
+        return True
+    if not calendar:
+        return False
+    earlier = [d for d in calendar if d < day]
+    return bool(earlier) and earlier[-1] == batch_date
+
+
 def prepare_pool_analysis_batch(
     *,
     as_of: str | None = None,
@@ -195,14 +276,18 @@ def prepare_pool_analysis_batch(
     result: dict[str, Any] = {
         "trade_date": day,
         "batch_date": None,
+        "stale_batch": None,
         "pool_size": 0,
         "selected": 0,
         "started": 0,
         "started_symbols": [],
         "skipped_existing": 0,
+        "reconciled": 0,
         "removed": [],
         "dispatch_failed": 0,
     }
+    # 全表对账（含历史僵尸行）；结果计数随摘要披露
+    result["reconciled"] = reconcile_pool_analysis_runs(None, db_path=db_path)
 
     successful = latest_successful_pool(db_path=screening_db_path)
     if successful is None:
@@ -215,9 +300,16 @@ def prepare_pool_analysis_batch(
     result["batch_date"] = batch_date
     result["pool_size"] = len(pool)
 
-    if batch_date != day:
+    if not _accept_batch_date(batch_date, day, read_snapshot_calendar()):
         result["status"] = "skipped_stale_pool"
         return result
+    if batch_date != day:
+        result["stale_batch"] = batch_date
+        logger.warning(
+            "池分析接受前一交易日的补跑池（批次 %s，分析日 %s）；时效性重校验照常执行",
+            batch_date,
+            day,
+        )
     if not pool:
         result["status"] = "skipped_empty_pool"
         return result
@@ -237,7 +329,9 @@ def prepare_pool_analysis_batch(
         if not symbol or symbol in removed_symbols:
             continue
         existing = get_pool_analysis_run(day, symbol, db_path=db_path)
-        if existing is not None and existing.get("status") == "queued":
+        if existing is not None and existing.get("status") in ("queued", "completed"):
+            # queued = 已建会话待入队/在跑；completed = 当日已完成（对账后可见）——
+            # 两者都不重复建会话、不重复烧分析（issue #456）。
             result["skipped_existing"] += 1
             continue
         session_id = str(existing.get("session_id") or "") if existing else ""
