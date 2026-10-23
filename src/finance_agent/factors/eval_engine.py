@@ -148,14 +148,30 @@ def _ts_std(frame: pd.DataFrame, window: int) -> pd.DataFrame:
 def _ts_rank(frame: pd.DataFrame, window: int) -> pd.DataFrame:
     """窗口内当前值的平均秩百分比（pandas ``rank(pct=True)`` 口径，含并列）。
 
-    经 ``rolling.apply``（``raw=True``）实现；``min_periods=window`` 使窗口不足/
-    含 NaN 时 pandas 直接产出 NaN（不调用回调）。
+    向量化实现（issue #463，替代 ``rolling.apply`` 逐格 Python 回调）：当前值
+    ``x_t`` 在窗口内的平均秩 = ``#{x_{t-j} < x_t} + (#{x_{t-j} = x_t} + 1)/2``
+    （并列取平均，含自身），pct = 秩 / window——与 ``pd.Series(w).rank(pct=True)``
+    的最后元素逐位一致。``min_periods=window`` 语义：窗口不足（前 window−1 行）
+    或窗口内任一格（含 ``x_t`` 自身）NaN → NaN。按窗口偏移逐次移位比较（window
+    次全帧向量化），内存有界（无 (日, 票, 窗) 三维展开）。
     """
-
-    def _last_pct_rank(values: np.ndarray) -> float:
-        return float(pd.Series(values).rank(pct=True).iloc[-1])
-
-    return frame.rolling(window, min_periods=window).apply(_last_pct_rank, raw=True)
+    values = frame.to_numpy(dtype="float64")
+    n_rows = values.shape[0]
+    less = np.zeros_like(values)
+    equal = np.zeros_like(values)
+    valid = np.zeros(values.shape, dtype=bool)
+    if n_rows >= window:
+        valid[window - 1 :, :] = True
+    for offset in range(window):
+        # 行 i 处比较 x_i（窗口左端）与 x_{i+offset}（当前值），对齐到目标行 i+offset
+        left = values[: n_rows - offset, :]
+        current = values[offset:, :]
+        less[offset:, :] += left < current
+        equal[offset:, :] += left == current
+        valid[offset:, :] &= ~np.isnan(left)
+        valid[offset:, :] &= ~np.isnan(current)
+    pct = (less + (equal + 1.0) / 2.0) / window
+    return _wrap(np.where(valid, pct, np.nan), frame)
 
 
 def _delta(frame: pd.DataFrame, window: int) -> pd.DataFrame:
