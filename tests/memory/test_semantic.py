@@ -9,6 +9,7 @@ spec decision-memory「语义记忆人工确认」：
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -270,12 +271,17 @@ class TestConfirmationGate:
                 assert candidate not in str(_factor_library_block(state))
 
     def test_unconfirmed_text_only_reachable_via_semantic_module(self):
-        """静态门禁：`memory_clauses` 表名只出现在 semantic.py（无第二读入口）。"""
+        """静态门禁：`memory_clauses` 表名只出现在 semantic.py（无第二读入口）。
+
+        按 SQL 字面量匹配而非裸子串——operator 工具名 get_memory_clauses /
+        API 名 memory_clause_list 属标识符，不构成第二读取入口。
+        """
         src = Path("src/finance_agent")
+        pat = re.compile(r"(?<![A-Za-z0-9_])memory_clauses(?![A-Za-z0-9_])")
         hits = [
             path.relative_to(src).as_posix()
             for path in src.rglob("*.py")
-            if "memory_clauses" in path.read_text(encoding="utf-8")
+            if pat.search(path.read_text(encoding="utf-8"))
         ]
         assert hits == ["memory/semantic.py"]
 
