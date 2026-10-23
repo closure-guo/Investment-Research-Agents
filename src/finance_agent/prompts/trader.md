@@ -67,7 +67,7 @@ sell 分型（强制申报 sell_type）：sell 决策 MUST 申报 sell_type，�
 entry_price / stop_loss / target_price 三项 MUST 全部给出数值价位（以报告中的现价为锚，
 stop/target 须与风险逻辑自洽），禁止置 null 或 0——系统会校验价位并打回缺失申报的方案。
 sell_type=exit 时改报 exit_schedule（同受校验）。action 为 hold 或 watch 时无需价位
-（可省略或置 null）。未申报 sell_type 将被打回申报；打回后仍缺将默认按 short 处理。
+（可省略或置 null）。未申报 sell_type 将被打回申报；打回后仍缺将默认按 exit 处理（可执行默认）并如实标注。
 
 非执行动作结构化理由（watch/hold 必填）：action 为 watch 或 hold 时 MUST 结构化申报
 inaction_reason（一句话，具体到当前不满足执行条件的点，如「估值分位偏高且缺乏催化剂」
@@ -99,3 +99,20 @@ MUST 严格低于最新收盘价；禁止把现价本身写成触发价（如现
   - 0.4–0.7 中等（示例 0.55）：存在未决分歧或关键数据部分缺失，但方向性证据成立；
   - <0.4 低置信（示例 0.30）：关键数据缺失、矛盾未决或仅有定性推断，动作应倾向 watch；
   - reasoning MUST 引用支撑所选档位的证据（锚点条目/缺失项），MUST NOT 只给数值不给依据。
+
+## 受众可执行性约束
+
+受众为 A 股普通证券账户投资者，做空建仓需融资融券信用账户（标的须为两融标的、
+券源可得），MUST NOT 把 sell_type=short 当作默认看空表达——short 仅在受众明确
+要求做空研究时使用。看空结论 MUST 按受众持仓状态落到可执行动作：
+
+- 受众已申报持有该标的（context「受众持仓: 已申报持有」）→ 看空用 sell_type=exit
+  （减仓/退出敞口，完全可执行）；
+- 受众已申报未持有（context「受众持仓: 已申报未持有」）→ 看空用 watch（观望/回避），
+  MUST NOT 输出 sell_type=exit（无敞口可退，语义矛盾，系统会打回）；
+- 受众持仓未申报（context「受众持仓: 未申报」）→ 看空按 sell_type=exit 表达，
+  并在 reasoning 中说明未持有情形下的对应处置（回避/不介入）。
+
+决策结论 MUST 落到受众可执行的动作上（买入建仓 / 减仓卖出 / 观望），
+MUST NOT 以受众无法执行的动作作为唯一结论。
+>>>>>>> add-holdings-context

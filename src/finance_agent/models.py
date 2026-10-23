@@ -206,7 +206,8 @@ class TradeDecision(BaseModel):
     # sell 分型（update-sell-action-typing，#188）：exit=持有者减仓/退出敞口（申报
     # exit_schedule 减仓节奏，无新建仓参数，重新介入条件走 reeval_triggers）；
     # short=做空建仓（沿用 entry/stop/target 必填模板）。None=未申报/历史形态，
-    # 校验层打回申报，仍缺默认按 short 处理（保守，与现行模板语义一致）
+    # 校验层打回申报，仍缺默认按 exit 处理（add-holdings-context 可执行默认：原为
+    # short，与生产分型语义相反且 A 股散户普遍不可执行）
     sell_type: Literal["exit", "short"] | None = None
     exit_schedule: str | None = None
 
@@ -247,8 +248,8 @@ class TradeDecision(BaseModel):
     @classmethod
     def _normalize_sell_type(cls, value: object) -> object:
         """sell_type 归一（update-sell-action-typing）：大小写/同义词容错——
-        减仓/退出族→exit、做空族→short；未识别杂值归 None（走默认 short 模板
-        路径，不抛异常炸管线——申报约束由 risk_judge 校验层承担）。
+        减仓/退出族→exit、做空族→short；未识别杂值归 None（不抛异常炸管线——
+        申报约束由 risk_judge 校验层承担，打回后仍缺默认 exit）。
         非 sell 动作上的取值由 model_validator 归 None（防 LLM 在 buy 上塞值）。
         """
         if not isinstance(value, str):
@@ -326,6 +327,20 @@ class TradeDecision(BaseModel):
             self.sell_type = None
             self.exit_schedule = None
         return self
+
+
+class HoldingsContext(BaseModel):
+    """受众持仓上下文（add-holdings-context 预留框架）。
+
+    三态：True=已申报持有、False=已申报未持有、None=未申报。未申报 MUST NOT 被
+    等同于「未持有」——二者对方向可执行性的含义不同（未持有者看空只能观望；
+    未申报者按可执行默认 exit 表达并要求说明未持有情形处置）。
+
+    当前唯一来源是分析请求的显式声明；未来自动选股/交易接入真实账户持仓时，
+    在本模型上扩展来源与持仓明细字段（数量/成本随消费方一并增加，避免死字段）。
+    """
+
+    holds: bool | None = None
 
 
 class FundManagerDecision(BaseModel):

@@ -510,7 +510,7 @@ class TestSellTypeTyping:
         assert TradeDecision.model_validate(self._sell(sell_type="做空")).sell_type == "short"
 
     def test_unknown_sell_type_normalized_to_none(self):
-        # 杂值归 None（走默认 short 模板路径），不抛异常炸管线
+        # 杂值归 None（交 risk_judge 校验层打回申报，仍缺默认 exit），不抛异常炸管线
         d = TradeDecision.model_validate(self._sell(sell_type="partially"))
         assert d.sell_type is None
 
@@ -523,7 +523,7 @@ class TestSellTypeTyping:
         assert d.exit_schedule is None
 
     def test_default_none_backcompat(self):
-        # 历史决策对象（无字段）→ None，模板默认 short，行为与现状一致
+        # 历史决策对象（无字段）→ None，模型层不定型（risk_judge 打回后仍缺默认 exit）
         d = TradeDecision.model_validate(self._sell())
         assert d.sell_type is None
         assert d.exit_schedule is None

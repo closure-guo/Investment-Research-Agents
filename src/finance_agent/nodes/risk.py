@@ -16,7 +16,12 @@ from finance_agent.langfuse_tracing import update_current_span
 from finance_agent.memory import append_memory_block
 from finance_agent.metrics.decision_price_check import check_decision_prices
 from finance_agent.models import DebateMessage, TradeDecision
-from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint
+from finance_agent.nodes._llm_utils import (
+    call_llm_for_json,
+    focus_hint,
+    holdings_context_line,
+    holdings_holds,
+)
 from finance_agent.nodes.validate import apply_payout_self_check as _apply_payout_self_check
 from finance_agent.nodes.validate import final_price_missing, inaction_rationale_missing
 from finance_agent.outcome.track_record.model import recent_directions
@@ -203,7 +208,8 @@ def _reaffirm_decision_semantics(
     if hy["flip"]:
         prior_action = _DIRECTION_ACTION.get(str(hy["prior_direction"]), "watch")
         # 维持前判到执行动作时：反方向价位不可信清空（交既有价位完整性打回补报）；
-        # sell_type 维持语义中性默认 short（清空会撞后续 sell_type 申报打回的级联）
+        # sell_type 维持可执行默认 exit（add-holdings-context：原为 short——与生产
+        # 分型语义相反，且 A 股散户普遍不可执行）
         update: dict = {
             "action": prior_action,
             "position_size": None,
@@ -213,7 +219,7 @@ def _reaffirm_decision_semantics(
             "exit_schedule": None,
         }
         if prior_action == "sell":
-            update["sell_type"] = "short"
+            update["sell_type"] = "exit"
         else:
             update["sell_type"] = None
         decision = decision.model_copy(update=update)
@@ -266,6 +272,35 @@ def _recheck_price_note_after_retry(
             final_price_check["note"] = f"价位结论已被{cause}覆盖（终稿换代后价位齐备，未再次打回）"
 
 
+def _is_not_holding_violation(decision: TradeDecision) -> bool:
+    """未持有受众与 exit 并存的语义矛盾判定（add-holdings-context 门禁判据）。"""
+    return (
+        str(getattr(decision, "action", "")) == "sell"
+        and str(getattr(decision, "sell_type", "") or "") == "exit"
+    )
+
+
+def _downgrade_exit_to_watch(decision: TradeDecision) -> TradeDecision:
+    """exit 不可执行时的确定性降级：清空分型/节奏/建仓价位，如实标注无敞口可退。
+
+    门禁打回后仍犯（重申）与终稿复核两处共用同一降级语义——单一来源防漂移；
+    MUST NOT 编造 exit_schedule 或建仓价位（清空即如实）。
+    """
+    return decision.model_copy(
+        update={
+            "action": "watch",
+            "sell_type": None,
+            "exit_schedule": None,
+            "entry_price": None,
+            "stop_loss": None,
+            "target_price": None,
+            "inaction_reason": (
+                "未持有无敞口可退，已降级观望：受众已申报未持有该标的，exit（持有者减仓）不可执行"
+            ),
+        }
+    )
+
+
 def risk_judge(state: dict) -> dict:
     """Layer IV Risk Judge — 最终交易决策。"""
     context = _build_risk_context(state)
@@ -295,7 +330,8 @@ def risk_judge(state: dict) -> dict:
     )
     # sell 分型申报（update-sell-action-typing，#188）：sell 缺 sell_type → 打回申报
     # 一次；申报 exit → 价位豁免（final_price_missing 分型分支生效，免去无意义价位
-    # 打回）；仍缺 → 默认 short（保守，与现行建仓模板语义一致）+ 如实标注。
+    # 打回）；仍缺 → 默认 exit（add-holdings-context 可执行默认：原为 short，与
+    # 生产分型语义相反且 A 股散户普遍不可执行）+ 如实标注。
     # 判定在价位完整性检查之前（design：打回预算不叠加，先定型再验参数）
     if (
         str(getattr(decision, "action", "")) == "sell"
@@ -322,22 +358,64 @@ def risk_judge(state: dict) -> dict:
             str(getattr(decision, "action", "")) == "sell"
             and getattr(decision, "sell_type", None) is None
         ):
-            decision = decision.model_copy(update={"sell_type": "short"})
-            _sell_type_note = "sell_type 未申报，默认 short 模板（如实标注）"
+            decision = decision.model_copy(update={"sell_type": "exit"})
+            _sell_type_note = "sell_type 未申报，默认 exit（可执行默认，如实标注）"
         else:
             _sell_type_note = "打回后已申报 sell_type"
     else:
+        _sell_type_note = ""
+    # 未持有受众的 exit 可执行性门禁（add-holdings-context）：exit 是「持有者减仓/
+    # 退出敞口」，受众已申报未持有则无敞口可退——语义矛盾，打回重申恰一次，仍犯
+    # 降级 watch（复用滞回「重申仍无 → 降级」模式），判定落 state 供 trace 观测，
+    # 报告不渲染。未申报与已申报持有不触发（exit 对二者本就成立或走可执行默认）。
+    holdings_check: dict = {"result": "pass", "note": ""}
+    if holdings_holds(state) is False and _is_not_holding_violation(decision):
+        retry_context = (
+            f"{context}\n\n【受众可执行性打回】受众已申报未持有该标的，无敞口可退——"
+            "sell_type=exit（持有者减仓/退出敞口）对无持仓受众不可执行。看空请改为 "
+            "watch（观望/回避）并申报 inaction_reason 与 reeval_triggers；若受众明确"
+            "要求做空研究，可用 sell_type=short（沿用 entry/stop/target 建仓模板）。"
+            "请重新输出完整决策 JSON。"
+        )
+        data = call_llm_for_json(
+            retry_context,
+            system=system,
+            api_key=api_key,
+            node_name="risk_judge",
+            llm_config=state.get("llm_config"),
+            stock_code=state.get("stock_code"),
+            prompt_name=_pinfo.prompt_name,
+            prompt_version=_pinfo.prompt_version,
+        )
+        decision = TradeDecision.model_validate(data)
+        if _is_not_holding_violation(decision):
+            decision = _downgrade_exit_to_watch(decision)
+            holdings_check = {"result": "fail", "note": "未持有无敞口可退，已降级观望"}
+        else:
+            holdings_check = {"result": "pass", "note": "打回后已改判"}
+        # 终稿换代：sell_type 定型结论已被门禁重试覆盖，如实清空避免陈旧标注
         _sell_type_note = ""
     # 终稿价位完整性（extend-payout-self-check-coverage，601888 实证：buy 价位全 None
     # 直通）：buy/sell 缺失首次打回重试一次；仍缺放行 + 如实标注（同 Trader 价检语义）
     final_price_check: dict = {"result": "pass", "note": _sell_type_note}
     _missing = final_price_missing(decision)
     if _missing:
-        retry_context = (
-            f"{context}\n\n【价位完整性打回】{'buy' if decision.action == 'buy' else 'sell'}"
-            f"决策必须结构化申报数值价位，缺失：{'、'.join(_missing)}。"
-            "请重新输出补全 entry_price/stop_loss/target_price 的完整决策 JSON（继承或显式改写 Trader 价位均可，但必须以结构化字段申报）。"
-        )
+        if "exit_schedule" in _missing:
+            # 分型分支（add-holdings-context）：exit 形态缺减仓节奏时 MUST 要节奏，
+            # 沿用建仓价位措辞会要求补 entry/stop/target 来满足 exit 校验（自相矛盾）
+            retry_context = (
+                f"{context}\n\n【减仓节奏申报打回】终稿 sell_type 为 exit（持有者减仓），"
+                "必须申报 exit_schedule 减仓节奏，当前缺失：exit_schedule。请重新输出"
+                "补全 exit_schedule（一句话写清批次与触发，如「分两批：现价减半、"
+                "跌破600清仓」）的完整决策 JSON。若受众并未持有该标的（无敞口可退），"
+                "请改为 watch 并申报 inaction_reason 与 reeval_triggers。"
+            )
+        else:
+            retry_context = (
+                f"{context}\n\n【价位完整性打回】{'buy' if decision.action == 'buy' else 'sell'}"
+                f"决策必须结构化申报数值价位，缺失：{'、'.join(_missing)}。"
+                "请重新输出补全 entry_price/stop_loss/target_price 的完整决策 JSON（继承或显式改写 Trader 价位均可，但必须以结构化字段申报）。"
+            )
         data = call_llm_for_json(
             retry_context,
             system=system,
@@ -618,6 +696,73 @@ def risk_judge(state: dict) -> dict:
                     f"打回后残留 {len(decision_price_anomalies)} 条未清零（未恶化，放行待人工终裁）"
                 )
 
+    # ── 终稿收口（add-holdings-context T5：打回预算已尽，MUST NOT 再触发 LLM 打回）──
+    # 1) sell_type 幂等收口：上方的分型定型块只覆盖「首次输出未申报」；其后各打回
+    # （减仓节奏/理由/再评估/触发位/价位交叉校验）换代后 LLM 可能再丢 sell_type，
+    # 终稿停在 None 既违反「打回后仍缺默认按 exit 处理」，又让本任务门禁判据失明。
+    # 兜底 exit 后按 exit 口径重算价位结论——旧注基于「未申报 → 建仓价位必填」
+    # 口径，换代后已成失真结论；exit_schedule 缺失按既有「已打回仍未申报」语义
+    # 如实标注，MUST NOT 编造减仓节奏/建仓价位。
+    _sell_type_collapse_note = ""
+    if (
+        str(getattr(decision, "action", "")) == "sell"
+        and getattr(decision, "sell_type", None) is None
+    ):
+        decision = decision.model_copy(update={"sell_type": "exit"})
+        _collapse_note = "打回后仍未申报 sell_type，默认 exit（可执行默认，如实标注）"
+        _missing_after_collapse = final_price_missing(decision)
+        if _missing_after_collapse:
+            _collapse_note += f"；终稿仍缺：{'、'.join(_missing_after_collapse)}（已打回仍未申报）"
+        final_price_check["note"] = _collapse_note
+        _sell_type_collapse_note = _collapse_note
+    # 2) 门禁判据终稿复核：后续打回换代可能把门禁已降级的终稿翻回 sell/exit，或
+    # 收口默认出的 exit 落在未持有受众上（门禁在主块已过）——打回预算已尽，按同一
+    # 确定性降级语义改判并如实改注（MUST NOT 再调用 LLM，避免死循环）。
+    if holdings_holds(state) is False and _is_not_holding_violation(decision):
+        decision = _downgrade_exit_to_watch(decision)
+        holdings_check = {
+            "result": "fail",
+            "note": "未持有无敞口可退，已降级观望（终稿复核降级）",
+        }
+        if _sell_type_collapse_note:
+            # 收口历史（LLM 打回后仍丢 sell_type、曾按未申报默认 exit）改记本键：
+            # 下方换代改注会覆盖 final_price_check 注，该事实仅此处可保留（trace
+            # 可观测；本键不进 report/FM 消费链，措辞亦避开 _FM_INCOMPLETE_MARKERS
+            # 「仍未申报」/「缺失」）
+            holdings_check["note"] += (
+                "；历史披露：终稿收口时 sell_type 曾按未申报默认 exit，该结论已被终稿复核降级覆盖"
+            )
+        # 终稿复核降级换代后价位注须订正（评审 I-1）：注可能仍写着对 sell/exit 的
+        # 结论（收口注「默认 exit…」/各重试注），对完整 watch 终稿已成失真陈述——
+        # 且注含标记词会经 report._fm_incomplete_integrity_block 渲染用户可见的
+        # 「审批对象结构不完整标注」，并进 FM 审批上下文。复用重试回路的换代改注
+        # helper（如实标注已被降级覆盖，不再打回）
+        _recheck_price_note_after_retry(decision, final_price_check, "终稿复核降级")
+        # 价位复核结果（decision_price_anomalies/decision_price_gate）保持降级前
+        # sell 终稿的结论不重跑：降级清空的是分型/节奏/建仓价位（非校验器输入），
+        # 校验输入 reeval_triggers/reasoning 与触发位均未被降级改动，唯一被替换的
+        # inaction_reason 是固定无价位文案（不引入新 anomaly）——既有价位复核结论
+        # 对新终稿仍成立
+        # 终稿换代改判 watch：复核兄弟结论（同 I-1 链模式，不再打回，不得留空注假阳性）
+        _missing_inaction_final = inaction_rationale_missing(decision)
+        if _missing_inaction_final:
+            final_inaction_check["note"] = (
+                "终稿复核降级后改为非执行动作且理由缺失："
+                f"{'、'.join(_missing_inaction_final)}（未再次打回，如实标注）"
+            )
+        if not decision.reeval_triggers:
+            final_reeval_check["note"] = (
+                final_reeval_check["note"]
+                or "终稿复核降级后 reeval_triggers 为空（未再次打回，如实标注）"
+            )
+        if (
+            getattr(decision, "trigger_high", None) is None
+            and getattr(decision, "trigger_low", None) is None
+        ):
+            final_trigger_check["note"] = (
+                "终稿复核降级后改为 watch 且触发位缺失（未再次打回，如实标注）"
+            )
+
     return {
         "final_trade_decision": decision,
         "payout_ratio_corrected": _payout_fixed,
@@ -629,6 +774,9 @@ def risk_judge(state: dict) -> dict:
         "decision_price_anomalies": decision_price_anomalies,
         "decision_price_gate": decision_price_gate,
         "decision_hysteresis": decision_hysteresis,
+        # 未持有受众的 exit 可执行性门禁判定（add-holdings-context）：trace 可观测，
+        # 报告不渲染（report.py 不消费本键）
+        "holdings_executability_check": holdings_check,
     }
 
 
@@ -663,6 +811,11 @@ def _build_risk_context(state: dict) -> str:
     hint = focus_hint(state)
     if hint:
         sections.append(hint)
+
+    # 受众持仓上下文（add-holdings-context）：三态均注入（同 Trader 层，两层不得漂移）。
+    # 注意本函数由激进/保守/中性三个风险辩论者与 risk_judge 共用——该行会同时进入
+    # 三方辩论 context，排查 context 内容时不要只盯着 risk_judge
+    sections.append(holdings_context_line(state))
 
     # Trader 方案
     plan = state.get("trader_plan") or {}
