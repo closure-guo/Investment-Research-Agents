@@ -327,6 +327,32 @@ async def test_run_finished_persisted_before_yield(isolated_db, monkeypatch):
     assert history[1]["content"] == "你好，世界"
 
 
+async def test_quick_run_persists_provider_usage(isolated_db, monkeypatch):
+    """add-composer-stat-pills：quick run 收尾把 Agent 累计 usage 写入会话。"""
+    sid = session_store.create_chat_session("计量会话")
+    stub = _StubAgent([StreamEvent.answer("你好")])
+    stub.usage_calls = 2
+    stub.usage_prompt_tokens = 1500
+    stub.usage_completion_tokens = 100
+    stub.usage_total_tokens = 1600
+    stub.usage_max_prompt_tokens = 900
+    monkeypatch.setattr(agent_factory, "build_agent", lambda **kwargs: stub)
+
+    encoder = EventEncoder()
+    agen = _agui_run_stream(sid, "run-usage", "问题", None, encoder)
+    async for _chunk in agen:
+        pass
+    with contextlib.suppress(Exception):
+        await agen.aclose()
+
+    row = session_store.get_session(sid)
+    assert row is not None
+    assert row["tokens_prompt"] == 1500
+    assert row["tokens_completion"] == 100
+    assert row["tokens_total"] == 1600
+    assert row["context_peak_tokens"] == 900
+
+
 async def test_client_disconnect_persists_interrupted(isolated_db, monkeypatch):
     """客户端断开（消费任务被 cancel）→ 中断占位落库 + status=interrupted。"""
     sid = session_store.create_chat_session("测试会话")

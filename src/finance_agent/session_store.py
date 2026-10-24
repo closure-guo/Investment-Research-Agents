@@ -107,7 +107,13 @@ def init_db() -> None:
             analyst_summaries TEXT,
             chat_history     TEXT DEFAULT '[]',
             created_at   TEXT NOT NULL,
-            duration_ms  INTEGER DEFAULT 0
+            duration_ms  INTEGER DEFAULT 0,
+            -- 会话级 LLM 用量（add-composer-stat-pills）：provider 真值累加，
+            -- 未知保持 0（不用字符估算填充）；context_peak_tokens 为单次请求峰值。
+            tokens_prompt       INTEGER DEFAULT 0,
+            tokens_completion   INTEGER DEFAULT 0,
+            tokens_total        INTEGER DEFAULT 0,
+            context_peak_tokens INTEGER DEFAULT 0
         )
         """
     )
@@ -132,6 +138,17 @@ def init_db() -> None:
         # 终稿决策 JSON（add-report-revision-view）：随 update_session_report 落库，
         # 供同标的下一份报告的「距上次报告」增量摘要回溯；NULL = 无终稿/旧会话
         ("final_trade_decision", "ALTER TABLE sessions ADD COLUMN final_trade_decision TEXT"),
+        # 会话级用量（add-composer-stat-pills）：旧库幂等补列，默认 0
+        ("tokens_prompt", "ALTER TABLE sessions ADD COLUMN tokens_prompt INTEGER DEFAULT 0"),
+        (
+            "tokens_completion",
+            "ALTER TABLE sessions ADD COLUMN tokens_completion INTEGER DEFAULT 0",
+        ),
+        ("tokens_total", "ALTER TABLE sessions ADD COLUMN tokens_total INTEGER DEFAULT 0"),
+        (
+            "context_peak_tokens",
+            "ALTER TABLE sessions ADD COLUMN context_peak_tokens INTEGER DEFAULT 0",
+        ),
     ]:
         with contextlib.suppress(sqlite3.OperationalError):
             conn.execute(ddl)
@@ -950,3 +967,107 @@ def update_pipeline_timelines_json(session_id: str, payload_json: str) -> bool:
     conn.commit()
     conn.close()
     return cur.rowcount > 0
+
+
+def update_session_usage(
+    session_id: str,
+    *,
+    prompt: int = 0,
+    completion: int = 0,
+    total: int = 0,
+    context_peak: int = 0,
+) -> bool:
+    """累加会话级 LLM 用量（add-composer-stat-pills）。
+
+    - token 三列做 ``+=``：会话累计用量跨多次分析累加；
+    - ``context_peak_tokens`` 取 ``MAX(旧值, 本次峰值)``：表示会话曾用满的上下文峰值。
+
+    调用方为 deep 分析线程（``_run_graph``）结束时；值为 provider 真值，
+    无 usage 时传 0（不写入估算值）。
+    """
+    conn = _get_db()
+    cur = conn.execute(
+        """
+        UPDATE sessions SET
+            tokens_prompt = COALESCE(tokens_prompt, 0) + ?,
+            tokens_completion = COALESCE(tokens_completion, 0) + ?,
+            tokens_total = COALESCE(tokens_total, 0) + ?,
+            context_peak_tokens = MAX(COALESCE(context_peak_tokens, 0), ?)
+        WHERE session_id = ?
+        """,
+        (prompt, completion, total, context_peak, session_id),
+    )
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+def session_stats(session_id: str) -> dict[str, Any] | None:
+    """会话计量聚合（add-composer-stat-pills）：轮次 / 步骤 / 耗时 / 用量 / 上下文峰值。
+
+    - ``turns``：chat_history 中 role=user 的条数；
+    - ``steps``：事件日志内 ``node_start`` 的去重节点数（兼容 node_id / node 两种键）；
+    - 数值列缺失或旧库未迁移时一律回落 0（不抛错、不造数）。
+
+    会话不存在返回 None。
+    """
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT session_id, session_type, chat_history, duration_ms,
+                   tokens_prompt, tokens_completion, tokens_total, context_peak_tokens
+            FROM sessions WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if not row:
+            return None
+
+        turns = 0
+        assistant_messages = 0
+        raw_history = row["chat_history"]
+        if raw_history:
+            try:
+                history = json.loads(raw_history)
+            except (json.JSONDecodeError, TypeError):
+                history = None
+            if isinstance(history, list):
+                for item in history:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("role") == "user":
+                        turns += 1
+                    elif item.get("role") == "assistant":
+                        assistant_messages += 1
+
+        # 只取可能含 node_start 的事件，避免把逐 token 的 chat_token 全量解析
+        event_rows = conn.execute(
+            "SELECT event_json FROM session_events "
+            "WHERE session_id = ? AND event_json LIKE '%\"node_start\"%'",
+            (session_id,),
+        ).fetchall()
+        nodes: set[str] = set()
+        for event_row in event_rows:
+            try:
+                event = json.loads(event_row["event_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "node_start":
+                continue
+            node = event.get("node_id") or event.get("node")
+            if isinstance(node, str) and node:
+                nodes.add(node)
+
+        return {
+            "turns": turns,
+            # quick 会话没有管线 node_start：steps 回退为 assistant 消息数（模型回复步）
+            "steps": len(nodes) or (assistant_messages if row["session_type"] == "chat" else 0),
+            "duration_ms": int(row["duration_ms"] or 0),
+            "tokens_prompt": int(row["tokens_prompt"] or 0),
+            "tokens_completion": int(row["tokens_completion"] or 0),
+            "tokens_total": int(row["tokens_total"] or 0),
+            "context_peak_tokens": int(row["context_peak_tokens"] or 0),
+        }
+    finally:
+        conn.close()

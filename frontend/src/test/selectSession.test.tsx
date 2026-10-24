@@ -85,6 +85,8 @@ function stubFetch(detailResponses: Array<{ ok: boolean; body: unknown }>) {
       return new Response(JSON.stringify({ sessions: [] }), { status: 200 })
     }
     if (url.startsWith('/api/sessions/')) {
+      // add-composer-stat-pills：计量条 stats 端点独立分流，不得消耗会话详情调用序
+      if (url.endsWith('/stats')) return new Response('{}', { status: 404 })
       const idx = Math.min(detailCallCount, detailResponses.length - 1)
       detailCallCount += 1
       const item = detailResponses[idx]
@@ -129,6 +131,8 @@ function stubFetchWithSessionList(sessionId: string, displayName: string, detail
       )
     }
     if (url.startsWith(`/api/sessions/${sessionId}`)) {
+      // add-composer-stat-pills：stats 端点不参与会话详情调用序
+      if (url.endsWith('/stats')) return new Response('{}', { status: 404 })
       // SSE stream 端点：新架构下 running 会话优先走 journal replay，但本组用例
       // 测的是「无在途 SSE（404）时轮询接管」场景——rebuild 只保留 user 消息，
       // resume 收到 404 保持 streaming 相位，轮询 effect 启动后用 updatePipelineSnapshot
@@ -319,6 +323,8 @@ describe('selectSession 按会话状态恢复管线', () => {
         })
       }
       if (url.startsWith('/api/sessions/')) {
+        // add-composer-stat-pills：stats 端点独立分流，不消耗 detailCallCount 序
+        if (url.endsWith('/stats')) return new Response('{}', { status: 404 })
         // SSE stream 端点：模拟「无在途 SSE、靠轮询恢复」，返回 404 让 resume 安静保持相位
         if (url.includes('/stream')) {
           return new Response('{}', { status: 404 })

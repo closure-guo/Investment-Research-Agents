@@ -81,6 +81,26 @@ class TestUsageAccumulator:
         assert acc.calls == 2
         assert (acc.prompt_tokens, acc.completion_tokens, acc.total_tokens) == (11, 3, 14)
 
+    def test_tracks_max_prompt_tokens(self):
+        """add-composer-stat-pills：上下文峰值 = 单次请求 prompt_tokens 的最大值。"""
+        from finance_agent.nodes._llm_utils import UsageAccumulator
+
+        acc = UsageAccumulator()
+        acc.add({"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105})
+        acc.add({"prompt_tokens": 40, "completion_tokens": 5, "total_tokens": 45})
+        acc.add({"prompt_tokens": 120, "completion_tokens": 5, "total_tokens": 125})
+        assert acc.max_prompt_tokens == 120
+
+    def test_max_prompt_tokens_stays_zero_without_usage(self):
+        """无 usage 不造数：None / 空 dict / 缺 prompt 键都保持 0。"""
+        from finance_agent.nodes._llm_utils import UsageAccumulator
+
+        acc = UsageAccumulator()
+        acc.add(None)
+        acc.add({})
+        acc.add({"completion_tokens": 7})
+        assert acc.max_prompt_tokens == 0
+
 
 class TestUsageAccumulatorConcurrency:
     """Δ3 终审 I1：LangGraph 并行分支经 executor ``copy_context`` 把累加器传播到

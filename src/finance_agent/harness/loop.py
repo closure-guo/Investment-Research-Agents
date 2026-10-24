@@ -251,6 +251,13 @@ class Agent:
         # 运行时状态
         self.session_id: str = str(uuid.uuid4())[:8]
         self._running = False
+        # provider usage 累计（add-composer-stat-pills）：quick/chat 通道不经过管线
+        # 节点，用量在 Agent 层累计，由调用方在收尾时落库（session_store）。
+        self.usage_calls: int = 0
+        self.usage_prompt_tokens: int = 0
+        self.usage_completion_tokens: int = 0
+        self.usage_total_tokens: int = 0
+        self.usage_max_prompt_tokens: int = 0
 
     # ── 权限处理 ──
 
@@ -277,6 +284,30 @@ class Agent:
         return False
 
     # ── 核心运行入口 ──
+
+    def _record_usage(self, usage: dict[str, int] | None) -> None:
+        """累计一次 LLM 调用的 provider usage（缺失/畸形按 0，不估算填充）。
+
+        quick 模式的用量落库真值来源：调用方（AG-UI / SSE 收尾）读取
+        ``usage_*`` 属性后写入 session_store。
+        """
+        if not isinstance(usage, dict) or not usage:
+            return
+
+        def _to_int(key: str) -> int:
+            try:
+                return int(usage.get(key) or 0)
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        prompt = _to_int("prompt_tokens")
+        completion = _to_int("completion_tokens")
+        total = _to_int("total_tokens") or (prompt + completion)
+        self.usage_calls += 1
+        self.usage_prompt_tokens += prompt
+        self.usage_completion_tokens += completion
+        self.usage_total_tokens += total
+        self.usage_max_prompt_tokens = max(self.usage_max_prompt_tokens, prompt)
 
     async def run(self, user_input: str, force_tool: bool = False) -> AsyncIterator[StreamEvent]:
         """
@@ -412,6 +443,7 @@ class Agent:
                 # 预算约束的是请求上下文，不含输出。此前 calibrate 零生产调用方——预算永远
                 # 停在 capability 派生值、usage_estimated 恒为 True，估算偏差无从纠正。
                 self.context.budget.calibrate((_call_usage or {}).get("prompt_tokens"))
+                self._record_usage(_call_usage)
 
                 # ── DSML 防御性解析 ──
                 # DeepSeek 偶发以 DSML 文本标记输出工具调用，litellm 未解析为

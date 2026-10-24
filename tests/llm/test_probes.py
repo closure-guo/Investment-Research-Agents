@@ -132,6 +132,45 @@ class TestRunLiveProbes:
         assert report.tool_followup is True
         assert report.json_output is True
 
+    def test_json_probe_prompt_requests_json(self, monkeypatch):
+        """json_output 探测必须向模型明确索要 JSON。
+
+        2026-10-23 缺陷：探测请求体是「说你好」，却强制 response_format=
+        json_object。DeepSeek 系端点（opencode zen/go 的 deepseek-v4.1-flash）
+        直接 400：Prompt must contain the word 'json'——能力被误判为不支持。
+        """
+        import litellm
+
+        from finance_agent.llm.probes import run_live_probes
+
+        def fake_completion(**kwargs):
+            from types import SimpleNamespace
+
+            if kwargs.get("response_format"):
+                prompt = " ".join(str(m.get("content") or "") for m in kwargs.get("messages") or [])
+                assert "json" in prompt.lower(), f"json probe prompt lacks json: {prompt!r}"
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content='{"ok": true}', tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ]
+                )
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="好的", tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ]
+            )
+
+        monkeypatch.setattr(litellm, "completion", fake_completion)
+        report = run_live_probes(model="openai/x", api_key="k", base_url="https://x/v1")
+        assert report.json_output is True
+        assert "json_mode_unsupported" not in report.warnings
+
     def test_tool_probe_failure_marks_none(self, monkeypatch):
         import litellm
 
