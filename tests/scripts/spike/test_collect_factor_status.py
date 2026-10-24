@@ -482,3 +482,39 @@ class TestLogAge:
             wd, out, state, now_epoch=1_800_000_000.0, session_alive=lambda: True
         )
         assert snap["current_session"]["log_age_s"] is None
+
+
+class TestProcessAliveWindows:
+    """issue #451：Windows 上 ``os.kill(pid, 0)`` 实为 GenerateConsoleCtrlEvent(CTRL_C_EVENT)
+    ——把 Ctrl-C 打进共享控制台，连同 pytest 与外层 shell 一起打断。存活探测在 Windows
+    分支必须走 ``_windows_probe``（OpenProcess），MUST NOT 触达 ``os.kill``。"""
+
+    def test_windows_branch_uses_probe_and_never_os_kill(self, monkeypatch):
+        kill_calls: list[tuple[int, int]] = []
+
+        def forbidden_kill(pid, sig):
+            kill_calls.append((pid, sig))
+            return None
+
+        probe_results = iter([True, False])
+        seen: list[int] = []
+
+        def fake_probe(pid: int) -> bool:
+            seen.append(pid)
+            return next(probe_results)
+
+        monkeypatch.setattr(cfs.os, "name", "nt")
+        monkeypatch.setattr(cfs.os, "kill", forbidden_kill)
+        monkeypatch.setattr(cfs, "_windows_probe", fake_probe)
+
+        assert cfs._process_alive(4242) is True
+        assert cfs._process_alive(1) is False
+        assert seen == [4242, 1]
+        assert kill_calls == []  # Windows 分支不得触达 os.kill
+
+    def test_posix_path_unchanged(self, monkeypatch):
+        monkeypatch.setattr(cfs.os, "name", "posix")
+        assert cfs._process_alive(os.getpid()) is True
+        assert cfs._process_alive(-1) is False
+        assert cfs._process_alive(None) is False
+        assert cfs._process_alive(0) is False

@@ -199,6 +199,10 @@ def _read_tail(path: Path, nbytes: int) -> str:
 def _process_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
+    if os.name == "nt":
+        # Windows：os.kill(pid, 0) 实为 GenerateConsoleCtrlEvent(CTRL_C_EVENT)——把
+        # Ctrl-C 打进共享控制台，连同调用方（pytest/外层 shell）一起打断（issue #451）。
+        return _windows_probe(int(pid))
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -208,6 +212,28 @@ def _process_alive(pid: int | None) -> bool:
     except OSError:
         return False
     return True
+
+
+def _windows_probe(pid: int) -> bool:
+    """Windows 存活探测：OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) 查退出码。
+
+    句柄打不开一律按不存在处理（探测语义接受把「无权限」读成「不在」——现有调用
+    只区分「活着/死了」，误判方向是保守的）。"""
+    import ctypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _rdagent_session_alive() -> bool:
