@@ -18,4 +18,4 @@
 - [x] 3.1 `uv run pytest tests/screening/ -q` 全绿
 - [x] 3.2 `uv run ruff check src/finance_agent/screening/ tests/screening/` + `ruff format --check` 零告警
 - [x] 3.3 `uv run mypy src/finance_agent/screening/`（不得新增存量外错误）
-- [ ] 3.4 `openspec validate refine-screening-activation-scoring --strict` 通过；tasks 全勾后归档前跑 `openspec status`
+- [x] 3.4 `openspec validate refine-screening-activation-scoring --strict` 通过；tasks 全勾后归档前跑 `openspec status`
