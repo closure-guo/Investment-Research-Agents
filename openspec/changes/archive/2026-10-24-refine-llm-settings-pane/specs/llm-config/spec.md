@@ -2,16 +2,16 @@
 
 ### Requirement: 前端设置面板支持自定义 LLM 配置
 
-系统 SHALL 在前端提供设置面板（LLM 配置），按「连接 / 模型 / 高级」三段组织字段：连接段含 Provider 预设、API Base URL、API Key 与连通性测试；模型段含模型名称与自动发现、上下文窗口、最大输出、思考模式；高级段含 API 形式与多 profile 管理。API Key 输入框 SHALL 为只写语义：已保存密钥时输入框保持为空并提示「已保存（不回显）」，输入新值即替换，且 SHALL 提供显示/隐藏切换。API Base URL 非空时 MUST 匹配 `http(s)://`；上下文长度非空时 MUST 为正整数；非法值 SHALL 在对应字段下方以红字提示并阻止保存。配置持久化到浏览器 localStorage（`fa_llm_profiles` / 激活 profile），既有旧 key 迁移、占位符默认值与多 profile 管理语义保持不变。
+系统 SHALL 在前端提供设置面板（LLM 配置），按「连接 / 模型 / 高级」三段组织字段：连接段含 Provider 预设、API Base URL、API Key 与连通性测试；模型段含模型名称与自动发现、上下文窗口、最大输出、思考模式；高级段含 API 形式与多 profile 管理。API Key 输入框 SHALL 为只写语义：已保存密钥时输入框保持为空并提示「已保存（不回显）」，输入新值即替换，且 SHALL 提供显示/隐藏切换。API Base URL 非空时 MUST 匹配 `http(s)://`；上下文长度非空时 MUST 为正整数；非法值 SHALL 在对应字段下方以红字提示并阻止保存。设置面板 SHALL 位于设置中心页 `/settings` 的「LLM 配置」分区内（由 SettingsModal 弹窗整体迁移而来），通过左侧垂直导航访问。配置持久化到浏览器 localStorage（`fa_llm_profiles` / 激活 profile），既有旧 key 迁移、占位符默认值与多 profile 管理语义保持不变。
 
 (Previously: 系统 SHALL 在前端提供设置面板（LLM 配置），允许用户配置 model、base_url、api_key、thinking 等参数；面板展示 API Key（密码输入框）、模型名称、API Base URL、思考模式四项；已保存的 API Key 会回填进密码输入框。)
 
-#### Scenario: 设置面板展示三段字段
+#### Scenario: 设置面板展示四项配置字段
 
-- **GIVEN** 用户进入设置中心页「LLM 配置」分区
-- **THEN** 连接段展示 Provider 预设、API Base URL、API Key、测试连接
+- **GIVEN** 用户进入设置中心页「LLM 配置」分区（原 SettingsModal 弹窗整体迁移至此，header 齿轮/侧栏入口改为跳转设置页）
+- **THEN** 面板按「连接 / 模型 / 高级」三段组织字段：连接段展示 Provider 预设、API Base URL、API Key、测试连接
 - **AND** 模型段展示模型名称、上下文窗口、最大输出、思考模式（仅 DeepSeek 模型）
-- **AND** 高级段折叠展示 API 形式与配置管理
+- **AND** 高级段折叠展示 API 形式与配置管理（原四项基础字段 API Key / 模型名称 / API Base URL / 思考模式分别落入连接段与模型段）
 
 #### Scenario: 已保存密钥不回显
 
@@ -36,14 +36,14 @@
 
 #### Scenario: 配置持久化到 localStorage
 
-- **WHEN** 用户修改合法配置并保存
-- **THEN** 系统 SHALL 将配置序列化存入 `fa_llm_profiles` 的激活 profile
+- **WHEN** 用户在设置面板修改任意配置项并保存
+- **THEN** 系统 SHALL 将配置序列化为 JSON 存入浏览器 localStorage（`fa_llm_profiles` / 激活 profile）
 - **AND** 页面刷新后重新进入「LLM 配置」分区时，SHALL 恢复上次保存的配置
 
 #### Scenario: 设置面板占位符显示后端默认值
 
 - **WHEN** 设置面板首次加载（无已保存配置）
-- **THEN** 模型名称输入框的 placeholder SHALL 显示后端默认模型
+- **THEN** 模型名称输入框的 placeholder SHALL 显示后端默认模型（从 `GET /api/llm-config` 获取）
 - **AND** API Base URL 输入框的 placeholder SHALL 显示后端默认 base_url
 - **AND** 思考模式开关 SHALL 默认设为后端默认值
 

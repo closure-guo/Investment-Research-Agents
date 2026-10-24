@@ -36,9 +36,9 @@ sell 决策 SHALL 按 `sell_type` 分模板渲染（update-sell-action-typing，
 - **WHEN** `exit_schedule` 缺失
 - **THEN** 「减仓节奏」行 SHALL 如实渲染「未申报」，MUST NOT 编造
 
-#### Scenario: 历史未申报形态按 short 模板渲染并披露
+#### Scenario: sell 未申报 sell_type 按默认模板渲染
 
-- **WHEN** action 为 sell 且 `sell_type` 为 None（add-holdings-context 之前产出的历史决策对象）
+- **WHEN** action 为 sell 且 `sell_type` 为 None（add-holdings-context 之前产出的历史决策对象；此后未申报默认改 exit，None 仅剩历史形态）
 - **THEN** 报告 SHALL 按 short 模板渲染既有参数行（行为与现状一致，历史报告兼容）
 - **AND** 报告 SHALL 渲染做空披露行——历史形态同样按做空建仓模板呈现，不披露即把不可执行结构呈现为可执行建议
 

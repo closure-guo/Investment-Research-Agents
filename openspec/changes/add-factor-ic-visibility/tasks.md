@@ -25,4 +25,4 @@
 - [x] 5.1 新增 E2E：`factor-library.spec.ts` 扩展（真实浏览器展开因子看折线图与就绪度）
 - [x] 5.2 新增 E2E：`screening-page.spec.ts` 增加因子信号卡用例（真实浏览器可见）
 - [x] 5.3 `uv run pytest` / `npm test` / `npx playwright test` 全绿
-- [ ] 5.4 人工验证报告落 `tests/validation/2026-10-23-add-factor-ic-visibility-validation.md`
+- [x] 5.4 人工验证报告落 `tests/validation/2026-10-23-add-factor-ic-visibility-validation.md`（报告结论中「人工抽查确认」仍待 owner，故暂不 archive）

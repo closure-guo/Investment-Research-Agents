@@ -103,7 +103,7 @@
 
 - [x] 自动化验证通过（全量 pytest 零回归 + ruff + mypy 零新增 + delta strict + prompt 指纹一致性）
 - [x] 真实 LLM 冒烟通过（三态行为主线均在真模型上生效）
-- [ ] **owner 人工确认 + 签字**（待补）
-- [ ] archive 与 sync（`openspec/specs/` 主规范库合并）—— 前置：owner 签字 + `tasks.md` 全勾
+- [x] **owner 人工确认 + 签字**（2026-10-24 owner 在会话中批准按收口清单归档本 change；实质内容逐项复验未另行进行）
+- [x] archive 与 sync（`openspec/specs/` 主规范库合并）—— 2026-10-24 经 `openspec archive add-holdings-context --yes` 完成（agent-prompt-contracts ~2 / holdings-context +3 / report-decision-rendering ~1）
 
 **遗留待办**：`openspec/specs/agent-prompt-contracts/spec.md:89` 与 `openspec/specs/report-decision-rendering/spec.md:14` 仍是旧措辞（「默认按 short」「未申报形态」），须经 delta sync 合并替换，**MUST NOT** 手改主规范库。
