@@ -56,6 +56,11 @@ _MIN_ABSOLUTE_IC_TOTAL: float = 1e-12
 # 权重日间摆动会让 L2 排序接近随机（生产 2026-10-21 实测 Top-100 日间重叠 1/100），
 # 与精选池「连续 3 日在榜」门槛相乘即空池。10 条 ≈ 两周，是权重估计的最低可用量。
 MIN_IC_SAMPLES_FOR_SCORING: int = 10
+# 权重幅度比例门槛（refine-screening-activation-scoring）：IC 样本 ≥ 此数的因子
+# 幅度按 |IC 均值| 比例；低于此数等幅（只保留方向）。单样本 IC 标准差 ≈0.09，
+# n<30 时因子间 |IC 均值| 差异大部分是抽签噪声——等幅消除噪声幅度放大，方向
+# 信息（IC 均值符号）保留。30 ≈ 单窗噪声下均值标准误降到 ~1/√30 的经验门槛。
+MIN_SAMPLES_FOR_PROPORTIONAL_WEIGHTS: int = 30
 # 面板日期轴参照字段（六字段契约；as_of 合法性与横截面列集合以该帧为准）
 _DATE_AXIS_FIELD = "close"
 
@@ -85,26 +90,43 @@ class Candidate:
 
 
 def factor_weights(
-    factors: list[dict], ic_stats: dict[int, tuple[float, float]]
+    factors: list[dict],
+    ic_stats: dict[int, tuple[float, float]],
+    *,
+    ic_counts: Mapping[int, int] | None = None,
 ) -> dict[int, float]:
-    """R2 权重：``ic_mean_i / Σ_j |ic_mean_j|``（结果按 ``factors`` 传入顺序）。
+    """R2 权重（方向 × 幅度，结果按 ``factors`` 传入顺序）：
+    ``sign(ic_mean_i) × magnitude_i / Σ_j magnitude_j``。
 
-    ``ic_stats`` 缺该因子 → ``(0.0, 0.0)``（权重 0，等价于不参与）；提供的
-    IC 均值须有限（NaN/±inf → ``ValueError``，不让坏值经分母扩散成坏权重）；
-    ``Σ|ic_mean| < 1e-12``（含空因子列表）→ ``ValueError("无有效 IC 信息，拒绝打分")``。
+    幅度：``ic_counts`` 中样本数 ≥ ``MIN_SAMPLES_FOR_PROPORTIONAL_WEIGHTS`` →
+    ``|ic_mean_i|``（维持比例）；样本不足或未提供 ``ic_counts``（视为 0）→ 等幅
+    ``1.0``（消除低样本噪声幅度、保留全部方向信息）。IC 均值为 0（含
+    ``|IC 均值| < 1e-12`` 的数值零——其符号无信息量）的因子权重 0 且不占归一
+    分母；``ic_stats`` 缺该因子 → ``(0.0, 0.0)``（权重 0，等价于不参与）；
+    提供的 IC 均值须有限（NaN/±inf → ``ValueError``，不让坏值经分母扩散成坏权重）；
+    ``Σ magnitude < 1e-12``（含空因子列表）→ ``ValueError("无有效 IC 信息，拒绝打分")``。
     """
-    ic_means: dict[int, float] = {}
+    signs: dict[int, float] = {}
+    magnitudes: dict[int, float] = {}
     for row in factors:
         factor_id = int(row["id"])
         raw_mean, _icir = ic_stats.get(factor_id, (0.0, 0.0))
         ic_mean = float(raw_mean)
         if not math.isfinite(ic_mean):
             raise ValueError(f"因子 {factor_id} 的 IC 均值非有限: {raw_mean!r}")
-        ic_means[factor_id] = ic_mean
-    total = math.fsum([abs(ic_mean) for ic_mean in ic_means.values()])
+        if abs(ic_mean) < _MIN_ABSOLUTE_IC_TOTAL:
+            signs[factor_id] = 0.0
+            magnitudes[factor_id] = 0.0
+            continue
+        signs[factor_id] = 1.0 if ic_mean > 0.0 else -1.0
+        samples = int(ic_counts.get(factor_id, 0)) if ic_counts is not None else 0
+        magnitudes[factor_id] = (
+            abs(ic_mean) if samples >= MIN_SAMPLES_FOR_PROPORTIONAL_WEIGHTS else 1.0
+        )
+    total = math.fsum(magnitudes.values())
     if total < _MIN_ABSOLUTE_IC_TOTAL:
         raise ValueError("无有效 IC 信息，拒绝打分")
-    return {factor_id: ic_mean / total for factor_id, ic_mean in ic_means.items()}
+    return {factor_id: signs[factor_id] * magnitudes[factor_id] / total for factor_id in signs}
 
 
 def recent_ic_stats(
@@ -151,6 +173,70 @@ def _mean_icir(values: list[float]) -> tuple[float, float]:
     return mean, mean / std
 
 
+# ── Spearman 秩相关（手写：秩变换 + Pearson，无 scipy 依赖） ────────────────
+
+
+def _average_ranks(values: Sequence[float]) -> list[float]:
+    """1 起始秩、平局取平均秩（与 scipy rankdata 'average' 同口径）。"""
+    order = sorted(range(len(values)), key=lambda index: values[index])
+    ranks = [0.0] * len(values)
+    start = 0
+    total = len(values)
+    while start < total:
+        end = start
+        while end + 1 < total and values[order[end + 1]] == values[order[start]]:
+            end += 1
+        average = (start + end) / 2.0 + 1.0
+        for position in range(start, end + 1):
+            ranks[order[position]] = average
+        start = end + 1
+    return ranks
+
+
+def spearman_rank_corr(xs: Sequence[float], ys: Sequence[float]) -> float:
+    """Spearman 秩相关（双方取秩后的 Pearson）。
+
+    沿闸②单调性判据先例手写（pandas ``corr(method='spearman')`` 委托 scipy，
+    本仓无该依赖）。长度不等 → ``ValueError``；样本 < 2 或任一侧常量（秩方差
+    为 0，相关无定义）→ ``ValueError``——fail loud，不产出伪装读数。
+    """
+    if len(xs) != len(ys):
+        raise ValueError(f"两组序列长度不等: {len(xs)} != {len(ys)}")
+    if len(xs) < 2:
+        raise ValueError(f"样本不足（<2）无法计算秩相关: {len(xs)}")
+    rank_xs = _average_ranks(xs)
+    rank_ys = _average_ranks(ys)
+    count = len(rank_xs)
+    mean_x = math.fsum(rank_xs) / count
+    mean_y = math.fsum(rank_ys) / count
+    covariance = math.fsum(
+        (x - mean_x) * (y - mean_y) for x, y in zip(rank_xs, rank_ys, strict=True)
+    )
+    variance_x = math.fsum((x - mean_x) ** 2 for x in rank_xs)
+    variance_y = math.fsum((y - mean_y) ** 2 for y in rank_ys)
+    if variance_x == 0.0 or variance_y == 0.0:
+        raise ValueError("常量序列的秩方差为 0，秩相关无定义")
+    return covariance / math.sqrt(variance_x * variance_y)
+
+
+def factor_liquidity_rank_corr(
+    *,
+    factor_scores: Mapping[str, float],
+    liquidity_scores: Mapping[str, float],
+) -> tuple[float, int]:
+    """因子综合分排序 vs 流动性排序的 Spearman（同一标的集上的只读读数）。
+
+    取两映射的公共标的（按 symbol 升序对齐）计算；返回 ``(秩相关, 样本数)``。
+    公共标的 < 2 或任一侧常量 → ``ValueError``（调用方决定披露 null）。
+    """
+    common = sorted(set(factor_scores) & set(liquidity_scores))
+    corr = spearman_rank_corr(
+        [factor_scores[symbol] for symbol in common],
+        [liquidity_scores[symbol] for symbol in common],
+    )
+    return corr, len(common)
+
+
 # ── 打分与排序（R1 / R3） ───────────────────────────────────────────────────
 
 
@@ -162,13 +248,14 @@ def rank_universe(
     factors: list[dict],
     ic_stats: dict[int, tuple[float, float]],
     top_n: int = 100,
+    ic_counts: Mapping[int, int] | None = None,
 ) -> list[Candidate]:
     """L2 打分入口：L1 通过标的 × 因子库因子 → Top-N ``Candidate``（R1–R3）。
 
     逐因子在 ``passed_codes`` 集合上取 ``as_of`` 当日值做截面 z-score（R1）→ 按
-    ``factor_weights`` 加权合成（R2）→ composite 降序、symbol 升序排序（确定性
-    tie-break）→ 截取 ``top_n``，rank 从 1 连续。``Σ contribution ==
-    composite_score``（1e-9）在每条候选上成立（同一累加顺序）。
+    ``factor_weights`` 加权合成（R2；``ic_counts`` 透传控制幅度规则）→ composite
+    降序、symbol 升序排序（确定性 tie-break）→ 截取 ``top_n``，rank 从 1 连续。
+    ``Σ contribution == composite_score``（1e-9）在每条候选上成立（同一累加顺序）。
 
     fail loud：``top_n < 1`` / 面板缺 ``close`` / ``as_of`` 不在面板日期 /
     ``passed_codes`` 重复或不在面板列 / ``factors`` 为空 / ``Σ|ic_mean| < 1e-12``。
@@ -190,7 +277,7 @@ def rank_universe(
     if missing:
         raise ValueError(f"passed_codes 不在面板列: {sorted(missing)}")
 
-    weights = factor_weights(factors, ic_stats)
+    weights = factor_weights(factors, ic_stats, ic_counts=ic_counts)
     factor_ids: list[int] = []
     zscore_maps: list[dict[str, float]] = []
     for row in factors:

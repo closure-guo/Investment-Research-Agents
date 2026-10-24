@@ -58,6 +58,7 @@ from finance_agent.screening.filters import build_candidate_record, filter_unive
 from finance_agent.screening.ranker import (
     MIN_IC_SAMPLES_FOR_SCORING,
     Candidate,
+    factor_liquidity_rank_corr,
     has_scorable_factors,
     ic_sample_counts,
     liquidity_fallback_rank,
@@ -374,15 +375,39 @@ def run_screening_batch(
                     for row in thin_factors
                 ),
             )
+        rank_corr: tuple[float, int] | None = None
         if has_scorable_factors(scorable_factors, ic_stats):
-            candidates = rank_universe(
+            # 全量排序后截断 Top-N：截断前榜单用于因子榜/流动性榜秩相关披露
+            # （同一 L1 通过集上的只读读数；top_n 下限 1 防 0 值被拒）。
+            ranked_all = rank_universe(
                 panel=active_panel,
                 as_of=trade_date,
                 passed_codes=passed,
                 factors=scorable_factors,
                 ic_stats=ic_stats,
-                top_n=L2_TOP_N,
+                ic_counts=ic_counts,
+                top_n=max(1, len(passed)),
             )
+            candidates = ranked_all[:L2_TOP_N]
+            liquidity_ranked = liquidity_fallback_rank(
+                amounts_by_code=amounts,
+                passed_codes=passed,
+                as_of=trade_date,
+                top_n=max(1, len(passed)),
+            )
+            try:
+                rank_corr = factor_liquidity_rank_corr(
+                    factor_scores={
+                        candidate.symbol: candidate.composite_score for candidate in ranked_all
+                    },
+                    liquidity_scores={
+                        candidate.symbol: candidate.composite_score
+                        for candidate in liquidity_ranked
+                    },
+                )
+            except ValueError as exc:
+                # 读数不可算（公共标的 <2 或常量序列）不阻断批次——披露缺失优于批次失败
+                _logger.warning("选股日批（%s）因子榜/流动性榜秩相关不可计算：%s", trade_date, exc)
         else:
             selection_mode = "fallback"
             _logger.warning(
@@ -470,6 +495,10 @@ def run_screening_batch(
             exec_constraints=exec_constraints,
             db_path=db_path,
         )
+        summary_extra: dict[str, Any] = {}
+        if rank_corr is not None:
+            summary_extra["factor_liquidity_rank_corr"] = rank_corr[0]
+            summary_extra["rank_corr_samples"] = rank_corr[1]
         return {
             "trade_date": trade_date,
             "status": "ok",
@@ -482,6 +511,7 @@ def run_screening_batch(
             "pool": pool,
             "frontier_gate": frontier_gate,
             "exec_constraints": exec_constraints,
+            **summary_extra,
         }
     except Exception as exc:  # noqa: BLE001 -- fail-closed：任一步失败 → 批次 failed + 零池
         error = f"{type(exc).__name__}: {exc}"

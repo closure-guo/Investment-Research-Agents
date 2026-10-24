@@ -620,6 +620,9 @@ def test_empty_library_falls_back_to_liquidity_ranking(ws: _Workspace) -> None:
     assert result["l1_passed"] == 3
     assert result["l2_top"] == 3
     assert result["pool_size"] == 2  # 在榜门槛照常累计（降级名单同契约落库）
+    # 降级批次不携带秩相关披露字段（spec：factor 批次专属）
+    assert "factor_liquidity_rank_corr" not in result
+    assert "rank_corr_samples" not in result
 
     batch = latest_screening_batch(db_path=ws.screening_db)
     assert batch is not None and batch["selection_mode"] == "fallback"
@@ -656,6 +659,10 @@ def test_factor_mode_regression_and_batch_tag(ws: _Workspace) -> None:
     _seed_pool_days(ws)
     result = _run(ws)
     assert result["selection_mode"] == "factor"
+    # 因子榜/流动性榜秩相关披露（refine-screening-activation-scoring）：
+    # factor 批次必带有限读数，样本数 = L1 通过集全体（本 fixture 3 只）
+    assert -1.0 <= result["factor_liquidity_rank_corr"] <= 1.0
+    assert result["rank_corr_samples"] == 3
     batch = latest_screening_batch(db_path=ws.screening_db)
     assert batch is not None and batch["selection_mode"] == "factor"
     pool = list_selection_pool(_AS_OF, db_path=ws.screening_db)
