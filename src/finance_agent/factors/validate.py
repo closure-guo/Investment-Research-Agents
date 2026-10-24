@@ -7,7 +7,10 @@
   命中 → 原因码 ``STRUCTURAL_DUPLICATE``；
 - **闸 1 可计算性**：全样本面板缺失率 ≤ ``MAX_MISSING_RATE`` → 否则 ``LOW_COVERAGE``；
 - **闸 2 单因子检验**：``|ICIR| ≥ MIN_ABS_ICIR`` 且 ``|IC 均值| > 0``（E3；
-  显著性由闸 3 承担）→ 否则 ``WEAK_ICIR``；
+  显著性由闸 3 承担）→ 否则 ``WEAK_ICIR``；附加**分层单调性**判据
+  （|十分位累计收益 Spearman| ≥ ``MIN_DECILE_MONOTONICITY`` 且与 IC 均值同号
+  → 否则 ``WEAK_MONOTONICITY``，仍记 ``rejected_gate=2``；
+  add-factor-monotonicity-gate）；
 - **闸 3 显著性**：同批次候选置换检验 + BH-FDR（q=``BH_FDR_Q``，``seed`` 可复现）
   → 否则 ``NOT_SIGNIFICANT``；
 - **闸 4 池级增量**：与池内任一因子 ``|IC 相关| > MAX_IC_CORRELATION`` →
@@ -77,6 +80,8 @@ from finance_agent.factors.constraints import (
     MAX_IC_CORRELATION,
     MAX_MISSING_RATE,
     MIN_ABS_ICIR,
+    MIN_DECILE_MONOTONICITY,
+    MIN_IC_SAMPLES,
     MIN_OOS_IR_SAMPLES,
     MIN_REDUNDANCY_SAMPLES,
     PERMUTATION_N,
@@ -121,6 +126,7 @@ class ReasonCode(enum.StrEnum):
 
     LOW_COVERAGE = "LOW_COVERAGE"
     WEAK_ICIR = "WEAK_ICIR"
+    WEAK_MONOTONICITY = "WEAK_MONOTONICITY"
     NOT_SIGNIFICANT = "NOT_SIGNIFICANT"
     REDUNDANT_WITH_POOL = "REDUNDANT_WITH_POOL"
     NO_POOL_INCREMENT = "NO_POOL_INCREMENT"
@@ -226,6 +232,65 @@ def check_single_factor(ic: pd.Series) -> GateResult:
             "icir": icir,
             "n_samples": n_samples,
             "min_abs_icir": MIN_ABS_ICIR,
+        },
+    )
+
+
+def check_monotonicity(
+    factor_values: pd.DataFrame, fwd_returns: pd.DataFrame, ic: pd.Series
+) -> GateResult:
+    """闸②附加判据：分层单调性（add-factor-monotonicity-gate）。
+
+    逐日按因子值截面秩（``rank(method="first")`` → ``qcut`` 10 桶；当日两帧共同
+    有效样本 ≥ ``MIN_IC_SAMPLES`` 的日期才计入——与 ``rank_ic_series`` 同一有效性
+    定义）构建十分位等权组合，各分位远期收益按日算术累加为分位累计收益；判定 =
+    |Spearman| ≥ ``MIN_DECILE_MONOTONICITY`` **且** Spearman 符号与 IC 均值一致
+    （负向因子按其方向单调同样通过——方向由 IC 符号锚定；端点差 Q10−Q1 作为
+    披露字段保留）。任一不可计算（零有效日 / 累计收益常量 → Spearman NaN /
+    IC 均值无向）→ fail closed 拒收（``WEAK_MONOTONICITY``）。秩并列按列序破平
+    （面板构造确定 → 逐位可复现）。判据方向口径的实证依据：生产 10 因子 sanity
+    锚首跑按「正相关 ≥0.6」判 10/10 拒收，其中 7 个 Spearman ∈ [−1.0, −0.758] 且
+    IC 均值同负——方向一致的单调递减被误杀（见验证报告 2026-10-24）。
+    """
+    decile_returns = [0.0] * 10
+    valid_days = 0
+    common = factor_values.index.intersection(fwd_returns.index).sort_values()
+    for trade_date in common:
+        factor_row = factor_values.loc[trade_date]
+        return_row = fwd_returns.loc[trade_date]
+        mask = factor_row.notna() & return_row.notna()
+        if int(mask.sum()) < MIN_IC_SAMPLES:
+            continue
+        ranks = factor_row[mask].rank(method="first")
+        buckets = pd.qcut(ranks, 10, labels=False)
+        aligned = return_row[mask]
+        for bucket in range(10):
+            selector = buckets == bucket
+            if bool(selector.any()):
+                decile_returns[bucket] += float(aligned[selector].mean())
+        valid_days += 1
+    q10_q1 = decile_returns[-1] - decile_returns[0]
+    if valid_days > 0 and len(set(decile_returns)) > 1:
+        # Spearman = 双方取秩后的 Pearson（pandas spearman 委托 scipy，本仓无该依赖；
+        # 分位序 1..10 无并列 → 秩即自身，只需对累计收益取秩）
+        spearman = float(
+            pd.Series(range(1, 11), dtype=float).corr(pd.Series(decile_returns).rank())
+        )
+    else:
+        spearman = math.nan
+    ic_mean = _ic_stats(ic)[0]
+    sign_ok = _sign(spearman) != 0 and _sign(spearman) == _sign(ic_mean)
+    passed = math.isfinite(spearman) and abs(spearman) >= MIN_DECILE_MONOTONICITY and sign_ok
+    return GateResult(
+        gate=GATE_SINGLE_FACTOR,
+        passed=passed,
+        reason=None if passed else ReasonCode.WEAK_MONOTONICITY,
+        detail={
+            "spearman": spearman,
+            "q10_q1": q10_q1,
+            "decile_returns": decile_returns,
+            "valid_days": valid_days,
+            "threshold": MIN_DECILE_MONOTONICITY,
         },
     )
 
@@ -836,6 +901,12 @@ def admit_candidates(
                 None, STATUS_REJECTED, (dedup, gate1, gate2), GATE_SINGLE_FACTOR
             )
             continue
+        gate2m = check_monotonicity(values, fwd, ic)
+        if not gate2m.passed:
+            outcomes[position] = AdmissionResult(
+                None, STATUS_REJECTED, (dedup, gate1, gate2, gate2m), GATE_SINGLE_FACTOR
+            )
+            continue
         pending.append(
             _PendingCandidate(
                 position=position,
@@ -847,7 +918,7 @@ def admit_candidates(
                 alignment_score=candidate.get("alignment_score"),
                 values=values,
                 ic=ic,
-                gates=[dedup, gate1, gate2],
+                gates=[dedup, gate1, gate2, gate2m],
             )
         )
 

@@ -24,6 +24,7 @@ import pytest
 from finance_agent.factors.constraints import (
     BH_FDR_Q,
     DEFAULT_IC_HORIZON,
+    MIN_DECILE_MONOTONICITY,
     MIN_OOS_IR_SAMPLES,
     PERMUTATION_N,
     TRAIN_FRACTION,
@@ -59,6 +60,7 @@ from finance_agent.factors.validate import (
     admit_candidates,
     benjamini_hochberg_adjust,
     check_computability,
+    check_monotonicity,
     check_out_of_sample,
     check_pool_increment,
     check_significance,
@@ -138,6 +140,7 @@ def test_reason_codes_are_verbatim():
     assert {code.value for code in ReasonCode} == {
         "LOW_COVERAGE",
         "WEAK_ICIR",
+        "WEAK_MONOTONICITY",  # 闸②附加判据（add-factor-monotonicity-gate）
         "NOT_SIGNIFICANT",
         "REDUNDANT_WITH_POOL",
         "NO_POOL_INCREMENT",
@@ -333,7 +336,9 @@ def test_admit_candidates_admits_strong_factor_end_to_end(tmp_path):
     result = results[0]
     assert result.rejected_gate is None
     assert result.status == "active"
-    assert [gate.gate for gate in result.gates] == [0, 1, 2, 3, 4, 5]
+    # 闸②现含两项判定（ICIR + 分层单调性，同为 gate=2；add-factor-monotonicity-gate）
+    assert [gate.gate for gate in result.gates] == [0, 1, 2, 2, 3, 4, 5]
+    assert result.gates[3].reason is None  # 单调性判据通过（detail 含 spearman/q10_q1）
 
     rows = list_factors(db_path=db)
     assert len(rows) == 1
@@ -1409,3 +1414,136 @@ def test_pool_cache_reuses_pool_evaluation_across_candidates(tmp_path, monkeypat
         db_path=db,
     )
     assert pool_evals["count"] == 3
+
+
+# ── 闸②附加判据：分层单调性（add-factor-monotonicity-gate） ─────────────────
+
+
+def _mono_frames(
+    per_code_return: list[float],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """构造 values/fwd/ic：40 码、值 = 码序（十分位各 4 码）、次日收益逐码给定。
+
+    ``per_code_return[i]`` = 码 i 的次日收益（前 20 日同型逐日累加放大分位差异；
+    末行 NaN 模拟「最后一日无远期收益」→ 有效日 = 20）；ic 序列取同号常量
+    （本纯函数只消费 ic 的均值符号）。
+    """
+    dates = [(date(2026, 1, 5) + timedelta(days=offset)).isoformat() for offset in range(21)]
+    codes = [f"c{index:03d}" for index in range(len(per_code_return))]
+    values = pd.DataFrame(
+        np.tile(np.arange(len(per_code_return), dtype=float), (21, 1)),
+        index=dates,
+        columns=codes,
+    )
+    returns = np.vstack(
+        [
+            np.tile(np.asarray(per_code_return, dtype=float), (20, 1)),
+            np.full((1, len(per_code_return)), np.nan),
+        ]
+    )
+    fwd = pd.DataFrame(returns, index=dates, columns=codes)
+    ic = pd.Series([0.2, 0.25, 0.15, 0.2, 0.22], name="rank_ic")
+    return values, fwd, ic
+
+
+def test_monotone_factor_passes_monotonicity() -> None:
+    values, fwd, ic = _mono_frames([float(i) for i in range(40)])
+    gate = check_monotonicity(values, fwd, ic)
+    assert gate.gate == 2
+    assert gate.passed is True
+    assert gate.reason is None
+    assert gate.detail["spearman"] >= 0.99
+    assert gate.detail["q10_q1"] > 0
+    assert len(gate.detail["decile_returns"]) == 10
+    assert gate.detail["valid_days"] == 20
+    assert gate.detail["threshold"] == MIN_DECILE_MONOTONICITY
+
+
+def test_mid_inversion_rejected_by_monotonicity() -> None:
+    # 端点方向正确（Q10 > Q1）但中段倒挂 → Spearman 负 → 拒收
+    per_code = [1.0] * 4 + [9.0] * 8 + [2.0] * 12 + [6.0] * 8 + [8.0] * 8
+    values, fwd, ic = _mono_frames(per_code)
+    gate = check_monotonicity(values, fwd, ic)
+    assert gate.passed is False
+    assert gate.reason == "WEAK_MONOTONICITY"
+    assert gate.detail["q10_q1"] > 0  # 端点差方向本身正确——死于 Spearman
+
+
+def test_sign_mismatch_rejected_by_monotonicity() -> None:
+    # 递增分位（Spearman=+1）配负向 IC → 方向不一致 → 拒收（方向由 IC 符号锚定）
+    values, fwd, _ic = _mono_frames([float(i) for i in range(40)])
+    negative_ic = pd.Series([-0.2, -0.25, -0.15, -0.2, -0.22], name="rank_ic")
+    gate = check_monotonicity(values, fwd, negative_ic)
+    assert gate.passed is False
+    assert gate.reason == "WEAK_MONOTONICITY"
+
+
+def test_negatively_oriented_monotone_factor_passes() -> None:
+    # 递减分位（Spearman=−1）配负向 IC → 方向一致 → 通过（生产量价族即此形态）
+    values, fwd, _ic = _mono_frames([float(39 - i) for i in range(40)])
+    negative_ic = pd.Series([-0.2, -0.25, -0.15, -0.2, -0.22], name="rank_ic")
+    gate = check_monotonicity(values, fwd, negative_ic)
+    assert gate.passed is True
+    assert gate.reason is None
+    assert gate.detail["spearman"] <= -0.99
+
+
+def test_insufficient_daily_breadth_fails_closed() -> None:
+    values, fwd, ic = _mono_frames([float(i) for i in range(40)])
+    values.iloc[:, 10:] = np.nan  # 每日仅 10 票有效 < MIN_IC_SAMPLES(30) → 零有效日
+    gate = check_monotonicity(values, fwd, ic)
+    assert gate.passed is False
+    assert gate.reason == "WEAK_MONOTONICITY"
+    assert gate.detail["valid_days"] == 0
+
+
+def test_monotonicity_rejection_wired_into_gate2(tmp_path) -> None:
+    """端到端：多数强正日 + 少数更狠的反号日 → |ICIR| 过闸但累计分位倒挂 → 闸②拒收。
+
+    构造：60 日 × 40 码，系数按日交错（i%10<7 → +0.10，否则 −0.30）：42 正日
+    + 18 反号日。逐日 IC = ±1（零噪声线性）→ IC 序列均值 = +0.39、ICIR ≈ 0.42
+    → 闸② ICIR 过、IC 均值为正；但分位累计 ∝ f(分位) × (42×0.10 − 18×0.30)
+    = −1.2×f → 递减 → Spearman = −1 与 IC 均值反号 → 方向不一致拒收
+    （该形态 = 逐日秩相关被多数日推高、时间聚合被少数大反号日拖反——正是
+    分层单调性要抓的「多数日方向 ≠ 累计可交易方向」）。
+    """
+    rng = np.random.default_rng(20261024)
+    days, codes_n = 60, 40
+    signal = rng.uniform(-1.0, 1.0, size=(days, codes_n))
+    coeffs = np.where(np.arange(days) % 10 < 7, 0.10, -0.30)
+    returns = np.zeros((days, codes_n))
+    returns[1:] = coeffs[1:, None] * signal[:-1]
+    close = 100.0 * np.cumprod(1.0 + returns, axis=0)
+    dates = [(date(2026, 1, 5) + timedelta(days=o)).isoformat() for o in range(days)]
+    codes = [f"c{index:03d}" for index in range(codes_n)]
+
+    def frame(values: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame(values, index=dates, columns=codes)
+
+    panel = MarketPanel(
+        fields={
+            "open": frame(close),
+            "high": frame(close),
+            "low": frame(close),
+            "close": frame(close),
+            "volume": frame(signal),
+            "amount": frame(signal),
+        }
+    )
+    results = admit_candidates(
+        [{"expression": "volume", "hypothesis": "单调性接线用例", "category": "价量"}],
+        panel,
+        seed=42,
+        db_path=tmp_path / "lib.db",
+    )
+    result = results[0]
+    assert result.factor_id is None
+    assert result.rejected_gate == 2
+    mono = [gate for gate in result.gates if gate.reason == "WEAK_MONOTONICITY"]
+    assert len(mono) == 1
+    # 账本行拒收闸口 = 2（原因码经 gates/事件史自动携带；账本列集不含 reason）
+    from finance_agent.factors.library import list_ledger_entries
+
+    entries = list_ledger_entries(db_path=tmp_path / "lib.db")
+    # 账本 rejected_gate 列为 TEXT 型（SQLite 亲和），admitted 还原为布尔
+    assert str(entries[0]["rejected_gate"]) == "2" and entries[0]["admitted"] is False

@@ -4340,24 +4340,26 @@ def _factor_detail_payload(factor_id: int) -> dict[str, Any] | None:
         {"trade_date": trade_date, "rank_ic": rank_ic} for trade_date, rank_ic in ic_series
     ]
     detail["events"] = [_factor_event_payload(event) for event in events]
-    detail["style_exposure"] = _factor_style_exposure_payload(row)
+    detail.update(_factor_detail_diagnostics(row))
     return detail
 
 
-def _factor_style_exposure_payload(row: dict[str, Any]) -> dict[str, Any] | None:
-    """风格暴露披露（只读诊断，add-factor-style-exposure）。
+def _factor_detail_diagnostics(row: dict[str, Any]) -> dict[str, Any]:
+    """风格暴露 + 分层单调性诊断（共享一次准入面板构建；add-factor-monotonicity-gate）。
 
-    在准入面板上现算因子与 builtin 风格代理篮子的 IC 相关。面板不可得/表达式不可求值
-    → **返回 None**（前端如实展示「数据不足」，MUST NOT 用 0 或虚构值冒充）。
+    在准入面板上现算因子与 builtin 风格代理篮子的 IC 相关（add-factor-style-exposure）
+    与十分位分层单调性（闸②判据的**观测读数**——存量因子不回溯、不挂任何处置）。
+    任一不可计算（面板不可得/深度不足/表达式不可求值）→ 对应键 None（前端如实展示
+    「数据不足」，MUST NOT 用 0/虚构值冒充）。
     """
     try:
         from finance_agent.factors.style_exposure import MIN_STYLE_SAMPLES
 
-        # 短路：风格暴露需要「因子 IC × 代理 IC」≥ MIN_STYLE_SAMPLES 个共同交易日；
-        # 因子自身 IC 点数不足时结果必为 None，不得为它构建准入面板——500 日 × 全市场
-        # 面板实测需数分钟，会把因子详情接口拖成超时（详情页全部「加载失败」的根因）。
+        # 短路：两读数都以「因子自身 IC 点数 ≥ MIN_STYLE_SAMPLES」为前提；不足时
+        # 不得构建准入面板——500 日 × 全市场面板实测需数分钟，会把因子详情接口拖成
+        # 超时（详情页全部「加载失败」的根因，add-factor-ic-visibility）。
         if len(list_ic_series(int(row["id"]), limit=FACTOR_IC_WINDOW)) < MIN_STYLE_SAMPLES:
-            return None
+            return {"style_exposure": None, "monotonicity": None}
         from finance_agent.factors.dsl import parse as dsl_parse
         from finance_agent.factors.eval_engine import (
             evaluate as dsl_evaluate,
@@ -4367,14 +4369,22 @@ def _factor_style_exposure_payload(row: dict[str, Any]) -> dict[str, Any] | None
             rank_ic_series,
         )
         from finance_agent.factors.monthly import _panel_from_snapshot
+        from finance_agent.factors.validate import check_monotonicity
 
         panel = _panel_from_snapshot(None)
         fwd = forward_returns(panel.fields["close"])
-        factor_ic = rank_ic_series(dsl_evaluate(dsl_parse(str(row["expression"])), panel), fwd)
-        return style_exposure_payload(compute_style_exposure(factor_ic, panel, fwd=fwd))
+        values = dsl_evaluate(dsl_parse(str(row["expression"])), panel)
+        factor_ic = rank_ic_series(values, fwd)
+        monotonicity = check_monotonicity(values, fwd, factor_ic)
+        return {
+            "style_exposure": style_exposure_payload(
+                compute_style_exposure(factor_ic, panel, fwd=fwd)
+            ),
+            "monotonicity": {"passed": monotonicity.passed, **monotonicity.detail},
+        }
     except (OSError, ValueError) as exc:  # 面板不可得/深度不足/表达式不可求值 → 诚实置空
-        _logger.warning("因子风格暴露不可计算 factor_id=%s: %s", row.get("id"), exc)
-        return None
+        _logger.warning("因子诊断读数不可计算 factor_id=%s: %s", row.get("id"), exc)
+        return {"style_exposure": None, "monotonicity": None}
 
 
 @app.get("/api/factors")
