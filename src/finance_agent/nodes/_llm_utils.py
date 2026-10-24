@@ -547,6 +547,9 @@ class UsageAccumulator:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    # 单次请求 prompt_tokens 峰值（add-composer-stat-pills）：上下文已用控件的分子。
+    # 与累计量不同，多次调用取最大值——表示「这个会话曾把窗口用满到什么程度」。
+    max_prompt_tokens: int = 0
     # 实例级互斥（并发 fan-out 下保护读-改-写；不参与构造/相等/repr）
     _lock: Any = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
@@ -573,6 +576,8 @@ class UsageAccumulator:
             self.prompt_tokens += prompt
             self.completion_tokens += completion
             self.total_tokens += _coerce_int(usage.get("total_tokens")) or (prompt + completion)
+            # 峰值：缺 prompt 键时 prompt=0，max 保持原值（不造数）
+            self.max_prompt_tokens = max(self.max_prompt_tokens, prompt)
 
 
 def _coerce_int(value: Any) -> int:

@@ -217,6 +217,11 @@ def _capability_for_model(model: str) -> Capability:
     return _PRESETS["openai-compatible"].capability
 
 
+def capability_for_model(model: str) -> Capability:
+    """对外暴露的静态能力推断（probe 响应补充 max_output 等只读事实用）。"""
+    return _capability_for_model(model)
+
+
 # env 注入的 fallback 成员（LLM_FALLBACK_*）：主 profile 的 fallback 链成员。
 # 生产 2026-10 的 5xx 断供需要「换一个端点」而不是同端点重试；registry preset 的
 # fallback 只服务命名 preset，env 配置（LLM_*）此前没有成员。

@@ -3,6 +3,7 @@ import {
   AssistantRuntimeProvider,
   MessagePrimitive,
   ThreadPrimitive,
+  useAuiState,
 } from '@assistant-ui/react'
 import type { AssistantRuntime } from '@assistant-ui/core'
 import type {
@@ -161,25 +162,44 @@ const QuickUserMessage = () => (
   </div>
 )
 
-const QuickAssistantMessage = () => (
-  <div className="flex justify-start animate-slide-in" data-testid="agui-assistant-message">
-    <div className="max-w-[95%] md:max-w-[90%] w-full">
-      <div className="flex items-start gap-3">
-        <div
-          className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-1"
-          style={{ background: 'var(--bg-brand)' }}
-        >
-          <i className="fas fa-robot text-white text-xs"></i>
-        </div>
-        <div className="flex-1 min-w-0 text-sm" style={{ color: 'var(--text-secondary)' }}>
-          <MessagePrimitive.Parts
-            components={{ Text: MarkdownText, Reasoning: ReasoningBlock, tools: { Fallback: ToolCallBlock } }}
-          />
+// 同一轮回复的头像归属：AG-UI 每个 LLM turn 发一条 TEXT_MESSAGE_*，assistant-ui
+// 渲染为连续多条 assistant 消息。逐消息挂头像会让同一条回复出现两个/多个机器人
+// 头像（2026-10-23 用户报告：用户气泡左上、左下各一个）。头像只由本轮首条承载，
+// 后续消息用等宽占位保持正文缩进一致。
+function isFirstAssistantOfRun(
+  messages: readonly { id: string; role: string }[],
+  messageId: string,
+): boolean {
+  const idx = messages.findIndex((m) => m.id === messageId)
+  return idx <= 0 || messages[idx - 1]?.role !== 'assistant'
+}
+
+const QuickAssistantMessage = () => {
+  const showAvatar = useAuiState((s) => isFirstAssistantOfRun(s.thread.messages, s.message.id))
+  return (
+    <div className="flex justify-start animate-slide-in" data-testid="agui-assistant-message">
+      <div className="max-w-[95%] md:max-w-[90%] w-full">
+        <div className="flex items-start gap-3">
+          {showAvatar ? (
+            <div
+              className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-1"
+              style={{ background: 'var(--bg-brand)' }}
+            >
+              <i className="fas fa-robot text-white text-xs"></i>
+            </div>
+          ) : (
+            <div className="w-7 flex-shrink-0" aria-hidden="true" />
+          )}
+          <div className="flex-1 min-w-0 text-sm" style={{ color: 'var(--text-secondary)' }}>
+            <MessagePrimitive.Parts
+              components={{ Text: MarkdownText, Reasoning: ReasoningBlock, tools: { Fallback: ToolCallBlock } }}
+            />
+          </div>
         </div>
       </div>
     </div>
-  </div>
-)
+  )
+}
 
 const QuickThread = forwardRef<QuickThreadHandle, QuickThreadProps>(function QuickThread(
   { apiKey, llmConfig = null, sessionId = null, onSessionCreated, onRunFinished, onRunningChange, onError, onOpenSession },

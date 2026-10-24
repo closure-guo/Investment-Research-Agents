@@ -374,3 +374,6 @@ pytest-of-*/
 
 # 每日汇报 E2E 专用库（add-auto-pool-analysis-daily-brief）
 data/test-e2e-dailyops-*
+
+# composer/llm-pane E2E 专项库（playwright.composer.config.ts）
+data/test-e2e-stats-*

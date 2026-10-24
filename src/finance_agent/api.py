@@ -119,12 +119,14 @@ from finance_agent.session_store import (  # noqa: E402
     list_session_events,
     list_sessions,
     rename_session,
+    session_stats,
     set_pipeline_anchor,
     update_pipeline_snapshot,
     update_pipeline_timelines,
     update_session_for_clarify,
     update_session_report,
     update_session_status,
+    update_session_usage,
     upsert_chat,
 )
 from finance_agent.stream_registry import registry  # noqa: E402
@@ -1339,6 +1341,17 @@ if TESTING:
         pipeline_snapshot = req.get("pipeline_snapshot")
         if isinstance(pipeline_snapshot, dict):
             update_pipeline_snapshot(session_id, pipeline_snapshot)
+        # 用量造数（add-composer-stat-pills）：E2E 需要可断言的 token/上下文峰值，
+        # 而 TESTING stub 不产生 usage。字段全部可选，缺省不写（保持 0）。
+        usage = req.get("usage")
+        if isinstance(usage, dict):
+            update_session_usage(
+                session_id,
+                prompt=int(usage.get("prompt", 0) or 0),
+                completion=int(usage.get("completion", 0) or 0),
+                total=int(usage.get("total", 0) or 0),
+                context_peak=int(usage.get("context_peak", 0) or 0),
+            )
         return {"session_id": session_id}
 
     @app.post("/api/test/reset")
@@ -1369,6 +1382,18 @@ async def get_session_detail(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+@app.get("/api/sessions/{session_id}/stats")
+async def get_session_stats(session_id: str):
+    """会话计量聚合（add-composer-stat-pills）：轮次/步骤/耗时/用量/上下文峰值。
+
+    只读轻量查询，供输入框计量条轮询；不触发任何 LLM 调用。
+    """
+    stats = await asyncio.to_thread(session_stats, session_id)
+    if not stats:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return stats
 
 
 @app.patch("/api/sessions/{session_id}")
@@ -2725,7 +2750,11 @@ async def test_llm_config(req: LLMConfigRequest):
     # 模型前缀归一（设计档案 §6）：自定义 baseUrl + 裸模型名 → 强制 openai/，
     # 与 resolver._ensure_prefix 同一语义；同时令缓存键与 resolve 侧一致
     # （裸模型探测结果否则永不命中 resolver 读取，终审 #77）。
-    from finance_agent.llm.resolver import UnknownProviderPrefixError, _ensure_prefix
+    from finance_agent.llm.resolver import (
+        UnknownProviderPrefixError,
+        _capability_for_model,
+        _ensure_prefix,
+    )
 
     try:
         usedModel = _ensure_prefix(usedModel, usedBaseUrl)
@@ -2763,6 +2792,8 @@ async def test_llm_config(req: LLMConfigRequest):
                 "tool_call": report.tool_call,
                 "tool_followup": report.tool_followup,
                 "json_output": report.json_output,
+                # 最大输出：按模型名静态推断（probe 不改变该事实），供前端只读展示
+                "max_output": _capability_for_model(usedModel).max_output,
             },
             "warnings": report.warnings,
             "error": report.error,

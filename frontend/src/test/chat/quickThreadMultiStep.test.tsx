@@ -56,6 +56,19 @@ const MULTISTEP_RUN1 = [
   { type: 'RUN_FINISHED', threadId: 'sess-1', runId: 'run-1' },
 ]
 
+// 单次 run 内多段 assistant 消息（每个 LLM turn 一个 TEXT_MESSAGE_*）：
+// 后端 translator 按轮次发事件，assistant-ui 会渲染成多条消息。
+const MULTI_SEGMENT_RUN = [
+  { type: 'RUN_STARTED', threadId: 'sess-1', runId: 'run-1' },
+  { type: 'TEXT_MESSAGE_START', messageId: 'a1', role: 'assistant' },
+  { type: 'TEXT_MESSAGE_CONTENT', messageId: 'a1', delta: '先查一下行情' },
+  { type: 'TEXT_MESSAGE_END', messageId: 'a1' },
+  { type: 'TEXT_MESSAGE_START', messageId: 'a2', role: 'assistant' },
+  { type: 'TEXT_MESSAGE_CONTENT', messageId: 'a2', delta: '行情已确认' },
+  { type: 'TEXT_MESSAGE_END', messageId: 'a2' },
+  { type: 'RUN_FINISHED', threadId: 'sess-1', runId: 'run-1' },
+]
+
 const RUN2 = [
   { type: 'RUN_STARTED', threadId: 'sess-1', runId: 'run-2' },
   { type: 'TEXT_MESSAGE_START', messageId: 'a2', role: 'assistant' },
@@ -94,6 +107,29 @@ describe('QuickThread 多步交互回归（动作条 + 分轮时序）', () => {
     expect(screen.getByText(/调用工具 · web_search/)).toBeInTheDocument()
     // run 正常结束（不被 AGUIError 判错）
     expect(screen.queryByTestId('agui-stream-status')).toBeNull()
+  })
+
+  it('单次 run 内多段 assistant 消息只显示一个 agent 头像（同一轮回复不重复头像）', async () => {
+    // 缺陷复现（2026-10-23 用户报告）：quick 单次 run 里每个 LLM turn 都产生
+    // 一条 assistant-ui 消息；逐消息渲染头像会让同一条回复出现两个/多个机器人
+    // 头像（一个在用户气泡左上、一个在左下）。头像应只出现在本轮首条消息上。
+    const fetchMock = vi.fn(async () => aguiSse(MULTI_SEGMENT_RUN))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const ref = createRef<QuickThreadHandle>()
+    const { container } = render(<QuickThread ref={ref} apiKey="sk-test" />)
+
+    await act(async () => {
+      ref.current?.send('多段回答')
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('行情已确认')).toBeInTheDocument()
+    })
+    // 两段内容仍是两条 assistant 消息（分轮时序不被合并破坏）
+    expect(screen.getAllByTestId('agui-assistant-message')).toHaveLength(2)
+    // 但整轮只应有一个机器人头像
+    expect(container.querySelectorAll('i.fa-robot')).toHaveLength(1)
   })
 
   it('多轮追问：两轮消息按时间序列独立排列，第二轮请求携带历史上下文（根因2：parentId=null）', async () => {

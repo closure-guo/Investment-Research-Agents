@@ -301,6 +301,7 @@ async def _agui_run_stream(
     collector = _AguiCollector()
     # 终态落库标记前置到 try 外：外层 finally 兜底在任何时机退出都要可读
     terminal_persisted = False
+    agent = None
     try:
         # user 消息任务内落库（调研 §3.1：409/single-flight 语义不适用于本通道）
         await asyncio.to_thread(session_store.append_chat, thread_id, "user", user_message)
@@ -449,6 +450,13 @@ async def _agui_run_stream(
         # 实证，2026-09-01）。aclose 上下文里 await 落库不安全，detach 执行。
         if not terminal_persisted:
             _schedule_interrupted_persist(thread_id, collector)
+        # add-composer-stat-pills：quick 模式 provider usage 落库（agent 累计）。
+        # 与终态落库同样属于旁路，失败不阻断收尾。
+        if agent is not None:
+            with contextlib.suppress(Exception):
+                from finance_agent.agent_factory import _persist_agent_usage
+
+                await asyncio.to_thread(_persist_agent_usage, thread_id, agent)
 
 
 @router.post("/api/agui/quick")

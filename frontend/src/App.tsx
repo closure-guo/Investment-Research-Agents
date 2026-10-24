@@ -47,6 +47,7 @@ import { loadThemeChoice, saveThemeChoice, applyTheme, watchSystemTheme, type Th
 import { useHotkeys } from './hooks/useHotkeys'
 import { Toaster } from './components/ui/sonner'
 import { SnapshotBanner } from './SnapshotBanner'
+import { ComposerStats } from './components/ComposerStats'
 import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
 import { Textarea } from './components/ui/textarea'
@@ -811,9 +812,13 @@ export default function App() {
   })
   // Composer 运行中判定（对齐 store 拦截语义 isSessionRunning：前端有活跃 reader 在消费），
   // 叠加消息级流式标记（澄清阶段）与 quick run 进行中；恢复态（无 reader）不拦截发送
-  const composerRunning =
+  // deepRunning 只描述「外层 AnalysisThread 自己的 run」——quick run 属于 QuickThread
+  // 的内嵌 runtime，不得写进外层 isRunning：assistant-ui 在 isRunning 且外部消息为空时
+  // 会插入一条待产出占位 assistant 消息并套上头像，与 QuickThread 的真实回复形成
+  // 上下两个头像（2026-10-23 用户报告）。
+  const deepRunning =
     store.isSessionRunning(currentSessionId ?? '') ||
-    messages.some((m) => m.streaming) || quickRunning
+    messages.some((m) => m.streaming)
 
   // 消息 hover「重新生成」：定位该 assistant 消息前驱最近的 user 查询并重提交
   // （运行中拦截由 handleComposerSubmit → startAnalysis/quickChat 守卫兜底）
@@ -838,7 +843,19 @@ export default function App() {
       />
     </div>
   )
-  const composerSend = (
+  const composerSend = quickRunning ? (
+    // quick run 的取消属于 QuickThread（内嵌 AG-UI runtime），外层 runtime 不进入
+    // running 态，ComposerPrimitive.Cancel 不可用（canCancel=isRunning）——用显式
+    // 停止按钮桥回 stopGeneration（内部 abort QuickThread）。
+    <button
+      data-testid="composer-stop"
+      onClick={() => { void stopGeneration() }}
+      className="w-9 h-9 rounded-xl mb-0.5 mr-0.5 flex items-center justify-center shrink-0"
+      style={{ background: 'var(--bg-brand)' }}
+    >
+      <i className="fas fa-stop text-xs" style={{ color: 'var(--text-onbrand)' }}></i>
+    </button>
+  ) : (
     <>
       {/* 运行中：发送键变停止按钮（runtime 状态判定，拦截语义迁移） */}
       <ThreadPrimitive.If running>
@@ -1023,7 +1040,7 @@ export default function App() {
                 消息区为固定高度滚动容器，Viewport autoScroll 提供流式跟随/上翻暂停。 */}
             <AnalysisRuntimeProvider
               messages={visibleMessages}
-              isRunning={composerRunning}
+              isRunning={deepRunning}
               onSubmit={handleComposerSubmit}
               onCancel={stopGeneration}
             >
@@ -1119,6 +1136,10 @@ export default function App() {
               onSwitchProfile={switchProfile}
               composerInput={composerInput}
               composerSend={composerSend}
+              sessionId={currentSessionId}
+              running={appState === 'analyzing' || quickRunning}
+              // 上下文窗口：请求级 contextLength 优先，未设置回退 registry 静态默认（128k）
+              contextWindow={llmConfig.contextLength ?? 128000}
             />
               </AnalysisRuntimeProvider>
             </>
@@ -2475,7 +2496,7 @@ export function ReportCard({ msg, variant = 'inline', onOpenPanel }: {
 // 传入 composerInput/composerSend 插槽（ComposerPrimitive 输入/发送/停止），保持
 // 「Enter 发送、Shift+Enter 换行、空禁用发送、运行中发送键变停止」；未传插槽时
 // 使用受控 Textarea+按钮（保持本组件可独立渲染，dropdownOutsideClick 等测试不变）。
-export function ChatInputBar({ onSend, leftInset, mode, setMode, capability, onNewAnalysis, apiKey, onOpenSettings, profileName, profiles, activeProfileId, onSwitchProfile, composerInput, composerSend }: {
+export function ChatInputBar({ onSend, leftInset, mode, setMode, capability, onNewAnalysis, apiKey, onOpenSettings, profileName, profiles, activeProfileId, onSwitchProfile, composerInput, composerSend, sessionId, running, contextWindow }: {
   onSend: (text: string) => void
   leftInset: number
   mode: 'quick' | 'deep'
@@ -2490,6 +2511,10 @@ export function ChatInputBar({ onSend, leftInset, mode, setMode, capability, onN
   onSwitchProfile: (id: string) => void
   composerInput?: ReactNode
   composerSend?: ReactNode
+  // add-composer-stat-pills：会话计量条数据源（缺省时整条不渲染）
+  sessionId?: string | null
+  running?: boolean
+  contextWindow?: number | null
 }) {
   const [text, setText] = useState('')
   const [modeDropdownOpen, setModeDropdownOpen] = useState(false)
@@ -2653,9 +2678,12 @@ export function ChatInputBar({ onSend, leftInset, mode, setMode, capability, onN
             )}
           </div>
         </div>
-        <div className="text-center mt-1">
-          <span className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>AI 生成仅供参考，不构成投资建议</span>
-        </div>
+        {/* 计量条替换静态免责声明（add-composer-stat-pills）；免责声明保留在报告页脚与导出产物 */}
+        <ComposerStats
+          sessionId={sessionId ?? null}
+          running={running}
+          contextWindow={contextWindow}
+        />
       </div>
     </div>
   )

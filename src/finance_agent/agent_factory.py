@@ -426,6 +426,33 @@ _pipeline_executor = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+def _persist_agent_usage(session_id: str | None, agent: object) -> None:
+    """把 ReAct Agent 本次运行累计的 provider usage 落库到会话（quick/chat 路径）。
+
+    quick 模式经 AG-UI 通道，LLM 调用不经过管线节点，``usage_collector``
+    收不到；Agent 在 ``_record_usage`` 里累计，收尾时由调用方写库。
+    ``usage_calls == 0``（stub / provider 未返回）时不写，避免「0 已记账」假象。
+    旁路：落库失败只记 WARNING，不阻断会话收尾。
+    """
+    if not session_id:
+        return
+    calls = int(getattr(agent, "usage_calls", 0) or 0)
+    if calls == 0:
+        return
+    from finance_agent import session_store as _session_store
+
+    try:
+        _session_store.update_session_usage(
+            session_id,
+            prompt=int(getattr(agent, "usage_prompt_tokens", 0) or 0),
+            completion=int(getattr(agent, "usage_completion_tokens", 0) or 0),
+            total=int(getattr(agent, "usage_total_tokens", 0) or 0),
+            context_peak=int(getattr(agent, "usage_max_prompt_tokens", 0) or 0),
+        )
+    except Exception:  # noqa: BLE001 -- 旁路铁律：记账失败不得影响会话收尾
+        logger.warning("Agent 用量落库失败(不阻断): session=%s", session_id, exc_info=True)
+
+
 def _persist_decision_from_tool(
     accumulated: dict, session_id: str, stock_code: str, stock_name: str
 ) -> None:
@@ -724,25 +751,52 @@ def _make_run_deep_analysis(
         # 消费链压出 ~19 分钟滞后，管线本体完成却被误判超时置 failed）。
         graph_done = threading.Event()
 
-        def _run_graph():
-            gen = _stream_graph(initial_state, session_id=session_id)
+        def _persist_pipeline_usage(acc: object) -> None:
+            """把一次 deep 分析的 usage 真值累加到会话（add-composer-stat-pills）。
+
+            旁路：落库失败只记 WARNING，不阻断管线收尾。``calls == 0``（无任何
+            LLM 调用或 stub 路径）时不写库，避免制造「0 但已记账」的假象。
+            """
+            from finance_agent.nodes._llm_utils import UsageAccumulator
+
+            if not session_id or not isinstance(acc, UsageAccumulator) or acc.calls == 0:
+                return
             try:
-                for mode, chunk in gen:
-                    if graph_cancel.is_set():
-                        break
-                    asyncio.run_coroutine_threadsafe(chunk_queue.put((mode, chunk)), loop)
-            except Exception as e:
-                asyncio.run_coroutine_threadsafe(chunk_queue.put(e), loop)
-            finally:
-                with contextlib.suppress(BaseException):
-                    gen.close()  # GeneratorExit 传播关闭底层 graph.stream，阻断后续节点
-                # 先置位图完成信号再投哨兵：保证消费者看到 graph_done 后哨兵
-                # 必然到达（排空 get() 无需超时的正确性前提）。注意 graph_done
-                # 只证明生产者发完流——chunk_queue 中可能仍缓冲未消费 chunk
-                # （含报告前的合法 thinking），消费者侧压缩以 report_seen 或
-                # 剩余积压超界（≥ TAIL_KEEP_MAX，incident 039）为准。
-                graph_done.set()
-                asyncio.run_coroutine_threadsafe(chunk_queue.put(None), loop)
+                _session_store.update_session_usage(
+                    session_id,
+                    prompt=acc.prompt_tokens,
+                    completion=acc.completion_tokens,
+                    total=acc.total_tokens,
+                    context_peak=acc.max_prompt_tokens,
+                )
+            except Exception:  # noqa: BLE001 -- 旁路铁律：记账失败不得影响报告产出
+                logger.warning("会话用量落库失败(不阻断): session=%s", session_id, exc_info=True)
+
+        def _run_graph():
+            # usage_collector 基于 contextvar：必须在真正执行 LLM 调用的本线程内
+            # 激活，async 调用方的 with 不会传播进 executor 线程（design D2）。
+            from finance_agent.nodes._llm_utils import usage_collector
+
+            gen = _stream_graph(initial_state, session_id=session_id)
+            with usage_collector() as _usage_acc:
+                try:
+                    for mode, chunk in gen:
+                        if graph_cancel.is_set():
+                            break
+                        asyncio.run_coroutine_threadsafe(chunk_queue.put((mode, chunk)), loop)
+                except Exception as e:
+                    asyncio.run_coroutine_threadsafe(chunk_queue.put(e), loop)
+                finally:
+                    with contextlib.suppress(BaseException):
+                        gen.close()  # GeneratorExit 传播关闭底层 graph.stream，阻断后续节点
+                    _persist_pipeline_usage(_usage_acc)
+                    # 先置位图完成信号再投哨兵：保证消费者看到 graph_done 后哨兵
+                    # 必然到达（排空 get() 无需超时的正确性前提）。注意 graph_done
+                    # 只证明生产者发完流——chunk_queue 中可能仍缓冲未消费 chunk
+                    # （含报告前的合法 thinking），消费者侧压缩以 report_seen 或
+                    # 剩余积压超界（≥ TAIL_KEEP_MAX，incident 039）为准。
+                    graph_done.set()
+                    asyncio.run_coroutine_threadsafe(chunk_queue.put(None), loop)
 
         loop.run_in_executor(_pipeline_executor, _run_graph)
 
@@ -2276,6 +2330,10 @@ async def stream_agent_to_sse(
             nextTask.cancel()
         with contextlib.suppress(Exception):
             await agentGen.aclose()
+        # add-composer-stat-pills：ReAct 编排层 provider usage 落库（与管线 usage 分开累加）
+        if session_id:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(_persist_agent_usage, session_id, agent)
         with contextlib.suppress(Exception):
             _propagate_cm.__exit__(None, None, None)
             _react_cm.__exit__(None, None, None)

@@ -63,15 +63,19 @@ describe('LlmConfigPane profile 切换（ZCode 式整体切换）', () => {
       )
     }
 
-    // 初始展示 profile a
+    // 初始展示 profile a：模型名回填；密钥只写，输入框恒为空且提示已保存
     expect((screen.getByPlaceholderText('deepseek/deepseek-chat') as HTMLInputElement).value).toBe('deepseek/deepseek-chat')
-    expect((screen.getByPlaceholderText('sk-...') as HTMLInputElement).value).toBe('sk-a')
+    const keyInput = () => screen.getByTestId('api-key-input') as HTMLInputElement
+    expect(keyInput().value).toBe('')
+    expect(keyInput().placeholder).toContain('已保存')
 
     // 点击 profile b
     fireEvent.click(screen.getByText('方舟 GLM'))
 
-    // 表单应整体切换为 b 的配置（修复点）
+    // 表单应整体切换为 b 的配置（修复点）：模型名变化，密钥仍不回显
     expect((screen.getByPlaceholderText('deepseek/deepseek-chat') as HTMLInputElement).value).toBe('openai/glm-5.3')
-    expect((screen.getByPlaceholderText('sk-...') as HTMLInputElement).value).toBe('ark-b')
+    expect(keyInput().value).toBe('')
+    // 新 profile 同样有已保存密钥 → placeholder 继续反映「已保存」
+    expect(keyInput().placeholder).toContain('已保存')
   })
 })

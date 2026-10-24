@@ -24,6 +24,8 @@ export interface CapabilityMatrix {
   tool_call: boolean
   tool_followup: boolean
   json_output: boolean
+  // probe 得到的最大输出 tokens（只读展示）；旧数据/后端未返回时缺省
+  max_output?: number
 }
 
 // 模式门禁判定结果
@@ -72,6 +74,8 @@ export function parseCapability(obj: unknown): CapabilityMatrix | null {
     tool_call: c.tool_call as boolean,
     tool_followup: c.tool_followup as boolean,
     json_output: c.json_output as boolean,
+    // max_output 为可选只读事实：仅在 number 时透传（缺失/类型不符 → undefined，不阻断矩阵解析）
+    ...(typeof c.max_output === 'number' && Number.isFinite(c.max_output) ? { max_output: c.max_output } : {}),
   }
 }
 

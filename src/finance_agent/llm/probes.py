@@ -183,8 +183,15 @@ def run_live_probes(
     try:
         raw_completion(**base)
         report["non_stream"] = True
+        # json 探测必须显式索要 JSON：DeepSeek/OpenAI 系端点在 response_format=
+        # json_object 时要求 prompt 含 "json" 字样，否则直接 400
+        # （2026-10-23 opencode deepseek-v4.1-flash 误报 json_output=false）。
+        json_probe_msgs = [{"role": "user", "content": '请只输出一个 JSON 对象：{"ok": true}'}]
         try:
-            raw_completion(**base, response_format={"type": "json_object"})
+            raw_completion(
+                **{**base, "messages": json_probe_msgs},
+                response_format={"type": "json_object"},
+            )
             report["json_output"] = True
         except Exception:  # noqa: S110 -- json_mode 可选能力，失败记 warning
             warnings.append("json_mode_unsupported")

@@ -58,8 +58,12 @@ function makeAguiHandler(mode: 'hold' | 'events' | '409', events: object[] = [])
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         if (mode === 'hold') {
-          // 挂起场景先下发 RUN_STARTED（run 进入 running 态），随后保持流打开
-          controller.enqueue(enc.encode(`data: ${JSON.stringify({ type: 'RUN_STARTED', threadId: 's1', runId: 'r-hold' })}\n\n`))
+          // 挂起场景先下发 RUN_STARTED（run 进入 running 态），随后保持流打开。
+          // events 可选：用于「run 已产出内容但尚未结束」的断言（如头像数量）。
+          const initial = events.length
+            ? events
+            : [{ type: 'RUN_STARTED', threadId: 's1', runId: 'r-hold' }]
+          for (const ev of initial) controller.enqueue(enc.encode(`data: ${JSON.stringify(ev)}\n\n`))
           if (gate) await gate
         } else {
           for (const ev of events) controller.enqueue(enc.encode(`data: ${JSON.stringify(ev)}\n\n`))
@@ -272,5 +276,76 @@ describe('QuickThread 切换守卫与历史恢复（Task 3b）', () => {
     await waitFor(() => expect(agui.requests.length).toBe(1), { timeout: 5_000 })
     await waitFor(() => expect(screen.getByTestId('agui-user-message')).toBeInTheDocument())
     expect(screen.getByTestId('agui-user-message')).toHaveTextContent('首页首条提问')
+  })
+
+  it('App 级：quick run 中 Composer 停止按钮中止 AG-UI run', async () => {
+    // 外层 runtime 不再因 quickRunning 进入 running 态后，Composer 停止按钮改由
+    // quickRunning 直接渲染并桥回 stopGeneration——本用例锁住取消链路。
+    const agui = makeAguiHandler('hold')
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/sessions' && (!init || !init.method)) {
+        return new Response(JSON.stringify({ sessions: [] }), { status: 200 })
+      }
+      if (url === '/api/agui/quick') return agui.handler(init)
+      return new Response('{}', { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+    await waitFor(() => expect(screen.getByText('今天想研究什么？')).toBeInTheDocument())
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /模式/ })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /快速模式/ })) })
+
+    const input = screen.getByPlaceholderText(/输入问题/)
+    await act(async () => {
+      fireEvent.change(input, { target: { value: '中途停止' } })
+      fireEvent.click(screen.getByTestId('send-button'))
+    })
+    await waitFor(() => expect(agui.requests.length).toBe(1))
+    await waitFor(() => expect(screen.getByTestId('composer-stop')).toBeInTheDocument())
+
+    await act(async () => { fireEvent.click(screen.getByTestId('composer-stop')) })
+    await waitFor(() => expect(agui.requests[0].signal?.aborted).toBe(true))
+    await waitFor(() => expect(screen.getByTestId('send-button')).toBeInTheDocument())
+  })
+
+  it('App 级：quick run 进行中只渲染一个 agent 头像（外层 Thread 不产生占位消息）', async () => {
+    // 缺陷复现（2026-10-23 用户报告）：quick 发送后消息区出现两个机器人头像——
+    // 上层 AnalysisThread 被标记 isRunning（含 quickRunning）且外部消息为空，
+    // assistant-ui 会插入一条待产出占位消息并套上头像；真正的 quick run 在
+    // 下方 QuickThread 内渲染，于是同一回复出现上下两个头像。
+    const agui = makeAguiHandler('hold', [
+      { type: 'RUN_STARTED', threadId: 's1', runId: 'r-hold' },
+      { type: 'TEXT_MESSAGE_START', messageId: 'm1', role: 'assistant' },
+      { type: 'TEXT_MESSAGE_CONTENT', messageId: 'm1', delta: '正在回答' },
+    ])
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/sessions' && (!init || !init.method)) {
+        return new Response(JSON.stringify({ sessions: [] }), { status: 200 })
+      }
+      if (url === '/api/agui/quick') return agui.handler(init)
+      return new Response('{}', { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { container } = render(<App />)
+    await waitFor(() => expect(screen.getByText('今天想研究什么？')).toBeInTheDocument())
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /模式/ })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /快速模式/ })) })
+
+    const input = screen.getByPlaceholderText(/输入问题/)
+    await act(async () => {
+      fireEvent.change(input, { target: { value: '只应有一个头像' } })
+      fireEvent.click(screen.getByTestId('send-button'))
+    })
+
+    await waitFor(() => expect(screen.getByTestId('agui-user-message')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('正在回答')).toBeInTheDocument())
+    // run 仍在进行中（流被挂起）时，整页只能有一个 agent 头像
+    expect(container.querySelectorAll('i.fa-robot')).toHaveLength(1)
+
+    await act(async () => { agui.release() })
   })
 })

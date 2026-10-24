@@ -174,6 +174,8 @@ def test_test_llm_config_success():
     assert data["success"] is True
     assert data["capability"]["tool_call"] is True
     assert data["capability"]["json_output"] is True
+    # max_output：静态能力推断随 probe 响应返回，供前端「最大输出」只读展示
+    assert data["capability"]["max_output"] == 8192
     assert data["model"] == "deepseek/deepseek-chat"
     mock_probe.assert_called_once()
     kw = mock_probe.call_args[1]
