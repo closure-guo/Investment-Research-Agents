@@ -5,8 +5,10 @@
 - R1 z-score 口径：逐因子在**通过 L1 的标的集合**上做截面 z-score（ddof=1，与
   ``eval_engine.cross_section_zscore`` 同口径）；因子值 NaN → 该标的该因子
   ``zscore=0.0``（贡献 0，且不因缺失被剔除）；截面全 NaN 或 std=0 → 全体 zscore=0.0；
-- R2 权重口径：``weight_i = ic_mean_i / Σ_j |ic_mean_j|``；
-  ``Σ_j |ic_mean_j| < 1e-12`` → ``ValueError("无有效 IC 信息，拒绝打分")``；
+- R2 权重口径（refine-screening-activation-scoring）：``weight_i = sign(ic_mean_i) ×
+  magnitude_i / Σ_j magnitude_j``——IC 样本数 ≥ 30 时 ``magnitude_i = |ic_mean_i|``（维持
+  比例），样本 < 30 或未提供 ``ic_counts`` 时等幅 ``magnitude_i = 1.0``（消除噪声幅度、
+  保留方向）；``Σ_j magnitude_j < 1e-12`` → ``ValueError("无有效 IC 信息，拒绝打分")``；
   ``contribution_i = weight_i × zscore_i``，``composite = Σ contribution_i``
   （按因子传入顺序累加——勾稽 Σcontribution == composite 由此天然成立，容差 1e-9）；
 - R3 as_of 语义：只用面板 ``as_of`` 当日行（无跨日聚合/无前视）；``as_of`` 不在
@@ -30,6 +32,7 @@ from finance_agent.factors.eval_engine import MarketPanel
 from finance_agent.factors.library import add_factor, list_factors, record_ic
 from finance_agent.screening.ranker import (
     MIN_IC_SAMPLES_FOR_SCORING,
+    MIN_SAMPLES_FOR_PROPORTIONAL_WEIGHTS,
     Candidate,
     factor_weights,
     has_scorable_factors,
@@ -38,6 +41,7 @@ from finance_agent.screening.ranker import (
     rank_universe,
     recent_ic_stats,
     select_scorable_factors,
+    spearman_rank_corr,
 )
 
 _DATES = ("2026-03-02", "2026-03-03", "2026-03-04")
@@ -102,8 +106,8 @@ def test_hand_computed_scores_and_contributions() -> None:
     """close/volume 两因子三标的：zscore/weight/contribution/composite 逐项手算对照。
 
     手算：close = (1,2,3) → mean 2、std(ddof=1) 1 → z = (−1,0,1)；
-    volume = (10,20,30) → z = (−1,0,1)；ic_stats = (0.03, 0.01) →
-    Σ|ic| = 0.04 → w = (0.75, 0.25)；composite(a,b,c) = (−1, 0, 1)。
+    volume = (10,20,30) → z = (−1,0,1)；ic_stats = (0.03, 0.01) 且 ic_counts 均 ≥30
+    （维持比例）→ Σ|ic| = 0.04 → w = (0.75, 0.25)；composite(a,b,c) = (−1, 0, 1)。
     """
     panel = _panel(close={"a": 1.0, "b": 2.0, "c": 3.0}, volume={"a": 10.0, "b": 20.0, "c": 30.0})
     factors = [_factor(1, "close"), _factor(2, "volume")]
@@ -115,6 +119,7 @@ def test_hand_computed_scores_and_contributions() -> None:
         passed_codes=["a", "b", "c"],
         factors=factors,
         ic_stats=ic_stats,
+        ic_counts={1: 40, 2: 40},
     )
 
     assert [candidate.symbol for candidate in candidates] == ["c", "b", "a"]
@@ -221,7 +226,7 @@ def test_nan_factor_value_gets_zero_zscore_and_stays_in_list() -> None:
 
     手算：close(a=1, b=2, c=NaN) → 有效集合 {1,2}：mean 1.5、std(ddof=1)=1/√2 →
     z_a=−1/√2、z_b=+1/√2、z_c=0；volume=(10,20,30) → z=(−1,0,1)；
-    w=(0.75,0.25) → composite_c = 0.25×1 = 0.25。
+    ic_counts 均 ≥30 → w=(0.75,0.25) → composite_c = 0.25×1 = 0.25。
     """
     panel = _panel(
         close={"a": 1.0, "b": 2.0, "c": float("nan")},
@@ -233,6 +238,7 @@ def test_nan_factor_value_gets_zero_zscore_and_stays_in_list() -> None:
         passed_codes=["a", "b", "c"],
         factors=[_factor(1, "close"), _factor(2, "volume")],
         ic_stats={1: (0.03, 0.5), 2: (0.01, 0.2)},
+        ic_counts={1: 40, 2: 40},
     )
 
     by_symbol = {candidate.symbol: candidate for candidate in candidates}
@@ -452,7 +458,7 @@ def test_factor_missing_from_ic_stats_gets_zero_weight() -> None:
 def test_negative_ic_mean_flips_weight_direction() -> None:
     """IC 均值符号决定权重方向（方向×强度）：负 IC 因子以负权重进入合成。
 
-    手算：w = (0.75, −0.25)；z_close = z_volume = (−1, 0, 1) →
+    手算：ic_counts 均 ≥30 → w = (0.75, −0.25)；z_close = z_volume = (−1, 0, 1) →
     composite = (−0.75+0.25, 0, 0.75−0.25) = (−0.5, 0, +0.5)。
     """
     panel = _panel(close={"a": 1.0, "b": 2.0, "c": 3.0}, volume={"a": 10.0, "b": 20.0, "c": 30.0})
@@ -462,6 +468,7 @@ def test_negative_ic_mean_flips_weight_direction() -> None:
         passed_codes=["a", "b", "c"],
         factors=[_factor(1, "close"), _factor(2, "volume")],
         ic_stats={1: (0.03, 0.5), 2: (-0.01, 0.2)},
+        ic_counts={1: 40, 2: 40},
     )
 
     for candidate in candidates:
@@ -476,23 +483,30 @@ def test_negative_ic_mean_flips_weight_direction() -> None:
 
 
 def test_factor_weights_formula_and_guards() -> None:
-    """factor_weights 逐项：权重 = ic_mean/Σ|ic_mean|；Σ|w| = 1；缺失 → 0；坏值 fail loud。"""
+    """factor_weights 逐项（ic_counts 均 ≥30 维持比例）：权重 = ic_mean/Σ|ic_mean|；Σ|w| = 1；缺失 → 0；坏值 fail loud。"""
     factors = [_factor(1, "close"), _factor(2, "volume"), _factor(3, "amount")]
-    weights = factor_weights(factors, {1: (0.06, 0.5), 2: (-0.02, 0.2), 3: (0.02, 0.3)})
+    counts = {1: 40, 2: 40, 3: 40}
+    weights = factor_weights(
+        factors, {1: (0.06, 0.5), 2: (-0.02, 0.2), 3: (0.02, 0.3)}, ic_counts=counts
+    )
 
     assert weights[1] == pytest.approx(0.6, abs=1e-12)
     assert weights[2] == pytest.approx(-0.2, abs=1e-12)
     assert weights[3] == pytest.approx(0.2, abs=1e-12)
     assert sum(abs(value) for value in weights.values()) == pytest.approx(1.0, abs=1e-12)
 
-    weights_missing = factor_weights(factors, {1: (0.06, 0.5)})
+    weights_missing = factor_weights(factors, {1: (0.06, 0.5)}, ic_counts=counts)
     assert weights_missing == {
         1: pytest.approx(1.0, abs=1e-12),
         2: 0.0,
         3: 0.0,
     }
     with pytest.raises(ValueError, match="非有限"):
-        factor_weights(factors, {1: (float("nan"), 0.5), 2: (0.02, 0.2), 3: (0.02, 0.3)})
+        factor_weights(
+            factors,
+            {1: (float("nan"), 0.5), 2: (0.02, 0.2), 3: (0.02, 0.3)},
+            ic_counts=counts,
+        )
     with pytest.raises(ValueError, match="无有效 IC 信息"):
         factor_weights([], {})
 
@@ -753,3 +767,110 @@ def test_ic_sample_counts_reads_recorded_series(tmp_path) -> None:
 
     assert ic_sample_counts([{"id": factor_id}], db_path=db) == {factor_id: 3}
     assert ic_sample_counts([{"id": factor_id + 99}], db_path=db) == {factor_id + 99: 0}
+
+
+# ── 权重构成：方向 × 幅度（refine-screening-activation-scoring） ────────────
+
+
+def test_factor_weights_equal_magnitude_below_threshold() -> None:
+    """样本 < 30 的因子等幅：|w| 相等、方向取 IC 均值符号（低样本噪声幅度不进合成）。"""
+    factors = [_factor(1, "close"), _factor(2, "volume")]
+    weights = factor_weights(
+        factors,
+        {1: (0.10, 0.5), 2: (-0.20, 0.8)},
+        ic_counts={1: 12, 2: 12},
+    )
+
+    assert weights[1] == pytest.approx(0.5, abs=1e-12)
+    assert weights[2] == pytest.approx(-0.5, abs=1e-12)
+    assert abs(weights[1]) == pytest.approx(abs(weights[2]), abs=1e-12)
+
+
+def test_factor_weights_proportional_at_or_above_threshold() -> None:
+    """样本 ≥ 30 维持 |IC 均值| 比例（与原式一致；边界 30 恰好纳入比例）。"""
+    factors = [_factor(1, "close"), _factor(2, "volume")]
+    weights = factor_weights(
+        factors,
+        {1: (0.10, 0.5), 2: (0.20, 0.8)},
+        ic_counts={1: MIN_SAMPLES_FOR_PROPORTIONAL_WEIGHTS, 2: 40},
+    )
+
+    assert weights[1] == pytest.approx(0.10 / 0.30, abs=1e-12)
+    assert weights[2] == pytest.approx(0.20 / 0.30, abs=1e-12)
+
+
+def test_factor_weights_mixed_samples_each_factor_its_own_rule() -> None:
+    """混合样本：高样本因子按 |IC 均值|、低样本因子等幅，按幅度之和归一。
+
+    手算：A（样本 40，均值 +0.30）幅度 0.30；B（样本 15，均值 −0.05）幅度 1.0；
+    Σ幅度 = 1.30 → w_A = 0.30/1.30、w_B = −1.0/1.30。
+    """
+    factors = [_factor(1, "close"), _factor(2, "volume")]
+    weights = factor_weights(
+        factors,
+        {1: (0.30, 0.9), 2: (-0.05, 0.2)},
+        ic_counts={1: 40, 2: 15},
+    )
+
+    assert weights[1] == pytest.approx(0.30 / 1.30, abs=1e-12)
+    assert weights[2] == pytest.approx(-1.0 / 1.30, abs=1e-12)
+
+    swapped = factor_weights(
+        factors,
+        {1: (0.30, 0.9), 2: (-0.05, 0.2)},
+        ic_counts={1: 15, 2: 40},
+    )
+    assert swapped[1] == pytest.approx(1.0 / 1.05, abs=1e-12)
+    assert swapped[2] == pytest.approx(-0.05 / 1.05, abs=1e-12)
+
+
+def test_factor_weights_missing_counts_treated_as_low_sample() -> None:
+    """未提供 ic_counts → 全部视为 0 样本（等幅）——默认走安全路径。"""
+    factors = [_factor(1, "close"), _factor(2, "volume")]
+    weights = factor_weights(factors, {1: (0.03, 0.5), 2: (0.01, 0.2)})
+
+    assert weights[1] == pytest.approx(0.5, abs=1e-12)
+    assert weights[2] == pytest.approx(0.5, abs=1e-12)
+
+
+def test_factor_weights_zero_mean_zero_weight_not_in_denominator() -> None:
+    """IC 均值恰为 0 的因子权重 0 且不占归一分母（等幅不放大无效因子）。"""
+    factors = [_factor(1, "close"), _factor(2, "volume"), _factor(3, "amount")]
+    weights = factor_weights(
+        factors,
+        {1: (0.10, 0.5), 2: (0.0, 0.0), 3: (-0.20, 0.8)},
+        ic_counts={1: 12, 2: 40, 3: 12},
+    )
+
+    assert weights[2] == 0.0
+    assert weights[1] == pytest.approx(0.5, abs=1e-12)
+    assert weights[3] == pytest.approx(-0.5, abs=1e-12)
+
+
+# ── Spearman 秩相关（手写秩变换 + Pearson，无 scipy） ───────────────────────
+
+
+def test_spearman_identical_ordering_is_one() -> None:
+    assert spearman_rank_corr([1.0, 2.0, 3.0, 4.0], [10.0, 20.0, 30.0, 40.0]) == pytest.approx(
+        1.0, abs=1e-12
+    )
+
+
+def test_spearman_opposite_ordering_is_minus_one() -> None:
+    assert spearman_rank_corr([1.0, 2.0, 3.0, 4.0], [40.0, 30.0, 20.0, 10.0]) == pytest.approx(
+        -1.0, abs=1e-12
+    )
+
+
+def test_spearman_ties_use_average_ranks() -> None:
+    """平局取平均秩：xs=[1,1,2]→秩 [1.5,1.5,3]、ys=[1,2,2]→秩 [1,2.5,2.5] → r=0.5。"""
+    assert spearman_rank_corr([1.0, 1.0, 2.0], [1.0, 2.0, 2.0]) == pytest.approx(0.5, abs=1e-12)
+
+
+def test_spearman_rejects_mismatched_or_degenerate_inputs() -> None:
+    with pytest.raises(ValueError, match="长度"):
+        spearman_rank_corr([1.0, 2.0], [1.0, 2.0, 3.0])
+    with pytest.raises(ValueError, match="样本"):
+        spearman_rank_corr([1.0], [2.0])
+    with pytest.raises(ValueError, match="常量"):
+        spearman_rank_corr([1.0, 1.0, 1.0], [1.0, 2.0, 3.0])
