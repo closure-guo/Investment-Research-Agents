@@ -9,11 +9,11 @@
 ## 2. 同批修复（非本 delta 范围，记录关联）
 
 - [x] 2.1 健康度评分 / σ 记号 / 年份+报告期三类漏排除（commit `e3637537`）
-- [ ] 2.2 32 条历史阻断离线重放（哨兵：误报桶清零、E 桶 11.3/21.5 结论落表）
+- [ ] 2.2 32 条历史阻断离线重放（哨兵：误报桶清零、E 桶 11.3/21.5 结论落表）——2026-10-24 可行性评估：阻断原文仅存 Langfuse trace（32 条 failure_reason 可经 `/api/sessions` 定位，但 pipeline_timelines/pipeline_snapshot 均空），提取→重放→分桶需独立评估轮且分桶终裁按 incident 026 须人工过目
 
 ## 3. 验证与收口
 
-- [ ] 3.1 `uv run pytest tests/metrics tests/nodes/test_risk.py tests/nodes/test_validate_trade_prices.py` 全绿（本机 2026-10-22 已过：351 passed）
-- [ ] 3.2 真实链路：一轮 cohort（≥10 标的）确认阻断数下降且无新增幻觉放行
+- [x] 3.1 `uv run pytest tests/metrics tests/nodes/test_risk.py tests/nodes/test_validate_trade_prices.py` 全绿（2026-10-24 复跑：352 passed）
+- [ ] 3.2 真实链路：一轮 cohort（≥10 标的）确认阻断数下降且无新增幻觉放行——挂靠自然 cohort（下一工作日 18:00，勿手动强跑：与日批互斥且省 LLM 额度），读数随档
 - [ ] 3.3 更新 `docs/incidents/034-decision-price-check-false-positives-20261002.md` 处置记录
 - [ ] 3.4 `openspec validate fix-price-gate-meta-discourse --strict` + sync

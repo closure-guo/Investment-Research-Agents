@@ -152,7 +152,9 @@ TBD - created by archiving change add-screening-filters. Update Purpose after ar
 达标）后，后续批次 SHALL 自动回到 `factor` 路径（降级为死分支，无配置开关）。降级通道 MUST NOT
 吞掉其他失败：L1/L3/池等其余任一步骤失败时批次仍 SHALL 记 failed、不产出精选池。
 
-(Previously: 触发条件仅为「无 active 因子，或全部 active 因子无有效 IC 记录」；只要存在任意 IC 记录即视为可打分，3 个样本也会被用于估计权重。)
+池接口 SHALL 同时返回 `factor_signal` 块：逐 active 因子给出 `{id, ic_samples, min_samples, eligible, expected_eligible_date}`，并给出批次级 `{selection_mode, reason, expected_factor_mode_date}`；`reason` SHALL 逐字说明被排除原因（如「IC 样本不足（门槛 10）」），`expected_factor_mode_date` SHALL 取各因子预计达标日的**最早值**（按工作日推算、不含节假日；已达标或无 IC 记录时为 `null`）。样本数与日期 MUST NOT 以估算值冒充精确读数——无 IC 记录时 `ic_samples=0`、日期为 `null`。
+
+(Previously: 触发条件仅为「无 active 因子，或全部 active 因子无有效 IC 记录」；只要存在任意 IC 记录即视为可打分，3 个样本也会被用于估计权重；池接口只披露 selection_mode 与文案，不披露逐因子样本与预计恢复日期。)
 
 #### Scenario: 库空降级产出
 
@@ -182,6 +184,13 @@ TBD - created by archiving change add-screening-filters. Update Purpose after ar
 - **WHEN** 读取池接口与批次历史接口
 - **THEN** 两处均含 `selection_mode=fallback`，池接口另含明示「非因子信号」的披露文案
 - **AND** 选股页展示降级披露横幅
+
+#### Scenario: 池接口披露逐因子就绪度
+
+- **GIVEN** 3 个 active 因子分别有 4/3/0 条 IC 记录，门槛 10
+- **WHEN** 读取池接口
+- **THEN** `factor_signal.factors` 逐因子给出 `ic_samples` 与 `eligible=false`
+- **AND** `expected_factor_mode_date` 为最早可达标日；`reason` 含「IC 样本不足」字样
 
 #### Scenario: 恢复自动切回
 
