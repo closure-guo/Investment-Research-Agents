@@ -241,10 +241,13 @@ def check_monotonicity(
     逐日按因子值截面秩（``rank(method="first")`` → ``qcut`` 10 桶；当日两帧共同
     有效样本 ≥ ``MIN_IC_SAMPLES`` 的日期才计入——与 ``rank_ic_series`` 同一有效性
     定义）构建十分位等权组合，各分位远期收益按日算术累加为分位累计收益；判定 =
-    分位序(1..10)与累计收益的 Spearman ≥ ``MIN_DECILE_MONOTONICITY`` **且**端点差
-    （Q10−Q1）符号与 IC 均值一致。任一不可计算（零有效日 / 累计收益常量 →
-    Spearman NaN / 端点差为 0 / IC 均值无向）→ fail closed 拒收
-    （``WEAK_MONOTONICITY``）。秩并列按列序破平（面板构造确定 → 逐位可复现）。
+    |Spearman| ≥ ``MIN_DECILE_MONOTONICITY`` **且** Spearman 符号与 IC 均值一致
+    （负向因子按其方向单调同样通过——方向由 IC 符号锚定；端点差 Q10−Q1 作为
+    披露字段保留）。任一不可计算（零有效日 / 累计收益常量 → Spearman NaN /
+    IC 均值无向）→ fail closed 拒收（``WEAK_MONOTONICITY``）。秩并列按列序破平
+    （面板构造确定 → 逐位可复现）。判据方向口径的实证依据：生产 10 因子 sanity
+    锚首跑按「正相关 ≥0.6」判 10/10 拒收，其中 7 个 Spearman ∈ [−1.0, −0.758] 且
+    IC 均值同负——方向一致的单调递减被误杀（见验证报告 2026-10-24）。
     """
     decile_returns = [0.0] * 10
     valid_days = 0
@@ -273,8 +276,10 @@ def check_monotonicity(
     else:
         spearman = math.nan
     ic_mean = _ic_stats(ic)[0]
-    sign_ok = _sign(q10_q1) != 0 and _sign(q10_q1) == _sign(ic_mean)
-    passed = math.isfinite(spearman) and spearman >= MIN_DECILE_MONOTONICITY and sign_ok
+    sign_ok = _sign(spearman) != 0 and _sign(spearman) == _sign(ic_mean)
+    passed = (
+        math.isfinite(spearman) and abs(spearman) >= MIN_DECILE_MONOTONICITY and sign_ok
+    )
     return GateResult(
         gate=GATE_SINGLE_FACTOR,
         passed=passed,

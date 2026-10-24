@@ -1467,11 +1467,22 @@ def test_mid_inversion_rejected_by_monotonicity() -> None:
 
 
 def test_sign_mismatch_rejected_by_monotonicity() -> None:
+    # 递增分位（Spearman=+1）配负向 IC → 方向不一致 → 拒收（方向由 IC 符号锚定）
     values, fwd, _ic = _mono_frames([float(i) for i in range(40)])
     negative_ic = pd.Series([-0.2, -0.25, -0.15, -0.2, -0.22], name="rank_ic")
     gate = check_monotonicity(values, fwd, negative_ic)
     assert gate.passed is False
     assert gate.reason == "WEAK_MONOTONICITY"
+
+
+def test_negatively_oriented_monotone_factor_passes() -> None:
+    # 递减分位（Spearman=−1）配负向 IC → 方向一致 → 通过（生产量价族即此形态）
+    values, fwd, _ic = _mono_frames([float(39 - i) for i in range(40)])
+    negative_ic = pd.Series([-0.2, -0.25, -0.15, -0.2, -0.22], name="rank_ic")
+    gate = check_monotonicity(values, fwd, negative_ic)
+    assert gate.passed is True
+    assert gate.reason is None
+    assert gate.detail["spearman"] <= -0.99
 
 
 def test_insufficient_daily_breadth_fails_closed() -> None:
