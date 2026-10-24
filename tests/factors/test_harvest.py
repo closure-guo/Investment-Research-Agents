@@ -187,6 +187,7 @@ class TestRunFactorHarvest:
         assert summary["admitted"] == 0
         assert summary["rejected"] == 1
         assert summary["errors"] == 2
+        assert summary["errors_breakdown"] == {"placeholders": 2, "real": 0}  # 全部为已知拒译占位
         # 拒收记录携带读数 detail（add-factor-harvest-bridge）
         rejected = [r for r in summary["rejections"] if r["gate"] is not None]
         assert rejected and "icir" in rejected[0]["detail"]
@@ -773,3 +774,60 @@ class TestUntilDrained:
         )
         assert drained["drained"] is True
         assert builds["count"] == 1
+
+
+def test_errors_breakdown_splits_placeholders_from_real(tmp_path):
+    """errors 桶构成披露（refine-harvest-errors-caliber）：占位（已知拒译）与真实
+    预检失败分列；errors 总数与留痕语义不变。"""
+    candidates = [
+        _candidate("tsmean", description="5 日均价", formulation="mean(C,5)"),
+        _candidate("dup1", description="占位", formulation="f1"),
+        _candidate("dup2", description="占位", formulation="f2"),
+    ]
+    cand_path = tmp_path / "candidates.json"
+    cand_path.write_text(
+        json.dumps({"generated_at": "2026-10-23T00:00:00+08:00", "candidates": candidates}),
+        encoding="utf-8",
+    )
+    client = _StubClient(
+        {
+            "tsmean": {"qlib_expression": "Mean($close, 5)"},
+            "dup1": {"untranslatable": True, "reason": "缺算子"},
+            "dup2": {"qlib_expression": "Skew($close, 20)"},
+        }
+    )
+    summary = run_factor_harvest(
+        candidates_path=cand_path,
+        state_path=tmp_path / "harvest_state.json",
+        client=client,
+        panel=_panel(),
+    )
+    assert summary["errors"] == 2  # 留痕总数不变
+    assert summary["errors_breakdown"] == {"placeholders": 2, "real": 0}
+
+    # stub 导入摘要多报 1 条真实预检失败 → real 单独可见
+    from finance_agent.factors.external import run_factor_external_import as _real_import
+
+    def _fake_import(payload, **kwargs):
+        base = _real_import(payload, **kwargs)  # 真源取自 external 模块（未被 patch）
+        base["errors"] += 1
+        base["rejections"] = [
+            *base["rejections"],
+            {"expression": "x", "gate": None, "reason": "真实预检失败"},
+        ]
+        return base
+
+    monkeypatch_target = "finance_agent.factors.harvest.run_factor_external_import"
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(monkeypatch_target, _fake_import)
+        replayed = run_factor_harvest(
+            candidates_path=cand_path,
+            state_path=tmp_path / "harvest_state.json",
+            client=client,
+            panel=_panel(),
+            retry_statuses={"untranslatable", "rejected", "transcription_error"},
+        )
+    assert replayed["errors"] == 3
+    assert replayed["errors_breakdown"] == {"placeholders": 2, "real": 1}
