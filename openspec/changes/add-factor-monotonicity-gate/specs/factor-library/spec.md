@@ -72,3 +72,24 @@
 - **WHEN** 请求详情
 - **THEN** `style_exposure` 含逐风格相关系数、主导风格与 |ρ|；|ρ| ≥ 0.7 时 `flagged` 为真
 - **AND** 面板不可得（如快照库为空）时 `style_exposure` 为 `null`（前端如实展示「数据不足」，MUST NOT 以 0 冒充）
+
+#### Scenario: IC 就绪度披露
+
+- **GIVEN** 某 active 因子有 4 条 IC 记录、最新 IC 日期为 2026-10-21、打分门槛为 10
+- **WHEN** 请求列表或详情
+- **THEN** 返回 `ic_points=4`、`min_samples_for_scoring=10`、`ic_window=60`
+- **AND** `expected_factor_mode_date` 为按工作日推算的首个可见达标日（示例为 2026-11-02），并在字段说明中标注「按工作日推算、不含节假日」
+
+#### Scenario: 样本不足不触发风格暴露面板
+
+- **GIVEN** 因子仅有 4 条 IC 记录（< 30）
+- **WHEN** 请求详情
+- **THEN** `style_exposure` 为 `null` 且 `monotonicity` 为 `null`
+- **AND** 接口 MUST NOT 构建准入面板（详情响应不因快照库大小而阻塞）
+
+#### Scenario: 分层单调性观测读数可算与不可算两态
+
+- **GIVEN** 某 active 因子 IC 点数 ≥ 30 且可在准入面板上求值
+- **WHEN** 请求详情
+- **THEN** `monotonicity` 含 `passed` / `spearman` / `q10_q1` / `decile_returns` / `valid_days` / `threshold`，为观测读数（不挂任何处置）
+- **AND** 快照库为空或表达式不可求值时 `monotonicity` 为 `null`（前端如实展示「数据不足」，MUST NOT 以 0 冒充）

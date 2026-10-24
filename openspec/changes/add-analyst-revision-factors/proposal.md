@@ -31,3 +31,4 @@
 - 前端：因子库页来源标签扩容（`research` → 「研究面」）；无新页面。
 - 与 `analyst-ex-post-verification` 的边界：事后检验判**分析师**（claim → outcome 记分卡），本 delta 判**信号可交易性**（因子 → 五道闸）——复用同一数据源，互不写入。
 - 与 `add-factor-monotonicity-gate`（并行在飞）同改 `factor-library`「五道闸准入管线」requirement——后归档方须合并重写 MODIFIED 块（既有惯例）。
+- **基线漂移提示（2026-10-24）**：`add-factor-ic-visibility` 已于本日在 main 归档（只读查询 requirement 增 IC 就绪度字段与短路语义）——本 delta 的「因子库只读查询」MODIFIED 块以彼时主规范为基线撰写，**实施/归档时须以届时主规范全文为基线重写**（保全部既有场景再叠加 source 枚举与值因子展示）。
