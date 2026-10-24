@@ -58,3 +58,9 @@
 - **GIVEN** 因子库已含可打分因子（active 且 IC 样本数 ≥ 10、Σ|IC 均值| > 0）
 - **WHEN** 选股日批运行
 - **THEN** 批次 `selection_mode=factor` 且 L2 走因子打分路径（Top-N 携带贡献分解）
+
+#### Scenario: 降级不吞失败
+
+- **GIVEN** 因子库无 active 因子，且 L3 粗筛因 LLM 网关整体不可用而失败
+- **WHEN** 选股日批运行
+- **THEN** 批次状态为 failed、当日精选池零行（fail-closed 语义不因降级通道放宽）

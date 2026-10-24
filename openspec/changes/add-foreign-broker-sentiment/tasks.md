@@ -30,8 +30,8 @@
 - [x] 5.1 `uv run python scripts/deploy_prompts.py` 发布 `foreign_broker_event`
 - [x] 5.2 `openspec validate add-foreign-broker-sentiment --strict` 通过
 - [x] 5.3 `uv run pytest` 定向测试全绿；`uv run ruff check` 通过
-- [ ] 5.4 用真实 feed 跑一轮：确认事件落库、摘要不超限、内外资分开可查
-- [ ] 5.5 人工抽查 10 条抽取，确认无原文外推断、无全文入库
+- [ ] 5.4 用真实 feed 跑一轮：确认事件落库、摘要不超限、内外资分开可查——2026-10-24 环境评估：`FOREIGN_NEWS_FEEDS` 未配置且**源选型被本机网络墙硬阻塞**（境外聚合器 Google News RSS / FT / investing / rsshub 全部 000 不可达；国内 RSS 生态残缺——格隆汇/新浪 RSS 404、智通 500；唯一可达的 36kr 为科技媒体、投行关键词命中≈0，不构成有效验证）。推荐配置：网络可达环境用 Google News RSS 关键词查询（`https://news.google.com/rss/search?q=高盛+OR+摩根士丹利+中国&hl=zh-CN&gl=CN&ceid=CN:zh-Hans`，查询级过滤天然对口）+ 英文机构名别名补入 `_broker_keywords`（现有关键词以中文为主，英文源需补 Goldman/Morgan Stanley/JPMorgan 等别名）
+- [ ] 5.5 人工抽查 10 条抽取，确认无原文外推断、无全文入库（随 5.4 数据一并做，单列以便分项勾销）
 
 > **5.4 / 5.5 阻塞于缺原料（2026-10-21 核实）**：`FOREIGN_NEWS_FEEDS` 未在 `.env` 配置，
 > `foreign_broker_events` 为 0 行、`report_extractions` 为 0 行，日批 `foreign_broker_news_daily`
