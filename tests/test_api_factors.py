@@ -417,3 +417,70 @@ def test_seed_factors_reset_then_seed_is_deterministic(testing_client, _factors_
 
     rows = TestClient(app).get(_FACTORS).json()["factors"]
     assert [row["expression"] for row in rows] == [_LLM_EXPRESSION]
+
+
+def test_detail_monotonicity_null_without_snapshot(_factors_db) -> None:
+    """详情含 monotonicity 键；快照库为空 → 诚实 None（MUST NOT 用 0/虚构冒充）。"""
+    llm_id, _ = _seed_library()
+
+    body = TestClient(app).get(f"{_FACTORS}/{llm_id}").json()
+
+    assert "monotonicity" in body
+    assert body["monotonicity"] is None
+
+
+def test_detail_monotonicity_observed_with_panel(_factors_db, monkeypatch) -> None:
+    """IC 点数过门槛 + 可注入面板 → monotonicity 为观测读数（含全部 detail 字段）。"""
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    import numpy as np
+    import pandas as pd
+
+    import finance_agent.factors.monthly as monthly
+    from finance_agent.factors.eval_engine import MarketPanel
+
+    # 种子因子表达式 = "close"（直接取 close 帧，规避 ts_rank 热身期/常量截面干扰）
+    factor_id = add_factor(
+        expression="close",
+        hypothesis="单调性观测读数用例",
+        category="价量",
+        status="candidate",
+        source="llm",
+    )
+    set_status(factor_id, "active", detail={"reason": "ADMITTED"})
+    for offset in range(30):  # 越过 MIN_STYLE_SAMPLES(30) 短路门槛
+        record_ic(factor_id, (_date(2026, 1, 5) + _timedelta(days=offset)).isoformat(), 0.1)
+
+    days, codes_n = 41, 40
+    codes = [f"c{i:03d}" for i in range(codes_n)]
+    dates = [(_date(2026, 1, 5) + _timedelta(days=o)).isoformat() for o in range(days)]
+    # 收益截面随码序递增 + 逐日码相位抖动（IC 逐日非常量，风格暴露相关可定义）
+    t_axis = np.arange(days)[:, None]
+    i_axis = np.arange(codes_n)[None, :]
+    daily = np.linspace(0.0005, 0.0025, codes_n)[None, :] * np.ones((days, 1))
+    daily = daily + 0.0008 * np.sin(t_axis / 5.0 + i_axis / 7.0)
+    close = 100.0 * np.cumprod(1.0 + daily, axis=0)
+
+    def _frame(matrix: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame(matrix, index=dates, columns=codes)
+
+    panel = MarketPanel(
+        fields={
+            "open": _frame(close),
+            "high": _frame(close),
+            "low": _frame(close),
+            "close": _frame(close),
+            "volume": _frame(close),
+            "amount": _frame(close),
+        }
+    )
+    monkeypatch.setattr(monthly, "_panel_from_snapshot", lambda *_a, **_k: panel)
+
+    body = TestClient(app).get(f"{_FACTORS}/{factor_id}").json()
+
+    mono = body["monotonicity"]
+    assert mono is not None
+    assert {"passed", "spearman", "q10_q1", "decile_returns", "valid_days", "threshold"} <= set(
+        mono
+    )
