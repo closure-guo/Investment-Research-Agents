@@ -294,12 +294,20 @@ def _cohort_block(settings: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# TESTING 专用时钟覆盖（add-ops-missed-today-badge）：/api/test/seed ``ops.now``
+# 冻结状态接口时钟——真实时钟下全部日批排程均在 15:35 后，E2E 无法自然构造
+# 「已过点未跑」态。仅 TESTING 进程设置；生产路径恒为 None。
+_now_override: datetime | None = None
+
+
 def _now() -> datetime:
     """状态接口的时钟（本地时区）；测试 patch 它即可冻结「今天几点」。
 
     与 ``scheduled_fire_time`` 的 naive 约定一致：naive 时刻按其排程时区解释
     （本系统所有日批均为 Asia/Shanghai）。
     """
+    if _now_override is not None:
+        return _now_override
     return datetime.now()
 
 

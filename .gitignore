@@ -377,3 +377,6 @@ data/test-e2e-dailyops-*
 
 # composer/llm-pane E2E 专项库（playwright.composer.config.ts）
 data/test-e2e-stats-*
+
+# E2E 误落 nested data/ 的测试库（webServer cwd 变体产物）
+tests/e2e/playwright/data/

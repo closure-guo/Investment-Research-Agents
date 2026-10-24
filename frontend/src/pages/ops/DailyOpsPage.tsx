@@ -41,6 +41,13 @@ const RUN_BADGE: Record<string, { status: StatusKey; label: string }> = {
 }
 /** 今日无运行行 → 未跑（retired 灰；语义见 design「未跑（今日无运行行）」） */
 const NOT_RUN_BADGE = { status: 'retired' as StatusKey, label: '未跑' }
+/**
+ * 今日漏跑告警位（add-ops-missed-today-badge，issue #453）：后端 missed_today=true
+ * （当天计划时刻已过、当天无任何运行行）→ degraded 琥珀告警，与 failed 红区分——
+ * 「压根没跑」（可能是调度器挂了）与「跑了但失败」（任务本身的问题）是两种故障。
+ * 仅在后端字段显式为 true 时渲染；字段缺失（旧载荷）回退既有「未跑」，不臆造告警。
+ */
+const MISSED_TODAY_BADGE = { status: 'degraded' as StatusKey, label: '今日漏跑' }
 /** 批次历史状态 → 徽章（ok/failed 两态，库内原值） */
 const BATCH_BADGE: Record<string, { status: StatusKey; label: string }> = {
   ok: { status: 'active', label: '成功' },
@@ -63,6 +70,21 @@ function localISODate(d: Date): string {
 
 function scheduleMinutes(job: OpsJobStatus): number {
   return job.schedule.hour * 60 + job.schedule.minute
+}
+
+/**
+ * 今天是否轮到该任务跑（add-ops-missed-today-badge 扩展）：月批看 day_of_month，
+ * mon-fri 任务看周末——此前周末已过点会谎称「今日未跑」，现如实归入非排程日
+ * （与后端 missed_today 周末恒 false 的口径一致）。
+ */
+function isScheduledToday(job: OpsJobStatus, now: Date): boolean {
+  if (job.schedule.day_of_month !== undefined && now.getDate() !== job.schedule.day_of_month) {
+    return false
+  }
+  if (job.schedule.day_of_week === 'mon-fri' && (now.getDay() === 0 || now.getDay() === 6)) {
+    return false
+  }
+  return true
 }
 
 /**
@@ -185,13 +207,24 @@ function describeJob(job: OpsJobStatus, now: Date): TaskState {
       run.status === 'failed' ? `${badge.label} · ${when}` : `${badge.label} · ${when} · ${fmtSummary(run.summary)}`
     return { badge, summary, error: run.status === 'failed' ? run.error : null }
   }
-  // 今日无运行行：已过排程时刻 → 未跑；未到 → 尚未到排程时刻（design 口径）。
-  // 月批（含 day_of_month）：仅排程日谈「今日未跑」；非排程日如实报「未到本期排程日」，
-  // 不得把「还没轮到」谎称成「该跑没跑」。
-  const isScheduledDay =
-    job.schedule.day_of_month === undefined || now.getDate() === job.schedule.day_of_month
-  const due = isScheduledDay && now.getHours() * 60 + now.getMinutes() >= scheduleMinutes(job)
-  const head = !isScheduledDay
+  // 今日无运行行：后端 missed_today=true → 「今日漏跑」告警位（服务器时钟权威，
+  // 含 running 行与补跑清扫感知——客户端不再重复推断漏跑，只信字段）。
+  // 字段缺失（旧载荷）走既有推断；月批仅排程日谈「今日未跑」，周末 mon-fri
+  // 任务如实报「未到本期排程日」，不得把「还没轮到」谎称成「该跑没跑」。
+  const scheduledToday = isScheduledToday(job, now)
+  const due = scheduledToday && now.getHours() * 60 + now.getMinutes() >= scheduleMinutes(job)
+  if (job.missed_today === true) {
+    const tail =
+      run === null
+        ? '（尚无运行历史）'
+        : `（上次运行：${run.started_at.slice(0, 10)} ${RUN_STATUS_LABEL[run.status] ?? run.status}）`
+    return {
+      badge: MISSED_TODAY_BADGE,
+      summary: `今日漏跑（排程 ${scheduleText(job.schedule)} 已过，当天无任何运行行）${tail}`,
+      error: null,
+    }
+  }
+  const head = !scheduledToday
     ? `未到本期排程日（${scheduleText(job.schedule)}）`
     : due
       ? '今日未跑'

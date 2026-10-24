@@ -524,3 +524,153 @@ describe('日批运维页每日汇报区（add-auto-pool-analysis-daily-brief）
     expect(screen.getByTestId('daily-brief-markdown').textContent).toContain('降级')
   })
 })
+
+describe('今日漏跑告警位（add-ops-missed-today-badge，issue #453）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    // 2026-10-22 周四 16:10：全部 15:35+ 排程已过点（漏跑态的确定性时刻）
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(new Date(2026, 9, 22, 16, 10, 0))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    window.history.pushState({}, '', '/')
+  })
+
+  const badge = (jobId: string) =>
+    within(screen.getByTestId(`page-shell-batch-${jobId}`)).getByTestId('status-badge')
+
+  it('missed_today=true → 「今日漏跑」告警徽章（degraded，与 failed 区分），摘要明示漏跑与上次运行', async () => {
+    mockFetch({
+      jobs: [
+        jobsBody([
+          opsJob('m_missed', 16, 0, {
+            missed_today: true,
+            last_run: opsRun({
+              job_id: 'm_missed',
+              status: 'ok',
+              started_at: '2026-10-21T16:00:00',
+              finished_at: '2026-10-21T16:01:00',
+            }),
+            history: [
+              opsRun({
+                job_id: 'm_missed',
+                status: 'ok',
+                started_at: '2026-10-21T16:00:00',
+                finished_at: '2026-10-21T16:01:00',
+              }),
+            ],
+          }),
+        ]),
+      ],
+    })
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+    await screen.findByTestId('ops-job-title-m_missed')
+
+    expect(badge('m_missed').getAttribute('data-status')).toBe('degraded')
+    expect(badge('m_missed').textContent).toBe('今日漏跑')
+    const summary = screen.getByTestId('ops-job-summary-m_missed').textContent ?? ''
+    expect(summary).toContain('今日漏跑')
+    expect(summary).toContain('16:00')
+    expect(summary).toContain('2026-10-21')
+    // 与 failed 语义区分：该批次卡内无失败错误位
+    expect(within(screen.getByTestId('page-shell-batch-m_missed')).queryByTestId(/ops-job-error/)).toBeNull()
+  })
+
+  it('当天已失败 → failed 徽章 + 错误逐字，不误报为漏跑', async () => {
+    mockFetch({
+      jobs: [
+        jobsBody([
+          opsJob('f_failed', 15, 40, {
+            missed_today: false,
+            last_run: opsRun({
+              job_id: 'f_failed',
+              status: 'failed',
+              error: 'RuntimeError: boom',
+              started_at: '2026-10-22T15:41:00',
+              finished_at: '2026-10-22T15:43:00',
+            }),
+          }),
+        ]),
+      ],
+    })
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+    await screen.findByTestId('ops-job-title-f_failed')
+
+    expect(badge('f_failed').getAttribute('data-status')).toBe('failed')
+    expect(badge('f_failed').textContent).toBe('失败')
+    expect(screen.getByTestId('ops-job-error-f_failed').textContent).toBe('RuntimeError: boom')
+    // 全页不出现「今日漏跑」
+    expect(screen.queryByText('今日漏跑')).toBeNull()
+  })
+
+  it('未到排程时刻不告警（missed_today=false → 既有「尚未到排程时刻」）', async () => {
+    mockFetch({
+      jobs: [jobsBody([opsJob('f_future', 18, 0, { missed_today: false })])],
+    })
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+    await screen.findByTestId('ops-job-title-f_future')
+
+    expect(badge('f_future').getAttribute('data-status')).toBe('retired')
+    expect(badge('f_future').textContent).toBe('未跑')
+    expect(screen.getByTestId('ops-job-summary-f_future').textContent).toContain('尚未到排程时刻')
+    expect(screen.queryByText('今日漏跑')).toBeNull()
+  })
+
+  it('周末 mon-fri 任务不告警，摘要如实「未到本期排程日」（不再谎称今日未跑）', async () => {
+    vi.setSystemTime(new Date(2026, 9, 24, 17, 0, 0)) // 2026-10-24 周六 17:00
+    mockFetch({
+      jobs: [jobsBody([opsJob('w_weekend', 16, 0, { missed_today: false })])],
+    })
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+    await screen.findByTestId('ops-job-title-w_weekend')
+
+    expect(badge('w_weekend').getAttribute('data-status')).toBe('retired')
+    expect(screen.queryByText('今日漏跑')).toBeNull()
+    expect(screen.getByTestId('ops-job-summary-w_weekend').textContent).toContain('未到本期排程日')
+  })
+
+  it('月批非排程日不告警（missed_today=false → 「未到本期排程日」）', async () => {
+    mockFetch({
+      jobs: [
+        jobsBody([
+          opsJob('mo_monthly', 9, 0, {
+            missed_today: false,
+            schedule: { day_of_week: '*', day_of_month: 1, hour: 9, minute: 0, timezone: 'Asia/Shanghai' },
+          }),
+        ]),
+      ],
+    })
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+    await screen.findByTestId('ops-job-title-mo_monthly')
+
+    expect(screen.queryByText('今日漏跑')).toBeNull()
+    expect(screen.getByTestId('ops-job-summary-mo_monthly').textContent).toContain('未到本期排程日')
+  })
+
+  it('字段缺失（旧载荷）回退既有行为：已过点无运行行维持「未跑」retired，不臆造告警', async () => {
+    mockFetch({
+      jobs: [
+        jobsBody([
+          opsJob('legacy', 16, 0, {
+            last_run: opsRun({
+              job_id: 'legacy',
+              status: 'ok',
+              started_at: '2026-10-21T16:00:00',
+              finished_at: '2026-10-21T16:01:00',
+            }),
+          }),
+        ]),
+      ],
+    })
+    render(<DailyOpsPage onBack={() => {}} onOpenEvalOps={() => {}} />)
+    await screen.findByTestId('ops-job-title-legacy')
+
+    expect(badge('legacy').getAttribute('data-status')).toBe('retired')
+    expect(badge('legacy').textContent).toBe('未跑')
+    expect(screen.queryByText('今日漏跑')).toBeNull()
+  })
+})
