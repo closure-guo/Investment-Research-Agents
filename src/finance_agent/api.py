@@ -899,6 +899,11 @@ if TESTING:
         events_reset（bool：清事件线四表）造选股页事件观察区块三态/空态
         （delta add-event-driven-lane）；库路径于调用期读 EVENTS_DB_PATH
         （E2E 指向独立测试库 data/test-e2e-events.db，绝不落到开发库 data/events.db）。
+        顶层可选 ops（dict：``now`` 冻结 ops 状态时钟（ISO 时刻；null 解除冻结，
+        add-ops-missed-today-badge）、``runs`` 造 job_runs 行（job_id/kind/status/
+        source/summary/error + started_at/finished_at 回拨））与 ops_runs_reset
+        （bool：清 job_runs 全表）造日批运维页漏跑/失败/未到点确定性状态；库路径
+        于调用期读 SESSIONS_DB_PATH（ops model env 口径，E2E 指向独立测试库）。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
         # track_record / snapshot / screening / memory / factors / broker / regime
@@ -922,6 +927,8 @@ if TESTING:
             and not isinstance(req.get("events"), dict)
             and not req.get("events_reset")
             and not isinstance(req.get("daily_brief"), dict)
+            and not isinstance(req.get("ops"), dict)
+            and not req.get("ops_runs_reset")
         ):
             return {"status": "ok", "mode": "testing"}
         # add-paper-broker：战绩造数复位（清 equity_curve + paper_equity 两表）。双曲线
@@ -1126,6 +1133,46 @@ if TESTING:
                 prompt_version=daily_brief_seed.get("prompt_version"),
                 error=daily_brief_seed.get("error"),
             )
+        # ops 造数（delta add-ops-missed-today-badge，issue #453）：可选先 reset（清
+        # job_runs 全表）再写运行行——逐条经既有落库入口 insert_job_run（生产同源），
+        # started_at/finished_at 经 set_job_run_timestamps 回拨（单测 _backdate 同语义）。
+        # 另可 ``now`` 冻结 ops 状态时钟（ops_api._now_override；null 解除冻结）——
+        # 真实时钟下全部日批排程均在 15:35 后，E2E 无法自然构造「已过点未跑」态。
+        # 库路径调用期读 SESSIONS_DB_PATH（ops model env 口径，E2E 指向独立测试库）。
+        if req.get("ops_runs_reset"):
+            from finance_agent.outcome.ops.model import clear_job_runs as _seed_clear_runs
+
+            _seed_clear_runs()
+        ops_seed = req.get("ops")
+        if isinstance(ops_seed, dict):
+            from finance_agent import ops_api as _seed_ops_api
+            from finance_agent.outcome.ops.model import (
+                insert_job_run as _seed_insert_run,
+            )
+            from finance_agent.outcome.ops.model import (
+                set_job_run_timestamps as _seed_run_timestamps,
+            )
+
+            if "now" in ops_seed:
+                raw_now = ops_seed.get("now")
+                _seed_ops_api._now_override = (
+                    datetime.fromisoformat(str(raw_now)) if raw_now else None
+                )
+            for run_row in ops_seed.get("runs") or []:
+                run_id = _seed_insert_run(
+                    str(run_row["job_id"]),
+                    str(run_row.get("kind", "scheduled")),
+                    str(run_row.get("status", "ok")),
+                    source=str(run_row.get("source", "scheduled")),
+                    summary=run_row.get("summary"),
+                    error=run_row.get("error"),
+                )
+                if run_row.get("started_at") or run_row.get("finished_at"):
+                    _seed_run_timestamps(
+                        run_id,
+                        started_at=run_row.get("started_at"),
+                        finished_at=run_row.get("finished_at"),
+                    )
         # 语义记忆造数（delta add-memory-confirmation T1）：可选先 reset（清条款表）再写
         # 条款——逐条经既有落库（去重口径同生产：同文本已存在则跳过）后再按 status 走
         # 既有状态机置态，与真实确认/驳回路径同源。库路径调用期读 SESSIONS_DB_PATH。

@@ -794,6 +794,8 @@ export interface OpsJobStatus {
   next_fire_time: string | null
   last_run: OpsRun | null
   history: OpsRun[]
+  /** 「当天计划时刻已过、且当天无任何运行行（含 running）」；服务器时钟权威（add-ops-missed-today-badge）。旧载荷缺失 → 前端回退既有「未跑」态 */
+  missed_today?: boolean
 }
 
 export interface OpsCohortState {

@@ -293,6 +293,39 @@ def insert_job_run(
         conn.close()
 
 
+def clear_job_runs(db_path: str | Path | None = None) -> None:
+    """清空 job_runs 全表（TESTING 造数复位面；E2E 隔离库内使用）。"""
+    init_ops(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute("DELETE FROM job_runs")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_job_run_timestamps(
+    run_id: int,
+    *,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    db_path: str | Path | None = None,
+) -> None:
+    """改写某运行行的 started_at / finished_at（TESTING 造数面：E2E 需要
+    「昨天跑过」「今天 15:41 失败」这类确定性时刻；与单测 _backdate_started_at
+    同一语义，供 /api/test/seed 复用）。"""
+    init_ops(db_path)
+    conn = _connect(db_path)
+    try:
+        if started_at is not None:
+            conn.execute("UPDATE job_runs SET started_at=? WHERE run_id=?", (started_at, run_id))
+        if finished_at is not None:
+            conn.execute("UPDATE job_runs SET finished_at=? WHERE run_id=?", (finished_at, run_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def finish_job_run(
     run_id: int,
     *,

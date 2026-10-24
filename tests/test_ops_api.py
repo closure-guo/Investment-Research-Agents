@@ -1664,3 +1664,75 @@ class TestMissedToday:
     def test_field_present_on_every_row(self, client):
         jobs = client.get(f"{BASE}/jobs").json()["jobs"]
         assert all(isinstance(job["missed_today"], bool) for job in jobs)
+
+
+class TestSeedOpsClockAndRuns:
+    """delta add-ops-missed-today-badge：/api/test/seed ``ops`` 造数块。
+
+    E2E 确定性面：``now`` 冻结 ops 状态时钟（ops_api._now_override）、``runs``
+    造运行行（started_at/finished_at 可回拨）、``ops_runs_reset`` 清 job_runs。
+    ``_now_override`` 是进程级状态——逐用例 try/finally 还原，防泄漏到其它测试。
+
+    seed 端点按导入期 TESTING 注册 → 用 test_api_broker 的 reload 模式出客户端。
+    """
+
+    @pytest.fixture
+    def testing_client(self, monkeypatch):
+        monkeypatch.setenv("TESTING", "1")
+        import importlib
+
+        import finance_agent.api as api_module
+
+        importlib.reload(api_module)
+        try:
+            yield TestClient(api_module.app)
+        finally:
+            monkeypatch.delenv("TESTING", raising=False)
+            importlib.reload(api_module)
+
+    def test_freeze_clock_and_seed_runs(self, testing_client):
+        try:
+            resp = testing_client.post(
+                "/api/test/seed",
+                json={
+                    "ops": {
+                        "now": "2026-10-22T16:10:00",
+                        "runs": [
+                            {
+                                "job_id": "factor_decay_monitor",
+                                "status": "ok",
+                                "started_at": "2026-10-21T16:00:00",
+                                "finished_at": "2026-10-21T16:01:00",
+                            }
+                        ],
+                    }
+                },
+            )
+            assert resp.status_code == 200
+            jobs = testing_client.get(f"{BASE}/jobs").json()["jobs"]
+            job = next(j for j in jobs if j["job_id"] == "factor_decay_monitor")
+            # 冻结时钟 16:10 > 16:00 排程、当天无运行行 → 漏跑态
+            assert job["missed_today"] is True
+            # 造数行经回拨成为「昨天跑过」
+            assert job["last_run"]["started_at"].startswith("2026-10-21")
+        finally:
+            ops_api._now_override = None
+
+    def test_unfreeze_via_null(self, testing_client):
+        ops_api._now_override = datetime(2020, 1, 1, 0, 0, 0)
+        try:
+            resp = testing_client.post("/api/test/seed", json={"ops": {"now": None}})
+            assert resp.status_code == 200
+            assert ops_api._now_override is None
+        finally:
+            ops_api._now_override = None
+
+    def test_runs_reset_clears_history(self, testing_client):
+        run_id = insert_job_run("factor_decay_monitor", "manual", "ok", db_path=_db())
+        try:
+            resp = testing_client.post("/api/test/seed", json={"ops_runs_reset": True})
+            assert resp.status_code == 200
+            assert list_job_runs(db_path=_db()) == []
+        finally:
+            pass
+        _ = run_id  # 造行只为证明清空前非空
