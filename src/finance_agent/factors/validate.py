@@ -7,7 +7,10 @@
   命中 → 原因码 ``STRUCTURAL_DUPLICATE``；
 - **闸 1 可计算性**：全样本面板缺失率 ≤ ``MAX_MISSING_RATE`` → 否则 ``LOW_COVERAGE``；
 - **闸 2 单因子检验**：``|ICIR| ≥ MIN_ABS_ICIR`` 且 ``|IC 均值| > 0``（E3；
-  显著性由闸 3 承担）→ 否则 ``WEAK_ICIR``；
+  显著性由闸 3 承担）→ 否则 ``WEAK_ICIR``；附加**分层单调性**判据
+  （|十分位累计收益 Spearman| ≥ ``MIN_DECILE_MONOTONICITY`` 且与 IC 均值同号
+  → 否则 ``WEAK_MONOTONICITY``，仍记 ``rejected_gate=2``；
+  add-factor-monotonicity-gate）；
 - **闸 3 显著性**：同批次候选置换检验 + BH-FDR（q=``BH_FDR_Q``，``seed`` 可复现）
   → 否则 ``NOT_SIGNIFICANT``；
 - **闸 4 池级增量**：与池内任一因子 ``|IC 相关| > MAX_IC_CORRELATION`` →
@@ -277,9 +280,7 @@ def check_monotonicity(
         spearman = math.nan
     ic_mean = _ic_stats(ic)[0]
     sign_ok = _sign(spearman) != 0 and _sign(spearman) == _sign(ic_mean)
-    passed = (
-        math.isfinite(spearman) and abs(spearman) >= MIN_DECILE_MONOTONICITY and sign_ok
-    )
+    passed = math.isfinite(spearman) and abs(spearman) >= MIN_DECILE_MONOTONICITY and sign_ok
     return GateResult(
         gate=GATE_SINGLE_FACTOR,
         passed=passed,
@@ -900,6 +901,12 @@ def admit_candidates(
                 None, STATUS_REJECTED, (dedup, gate1, gate2), GATE_SINGLE_FACTOR
             )
             continue
+        gate2m = check_monotonicity(values, fwd, ic)
+        if not gate2m.passed:
+            outcomes[position] = AdmissionResult(
+                None, STATUS_REJECTED, (dedup, gate1, gate2, gate2m), GATE_SINGLE_FACTOR
+            )
+            continue
         pending.append(
             _PendingCandidate(
                 position=position,
@@ -911,7 +918,7 @@ def admit_candidates(
                 alignment_score=candidate.get("alignment_score"),
                 values=values,
                 ic=ic,
-                gates=[dedup, gate1, gate2],
+                gates=[dedup, gate1, gate2, gate2m],
             )
         )
 
