@@ -24,6 +24,7 @@ import pytest
 from finance_agent.factors.constraints import (
     BH_FDR_Q,
     DEFAULT_IC_HORIZON,
+    MIN_DECILE_MONOTONICITY,
     MIN_OOS_IR_SAMPLES,
     PERMUTATION_N,
     TRAIN_FRACTION,
@@ -59,6 +60,7 @@ from finance_agent.factors.validate import (
     admit_candidates,
     benjamini_hochberg_adjust,
     check_computability,
+    check_monotonicity,
     check_out_of_sample,
     check_pool_increment,
     check_significance,
@@ -1409,3 +1411,73 @@ def test_pool_cache_reuses_pool_evaluation_across_candidates(tmp_path, monkeypat
         db_path=db,
     )
     assert pool_evals["count"] == 3
+
+
+# ── 闸②附加判据：分层单调性（add-factor-monotonicity-gate） ─────────────────
+
+
+def _mono_frames(
+    per_code_return: list[float],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """构造 values/fwd/ic：40 码、值 = 码序（十分位各 4 码）、次日收益逐码给定。
+
+    ``per_code_return[i]`` = 码 i 的次日收益（前 20 日同型逐日累加放大分位差异；
+    末行 NaN 模拟「最后一日无远期收益」→ 有效日 = 20）；ic 序列取同号常量
+    （本纯函数只消费 ic 的均值符号）。
+    """
+    dates = [(date(2026, 1, 5) + timedelta(days=offset)).isoformat() for offset in range(21)]
+    codes = [f"c{index:03d}" for index in range(len(per_code_return))]
+    values = pd.DataFrame(
+        np.tile(np.arange(len(per_code_return), dtype=float), (21, 1)),
+        index=dates,
+        columns=codes,
+    )
+    returns = np.vstack(
+        [
+            np.tile(np.asarray(per_code_return, dtype=float), (20, 1)),
+            np.full((1, len(per_code_return)), np.nan),
+        ]
+    )
+    fwd = pd.DataFrame(returns, index=dates, columns=codes)
+    ic = pd.Series([0.2, 0.25, 0.15, 0.2, 0.22], name="rank_ic")
+    return values, fwd, ic
+
+
+def test_monotone_factor_passes_monotonicity() -> None:
+    values, fwd, ic = _mono_frames([float(i) for i in range(40)])
+    gate = check_monotonicity(values, fwd, ic)
+    assert gate.gate == 2
+    assert gate.passed is True
+    assert gate.reason is None
+    assert gate.detail["spearman"] >= 0.99
+    assert gate.detail["q10_q1"] > 0
+    assert len(gate.detail["decile_returns"]) == 10
+    assert gate.detail["valid_days"] == 20
+    assert gate.detail["threshold"] == MIN_DECILE_MONOTONICITY
+
+
+def test_mid_inversion_rejected_by_monotonicity() -> None:
+    # 端点方向正确（Q10 > Q1）但中段倒挂 → Spearman 负 → 拒收
+    per_code = [1.0] * 4 + [9.0] * 8 + [2.0] * 12 + [6.0] * 8 + [8.0] * 8
+    values, fwd, ic = _mono_frames(per_code)
+    gate = check_monotonicity(values, fwd, ic)
+    assert gate.passed is False
+    assert gate.reason == "WEAK_MONOTONICITY"
+    assert gate.detail["q10_q1"] > 0  # 端点差方向本身正确——死于 Spearman
+
+
+def test_sign_mismatch_rejected_by_monotonicity() -> None:
+    values, fwd, _ic = _mono_frames([float(i) for i in range(40)])
+    negative_ic = pd.Series([-0.2, -0.25, -0.15, -0.2, -0.22], name="rank_ic")
+    gate = check_monotonicity(values, fwd, negative_ic)
+    assert gate.passed is False
+    assert gate.reason == "WEAK_MONOTONICITY"
+
+
+def test_insufficient_daily_breadth_fails_closed() -> None:
+    values, fwd, ic = _mono_frames([float(i) for i in range(40)])
+    values.iloc[:, 10:] = np.nan  # 每日仅 10 票有效 < MIN_IC_SAMPLES(30) → 零有效日
+    gate = check_monotonicity(values, fwd, ic)
+    assert gate.passed is False
+    assert gate.reason == "WEAK_MONOTONICITY"
+    assert gate.detail["valid_days"] == 0

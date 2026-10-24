@@ -6,6 +6,9 @@
   （NaN 占比，含算子不足窗口的 NaN；按全体 cell 计）；
 - ``MIN_ABS_ICIR``：闸②单因子检验——``|ICIR|`` 下限（ICIR = mean(IC)/std(IC)，
   std=0 → ICIR=0）；
+- ``MIN_DECILE_MONOTONICITY``：闸②附加判据「分层单调性」——十分位累计收益与
+  分位序的 Spearman 秩相关下限，且端点差（Q10−Q1）符号须与 IC 均值一致
+  （add-factor-monotonicity-gate；首月观测期不调，调整须过 metrics.md 口径修订）；
 - ``BH_FDR_Q``：闸③多重检验——Benjamini-Hochberg FDR 目标（``p_adj > q`` 拒收）；
 - ``MAX_IC_CORRELATION``：闸④冗余——候选与池内任一因子 IC 序列 Pearson 相关
   绝对值上限（严格大于即 ``REDUNDANT_WITH_POOL``）；
@@ -50,6 +53,8 @@ from __future__ import annotations
 MAX_MISSING_RATE: float = 0.2
 # 闸②：|ICIR| 下限
 MIN_ABS_ICIR: float = 0.3
+# 闸②附加判据：十分位累计收益与分位序的 Spearman 下限（分层单调性）
+MIN_DECILE_MONOTONICITY: float = 0.6
 # 闸③：Benjamini-Hochberg FDR 目标
 BH_FDR_Q: float = 0.1
 # 闸④：与池内任一因子 IC 序列 |Pearson ρ| 上限

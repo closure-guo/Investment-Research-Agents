@@ -77,6 +77,8 @@ from finance_agent.factors.constraints import (
     MAX_IC_CORRELATION,
     MAX_MISSING_RATE,
     MIN_ABS_ICIR,
+    MIN_DECILE_MONOTONICITY,
+    MIN_IC_SAMPLES,
     MIN_OOS_IR_SAMPLES,
     MIN_REDUNDANCY_SAMPLES,
     PERMUTATION_N,
@@ -121,6 +123,7 @@ class ReasonCode(enum.StrEnum):
 
     LOW_COVERAGE = "LOW_COVERAGE"
     WEAK_ICIR = "WEAK_ICIR"
+    WEAK_MONOTONICITY = "WEAK_MONOTONICITY"
     NOT_SIGNIFICANT = "NOT_SIGNIFICANT"
     REDUNDANT_WITH_POOL = "REDUNDANT_WITH_POOL"
     NO_POOL_INCREMENT = "NO_POOL_INCREMENT"
@@ -226,6 +229,62 @@ def check_single_factor(ic: pd.Series) -> GateResult:
             "icir": icir,
             "n_samples": n_samples,
             "min_abs_icir": MIN_ABS_ICIR,
+        },
+    )
+
+
+def check_monotonicity(
+    factor_values: pd.DataFrame, fwd_returns: pd.DataFrame, ic: pd.Series
+) -> GateResult:
+    """闸②附加判据：分层单调性（add-factor-monotonicity-gate）。
+
+    逐日按因子值截面秩（``rank(method="first")`` → ``qcut`` 10 桶；当日两帧共同
+    有效样本 ≥ ``MIN_IC_SAMPLES`` 的日期才计入——与 ``rank_ic_series`` 同一有效性
+    定义）构建十分位等权组合，各分位远期收益按日算术累加为分位累计收益；判定 =
+    分位序(1..10)与累计收益的 Spearman ≥ ``MIN_DECILE_MONOTONICITY`` **且**端点差
+    （Q10−Q1）符号与 IC 均值一致。任一不可计算（零有效日 / 累计收益常量 →
+    Spearman NaN / 端点差为 0 / IC 均值无向）→ fail closed 拒收
+    （``WEAK_MONOTONICITY``）。秩并列按列序破平（面板构造确定 → 逐位可复现）。
+    """
+    decile_returns = [0.0] * 10
+    valid_days = 0
+    common = factor_values.index.intersection(fwd_returns.index).sort_values()
+    for trade_date in common:
+        factor_row = factor_values.loc[trade_date]
+        return_row = fwd_returns.loc[trade_date]
+        mask = factor_row.notna() & return_row.notna()
+        if int(mask.sum()) < MIN_IC_SAMPLES:
+            continue
+        ranks = factor_row[mask].rank(method="first")
+        buckets = pd.qcut(ranks, 10, labels=False)
+        aligned = return_row[mask]
+        for bucket in range(10):
+            selector = buckets == bucket
+            if bool(selector.any()):
+                decile_returns[bucket] += float(aligned[selector].mean())
+        valid_days += 1
+    q10_q1 = decile_returns[-1] - decile_returns[0]
+    if valid_days > 0 and len(set(decile_returns)) > 1:
+        # Spearman = 双方取秩后的 Pearson（pandas spearman 委托 scipy，本仓无该依赖；
+        # 分位序 1..10 无并列 → 秩即自身，只需对累计收益取秩）
+        spearman = float(
+            pd.Series(range(1, 11), dtype=float).corr(pd.Series(decile_returns).rank())
+        )
+    else:
+        spearman = math.nan
+    ic_mean = _ic_stats(ic)[0]
+    sign_ok = _sign(q10_q1) != 0 and _sign(q10_q1) == _sign(ic_mean)
+    passed = math.isfinite(spearman) and spearman >= MIN_DECILE_MONOTONICITY and sign_ok
+    return GateResult(
+        gate=GATE_SINGLE_FACTOR,
+        passed=passed,
+        reason=None if passed else ReasonCode.WEAK_MONOTONICITY,
+        detail={
+            "spearman": spearman,
+            "q10_q1": q10_q1,
+            "decile_returns": decile_returns,
+            "valid_days": valid_days,
+            "threshold": MIN_DECILE_MONOTONICITY,
         },
     )
 
