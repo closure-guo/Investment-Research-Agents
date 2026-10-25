@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import (
@@ -3899,6 +3899,66 @@ async def trigger_report_analysis(doc_key: str, dry_run: bool = False) -> Any:
         dry_run=dry_run,
         enqueue=None if dry_run else _enqueue_pool_analysis,
     )
+
+
+@app.get("/api/research/reports/documents")
+async def list_research_documents(limit: int = 20) -> Any:
+    """投喂文档列表（add-research-report-ingest）：入库时间倒序，不含正文与页偏移。"""
+    capped = max(1, min(int(limit), 100))
+
+    def _load() -> dict:
+        from finance_agent.data.research_reports_store import list_documents
+
+        return {"documents": list_documents(limit=capped)}
+
+    return await asyncio.to_thread(_load)
+
+
+@app.post("/api/research/reports/ingest")
+async def ingest_research_report_api(
+    file: UploadFile = File(...),  # noqa: B008 -- FastAPI multipart 标准形态
+    org: str = Form(""),
+    publish_date: str = Form(""),
+    title: str = Form(""),
+    extract: bool = Form(True),
+) -> Any:
+    """研报直投入库（add-research-report-ingest）：multipart 上传，同步返回回执。
+
+    共享服务 `ingest_research_document` 承担哈希幂等/解析降级/跨源关联/抽取；
+    本端点只做类型与大小校验、线程池执行与错误归一。抽取（LLM）默认开启，
+    `extract=false` 供快速路径跳过。
+    """
+    data = await file.read()
+    if len(data) > 30 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="文件超过 30MB 上限")
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".pdf", ".txt", ".md"}:
+        raise HTTPException(status_code=400, detail="仅支持 pdf/txt/md 文件")
+    overrides = {
+        key: value
+        for key, value in {"org": org, "publish_date": publish_date, "title": title}.items()
+        if value
+    }
+
+    def _run() -> dict:
+        from finance_agent.data.research_reports import ingest_research_document
+
+        return ingest_research_document(
+            file.filename or "untitled",
+            data,
+            overrides=overrides,
+            extract=extract,
+        )
+
+    try:
+        receipt = await asyncio.to_thread(_run)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500, detail=f"入库失败: {type(exc).__name__}: {exc}"
+        ) from exc
+    return receipt
 
 
 @app.post("/api/screening/analyze")

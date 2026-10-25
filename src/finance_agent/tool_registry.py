@@ -27,6 +27,7 @@ TOOL_SET_FACTOR_RESEARCH_RUNNING = "set_factor_research_running"
 TOOL_RUN_OPS_JOB = "run_ops_job"
 TOOL_REVIEW_MEMORY_CLAUSE = "review_memory_clause"
 TOOL_START_POOL_ANALYSIS = "start_pool_analysis"
+TOOL_INGEST_RESEARCH_REPORT = "ingest_research_report"
 
 # 读写分类：写 = 产生会话/管线/订单/批次/控制文件等副作用。
 READ_TOOLS = frozenset(
@@ -51,6 +52,7 @@ WRITE_TOOLS = frozenset(
         TOOL_RUN_OPS_JOB,
         TOOL_REVIEW_MEMORY_CLAUSE,
         TOOL_START_POOL_ANALYSIS,
+        TOOL_INGEST_RESEARCH_REPORT,
     }
 )
 
@@ -73,5 +75,6 @@ QUICK_OPERATOR_TOOLS = frozenset(
         TOOL_RUN_OPS_JOB,
         TOOL_REVIEW_MEMORY_CLAUSE,
         TOOL_START_POOL_ANALYSIS,
+        TOOL_INGEST_RESEARCH_REPORT,
     }
 )

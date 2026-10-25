@@ -7,9 +7,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
@@ -18,6 +21,20 @@ from fastapi.responses import JSONResponse
 from finance_agent.operator.confirmation import consume_confirmation, issue_confirmation
 
 _logger = logging.getLogger("finance_agent.operator.writes")
+
+
+def _ingest_document(
+    *,
+    filename: str,
+    data: bytes,
+    overrides: dict | None = None,
+    extract: bool = True,
+) -> dict:
+    """共享直投入库服务间接层（add-research-report-ingest；测试打桩点）。"""
+    from finance_agent.data.research_reports import ingest_research_document
+
+    return ingest_research_document(filename, data, overrides=overrides, extract=extract)
+
 
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
 _PREVIEW_INSTRUCTION = (
@@ -328,9 +345,96 @@ def make_write_tools(
             },
         )
 
+    async def ingest_research_report(
+        text: str,
+        title: str = "",
+        org: str = "",
+        publish_date: str = "",
+        filename: str = "",
+        confirm: bool = False,
+        token: str = "",
+    ) -> str:
+        """把一段研报正文直投入库（写操作，需两步确认）。
+
+        文本经共享入库服务写入研报库：内容哈希幂等（重复投喂回执 skipped），
+        同时落盘一份到投喂目录。不接受 URL 参数（不做网络抓取）。
+
+        Args:
+            text: 研报正文（必填非空）
+            title/org/publish_date: 可选元数据，显式提供时优先于文件名推断
+            filename: 可选文件名（影响元数据推断），缺省按时间戳生成
+            confirm: 是否已获得用户确认（首次调用必须为 false）
+            token: 首次预览返回的令牌（可省略，服务端按会话与参数匹配）
+        """
+        action = "ingest_research_report"
+        clean_text = str(text or "")
+        if not clean_text.strip():
+            return _failure(action, {}, "empty_text: 请提供研报正文内容（不接受空文本）")
+        digest = hashlib.sha1(clean_text.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+        meta = {
+            key: value
+            for key, value in {
+                "title": title,
+                "org": org,
+                "publish_date": publish_date,
+                "filename": filename,
+            }.items()
+            if value
+        }
+        params: dict[str, Any] = {"text_sha1": digest, "text_chars": len(clean_text), **meta}
+        summary = (
+            f"将把一段 {len(clean_text)} 字的研报正文入库；"
+            "内容哈希幂等（重复投喂返回 skipped），全文仅个人研究自用。"
+        )
+        if not confirm:
+            return _preview(action, params, summary)
+        ok, reason = _confirmed(action, params, token)
+        if not ok:
+            return _failure(action, params, reason)
+        fname = str(filename or "").strip() or (
+            f"对话投喂_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        )
+        if not Path(fname).suffix:
+            fname += ".txt"
+        overrides = {
+            key: value
+            for key, value in {
+                "title": title,
+                "org": org,
+                "publish_date": publish_date,
+            }.items()
+            if value
+        }
+        try:
+            receipt = await asyncio.to_thread(
+                _ingest_document,
+                filename=fname,
+                data=clean_text.encode("utf-8"),
+                overrides=overrides,
+                extract=True,
+            )
+        except ValueError as exc:
+            return _failure(action, params, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return _failure(action, params, f"{type(exc).__name__}: {exc}")
+        payload: dict[str, Any] = {
+            "status": receipt.get("status"),
+            "doc_key": receipt.get("doc_key"),
+            "char_count": receipt.get("char_count"),
+        }
+        if receipt.get("status") == "ingested":
+            payload["report_key"] = receipt.get("report_key")
+            payload["depth_class"] = receipt.get("depth_class")
+            if receipt.get("parse_error"):
+                payload["parse_error"] = receipt["parse_error"]
+            if receipt.get("extraction_error"):
+                payload["extraction_error"] = receipt["extraction_error"]
+        return _success(action, params, payload)
+
     return {
         "set_factor_research_running": set_factor_research_running,
         "run_ops_job": run_ops_job,
         "review_memory_clause": review_memory_clause,
         "start_pool_analysis": start_pool_analysis,
+        "ingest_research_report": ingest_research_report,
     }

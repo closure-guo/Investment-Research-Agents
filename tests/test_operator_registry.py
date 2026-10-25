@@ -4,6 +4,7 @@ from finance_agent.tool_registry import (
     AGENT_TOOL_NAMES,
     QUICK_OPERATOR_TOOLS,
     READ_TOOLS,
+    TOOL_INGEST_RESEARCH_REPORT,
     TOOL_REVIEW_MEMORY_CLAUSE,
     TOOL_RUN_OPS_JOB,
     TOOL_SEARCH_STOCK,
@@ -29,6 +30,7 @@ def test_quick_operator_tools_are_single_sourced():
         TOOL_RUN_OPS_JOB,
         TOOL_REVIEW_MEMORY_CLAUSE,
         TOOL_START_POOL_ANALYSIS,
+        TOOL_INGEST_RESEARCH_REPORT,
     }
     assert frozenset(expected) == QUICK_OPERATOR_TOOLS
     assert QUICK_OPERATOR_TOOLS <= AGENT_TOOL_NAMES
@@ -45,3 +47,4 @@ def test_read_and_write_sets_are_disjoint():
     assert TOOL_RUN_OPS_JOB in WRITE_TOOLS
     assert TOOL_REVIEW_MEMORY_CLAUSE in WRITE_TOOLS
     assert TOOL_START_POOL_ANALYSIS in WRITE_TOOLS
+    assert TOOL_INGEST_RESEARCH_REPORT in WRITE_TOOLS

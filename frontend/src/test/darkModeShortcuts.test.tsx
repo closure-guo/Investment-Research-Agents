@@ -105,6 +105,7 @@ describe('命令面板（polish-dark-mode-shortcuts）', () => {
         onOpenFactors={onOpenFactors}
         onOpenFactorResearch={onOpenFactorResearch}
         onOpenBroker={onOpenBroker}
+        onOpenResearch={() => {}}
         onOpenOps={onOpenOps}
         onCycleTheme={onCycleTheme}
         themeChoice={(over.themeChoice as never) ?? 'light'}

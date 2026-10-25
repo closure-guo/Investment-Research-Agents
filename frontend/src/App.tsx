@@ -19,6 +19,7 @@ import { usePathname, navigate } from './route'
 import { DownloadCenter } from './pages/downloads/DownloadCenter'
 import { ScreeningPage } from './pages/screening/ScreeningPage'
 import { MemoryPage } from './pages/memory/MemoryPage'
+import { ResearchIngestPage } from './pages/research/ResearchIngestPage'
 import { FactorLibraryPage } from './pages/factors/FactorLibraryPage'
 import { FactorResearchPage } from './pages/factors/FactorResearchPage'
 import { BrokerConsolePage } from './pages/broker/BrokerConsolePage'
@@ -918,6 +919,7 @@ export default function App() {
         onOpenFactorResearch={() => navigate('/factor-research')}
         onOpenBroker={() => navigate('/broker')}
         onOpenOps={() => navigate('/ops')}
+        onOpenResearch={() => navigate('/research')}
         onOpenSettings={() => { setSettingsFocus(undefined); navigate('/settings') }}
         themeChoice={themeChoice}
         onCycleTheme={cycleTheme}
@@ -946,6 +948,9 @@ export default function App() {
         ) : pathname === '/memory' ? (
           // 记忆确认页（add-memory-confirmation T2）：语义记忆条款审批队列
           <MemoryPage onBack={() => navigate('/')} />
+        ) : pathname === '/research' ? (
+          // 研报投喂页（add-research-report-ingest）：直投入库 + 最近文档（不含正文）
+          <ResearchIngestPage onBack={() => navigate('/')} />
         ) : pathname === '/factors' ? (
           // 因子库页（delta add-factor-library-page T2）：资产目录（筛选 + 行展开，只读）
           <FactorLibraryPage onBack={() => navigate('/')} />
@@ -1169,6 +1174,7 @@ export default function App() {
         onOpenFactorResearch={() => navigate('/factor-research')}
         onOpenBroker={() => navigate('/broker')}
         onOpenOps={() => navigate('/ops')}
+        onOpenResearch={() => navigate('/research')}
         onCycleTheme={cycleTheme}
         themeChoice={themeChoice}
       />
@@ -1185,7 +1191,7 @@ export default function App() {
 }
 
 // ── Sidebar（add-collapsible-sidebar：shadcn Sidebar 原语重构）──
-function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenMemory, onOpenFactors, onOpenFactorResearch, onOpenBroker, onOpenOps, onOpenSettings, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
+function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, onNew, onOpenDownloads, onOpenDecisions, onOpenScreening, onOpenMemory, onOpenFactors, onOpenFactorResearch, onOpenBroker, onOpenOps, onOpenSettings, onOpenResearch, runningSessionIds, loading = false, themeChoice, onCycleTheme }: {
   sessions: SessionMeta[]
   currentSessionId: string | null
   onSelect: (id: string) => void
@@ -1200,6 +1206,7 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
   onOpenFactorResearch: () => void
   onOpenBroker: () => void
   onOpenOps: () => void
+  onOpenResearch: () => void
   onOpenSettings: () => void
   runningSessionIds: Set<string>
   loading?: boolean
@@ -1277,6 +1284,11 @@ function AppSidebar({ sessions, currentSessionId, onSelect, onDelete, onRename, 
           <SidebarIcon label="日批运维">
             <Button variant="ghost" size="icon" onClick={onOpenOps} aria-label="日批运维" data-testid="sidebar-ops-collapsed">
               <i className="fas fa-list-check text-xs"></i>
+            </Button>
+          </SidebarIcon>
+          <SidebarIcon label="研报">
+            <Button variant="ghost" size="icon" onClick={onOpenResearch} aria-label="研报" data-testid="sidebar-research-collapsed">
+              <i className="fas fa-file-lines text-xs"></i>
             </Button>
           </SidebarIcon>
           <SidebarIcon label="决策战绩">

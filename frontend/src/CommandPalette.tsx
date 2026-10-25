@@ -23,12 +23,14 @@ export interface CommandPaletteProps {
   onOpenBroker: () => void
   /** 日批运维页入口（delta add-daily-ops-page：与侧边栏折叠图标同源 navigate） */
   onOpenOps: () => void
+  /** 研报投喂页入口（add-research-report-ingest：与侧边栏折叠图标同源 navigate） */
+  onOpenResearch: () => void
   onCycleTheme: () => void
   /** 当前主题（面板内展示动作副作用说明） */
   themeChoice: ThemeChoice
 }
 
-export function CommandPalette({ open, onClose, sessions, onSelectSession, onNewSession, onOpenDownloads, onOpenMemory, onOpenFactors, onOpenFactorResearch, onOpenBroker, onOpenOps, onCycleTheme, themeChoice }: CommandPaletteProps) {
+export function CommandPalette({ open, onClose, sessions, onSelectSession, onNewSession, onOpenDownloads, onOpenMemory, onOpenFactors, onOpenFactorResearch, onOpenBroker, onOpenOps, onOpenResearch, onCycleTheme, themeChoice }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -60,8 +62,10 @@ export function CommandPalette({ open, onClose, sessions, onSelectSession, onNew
     { id: 'action-broker', icon: 'fa-book-open', label: '打开执行台账', hint: '', run: onOpenBroker },
     // add-daily-ops-page：日批运维页入口（与侧边栏折叠图标同源 navigate）
     { id: 'action-ops', icon: 'fa-list-check', label: '打开日批运维', hint: '', run: onOpenOps },
+    // add-research-report-ingest：研报投喂页入口（与侧边栏折叠图标同源 navigate）
+    { id: 'action-research', icon: 'fa-file-lines', label: '打开研报投喂', hint: '', run: onOpenResearch },
     { id: 'action-theme', icon: 'fa-moon', label: `切换主题（当前：${themeChoice === 'system' ? '跟随系统' : themeChoice === 'dark' ? '深色' : '浅色'}）`, hint: '', run: onCycleTheme },
-  ]), [onNewSession, onOpenDownloads, onOpenMemory, onOpenFactors, onOpenFactorResearch, onOpenBroker, onOpenOps, onCycleTheme, themeChoice])
+  ]), [onNewSession, onOpenDownloads, onOpenMemory, onOpenFactors, onOpenFactorResearch, onOpenBroker, onOpenOps, onOpenResearch, onCycleTheme, themeChoice])
 
   const q = query.trim().toLowerCase()
   const matchedSessions = q
