@@ -38,3 +38,20 @@
 - [ ] /research 页上传一份真实 PDF：回执含字数/深度分级，列表出现该文档
 - [ ] 快速模式粘贴一段研报正文说「把这份研报入库」：预览 → 回复「确认执行」→ 回执 ingested；再发同样内容 → 回执 skipped
 - [ ] 把任意 PDF 放进 `data/research_report_inbox` 等日批：确认与直投不产生重复行（哈希幂等）
+
+## 浏览器人工端到端（2026-10-25 20:10–20:30，真实 LLM）
+
+隔离栈（worktree 后端 8008 / 前端 5181，独立 DB + 独立投喂目录，真实 deepseek-v4.1-flash，生产栈未触碰）：
+
+| 场景 | 结果 |
+|---|---|
+| ① /research 页上传（DataTransfer 注入 .txt，等价 setInputFiles） | ✅ 回执「入库成功 doc_key e75130e9… 244 字 comment」，列表刷新含「贵州茅台三季报点评/国信证券/2026-10-24」；截图视觉核验通过（暗色/布局/三态齐全） |
+| ② 快速模式对话投喂（粘贴正文「把这份研报入库」） | ✅ 预览诚实（68 字/标题/「机构与发布日期：你未提供，暂缺」/去重说明）→ 回复确认词 → 回执 ingested doc_key 3acf4a7e… |
+| ③ 同内容再次投喂 | ✅ 回执 skipped（doc_key 与首次一致，模型如实解释内容哈希去重） |
+| ④ 直投 ↔ 目录扫描幂等互斥 | ✅ 直投 PDF → 扫描 skipped=1 → 再直投 skipped（txt 不在扫描范围，天然互斥） |
+
+要点与观察：
+
+- **跨轮确认按设计生效**：新 agent run 的 chat_history 不回放工具调用，模型不记得上轮已发预览；服务端按 session+action+params（含 text_sha1）匹配预览，confirm=true 直接通过——单测 `test_confirmation_survives_new_agent_run` 的真实 LLM 版复现。
+- 真实 LLM 抽取落库正常（broker/日期/类型），但对短合成文本 `stocks=null`——既有抽取面质量观察项，与本变更无关，登记为候选 issue。
+- 空投喂目录首启显示「暂无投喂文档」空态正确；测试后临时栈已清理（8008/5181 已释放），生产 5173 全程未受影响。
