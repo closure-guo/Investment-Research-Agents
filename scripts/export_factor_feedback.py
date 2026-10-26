@@ -49,7 +49,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"wrote {args.out}: explored={payload['total_explored']} returned={payload['returned']} "
         f"admitted={counts.get('admitted', 0)} rejected={counts.get('rejected', 0)} "
-        f"untranslatable={counts.get('untranslatable', 0)}"
+        f"untranslatable={counts.get('untranslatable', 0)} "
+        f"contract={'yes' if payload.get('contract') else 'no'}"
     )
     return 0
 
