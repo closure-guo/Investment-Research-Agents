@@ -76,6 +76,93 @@ def test_build_payload_dedupes_by_canonical_and_orders_admitted_first() -> None:
     assert unt["reason"].startswith("untranslatable:translator")
 
 
+def test_build_payload_reserves_untranslatable_quota() -> None:
+    """untranslatable 必须有保底配额且排在 rejected 之前（否则被 limit+渲染预算结构性饿死）。"""
+    processed: dict[str, dict] = {}
+    for i in range(200):
+        processed[f"rej{i}"] = {
+            "status": "rejected",
+            "expression": f"sub(div(close,ref(close,{i + 2})),1)",
+            "gate": 2,
+            "reason": "WEAK_ICIR",
+            "at": "2026-10-21T16:00:00+08:00",
+        }
+    for i in range(50):
+        processed[f"unt{i}"] = {
+            "status": "untranslatable",
+            "stage": "llm",
+            "detail": "缺少按日期的横截面算子：无法计算等权市场收益与最终 cs_zscore " + "x" * 100,
+            "at": f"2026-10-2{5 - (i // 25)}T16:0{i % 10}:00+08:00",
+        }
+    payload = build_payload(processed, {}, limit=80)
+
+    statuses = [e["status"] for e in payload["explored"]]
+    assert payload["returned"] == 80
+    assert statuses.count("untranslatable") == 20  # 默认配额
+    assert statuses.count("rejected") == 60
+    # 配额条目紧随 admitted 之后、rejected 之前（渲染器单遍截断，位置决定可见性）
+    first_rejected = statuses.index("rejected")
+    assert statuses[first_rejected - 20 : first_rejected] == ["untranslatable"] * 20
+    # 紧凑化：desc 与 reason 收紧，让配额能挤进 9000 字符渲染预算
+    for entry in payload["explored"]:
+        if entry["status"] != "untranslatable":
+            continue
+        assert entry["expression"] is None
+        assert len(entry["desc"]) <= 60
+        assert entry["reason"].startswith("untranslatable:llm")
+        assert len(entry["reason"]) <= len("untranslatable:llm（）") + 40
+
+
+def test_build_payload_untranslatable_quota_spills_back_to_rejected() -> None:
+    """untranslatable 不足配额时，空出的槽位归还 rejected（不缩水 payload）。"""
+    processed = {
+        f"rej{i}": {
+            "status": "rejected",
+            "expression": f"sub(div(close,ref(close,{i + 2})),1)",
+            "gate": 2,
+            "reason": "WEAK_ICIR",
+            "at": "2026-10-21T16:00:00+08:00",
+        }
+        for i in range(10)
+    }
+    processed["unt0"] = {
+        "status": "untranslatable",
+        "stage": "translator",
+        "detail": "复杂度超限",
+        "at": "2026-10-21T09:00:00+08:00",
+    }
+    payload = build_payload(processed, {}, limit=5)
+    statuses = [e["status"] for e in payload["explored"]]
+    assert statuses == ["untranslatable", "rejected", "rejected", "rejected", "rejected"]
+
+
+def test_build_payload_untranslatable_quota_spans_multiple_days() -> None:
+    """单一收割批次不得垄断配额：按日轮转选取，早期批次的机制族仍须可见。"""
+    processed: dict[str, dict] = {}
+    for i in range(40):
+        processed[f"new{i}"] = {
+            "status": "untranslatable",
+            "stage": "llm",
+            "detail": "缺少横截面算子",
+            "at": f"2026-10-25T16:{i:02d}:00+08:00",
+        }
+    processed["old_resid_rev"] = {
+        "status": "untranslatable",
+        "stage": "llm",
+        "detail": "缺少横截面 OLS 与 PCA",
+        "at": "2026-10-21T09:00:00+08:00",
+    }
+    payload = build_payload(processed, {}, limit=10, untranslatable_quota=6)
+    names = [e["name"] for e in payload["explored"]]
+    assert payload["returned"] == 6
+    assert "old_resid_rev" in names  # 旧批次仍进入配额
+    assert names.count("old_resid_rev") == 1
+    # 选取后仍按时间倒序呈现
+    assert [e["at"] for e in payload["explored"]] == sorted(
+        (e["at"] for e in payload["explored"]), reverse=True
+    )
+
+
 def test_build_payload_limit_truncates() -> None:
     processed = {
         f"f{i}": {
