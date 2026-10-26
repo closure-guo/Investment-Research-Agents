@@ -446,6 +446,165 @@ def _document_key(data: bytes) -> str:
     return hashlib.sha1(data, usedforsecurity=False).hexdigest()
 
 
+_INGEST_SUFFIXES = {".pdf", ".txt", ".md"}
+
+
+def ingest_research_document(
+    filename: str,
+    data: bytes,
+    *,
+    db_path: str | None = None,
+    extract: bool = True,
+    overrides: dict | None = None,
+    inbox_dir: str | Path | None = None,
+    file_path: str | None = None,
+) -> dict:
+    """单文档直投入库（add-research-report-ingest）：与目录扫描共享同一套语义。
+
+    按内容 sha1 幂等（重复返回 ``skipped``，不动首次入库时间）；``.pdf`` 走
+    ``extract_pdf_text``（解析失败仍入库、正文空、``parse_error`` 披露，与
+    ``ingest_inbox`` 降级语义一致），``.txt``/``.md`` 按 UTF-8 优先、GBK 兜底解码。
+    ``file_path`` 显式给出时使用原路径（目录扫描路径），否则落盘到投喂目录
+    （命名冲突追加短哈希后缀）。``overrides`` 的 org/publish_date/title 显式值
+    优先于文件名推断。``extract=True`` 且正文非空时同步做 LLM 结构化抽取并
+    回链 ``report_key``，抽取失败只写 ``extraction_error`` 不阻断。
+
+    Returns:
+        结构化回执：status(ingested|skipped)/doc_key/filename/char_count/
+        page_count/org/publish_date/report_key/depth_class/parse_error/extraction_error。
+    """
+    name = Path(str(filename or "")).name or "untitled"
+    suffix = Path(name).suffix.lower()
+    if suffix not in _INGEST_SUFFIXES:
+        raise ValueError(f"不支持的文件类型 {suffix!r}：仅支持 pdf/txt/md")
+    key = _document_key(data)
+    if store.document_exists(key, db_path=db_path):
+        return {
+            "status": "skipped",
+            "doc_key": key,
+            "filename": name,
+            "char_count": 0,
+            "page_count": 0,
+            "org": None,
+            "publish_date": None,
+            "report_key": None,
+            "depth_class": None,
+            "parse_error": None,
+            "extraction_error": None,
+        }
+
+    if file_path is None:
+        target_dir = Path(
+            inbox_dir
+            if inbox_dir is not None
+            else os.getenv("RESEARCH_REPORT_INBOX_DIR", INBOX_DIR_DEFAULT)
+        )
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / name
+        if target.exists():
+            target = target_dir / f"{target.stem}_{key[:8]}{target.suffix}"
+        target.write_bytes(data)
+        file_path = str(target.resolve())
+
+    text, pages, offsets = "", 0, None
+    parse_error: str | None = None
+    if suffix == ".pdf":
+        try:
+            parsed = extract_pdf_text(file_path)
+            if len(parsed) == 2:  # 兼容旧自定义解析器/monkeypatch
+                text, pages = parsed
+            else:
+                text, pages, offsets = parsed
+        except Exception as exc:  # 无文本层/加密/损坏：文档仍入库，偏移为 null
+            parse_error = f"parse_failed: {exc}"
+            logger.warning("直投解析降级 %s: %s", name, exc)
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            try:
+                text = data.decode("gbk")
+            except UnicodeDecodeError:
+                raise ValueError(f"文本解码失败（utf-8/gbk 均失败）: {exc}") from exc
+        pages = 1
+
+    overrides = overrides or {}
+    stem = Path(name).stem
+    org, publish_date = infer_metadata_from_filename(stem)
+    org = str(overrides.get("org") or "").strip() or org
+    publish_date = str(overrides.get("publish_date") or "").strip() or publish_date
+    title = str(overrides.get("title") or "").strip() or clean_doc_title(stem, org)
+    depth = classify_depth(title)
+    report_key = match_report_key(org, publish_date, title, db_path=db_path)
+    created = store.upsert_document(
+        {
+            "doc_key": key,
+            "filename": name,
+            "file_path": file_path,
+            "title": title,
+            "org": org,
+            "publish_date": publish_date,
+            "page_count": pages,
+            "char_count": len(text),
+            "text": text,
+            "page_offsets": offsets,
+            "report_key": report_key,
+            "depth_class": depth,
+            "usage_policy": "personal_research",
+            "source_type": "manual_feed",
+        },
+        db_path=db_path,
+    )
+    if not created:  # 并发竞态兜底：另一路已入库，等价幂等 skipped
+        return {
+            "status": "skipped",
+            "doc_key": key,
+            "filename": name,
+            "char_count": 0,
+            "page_count": 0,
+            "org": None,
+            "publish_date": None,
+            "report_key": None,
+            "depth_class": None,
+            "parse_error": None,
+            "extraction_error": None,
+        }
+
+    extraction_error: str | None = None
+    if extract and text:
+        try:
+            extraction = extract_document(key, db_path=db_path)
+            broker = extraction.get("broker") or org
+            date_value = extraction.get("report_date") or publish_date
+            linked = match_report_key(broker, date_value, title, db_path=db_path)
+            if linked:
+                report_key = linked
+                store.update_document_metadata(
+                    key,
+                    page_offsets=offsets,
+                    report_key=linked,
+                    depth_class=depth,
+                    db_path=db_path,
+                )
+        except Exception as exc:  # 抽取失败不影响入库
+            extraction_error = f"{type(exc).__name__}: {exc}"
+            logger.error("直投抽取失败 %s: %s", name, exc)
+
+    return {
+        "status": "ingested",
+        "doc_key": key,
+        "filename": name,
+        "char_count": len(text),
+        "page_count": pages,
+        "org": org,
+        "publish_date": publish_date,
+        "report_key": report_key,
+        "depth_class": depth,
+        "parse_error": parse_error,
+        "extraction_error": extraction_error,
+    }
+
+
 def ingest_inbox(
     inbox_dir: str | Path | None = None,
     *,
@@ -505,57 +664,19 @@ def ingest_inbox(
             scanned += 1
             try:
                 data = path.read_bytes()
-                key = _document_key(data)
-                if store.document_exists(key, db_path=db_path):
-                    skipped += 1
-                    continue
-                try:
-                    text, pages, offsets = _parse_pdf(path)
-                except Exception as exc:  # 无文本层/加密/损坏：文档仍入库，偏移为 null
-                    text, pages, offsets = "", 0, None
-                    logger.warning("投喂解析降级 %s: %s", path.name, exc)
-                    errors.append(f"{path.name}: parse_failed: {exc}")
-                org, publish_date = infer_metadata_from_filename(path.stem)
-                title = clean_doc_title(path.stem, org)
-                depth = classify_depth(title)
-                created = store.upsert_document(
-                    {
-                        "doc_key": key,
-                        "filename": path.name,
-                        "file_path": str(path.resolve()),
-                        "title": path.stem,
-                        "org": org,
-                        "publish_date": publish_date,
-                        "page_count": pages,
-                        "char_count": len(text),
-                        "text": text,
-                        "page_offsets": offsets,
-                        "report_key": match_report_key(org, publish_date, title, db_path=db_path),
-                        "depth_class": depth,
-                        "usage_policy": "personal_research",
-                        "source_type": "manual_feed",
-                    },
+                receipt = ingest_research_document(
+                    path.name,
+                    data,
                     db_path=db_path,
+                    extract=extract,
+                    file_path=str(path.resolve()),
                 )
-                if created:
+                if receipt["status"] == "ingested":
                     ingested += 1
-                    if extract and text:
-                        try:
-                            extraction = extract_document(key, db_path=db_path)
-                            broker = extraction.get("broker") or org
-                            date_value = extraction.get("report_date") or publish_date
-                            linked = match_report_key(broker, date_value, title, db_path=db_path)
-                            if linked:
-                                store.update_document_metadata(
-                                    key,
-                                    page_offsets=offsets,
-                                    report_key=linked,
-                                    depth_class=depth,
-                                    db_path=db_path,
-                                )
-                        except Exception as exc:  # 抽取失败不影响入库
-                            logger.error("投喂抽取失败 %s: %s", path.name, exc)
-                            errors.append(f"{path.name} 抽取: {exc}")
+                    if receipt["parse_error"]:
+                        errors.append(f"{path.name}: {receipt['parse_error']}")
+                    if receipt["extraction_error"]:
+                        errors.append(f"{path.name} 抽取: {receipt['extraction_error']}")
                 else:
                     skipped += 1
             except Exception as exc:

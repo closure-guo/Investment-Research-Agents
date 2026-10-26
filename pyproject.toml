@@ -23,6 +23,7 @@ dependencies = [
     "weasyprint>=62.0",
     "ag-ui-protocol==0.1.21",
     "pypdf>=5.0",
+    "python-multipart>=0.0.32",
 ]
 
 [tool.uv]
