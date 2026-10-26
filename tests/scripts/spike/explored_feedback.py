@@ -8,6 +8,9 @@
 
 契约：文件缺失/损坏/字段异常 → 返回空串（fail-safe，绝不阻断生成）；
 渲染结果超过 MAX_CHARS → 截断并标注；不修改任何全局状态。
+feed-dsl-contract-to-factor-generator：载荷含 `contract` 块（复杂度上限/算子与
+字段白名单/表达规则）与 `gate_rejections` 时，先渲染契约段再渲染已探索清单
+（数据驱动，约束文本不硬编码在本端）；契约缺失 → 仅渲染已探索清单（旧行为）。
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 DEFAULT_PATH = "/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/explored_factors.json"
 MAX_CHARS = 9000
@@ -40,34 +44,81 @@ def _format_item(item: dict) -> str:
     return line
 
 
+def _render_contract(contract: dict, gate_rejections: dict | None) -> list[str]:
+    """契约段（数据驱动：全部取自载荷，不硬编码约束）。字段异常 → 跳过该行（fail-safe）。"""
+    lines = [
+        "# Hard contract for factor expressions (downstream DSL)",
+        "Proposals violating any rule below are rejected BEFORE evaluation:",
+    ]
+    rules = contract.get("rules")
+    if isinstance(rules, list):
+        for rule in rules:
+            if isinstance(rule, str) and rule.strip():
+                lines.append(f"- {rule.strip()}")
+    complexity = contract.get("complexity")
+    if isinstance(complexity, dict) and complexity:
+        parts = [f"{k} <= {v}" for k, v in sorted(complexity.items())]
+        lines.append(f"- Complexity limits: {', '.join(parts)}.")
+    operators = contract.get("operators")
+    if isinstance(operators, list) and operators:
+        lines.append(
+            f"- Expressible operators (Qlib form): {', '.join(str(o) for o in operators)}."
+        )
+    fields = contract.get("fields")
+    if isinstance(fields, list) and fields:
+        lines.append(f"- Expressible fields: {', '.join(str(f) for f in fields)}.")
+    if isinstance(gate_rejections, dict) and gate_rejections:
+        pairs = ", ".join(f"gate{k}={v}" for k, v in sorted(gate_rejections.items()))
+        lines.append(f"- Historical gate rejections to date: {pairs} (advisory).")
+    return lines
+
+
 def render_explored_block(path: str | None = None) -> str:
     resolved = Path(path or os.environ.get("FACTOR_FEEDBACK_PATH", DEFAULT_PATH))
     try:
-        payload = json.loads(resolved.read_text(encoding="utf-8"))
+        payload: Any = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return ""
-    items = payload.get("explored") if isinstance(payload, dict) else None
-    if not isinstance(items, list) or not items:
+    if not isinstance(payload, dict):
+        return ""
+    items = payload.get("explored")
+    contract = payload.get("contract")
+    gate_rejections = payload.get("gate_rejections")
+    has_contract = isinstance(contract, dict)
+    has_items = isinstance(items, list) and bool(items)
+    if not has_contract and not has_items:
         return ""
 
-    lines = [
-        "=========================================================",
-        "# Cross-session memory: already explored factors",
-        "The factors below were already proposed and evaluated by the downstream 5-gate library.",
-        "Do NOT propose the same hypotheses or trivial variants (renamed windows, epsilon guards, "
-        "rescalings). Prefer genuinely different mechanisms and data transformations.",
-        "",
-    ]
-    used = sum(len(line) + 1 for line in lines)
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        line = _format_item(item)
-        if used + len(line) + 1 > MAX_CHARS:
-            lines.append("- ... (truncated)")
-            break
-        lines.append(line)
-        used += len(line) + 1
+    lines: list[str] = []
+    used = 0
+    if has_contract:
+        for line in _render_contract(
+            contract, gate_rejections if isinstance(gate_rejections, dict) else None
+        ):
+            lines.append(line)
+            used += len(line) + 1
+        lines.append("")
+        used += 1
+    if has_items:
+        explored_header = [
+            "=========================================================",
+            "# Cross-session memory: already explored factors",
+            "The factors below were already proposed and evaluated by the downstream 5-gate library.",
+            "Do NOT propose the same hypotheses or trivial variants (renamed windows, epsilon guards, "
+            "rescalings). Prefer genuinely different mechanisms and data transformations.",
+            "",
+        ]
+        lines += explored_header
+        used += sum(len(line) + 1 for line in explored_header)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            line = _format_item(item)
+            if used + len(line) + 1 > MAX_CHARS:
+                lines.append("- ... (truncated)")
+                break
+            lines.append(line)
+            used += len(line) + 1
     lines.append("=========================================================")
     return "\n".join(lines)
 
