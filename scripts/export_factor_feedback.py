@@ -19,6 +19,7 @@ from pathlib import Path
 from finance_agent.factors.feedback import (
     DEFAULT_LIMIT,
     DEFAULT_OUTPUT_PATH,
+    UNTRANSLATABLE_QUOTA,
     export_feedback,
 )
 
@@ -32,6 +33,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidates", default=DEFAULT_CANDIDATES, help="candidates.json 路径")
     parser.add_argument("--out", default=DEFAULT_OUTPUT_PATH, help="输出 JSON 路径")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="清单条目上限")
+    parser.add_argument(
+        "--untranslatable-quota",
+        type=int,
+        default=UNTRANSLATABLE_QUOTA,
+        help="untranslatable 条目保底配额（不足时空位归还 rejected）",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -40,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
             candidates_path=Path(args.candidates),
             output_path=Path(args.out),
             limit=args.limit,
+            untranslatable_quota=args.untranslatable_quota,
         )
     except (OSError, ValueError) as exc:
         print(f"export failed: {exc}", file=sys.stderr)

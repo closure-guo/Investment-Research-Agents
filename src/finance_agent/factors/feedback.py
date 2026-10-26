@@ -10,7 +10,14 @@ RD-Agent 的 feedback 只在**同一 trace**（会话）内传递（`trace.hist`
 
 口径：
 - 表达式按 DSL 规范化（``1e-6`` 以下常数视为 0）去重——epsilon 守卫变体不应各占一条；
-- 排序：admitted → rejected（闸②优先）→ untranslatable，再按时间倒序；
+- 排序：admitted → untranslatable（保底配额，最近优先）→ rejected（闸②优先）→
+  transcription_error，各档内按时间倒序；
+- ``untranslatable_quota``：untranslatable 条目的保底配额（默认 20）。该档条目
+  远超 rejected 档（实测 991 vs 190），若按原「状态优先」整体截断会被结构性
+  饿死——生成侧永远看不到「某机制族不可译」的经验，同一族因子（如残差×反转）
+  跨会话反复重提。配额不足时空位归还 rejected；
+- untranslatable 条目紧凑化（desc 60 字符 / detail 40 字符）：渲染侧有字符预算，
+  配额条目必须挤得进去；
 - 条目数由 ``limit`` 截断（默认 80），供 prompt 预算使用；
 - ``contract`` 块（复杂度上限 / 算子与字段白名单 / 表达规则）+ ``gate_rejections`` 聚合——
   生成侧表达契约回喂（feed-dsl-contract-to-factor-generator）：数值与白名单 import
@@ -39,7 +46,13 @@ from finance_agent.factors.qlib_translate import FIELD_MAPPINGS, OPERATOR_MAPPIN
 
 DEFAULT_OUTPUT_PATH = "data/factor_research/explored_factors.json"
 DEFAULT_LIMIT = 80
+# untranslatable 保底配额：该档经验（机制族不可译）决定生成侧是否重提同族因子，
+# 按状态优先整体截断会使其被 admitted+rejected 挤成 0 条，故单列配额。
+UNTRANSLATABLE_QUOTA = 20
 _MAX_DESC = 160
+_MAX_DESC_UNTRANSLATABLE = 60
+_MAX_DETAIL = 80
+_MAX_DETAIL_UNTRANSLATABLE = 40
 
 #: 表达规则文本（生成侧 prompt 语言=英文；三条对应实测转译损失前三死因：
 #: ε 符号常量无值、横截面运算缺算子、矩阵/回归/ML 流水线超出 DSL 边界）。
@@ -104,14 +117,40 @@ def _canon(node: Any) -> Any:
     return node
 
 
-def _reason(verdict: Mapping[str, Any]) -> tuple[int | None, str | None]:
+def _reason(
+    verdict: Mapping[str, Any], *, detail_chars: int = _MAX_DETAIL
+) -> tuple[int | None, str | None]:
     gate = verdict.get("gate")
     reason = verdict.get("reason")
     if gate is None and verdict.get("status") == "untranslatable":
         stage = verdict.get("stage")
         detail = str(verdict.get("detail") or "").strip()
-        return None, f"untranslatable:{stage}" + (f"（{detail[:80]}）" if detail else "")
+        return None, f"untranslatable:{stage}" + (f"（{detail[:detail_chars]}）" if detail else "")
     return (int(gate) if isinstance(gate, int) else None), (str(reason) if reason else None)
+
+
+def _select_untranslatable(entries: list[dict[str, Any]], quota: int) -> list[dict[str, Any]]:
+    """untranslatable 配额选取：按日轮转，防止单一批次垄断（批内按时间倒序）。
+
+    收割一批常在同一分钟内产出数十条不可译候选——纯「最近优先」会让配额被最后
+    一批吃满，早期批次的机制族（如残差×反转）永远看不到。按 ``at`` 的日期分桶
+    轮转选取；结果回按时间倒序呈现。
+    """
+    if quota <= 0:
+        return []
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:  # 已按时间倒序
+        buckets.setdefault(str(entry.get("at") or "")[:10], []).append(entry)
+    days = sorted(buckets, reverse=True)
+    picked: list[dict[str, Any]] = []
+    while len(picked) < quota and any(buckets[day] for day in days):
+        for day in days:
+            if len(picked) >= quota:
+                break
+            if buckets[day]:
+                picked.append(buckets[day].pop(0))
+    picked.sort(key=lambda e: str(e["at"]), reverse=True)
+    return picked
 
 
 def build_payload(
@@ -119,8 +158,14 @@ def build_payload(
     candidates: Mapping[str, Mapping[str, Any]],
     *,
     limit: int = DEFAULT_LIMIT,
+    untranslatable_quota: int = UNTRANSLATABLE_QUOTA,
 ) -> dict[str, Any]:
-    """状态 + 候选表 → 生成侧清单载荷（按规范化表达式去重、排序、截断）。"""
+    """状态 + 候选表 → 生成侧清单载荷（按规范化表达式去重、分档配额、截断）。
+
+    分档顺序：admitted（全部）→ untranslatable（最近 ``untranslatable_quota`` 条）
+    → rejected（按闸号升序）→ transcription_error。untranslatable 不足配额时空位
+    归还 rejected；``limit`` 仍是总量上限。
+    """
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
     gate_rejections: dict[str, int] = {}
@@ -139,13 +184,17 @@ def build_payload(
         seen.add(key)
         candidate = candidates.get(name) or {}
         description = " ".join(str(candidate.get("description") or "").split())
-        gate, reason = _reason(verdict)
+        compact = status == "untranslatable"
+        gate, reason = _reason(
+            verdict,
+            detail_chars=_MAX_DETAIL_UNTRANSLATABLE if compact else _MAX_DETAIL,
+        )
         if status == "rejected" and isinstance(gate, int):
             gate_rejections[str(gate)] = gate_rejections.get(str(gate), 0) + 1
         entries.append(
             {
                 "name": name,
-                "desc": description[:_MAX_DESC],
+                "desc": description[: _MAX_DESC_UNTRANSLATABLE if compact else _MAX_DESC],
                 "status": status,
                 "gate": gate,
                 "reason": reason,
@@ -155,13 +204,16 @@ def build_payload(
         )
 
     entries.sort(key=lambda e: str(e["at"]), reverse=True)
-    entries.sort(
-        key=lambda e: (
-            _STATUS_ORDER.get(str(e["status"]), 9),
-            e["gate"] if isinstance(e["gate"], int) else 99,
-        )
-    )
-    trimmed = entries[: max(limit, 0)]
+    admitted = [e for e in entries if e["status"] == "admitted"]
+    untranslatable = [e for e in entries if e["status"] == "untranslatable"]
+    rejected = [e for e in entries if e["status"] == "rejected"]
+    transcription = [e for e in entries if e["status"] == "transcription_error"]
+    rejected.sort(key=lambda e: e["gate"] if isinstance(e["gate"], int) else 99)
+    transcription.sort(key=lambda e: e["gate"] if isinstance(e["gate"], int) else 99)
+
+    quota = max(0, min(untranslatable_quota, len(untranslatable)))
+    ordered = admitted + _select_untranslatable(untranslatable, quota) + rejected + transcription
+    trimmed = ordered[: max(limit, 0)]
     return {
         "generated_at": datetime.now().astimezone().isoformat(),
         "total_explored": len(entries),
@@ -206,10 +258,16 @@ def export_feedback(
     candidates_path: str | Path,
     output_path: str | Path = DEFAULT_OUTPUT_PATH,
     limit: int = DEFAULT_LIMIT,
+    untranslatable_quota: int = UNTRANSLATABLE_QUOTA,
 ) -> dict[str, Any]:
     """一步导出（CLI 与测试共用）：返回写出载荷。"""
     processed = load_state(state_path)
     candidates = load_candidates(candidates_path)
-    payload = build_payload(processed, candidates, limit=limit)
+    payload = build_payload(
+        processed,
+        candidates,
+        limit=limit,
+        untranslatable_quota=untranslatable_quota,
+    )
     write_payload(payload, output_path)
     return payload
