@@ -127,3 +127,100 @@ def test_load_state_fails_loud_on_missing_processed(tmp_path) -> None:
         load_state(bad)
     with pytest.raises(ValueError):
         load_candidates(bad)
+
+
+def test_build_payload_carries_dsl_contract_single_sourced() -> None:
+    from finance_agent.factors.dsl import MAX_AST_DEPTH, MAX_FIELDS, MAX_FREE_PARAMS
+    from finance_agent.factors.feedback import CONTRACT_RULES
+    from finance_agent.factors.qlib_translate import FIELD_MAPPINGS, OPERATOR_MAPPINGS
+
+    payload = build_payload({}, {})
+    contract = payload["contract"]
+    assert contract["complexity"] == {
+        "max_ast_depth": MAX_AST_DEPTH,
+        "max_free_params": MAX_FREE_PARAMS,
+        "max_fields": MAX_FIELDS,
+    }
+    expected_ops = sorted(k for k, m in OPERATOR_MAPPINGS.items() if m.dsl_name)
+    expected_fields = sorted(k for k, f in FIELD_MAPPINGS.items() if f.dsl_field)
+    assert sorted(contract["operators"]) == expected_ops
+    assert sorted(contract["fields"]) == expected_fields
+    assert contract["rules"] == list(CONTRACT_RULES)
+    joined = " ".join(CONTRACT_RULES).lower()
+    assert "epsilon" in joined and "cross-sectional" in joined and "machine" in joined
+
+
+def test_build_payload_gate_rejections_aggregated() -> None:
+    processed = {
+        "a": {
+            "status": "rejected",
+            "expression": "sub(close,ref(close,1))",
+            "gate": 2,
+            "reason": "WEAK_ICIR",
+            "at": "2026-10-21T16:00:00+08:00",
+        },
+        "b": {
+            "status": "rejected",
+            "expression": "sub(close,ref(close,2))",
+            "gate": 4,
+            "reason": "NO_POOL_INCREMENT",
+            "at": "2026-10-21T16:00:01+08:00",
+        },
+        "c": {
+            "status": "rejected",
+            "expression": "sub(close,ref(close,3))",
+            "gate": 2,
+            "reason": "WEAK_ICIR",
+            "at": "2026-10-21T16:00:02+08:00",
+        },
+        "d": {
+            "status": "admitted",
+            "expression": "div(volume,ts_mean(volume,20))",
+            "at": "2026-10-21T16:00:03+08:00",
+        },
+    }
+    payload = build_payload(processed, {})
+    assert payload["gate_rejections"] == {"2": 2, "4": 1}
+
+
+def test_cli_prints_contract_presence(tmp_path) -> None:
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    state = tmp_path / "state.json"
+    cand = tmp_path / "cand.json"
+    out = tmp_path / "explored.json"
+    state.write_text(
+        json.dumps(
+            {
+                "processed": {
+                    "a": {
+                        "status": "admitted",
+                        "expression": "div(volume,ts_mean(volume,20))",
+                        "at": "2026-10-21T16:00:00+08:00",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    cand.write_text(json.dumps({"candidates": []}), encoding="utf-8")
+    proc = subprocess.run(  # noqa: S603 - 固定脚本路径,无外部输入
+        [
+            sys.executable,
+            str(repo / "scripts" / "export_factor_feedback.py"),
+            "--state",
+            str(state),
+            "--candidates",
+            str(cand),
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=repo,
+    )
+    assert "contract=yes" in proc.stdout

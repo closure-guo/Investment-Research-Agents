@@ -12,6 +12,9 @@ RD-Agent 的 feedback 只在**同一 trace**（会话）内传递（`trace.hist`
 - 表达式按 DSL 规范化（``1e-6`` 以下常数视为 0）去重——epsilon 守卫变体不应各占一条；
 - 排序：admitted → rejected（闸②优先）→ untranslatable，再按时间倒序；
 - 条目数由 ``limit`` 截断（默认 80），供 prompt 预算使用；
+- ``contract`` 块（复杂度上限 / 算子与字段白名单 / 表达规则）+ ``gate_rejections`` 聚合——
+  生成侧表达契约回喂（feed-dsl-contract-to-factor-generator）：数值与白名单 import
+  单一真相源（``dsl`` 复杂度常量、``qlib_translate`` 映射表），不复制字面量；
 - 任何字段缺失如实留空，不编造。
 """
 
@@ -23,13 +26,47 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from finance_agent.factors.dsl import Call, Number, parse, serialize
+from finance_agent.factors.dsl import (
+    MAX_AST_DEPTH,
+    MAX_FIELDS,
+    MAX_FREE_PARAMS,
+    Call,
+    Number,
+    parse,
+    serialize,
+)
+from finance_agent.factors.qlib_translate import FIELD_MAPPINGS, OPERATOR_MAPPINGS
 
 DEFAULT_OUTPUT_PATH = "data/factor_research/explored_factors.json"
 DEFAULT_LIMIT = 80
 _MAX_DESC = 160
 
+#: 表达规则文本（生成侧 prompt 语言=英文；三条对应实测转译损失前三死因：
+#: ε 符号常量无值、横截面运算缺算子、矩阵/回归/ML 流水线超出 DSL 边界）。
+CONTRACT_RULES: tuple[str, ...] = (
+    "Numeric constants must be concrete numbers (e.g. write 1e-12); symbolic constants "
+    "such as epsilon are inexpressible and the proposal is rejected.",
+    "Per-instrument time-series expressions only: cross-sectional (same-day cross-stock) "
+    "operations such as cross-sectional percentile rank or market-wide averages are inexpressible.",
+    "Matrix operations, rolling regressions, and machine-learning pipelines are outside "
+    "the expressible DSL.",
+)
+
 _STATUS_ORDER = {"admitted": 0, "rejected": 1, "untranslatable": 2, "transcription_error": 3}
+
+
+def _contract_block() -> dict[str, Any]:
+    """DSL 表达契约块（数值与白名单全部 import 取值，单一真相源自动跟随）。"""
+    return {
+        "complexity": {
+            "max_ast_depth": MAX_AST_DEPTH,
+            "max_free_params": MAX_FREE_PARAMS,
+            "max_fields": MAX_FIELDS,
+        },
+        "operators": sorted(k for k, m in OPERATOR_MAPPINGS.items() if m.dsl_name),
+        "fields": sorted(k for k, f in FIELD_MAPPINGS.items() if f.dsl_field),
+        "rules": list(CONTRACT_RULES),
+    }
 
 
 def canonical_expression(expression: str) -> str | None:
@@ -86,6 +123,7 @@ def build_payload(
     """状态 + 候选表 → 生成侧清单载荷（按规范化表达式去重、排序、截断）。"""
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
+    gate_rejections: dict[str, int] = {}
     for name, verdict in processed.items():
         if not isinstance(verdict, Mapping):
             continue
@@ -102,6 +140,8 @@ def build_payload(
         candidate = candidates.get(name) or {}
         description = " ".join(str(candidate.get("description") or "").split())
         gate, reason = _reason(verdict)
+        if status == "rejected" and isinstance(gate, int):
+            gate_rejections[str(gate)] = gate_rejections.get(str(gate), 0) + 1
         entries.append(
             {
                 "name": name,
@@ -129,6 +169,8 @@ def build_payload(
         "counts": {
             status: sum(1 for e in entries if e["status"] == status) for status in _STATUS_ORDER
         },
+        "gate_rejections": dict(sorted(gate_rejections.items())),
+        "contract": _contract_block(),
         "explored": trimmed,
     }
 
