@@ -395,8 +395,11 @@ class TestPostAdmissionReviewHook:
     def test_monthly_review_degrades_weak_seeded_factor(self, db: str):
         """预置 80 条恒定 IC 的 active 因子（ICIR=0）→ 月批复核降级。"""
         fid = add_factor(
-            expression="ts_std(close,10)", hypothesis="h", category="测试",
-            status="active", db_path=db,
+            expression="ts_std(close,10)",
+            hypothesis="h",
+            category="测试",
+            status="active",
+            db_path=db,
         )
         for i in range(80):
             record_ic(fid, (date(2025, 1, 1) + timedelta(days=i)).isoformat(), 0.04, db_path=db)

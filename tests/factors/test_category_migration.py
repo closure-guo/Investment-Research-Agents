@@ -14,12 +14,16 @@ def test_migrate_and_idempotent(tmp_path):
     fid_vol = add_factor(
         expression="ts_mean(volume,5)",
         hypothesis="[RD-Agent/volx] [Volume/Liquidity Factor] volume ratio",
-        category="外部", status="active", db_path=db,
+        category="外部",
+        status="active",
+        db_path=db,
     )
     fid_range = add_factor(
         expression="div(sub(high,low),close)",
         hypothesis="[RD-Agent/rngx] [Intraday Range Factor] high-low range",
-        category="外部", status="active", db_path=db,
+        category="外部",
+        status="active",
+        db_path=db,
     )
     result = migrate_category(db_path=db)
     assert result == {"migrated": 2, "skipped": 0}

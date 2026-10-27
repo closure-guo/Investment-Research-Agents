@@ -11,10 +11,12 @@ from finance_agent.factors.library import add_factor, record_ic
 
 def test_backfill_sign_and_idempotent(tmp_path):
     db = str(tmp_path / "factor_library.db")
-    fid_neg = add_factor(expression="ts_mean(close,5)", hypothesis="h", category="测试",
-                         status="active", db_path=db)
-    fid_zero = add_factor(expression="ts_mean(close,10)", hypothesis="h", category="测试",
-                          status="active", db_path=db)
+    fid_neg = add_factor(
+        expression="ts_mean(close,5)", hypothesis="h", category="测试", status="active", db_path=db
+    )
+    fid_zero = add_factor(
+        expression="ts_mean(close,10)", hypothesis="h", category="测试", status="active", db_path=db
+    )
     for day, value in [("2026-01-05", -0.04), ("2026-01-06", -0.06), ("2026-01-07", -0.02)]:
         record_ic(fid_neg, day, value, db_path=db)
     # fid_zero 无 IC 样本

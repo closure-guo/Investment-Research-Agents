@@ -847,9 +847,11 @@ class TestClassifyCategory:
         ("volratio20", "[Volume/Liquidity Factor] Twenty-day abnormal volume ratio", "量与流动性"),
         ("volcv20", "[Liquidity Stability Factor] volume coefficient of variation", "量与流动性"),
         # 正文含 "price-volume correlation family"（跨族提及）→ 标签仍是 Volume
-        ("volume_autocorr_10d",
-         "[Volume Autocorrelation Factor] orthogonal to the price-volume correlation family",
-         "量与流动性"),
+        (
+            "volume_autocorr_10d",
+            "[Volume Autocorrelation Factor] orthogonal to the price-volume correlation family",
+            "量与流动性",
+        ),
         ("VolumeTrend_20_60", "[Slow Volume-Regime Trend Factor] ln(MA20/MA60)", "量与流动性"),
         ("VOL_CONCENTRATION_10D", "[Volume Concentration Factor] max/sum", "量与流动性"),
         ("AMIHUD_ILLIQ_20D", "[Amihud Illiquidity Factor] price impact", "量与流动性"),
@@ -895,10 +897,10 @@ class TestHarvestCategoryWiring:
         from finance_agent.factors import harvest as harvest_module
 
         candidates = [
-            _candidate("volx", description="[Volume/Liquidity Factor] 20 日量比",
-                       formulation="v/ma(v,20)"),
-            _candidate("rngx", description="[Intraday Range Factor] 高低差",
-                       formulation="(h-l)/c"),
+            _candidate(
+                "volx", description="[Volume/Liquidity Factor] 20 日量比", formulation="v/ma(v,20)"
+            ),
+            _candidate("rngx", description="[Intraday Range Factor] 高低差", formulation="(h-l)/c"),
         ]
         cand_path = tmp_path / "candidates.json"
         cand_path.write_text(
@@ -918,9 +920,8 @@ class TestHarvestCategoryWiring:
                 "admitted": 0,
                 "rejected": len(payload),
                 "errors": 0,
-                "outcomes": [
-                    {"admitted": False, "gate": 2, "reason": "WEAK_ICIR", "detail": {}}
-                ] * len(payload),
+                "outcomes": [{"admitted": False, "gate": 2, "reason": "WEAK_ICIR", "detail": {}}]
+                * len(payload),
                 "rejections": [],
             }
 

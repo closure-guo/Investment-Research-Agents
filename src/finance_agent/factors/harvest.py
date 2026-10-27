@@ -104,6 +104,8 @@ def classify_category(name: Any, description: Any) -> str:
         if any(keyword.lower() in text for keyword in keywords):
             return bucket
     return CATEGORY_FALLBACK
+
+
 # 转译合同失败重试上限（共 3 次尝试；与「提案输出合同」修复重试上限同款——
 # recover-factor-supply-losses：2026-10-19 实测 2 条候选因 LLM 响应非 JSON 一次性落账）
 TRANSCRIPTION_MAX_ATTEMPTS: int = 3

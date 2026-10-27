@@ -180,9 +180,7 @@ def run_factor_monitor(
             continue
         recorded += 1
         days_recorded += outcome[1]
-        snapshot = _decay_snapshot(
-            factor_id, as_of, db_path=db_path, orientation=orientation
-        )
+        snapshot = _decay_snapshot(factor_id, as_of, db_path=db_path, orientation=orientation)
         if snapshot is None:
             skipped += 1
             continue

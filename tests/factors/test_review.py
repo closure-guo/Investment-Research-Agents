@@ -15,8 +15,11 @@ from finance_agent.factors.review import run_post_admission_review
 
 def _seed_factor(db, *, n_samples: int, ic_series=None) -> int:
     fid = add_factor(
-        expression=f"ts_mean(close,{5 + n_samples})", hypothesis="h", category="测试",
-        status="active", db_path=db,
+        expression=f"ts_mean(close,{5 + n_samples})",
+        hypothesis="h",
+        category="测试",
+        status="active",
+        db_path=db,
     )
     if ic_series is None:
         ic_series = [0.04] * n_samples
@@ -27,9 +30,16 @@ def _seed_factor(db, *, n_samples: int, ic_series=None) -> int:
 
 def _ledger_row(*, fid: int | None, p_value: float) -> dict:
     return {
-        "batch_id": "b1", "source": "test", "expression": "ts_mean(close,5)",
-        "p_value": p_value, "p_adj": None, "q": None, "n_hypotheses": 1,
-        "admitted": 1, "factor_id": fid, "rejected_gate": None,
+        "batch_id": "b1",
+        "source": "test",
+        "expression": "ts_mean(close,5)",
+        "p_value": p_value,
+        "p_adj": None,
+        "q": None,
+        "n_hypotheses": 1,
+        "admitted": 1,
+        "factor_id": fid,
+        "rejected_gate": None,
     }
 
 
