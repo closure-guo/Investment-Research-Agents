@@ -141,7 +141,23 @@ def test_aggregate_invalid_record_file_disclosed(tmp_path):
     assert "broken" in result["invalid_files"][0]
 
 
-def test_main_writes_markdown(tmp_path, capsys):
+def test_main_writes_markdown(tmp_path, capsys, monkeypatch):
+    """main 落盘 markdown + stdout 同步可见（nightly 日志）。
+
+    ``main`` 内部用真实时钟（``datetime.now(UTC)``），而 fixture 记录锚在固定
+    日期——不冻结时钟时记录会随日期滚动出 14 天窗（2026-10-27T10:00Z 起 CI
+    必败，实证于 PR #496）。此处冻结到 ``_NOW``（其余 aggregate 专测同锚点）。
+    """
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from scripts.ci import aggregate_flaky
+
+    frozen = datetime.fromisoformat(_NOW.replace("Z", "+00:00"))
+    monkeypatch.setattr(
+        aggregate_flaky, "datetime", SimpleNamespace(now=lambda tz=None: frozen.astimezone(tz))
+    )
+
     records_dir = _write(tmp_path, [_record("1", suites={"default": _suite(flaky=1)})])
     out = tmp_path / "summary.md"
     code = main(
