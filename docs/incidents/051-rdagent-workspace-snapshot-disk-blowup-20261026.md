@@ -92,8 +92,8 @@ python mmap SIGBUS。`.wslconfig` 的 `sparseVhd=true` **只对新建盘生效**
    `tests/validation/2026-10-27-add-factor-workspace-retention-disk-watch-validation.md`。
    部署备忘：**代理守护是常驻进程，supervisor restart 不换其内存模块**——部署采集器/代理
    改动后必须 kill 守护，由启动器 2 分钟节拍重拉。
-2. 102.7 GiB 迁移备份 `D:\WSL\backup\rdagent-20261022\ext4.vhdx`：**本起活盘损坏期间是唯一干净副本，未删**；
-   待压实完成 + 新盘观察稳定后清理。
+2. ~~102.7 GiB 迁移备份 `D:\WSL\backup\rdagent-20261022\ext4.vhdx`~~ **已删**（2026-10-27，用户确认；
+   新盘压实后稳定运行超一天且磁盘水位监控已上线）。
 3. vhdx 周期性压实/稀疏化运维任务（与 #1 的水位监控联动）。
 4. 生产栈在本窗口的不可达（docker engine 500）未单独归因，随恢复验证一并观察。
 
