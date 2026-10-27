@@ -67,6 +67,7 @@ from finance_agent.factors.propose import (
     propose_broad_batch,
     propose_deep_improvement,
 )
+from finance_agent.factors.review import run_post_admission_review
 from finance_agent.factors.tools import IC_WINDOW
 from finance_agent.factors.validate import AdmissionResult, admit_candidates
 from finance_agent.outcome.ops.model import list_job_runs
@@ -385,6 +386,9 @@ def run_factor_proposal_monthly(
             "reason": _rejection_reason(result),
         }
     deep_rejected = len(deep_admissible) - deep_admitted
+    # ③ 入库后业绩复核（add-factor-post-admission-review）：active 且入库后 IC 样本
+    # 充足的因子在入库后全样本上重验水位 + 账本全局 BH 反事实；命中 → degraded。
+    review = run_post_admission_review(db_path=db_path)
     summary = {
         "proposed": len(candidates) + len(deep_candidates),
         "admitted": admitted + deep_admitted,
@@ -400,6 +404,7 @@ def run_factor_proposal_monthly(
             "rejected": deep_rejected,
             "errors": len(deep_failures),
         },
+        "review": review,
     }
     logger.info("因子提案月批完成（广度+深度过闸入库 / 未过留事件史）: %s", summary)
     return summary

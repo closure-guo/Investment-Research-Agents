@@ -36,6 +36,7 @@ from finance_agent.factors.library import (
     list_factors,
     list_ic_series,
     record_ic,
+    set_orientation,
 )
 from finance_agent.factors.monitor import run_factor_decay_monitor, run_factor_monitor
 from finance_agent.outcome.ops.jobs import JOB_FUNCS, JOB_IDS, JOB_LABELS, SCHEDULES
@@ -248,6 +249,7 @@ def test_run_factor_monitor_empty_library_is_noop(tmp_path):
         "checked": 0,
         "skipped": 0,
         "degraded": [],
+        "reversed": [],
         "judged": [],
     }
 
@@ -439,3 +441,57 @@ def test_run_factor_monitor_routine_day_writes_exactly_one_new_day(tmp_path):
     result = run_factor_monitor(_daily_ic_panel(), _day(_MONITOR_DATES - 1), db_path=db)
     assert result["days_recorded"] == 1
     assert len(list_ic_series(factor_id, db_path=db)) == 80
+
+
+# ── 方向反转判据（add-factor-direction-reversal-monitor） ────────────────────
+
+
+def _active_factor_with_orientation(tmp_path, orientation: int):
+    """建库 + active 因子 + 写入入池定向符号。"""
+    db, factor_id = _active_factor(tmp_path)
+    set_orientation(factor_id, orientation, db_path=db)
+    return db, factor_id
+
+
+def test_run_factor_monitor_degrades_on_reversal_for_negative_orientation(tmp_path):
+    """定向 -1（负向因子）滚动均值连续 20 点为正 → DIRECTION_REVERSAL 降级。"""
+    db, factor_id = _active_factor_with_orientation(tmp_path, -1)
+    # 前 79 天 IC 全 +0.05；本次记录 -0.02 → 60 日窗均值仍 > 0（≈ +0.049）
+    _craft_history(db, factor_id, [0.05] * _CRAFTED_DATES)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+
+    assert result["reversed"] == [factor_id]
+    assert result["degraded"] == [factor_id]
+    assert result["judged"][0]["reversal"] is True
+    rows = list_factors(db_path=db)
+    assert rows[0]["status"] == "degraded"
+    events = list_events(factor_id, db_path=db)
+    assert events[-1]["detail"]["reason"] == "DIRECTION_REVERSAL"
+    assert events[-1]["detail"]["orientation"] == -1
+
+
+def test_run_factor_monitor_reversal_requires_twenty_positive_points(tmp_path):
+    """末 5 个滚动点为正、前 15 个为负 → 反转窗口未满足，不降级。"""
+    db, factor_id = _active_factor_with_orientation(tmp_path, -1)
+    # 造序列：前 70 点 -0.05、后 9 点 +0.5、本次 -0.02 →
+    # 滚动点 60..74 均值 < 0，75..79 均值 > 0（仅 5 个正点）
+    _craft_history(db, factor_id, [-0.05] * 70 + [0.5] * 9)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+
+    assert result["reversed"] == []
+    assert result["degraded"] == []
+    assert result["judged"][0]["reversal"] is False
+    rows = list_factors(db_path=db)
+    assert rows[0]["status"] == "active"
+
+
+def test_run_factor_monitor_reversal_skipped_when_orientation_unknown(tmp_path):
+    """定向 0（不可定）→ 反转判据不触发（全正序列仅走原衰减判据且不命中）。"""
+    db, factor_id = _active_factor_with_orientation(tmp_path, 0)
+    _craft_history(db, factor_id, [0.05] * _CRAFTED_DATES)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+
+    assert result["reversed"] == []
+    assert result["degraded"] == []
+    rows = list_factors(db_path=db)
+    assert rows[0]["status"] == "active"
