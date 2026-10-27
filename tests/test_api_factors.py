@@ -30,6 +30,7 @@ from finance_agent.factors.library import (
     list_events,
     list_factors,
     record_ic,
+    set_factor_diagnostics,
     set_status,
 )
 
@@ -429,15 +430,19 @@ def test_detail_monotonicity_null_without_snapshot(_factors_db) -> None:
     assert body["monotonicity"] is None
 
 
-def test_detail_monotonicity_observed_with_panel(_factors_db, monkeypatch) -> None:
-    """IC 点数过门槛 + 可注入面板 → monotonicity 为观测读数（含全部 detail 字段）。"""
+def test_detail_monotonicity_observed_via_diagnostics_batch(_factors_db) -> None:
+    """日批（面板注入）落库后 → 详情返回 monotonicity 观测读数（含全部 detail 字段）。
+
+    add-factor-diagnostics-batch：读数生产移至 factors.diagnostics 日批，API 纯读库。
+    本用例以合成面板跑一次日批，再请求详情断言两读数与 as_of 全齐。
+    """
     from datetime import date as _date
     from datetime import timedelta as _timedelta
 
     import numpy as np
     import pandas as pd
 
-    import finance_agent.factors.monthly as monthly
+    from finance_agent.factors.diagnostics import run_factor_diagnostics
     from finance_agent.factors.eval_engine import MarketPanel
 
     # 种子因子表达式 = "close"（直接取 close 帧，规避 ts_rank 热身期/常量截面干扰）
@@ -449,7 +454,7 @@ def test_detail_monotonicity_observed_with_panel(_factors_db, monkeypatch) -> No
         source="llm",
     )
     set_status(factor_id, "active", detail={"reason": "ADMITTED"})
-    for offset in range(30):  # 越过 MIN_STYLE_SAMPLES(30) 短路门槛
+    for offset in range(30):  # 越过 MIN_STYLE_SAMPLES(30) 候选门槛
         record_ic(factor_id, (_date(2026, 1, 5) + _timedelta(days=offset)).isoformat(), 0.1)
 
     days, codes_n = 41, 40
@@ -475,7 +480,9 @@ def test_detail_monotonicity_observed_with_panel(_factors_db, monkeypatch) -> No
             "amount": _frame(close),
         }
     )
-    monkeypatch.setattr(monthly, "_panel_from_snapshot", lambda *_a, **_k: panel)
+
+    summary = run_factor_diagnostics(panel=panel)
+    assert summary["computed"] == [factor_id]
 
     body = TestClient(app).get(f"{_FACTORS}/{factor_id}").json()
 
@@ -484,3 +491,72 @@ def test_detail_monotonicity_observed_with_panel(_factors_db, monkeypatch) -> No
     assert {"passed", "spearman", "q10_q1", "decile_returns", "valid_days", "threshold"} <= set(
         mono
     )
+    assert body["style_exposure"] is not None
+    assert body["diagnostics_as_of"] == dates[-1]
+
+
+# ── 诊断读数日批（add-factor-diagnostics-batch）：详情纯读库 + 零面板构建 ──
+
+
+def test_detail_never_builds_panel_regardless_of_ic_points(_factors_db, monkeypatch) -> None:
+    """回归测试：详情无条件零面板构建（任何 IC 点数、任何落库状态）。
+
+    生产事故：IC 历史回填使窗口 IC ≥ 30 后，旧实现在请求内现算 500 日 × 全市场
+    准入面板（单请求实测 71+ 分钟），详情页全部 active 因子挂死。本用例把面板
+    构建打桩为 raise——请求路径任何分支触及面板构建即失败，MUST 保持 200。
+    """
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    import finance_agent.factors.diagnostics as diag
+    import finance_agent.factors.monthly as monthly
+
+    llm_id, _ = _seed_library()
+    for offset in range(40):  # 窗口 IC 40 点 ≥ 30：旧实现在此进入慢路径
+        record_ic(llm_id, (_date(2026, 1, 5) + _timedelta(days=offset)).isoformat(), 0.1)
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("API 详情路径 MUST NOT 构建准入面板")
+
+    monkeypatch.setattr(monthly, "_panel_from_snapshot", _boom)
+    monkeypatch.setattr(diag, "_panel_from_snapshot", _boom)
+
+    resp = TestClient(app).get(f"{_FACTORS}/{llm_id}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["style_exposure"] is None
+    assert body["monotonicity"] is None
+    assert body["diagnostics_as_of"] is None
+
+
+def test_detail_returns_stored_diagnostics_with_as_of(_factors_db) -> None:
+    """日批已落库 → 详情返回读数 + diagnostics_as_of（读数数据截止交易日）。"""
+    llm_id, _ = _seed_library()
+    set_factor_diagnostics(
+        llm_id,
+        "2026-10-24",
+        style_exposure={
+            "correlations": {"momentum_20": 0.81},
+            "dominant": "momentum_20",
+            "dominant_correlation": 0.81,
+            "flagged": True,
+            "n_days": 41,
+            "threshold": 0.7,
+            "basket": ["momentum_20"],
+        },
+        monotonicity={
+            "passed": True,
+            "spearman": 0.72,
+            "q10_q1": 0.03,
+            "decile_returns": [0.0] * 10,
+            "valid_days": 100,
+            "threshold": 0.6,
+        },
+    )
+
+    body = TestClient(app).get(f"{_FACTORS}/{llm_id}").json()
+
+    assert body["style_exposure"]["dominant"] == "momentum_20"
+    assert body["monotonicity"]["passed"] is True
+    assert body["diagnostics_as_of"] == "2026-10-24"

@@ -57,6 +57,7 @@ from finance_agent.factors.builtin import BUILTIN_FACTORS  # noqa: E402
 from finance_agent.factors.harvest import DEFAULT_MAX_BATCHES_PER_RUN  # noqa: E402
 from finance_agent.factors.library import (  # noqa: E402
     FACTOR_STATES,
+    get_factor_diagnostics,
     list_events,
     list_factors,
     list_ic_series,
@@ -65,10 +66,6 @@ from finance_agent.factors.library import (  # noqa: E402
 from finance_agent.factors.readiness import (  # noqa: E402
     expected_factor_mode_date,
     factor_signal_payload,
-)
-from finance_agent.factors.style_exposure import (  # noqa: E402
-    compute_style_exposure,
-    style_exposure_payload,
 )
 from finance_agent.factors.tools import IC_WINDOW as FACTOR_IC_WINDOW  # noqa: E402
 from finance_agent.graph import build_5layer_graph  # noqa: E402
@@ -4405,46 +4402,24 @@ def _factor_detail_payload(factor_id: int) -> dict[str, Any] | None:
 
 
 def _factor_detail_diagnostics(row: dict[str, Any]) -> dict[str, Any]:
-    """风格暴露 + 分层单调性诊断（共享一次准入面板构建；add-factor-monotonicity-gate）。
+    """诊断读数纯读库（add-factor-diagnostics-batch）。
 
-    在准入面板上现算因子与 builtin 风格代理篮子的 IC 相关（add-factor-style-exposure）
-    与十分位分层单调性（闸②判据的**观测读数**——存量因子不回溯、不挂任何处置）。
-    任一不可计算（面板不可得/深度不足/表达式不可求值）→ 对应键 None（前端如实展示
-    「数据不足」，MUST NOT 用 0/虚构值冒充）。
+    读数生产在 ``factors.diagnostics.run_factor_diagnostics``（日批
+    factor_diagnostics_daily，17:15）。接口**无条件**零面板构建——任何分支、任何
+    IC 点数下详情响应不因快照库大小而阻塞（生产事故：IC 历史回填绕过旧「<30 点
+    短路」护栏后，请求内现算 500 日面板把详情拖成数十分钟，探针实测 71+ 分钟
+    未完成）。无落库读数（日批未及/样本不足/当日不可算）→ 双 None（前端如实展示
+    「数据不足」，MUST NOT 用 0/虚构值冒充）；``diagnostics_as_of`` 为读数数据
+    截止交易日（可观测性，前端不消费）。
     """
-    try:
-        from finance_agent.factors.style_exposure import MIN_STYLE_SAMPLES
-
-        # 短路：两读数都以「因子自身 IC 点数 ≥ MIN_STYLE_SAMPLES」为前提；不足时
-        # 不得构建准入面板——500 日 × 全市场面板实测需数分钟，会把因子详情接口拖成
-        # 超时（详情页全部「加载失败」的根因，add-factor-ic-visibility）。
-        if len(list_ic_series(int(row["id"]), limit=FACTOR_IC_WINDOW)) < MIN_STYLE_SAMPLES:
-            return {"style_exposure": None, "monotonicity": None}
-        from finance_agent.factors.dsl import parse as dsl_parse
-        from finance_agent.factors.eval_engine import (
-            evaluate as dsl_evaluate,
-        )
-        from finance_agent.factors.eval_engine import (
-            forward_returns,
-            rank_ic_series,
-        )
-        from finance_agent.factors.monthly import _panel_from_snapshot
-        from finance_agent.factors.validate import check_monotonicity
-
-        panel = _panel_from_snapshot(None)
-        fwd = forward_returns(panel.fields["close"])
-        values = dsl_evaluate(dsl_parse(str(row["expression"])), panel)
-        factor_ic = rank_ic_series(values, fwd)
-        monotonicity = check_monotonicity(values, fwd, factor_ic)
-        return {
-            "style_exposure": style_exposure_payload(
-                compute_style_exposure(factor_ic, panel, fwd=fwd)
-            ),
-            "monotonicity": {"passed": monotonicity.passed, **monotonicity.detail},
-        }
-    except (OSError, ValueError) as exc:  # 面板不可得/深度不足/表达式不可求值 → 诚实置空
-        _logger.warning("因子诊断读数不可计算 factor_id=%s: %s", row.get("id"), exc)
-        return {"style_exposure": None, "monotonicity": None}
+    stored = get_factor_diagnostics(int(row["id"]))
+    if stored is None:
+        return {"style_exposure": None, "monotonicity": None, "diagnostics_as_of": None}
+    return {
+        "style_exposure": stored["style_exposure"],
+        "monotonicity": stored["monotonicity"],
+        "diagnostics_as_of": stored["as_of"],
+    }
 
 
 @app.get("/api/factors")
