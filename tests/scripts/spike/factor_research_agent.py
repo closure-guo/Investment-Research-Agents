@@ -19,6 +19,8 @@
     python3 factor_research_agent.py --reconcile-once  # 立即调和一次（脚本用）
     python3 factor_research_agent.py --ensure-daemon   # 确保守护存活（脚本用）
     python3 factor_research_agent.py --set-intent running|stopped   # 写期望态（脚本用）
+    python3 factor_research_agent.py --prune           # 保留窗清理一次（看护会话后调用）
+    python3 factor_research_agent.py --disk-check      # 磁盘水位检查并写暂停文件（脚本用）
 """
 
 from __future__ import annotations
@@ -28,10 +30,11 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +65,16 @@ RESTART_STATE_NAME = ".agent_restart_state.json"
 # 手动 reconcile-once 等锁上限（应急通道不被守护的长采集无限阻塞；超时降级继续并告警）
 RECONCILE_LOCK_TIMEOUT_S = 8.0
 
+# 保留窗与磁盘水位默认值（incident 051 防复发；与 api.py 同名常量字面同步——plan 全局约束）
+DEFAULT_RETENTION_H = 48
+DEFAULT_DISK_MIN_FREE_GB_GUEST = 30
+DEFAULT_DISK_MIN_FREE_GB_HOST = 20
+DEFAULT_HOST_MOUNT = "/mnt/d"
+DISK_CHECK_BACKOFF_S = 300
+AGENT_SCRIPT_PATH = "/root/factor_research_agent.py"  # distro 部署位（plan 部署面）
+DISK_PAUSE_NAME = ".disk_pause.json"
+RDAGENT_WORKSPACE_REL = Path("git_ignore_folder") / "RD-Agent_workspace"
+
 # 研发节奏配置（delta add-factor-research-settings）：与后端
 # FACTOR_RESEARCH_CONFIG_DEFAULTS / BOUNDS 字面同步。
 DEFAULT_CONFIG_VALUES: dict[str, int] = {
@@ -86,18 +99,21 @@ class SingletonBusy(RuntimeError):  # noqa: N818 - 「单例被占」判定，�
 # 占位符用 {{...}} 显式替换（bash 的 ${DUR} 等花括号与 str.format 冲突）。
 SUPERVISOR_SCRIPT = """#!/usr/bin/env bash
 # 研发看护：无界 fin_factor 循环 + 崩溃自动重启（由 factor_research_agent 写/管）。
+# 低水位停发与保留窗清理见 incident 051 防复发（delta add-factor-workspace-retention-disk-watch）。
 set -u
 WORKDIR={{WORKDIR}}
 LOGDIR="$WORKDIR/factor_research_logs"
 echo $$ > "$WORKDIR/factor_research.pid"
 echo "[supervisor] started at $(date -Is) pid $$" >> "$LOGDIR/supervisor.log"
 while true; do
+  if ! python3 "{{AGENT}}" --disk-check; then sleep {{DISK_BACKOFF}}; continue; fi   # 低水位停发（运行中会话不受影响）
   LOG="$LOGDIR/session-$(date +%Y%m%d-%H%M%S).log"
   START=$(date +%s)
   bash {{LAUNCH}} > "$LOG" 2>&1
   END=$(date +%s)
   DUR=$((END - START))
   echo "[supervisor] session ended after ${DUR}s (log: $LOG) at $(date -Is)" >> "$LOGDIR/supervisor.log"
+  python3 "{{AGENT}}" --prune >> "$LOGDIR/prune.log" 2>&1 || true
   if [ "$DUR" -lt {{SHORT_THRESHOLD}} ]; then
     sleep {{SHORT_BACKOFF}}   # 短命会话（配额/网络故障）→ 退避
   else
@@ -111,12 +127,16 @@ def render_supervisor_script(workdir: str | Path, config: dict[str, int] | None 
     """看护脚本渲染（占位符替换；bash 花括号原样保留）。
 
     ``config`` 取节奏配置的生效值（缺省用 DEFAULT_CONFIG_VALUES）；会话间隔与退避
-    在下次启动看护时生效（页面已明示）。
+    在下次启动看护时生效（页面已明示）。``{{AGENT}}``/``{{DISK_BACKOFF}}`` 为
+    incident 051 防复发新增（--disk-check 门禁 + --prune 清理），与既有五占位符
+    同一替换语义。
     """
     values = {**DEFAULT_CONFIG_VALUES, **(config or {})}
     return (
         SUPERVISOR_SCRIPT.replace("{{WORKDIR}}", str(workdir))
         .replace("{{LAUNCH}}", LAUNCH_SCRIPT)
+        .replace("{{AGENT}}", AGENT_SCRIPT_PATH)
+        .replace("{{DISK_BACKOFF}}", str(DISK_CHECK_BACKOFF_S))
         .replace("{{SHORT_THRESHOLD}}", str(values["short_session_threshold_s"]))
         .replace("{{SHORT_BACKOFF}}", str(values["short_session_backoff_s"]))
         .replace("{{SESSION_GAP}}", str(values["session_gap_s"]))
@@ -279,6 +299,163 @@ def restart_summary(workdir: str | Path) -> dict[str, Any] | None:
         "result": state.get("last_restart_result"),
         "handled_at": state.get("handled_at"),
         "handled_at_epoch": state.get("handled_at_epoch"),
+    }
+
+
+# ── 保留窗清理（incident 051 防复发 1/4：workspace 快照磁盘撑爆）─────────────
+
+
+def _int_env(name: str, default: int) -> int:
+    """env 整数读取：缺失/非整数 → 默认值（fail-safe，不因配置崩）。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _file_blocks_bytes(st: os.stat_result) -> int:
+    """单文件占用字节：``st_blocks*512``；无 st_blocks 的平台按 apparent size 512 对齐。"""
+    blocks = getattr(st, "st_blocks", None)
+    if blocks is None:  # Windows 测试环境无 st_blocks → 以文件大小按 512 块对齐近似
+        return ((st.st_size + 511) // 512) * 512
+    return blocks * 512
+
+
+def _latest_mtime_under(entry: Path) -> float | None:
+    """目录树内最新文件 mtime（含子目录）；单文件 stat 失败 → 跳过该文件（容忍）。"""
+    latest: float | None = None
+    for root, _dirs, files in os.walk(entry):
+        for name in files:
+            try:
+                mtime = (Path(root) / name).stat().st_mtime
+            except OSError:
+                continue
+            if latest is None or mtime > latest:
+                latest = mtime
+    return latest
+
+
+def _tree_files_blocks_bytes(entry: Path) -> int:
+    """目录树内文件的 ``st_blocks*512`` 之和（目录本身不计）。"""
+    total = 0
+    for root, _dirs, files in os.walk(entry):
+        for name in files:
+            try:
+                total += _file_blocks_bytes((Path(root) / name).stat())
+            except OSError:
+                continue
+    return total
+
+
+def prune_workspace(
+    workdir: str | Path, retention_h: int, *, now_epoch: float | None = None
+) -> dict[str, Any]:
+    """会话产物保留窗清理（spec「会话产物保留窗清理」）。
+
+    删除 ``<workdir>/git_ignore_folder/RD-Agent_workspace`` 下「目录内最新文件 mtime」
+    **早于** ``now - retention_h*3600`` 的任务目录（恰好等于阈值不删；运行中会话的
+    目录 mtime 必在保留窗内，天然不受影响）。整树遍历失败 → 记入 ``failed`` 不中断
+    其余目录（spec「清理失败不致崩」）；workspace 根缺失 → 空结果（不视为错误）。
+
+    返回 ``{"deleted": [目录名...], "failed": [{"path","error"}...], "kept": int,
+    "freed_bytes": int}``；``freed_bytes`` 为已删目录内文件 st_blocks*512 之和
+    （目录本身不计），``kept`` 为保留的任务目录数。
+    """
+    now = time.time() if now_epoch is None else now_epoch
+    cutoff = now - retention_h * 3600
+    workspace = Path(workdir) / RDAGENT_WORKSPACE_REL
+    deleted: list[str] = []
+    failed: list[dict[str, str]] = []
+    kept = 0
+    freed = 0
+    if not workspace.is_dir():
+        return {"deleted": deleted, "failed": failed, "kept": kept, "freed_bytes": freed}
+    try:
+        entries = sorted(workspace.iterdir())
+    except OSError as exc:
+        failed.append({"path": str(workspace), "error": str(exc)})
+        return {"deleted": deleted, "failed": failed, "kept": kept, "freed_bytes": freed}
+    for entry in entries:
+        if not entry.is_dir():
+            continue  # workspace 根下的散文件不属任务目录，不删
+        try:
+            latest = _latest_mtime_under(entry)
+        except OSError as exc:
+            failed.append({"path": str(entry), "error": str(exc)})
+            continue
+        if latest is None or latest >= cutoff:
+            kept += 1  # 空目录无 mtime 证据 → 保留（不猜）
+            continue
+        try:
+            freed_here = _tree_files_blocks_bytes(entry)
+            shutil.rmtree(entry)
+        except OSError as exc:
+            failed.append({"path": str(entry), "error": str(exc)})
+            continue
+        freed += freed_here
+        deleted.append(entry.name)
+    return {"deleted": deleted, "failed": failed, "kept": kept, "freed_bytes": freed}
+
+
+# ── 磁盘水位（incident 051 防复发 2/4：磁盘撑爆后停发新会话）─────────────────
+
+
+def disk_thresholds() -> tuple[int, int]:
+    """低水位阈值（字节）：env ``FACTOR_DISK_MIN_FREE_GB_GUEST/HOST``（GB→×2**30），默认 30/20。
+
+    与 api.py 同名常量字面同步（plan 全局约束：阈值单源）。
+    """
+    guest_gb = _int_env("FACTOR_DISK_MIN_FREE_GB_GUEST", DEFAULT_DISK_MIN_FREE_GB_GUEST)
+    host_gb = _int_env("FACTOR_DISK_MIN_FREE_GB_HOST", DEFAULT_DISK_MIN_FREE_GB_HOST)
+    return guest_gb * 2**30, host_gb * 2**30
+
+
+def disk_watermark(
+    *,
+    guest_path: str | Path = "/",
+    host_path: str | Path | None = None,
+    disk_usage_fn: Callable[[str | Path], tuple[int, int, int]] | None = None,
+) -> dict[str, Any]:
+    """双侧磁盘水位判定（spec「低水位停发保护」的看护侧判定源）。
+
+    ``disk_usage_fn(path)`` 返回 ``(total, used, free)``（shutil.disk_usage 兼容形，
+    缺省即 shutil.disk_usage）。任一侧读取失败 / 路径不存在 → 该侧 None（fail-open，
+    不计入 low——读数失败 MUST NOT 编造）；双侧全失败 → ``low=False`` 且 ``error``
+    非空（放行研发但留痕，不静默阻断）。``host_path`` 缺省取 env
+    ``FACTOR_RESEARCH_HOST_MOUNT``（默认 /mnt/d）。空闲**恰等**阈值不算 low。
+
+    返回 ``{"guest_free_bytes", "host_free_bytes", "low", "reason", "thresholds",
+    "error"}``。
+    """
+    usage_fn = disk_usage_fn or shutil.disk_usage
+    if host_path is None:
+        host_path = os.environ.get("FACTOR_RESEARCH_HOST_MOUNT") or DEFAULT_HOST_MOUNT
+
+    def _free_bytes(path: str | Path) -> int | None:
+        try:  # shutil.disk_usage 对不存在的路径抛 FileNotFoundError（OSError 子类）→ 统一兜
+            return int(usage_fn(path)[2])
+        except OSError:
+            return None
+
+    guest_min, host_min = disk_thresholds()
+    guest_free = _free_bytes(guest_path)
+    host_free = _free_bytes(host_path)
+    error: str | None = None
+    if guest_free is None and host_free is None:
+        error = "磁盘读数双侧失败（guest/host 均不可得）→ fail-open 放行"
+    low_guest = guest_free is not None and guest_free < guest_min
+    low_host = host_free is not None and host_free < host_min
+    low = low_guest or low_host
+    return {
+        "guest_free_bytes": guest_free,
+        "host_free_bytes": host_free,
+        "low": low,
+        "reason": "guest" if low_guest else ("host" if low_host else None),
+        "thresholds": {"guest_min_bytes": guest_min, "host_min_bytes": host_min},
+        "error": error,
     }
 
 
@@ -739,6 +916,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_S)
     parser.add_argument(
+        "--retention-h",
+        type=int,
+        default=_int_env("FACTOR_WORKSPACE_RETENTION_H", DEFAULT_RETENTION_H),
+        help="保留窗小时数（默认取 env FACTOR_WORKSPACE_RETENTION_H，默认 48）",
+    )
+    parser.add_argument(
         "--pidfile",
         default=None,
         help="守护模式写入自身 pid（默认 <workdir>/factor_research_agent.pid）",
@@ -751,6 +934,12 @@ def main(argv: list[str] | None = None) -> int:
         "--launcher-tick", action="store_true", help="启动器节拍：确保守护 + 写心跳（脚本用）"
     )
     modes.add_argument("--set-intent", choices=("running", "stopped"), help="写期望态（脚本用）")
+    modes.add_argument(
+        "--prune", action="store_true", help="保留窗清理一次（看护在会话结束后调用）"
+    )
+    modes.add_argument(
+        "--disk-check", action="store_true", help="磁盘水位检查并写暂停文件（看护在拉起会话前调用）"
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -780,6 +969,26 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"launcher tick: agent_ok={payload['agent_ok']} pid={payload['agent_pid']}")
         return 0 if payload["agent_ok"] else 1
+
+    if args.prune:
+        print(json.dumps(prune_workspace(workdir, args.retention_h), ensure_ascii=False))
+        return 0
+
+    if args.disk_check:
+        result = disk_watermark()
+        payload = {
+            "paused": result["low"],
+            "reason": result["reason"],
+            "guest_free_bytes": result["guest_free_bytes"],
+            "host_free_bytes": result["host_free_bytes"],
+            "checked_at": datetime.now().astimezone().isoformat(),
+        }
+        try:  # 正常时也写 paused=false（防陈旧暂停态残留——看护以文件存在性为准）
+            cfs.atomic_write_json(workdir / "factor_research_logs" / DISK_PAUSE_NAME, payload)
+        except OSError as exc:
+            print(f"FAILED to write disk pause file: {exc}", file=sys.stderr)
+            return 1
+        return 2 if result["low"] else 0
 
     if args.set_intent is not None:
         payload = set_intent(control_path, args.set_intent == "running")

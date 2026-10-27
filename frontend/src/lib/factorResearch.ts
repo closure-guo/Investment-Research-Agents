@@ -207,6 +207,8 @@ export interface FactorResearchControlView {
   reachable: boolean
   switchDisabled: boolean
   restartDisabled: boolean
+  /** 「停止」按钮禁用（与开关同禁用源 + 无可停止对象判定） */
+  stopDisabled: boolean
   stateText: string
   /** 最近一次重启失败（同 request_id）的可读文案；无 → null */
   restartFailureText: string | null
@@ -249,6 +251,11 @@ export function deriveControlView(
   const switchDisabled =
     submitting || restartSubmitting || pending || restartPending || channelBlocked || !reachable
   const restartDisabled = switchDisabled
+  // 停止按钮（delta add-factor-research-stop-button）：与开关共享禁用源；另在「无可停止对象」
+  // （实态已停止且无运行意图）时禁用。实态不可证（unverified）但有运行意图 → 可点，用于撤销
+  // 持久化意图（与设置分区同一判定）。
+  const stopDisabled =
+    switchDisabled || (actualState === 'stopped' && control?.desired_running !== true)
 
   const collectedAt = data?.collected_at ? formatSessionTime(data.collected_at) : '—'
   const requestedAt = control?.requested_at ? formatSessionTime(control.requested_at) : null
@@ -352,9 +359,71 @@ export function deriveControlView(
     reachable,
     switchDisabled,
     restartDisabled,
+    stopDisabled,
     stateText,
     restartFailureText,
     restartTimedOut,
     channelOffline: data !== null && actualState === 'unverified' && honor === 'unavailable',
   }
+}
+
+// ── 磁盘水位（delta add-factor-workspace-retention-disk-watch；incident 051）──
+// 端点契约：GET /api/factor-research/status 的 ``data.disk`` 块（后端从采集器原始字节
+// 只读派生 GB + low_watermark，阈值单源在后端）。disk 增量字段的本模块契约类型不回改
+// types.ts；旧快照（无 disk 块）与 available=false / corrupt 时端点给兜底块
+// （全 null + low_watermark=false），派生 MUST 降级为「不渲染」且不崩。
+
+/** 磁盘水位只读派生块（GB 读数；null = 读数未上报，MUST NOT 编造数字）。 */
+export interface FactorResearchDiskBlock {
+  guest_free_gb: number | null
+  host_free_gb: number | null
+  workspace_gb: number | null
+  low_watermark: boolean
+  /** 先命中的低水位侧（guest 优先）；未判低水位 → null */
+  low_watermark_reason: 'guest' | 'host' | null
+  /** 看护停发原因（非空 = 新会话已被暂停拉起，保护行为非故障） */
+  paused_reason: string | null
+}
+
+/** 带 disk 块的快照响应（既有响应类型之上的增量字段）。 */
+export type FactorResearchStatusResponseWithDisk = FactorResearchStatusResponse & {
+  disk?: FactorResearchDiskBlock | null
+}
+
+export interface FactorResearchDiskView {
+  disk: FactorResearchDiskBlock
+  /** 水位卡是否渲染：缺 disk 块，或三读数全 null 且未判低水位 → 不渲染（旧快照兼容） */
+  showCard: boolean
+  /** 低水位横幅是否渲染：low_watermark=true 或 paused_reason 非空 */
+  showBanner: boolean
+}
+
+/** 快照 → 磁盘水位视图（兜底块/畸形字段如实置空，MUST NOT 编造读数）。 */
+export function deriveDiskView(data: FactorResearchStatusResponse | null): FactorResearchDiskView {
+  const raw = (data as FactorResearchStatusResponseWithDisk | null)?.disk ?? null
+  const num = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) ? v : null
+  const rawReason = raw?.low_watermark_reason
+  const rawPause = raw?.paused_reason
+  const disk: FactorResearchDiskBlock = {
+    guest_free_gb: num(raw?.guest_free_gb),
+    host_free_gb: num(raw?.host_free_gb),
+    workspace_gb: num(raw?.workspace_gb),
+    low_watermark: raw?.low_watermark === true,
+    low_watermark_reason: rawReason === 'guest' || rawReason === 'host' ? rawReason : null,
+    paused_reason: typeof rawPause === 'string' && rawPause !== '' ? rawPause : null,
+  }
+  const hasReading =
+    disk.guest_free_gb !== null || disk.host_free_gb !== null || disk.workspace_gb !== null
+  return {
+    disk,
+    showCard: raw !== null && (hasReading || disk.low_watermark),
+    showBanner: disk.low_watermark || disk.paused_reason !== null,
+  }
+}
+
+/** 磁盘读数展示（GB，1 位小数；未上报 → 「—」，调用方须配 title 说明）。 */
+export function formatDiskGb(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
+  return value.toFixed(1)
 }

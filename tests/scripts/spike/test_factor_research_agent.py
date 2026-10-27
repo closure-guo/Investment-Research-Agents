@@ -17,7 +17,11 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import time
+from pathlib import Path
 
 import collect_factor_status as cfs
 import factor_research_agent as agent
@@ -731,3 +735,318 @@ def test_run_tick_reports_agent_config(tmp_path, monkeypatch):
     assert snap["agent"]["config"]["values"] == agent.DEFAULT_CONFIG_VALUES
     assert snap["agent"]["config"]["source"] == "defaults"
     assert snap["agent"]["restart"] is None
+
+
+# ── TestPruneWorkspace：保留窗清理（incident 051 防复发 1/4）─────────────────
+
+
+def _touch_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# candidate\n", encoding="utf-8")
+
+
+def _set_mtime(path: Path, epoch: float) -> None:
+    os.utime(path, (epoch, epoch))
+
+
+def _disk_bytes(path: Path) -> int:
+    """单文件占用字节（st_blocks*512；无 st_blocks 的平台按 apparent size 512 对齐）。"""
+    st = path.stat()
+    blocks = getattr(st, "st_blocks", None)
+    if blocks is None:
+        return ((st.st_size + 511) // 512) * 512
+    return blocks * 512
+
+
+class TestPruneWorkspace:
+    """spec「会话产物保留窗清理」：删过期任务目录、保留窗内不碰、失败容忍不致崩。"""
+
+    @staticmethod
+    def _workspace(tmp_path) -> Path:
+        return tmp_path / "git_ignore_folder" / "RD-Agent_workspace"
+
+    def test_expired_deleted_and_fresh_kept(self, tmp_path):
+        now = time.time()
+        ws = self._workspace(tmp_path)
+        _touch_file(ws / "task-old" / "factor.py")
+        _touch_file(ws / "task-fresh" / "factor.py")
+        _touch_file(ws / "loose-file.txt")  # workspace 根下的散文件不是任务目录
+        _set_mtime(ws / "task-old" / "factor.py", now - 72 * 3600)
+        _set_mtime(ws / "task-fresh" / "factor.py", now - 10 * 3600)
+        _set_mtime(ws / "loose-file.txt", now - 72 * 3600)
+
+        result = agent.prune_workspace(tmp_path, 48, now_epoch=now)
+
+        assert result["deleted"] == ["task-old"]
+        assert result["kept"] == 1
+        assert result["failed"] == []
+        assert not (ws / "task-old").exists()
+        assert (ws / "task-fresh").exists()
+        assert (ws / "loose-file.txt").exists()
+
+    def test_boundary_exact_threshold_kept_one_second_earlier_deleted(self, tmp_path):
+        now = 1_800_000_000.0
+        ws = self._workspace(tmp_path)
+        _touch_file(ws / "task-eq" / "factor.py")
+        _touch_file(ws / "task-early" / "factor.py")
+        cutoff = now - 48 * 3600
+        _set_mtime(ws / "task-eq" / "factor.py", cutoff)  # 恰好等于阈值 → 留
+        _set_mtime(ws / "task-early" / "factor.py", cutoff - 1)  # 低 1 秒 → 删
+
+        result = agent.prune_workspace(tmp_path, 48, now_epoch=now)
+
+        assert result["deleted"] == ["task-early"]
+        assert result["kept"] == 1
+        assert (ws / "task-eq").exists()
+
+    def test_walk_error_recorded_and_others_pruned_with_freed_bytes(self, tmp_path, monkeypatch):
+        """整树遍历失败 → 进 failed 不中断；freed_bytes=已删目录文件 st_blocks*512 之和。"""
+        now = time.time()
+        ws = self._workspace(tmp_path)
+        _touch_file(ws / "task-bad" / "factor.py")
+        _touch_file(ws / "task-old" / "factor.py")
+        _set_mtime(ws / "task-bad" / "factor.py", now - 72 * 3600)
+        _set_mtime(ws / "task-old" / "factor.py", now - 72 * 3600)
+
+        real_walk = os.walk
+
+        def fake_walk(path, *args, **kwargs):
+            if Path(path).name == "task-bad":
+                raise OSError("simulated I/O error")
+            return real_walk(path, *args, **kwargs)
+
+        monkeypatch.setattr(agent.os, "walk", fake_walk)
+
+        expected = sum(_disk_bytes(p) for p in (ws / "task-old").rglob("*") if p.is_file())
+
+        result = agent.prune_workspace(tmp_path, 48, now_epoch=now)
+
+        assert result["deleted"] == ["task-old"]
+        assert len(result["failed"]) == 1
+        assert result["failed"][0]["path"].endswith("task-bad")
+        assert result["failed"][0]["error"]
+        assert result["freed_bytes"] == expected
+        assert (ws / "task-bad").exists()
+
+    def test_main_prune_prints_json_exit_zero(self, tmp_path, capsys):
+        now = time.time()
+        ws = self._workspace(tmp_path)
+        _touch_file(ws / "task-old" / "factor.py")
+        _set_mtime(ws / "task-old" / "factor.py", now - 72 * 3600)
+
+        rc = agent.main(["--prune", "--workdir", str(tmp_path)])
+
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert data["deleted"] == ["task-old"]
+        assert data["kept"] == 0
+        assert data["failed"] == []
+        assert not (ws / "task-old").exists()
+
+
+# ── TestDiskWatermark：低水位判定与暂停文件（incident 051 防复发 2/4）────────
+
+
+class TestDiskWatermark:
+    """spec「低水位停发保护」采集侧：阈值边界、失败置空 fail-open、暂停文件落盘。"""
+
+    @staticmethod
+    def _usage_fn(free_by_path: dict[str, int], error_path: str | None = None):
+        """disk_usage 桩：按路径返回 (total, used, free)；error_path 抛 OSError，未知路径模拟不存在。"""
+
+        def fn(path):
+            if error_path is not None and str(path) == error_path:
+                raise OSError("simulated statvfs failure")
+            if str(path) not in free_by_path:
+                raise FileNotFoundError(path)  # shutil.disk_usage 对缺失路径的同款行为
+            return (10**12, 0, free_by_path[str(path)])
+
+        return fn
+
+    @staticmethod
+    def _clear_threshold_env(monkeypatch):
+        monkeypatch.delenv("FACTOR_DISK_MIN_FREE_GB_GUEST", raising=False)
+        monkeypatch.delenv("FACTOR_DISK_MIN_FREE_GB_HOST", raising=False)
+        monkeypatch.delenv("FACTOR_RESEARCH_HOST_MOUNT", raising=False)
+
+    def test_boundary_exact_threshold_not_low_one_byte_low(self, monkeypatch):
+        self._clear_threshold_env(monkeypatch)
+        gb = 2**30
+        w = agent.disk_watermark(
+            guest_path="/guest",
+            host_path="/host",
+            disk_usage_fn=self._usage_fn({"/guest": 30 * gb, "/host": 20 * gb}),
+        )
+        assert w["low"] is False
+        assert w["reason"] is None
+        assert w["error"] is None
+        assert w["guest_free_bytes"] == 30 * gb
+        assert w["host_free_bytes"] == 20 * gb
+        assert w["thresholds"] == {"guest_min_bytes": 30 * gb, "host_min_bytes": 20 * gb}
+
+        w = agent.disk_watermark(
+            guest_path="/guest",
+            host_path="/host",
+            disk_usage_fn=self._usage_fn({"/guest": 30 * gb - 1, "/host": 20 * gb}),
+        )
+        assert w["low"] is True and w["reason"] == "guest"
+
+        w = agent.disk_watermark(
+            guest_path="/guest",
+            host_path="/host",
+            disk_usage_fn=self._usage_fn({"/guest": 30 * gb, "/host": 20 * gb - 1}),
+        )
+        assert w["low"] is True and w["reason"] == "host"
+
+    def test_single_side_oserror_none_and_not_low(self, monkeypatch):
+        """单侧失败 → 该侧 None（fail-open 不计 low），另一侧照常判定。"""
+        self._clear_threshold_env(monkeypatch)
+        gb = 2**30
+        w = agent.disk_watermark(
+            guest_path="/guest",
+            host_path="/host",
+            disk_usage_fn=self._usage_fn({"/host": 40 * gb}, error_path="/guest"),
+        )
+        assert w["guest_free_bytes"] is None
+        assert w["host_free_bytes"] == 40 * gb
+        assert w["low"] is False and w["reason"] is None
+
+        # host 路径不存在 → 同样置 None（不猜）
+        w = agent.disk_watermark(
+            guest_path="/guest",
+            host_path="/host-absent",
+            disk_usage_fn=self._usage_fn({"/guest": 40 * gb}),
+        )
+        assert w["host_free_bytes"] is None
+        assert w["low"] is False
+
+    def test_both_sides_fail_error_recorded_fail_open(self, monkeypatch):
+        self._clear_threshold_env(monkeypatch)
+        w = agent.disk_watermark(
+            guest_path="/x",
+            host_path="/y",
+            disk_usage_fn=self._usage_fn({}, error_path="/y"),
+        )
+        assert w["guest_free_bytes"] is None
+        assert w["host_free_bytes"] is None
+        assert w["low"] is False
+        assert w["error"]
+        assert w["reason"] is None
+
+    def test_env_threshold_override(self, monkeypatch):
+        gb = 2**30
+        monkeypatch.setenv("FACTOR_DISK_MIN_FREE_GB_GUEST", "5")
+        monkeypatch.setenv("FACTOR_DISK_MIN_FREE_GB_HOST", "1")
+        w = agent.disk_watermark(
+            guest_path="/guest",
+            host_path="/host",
+            disk_usage_fn=self._usage_fn({"/guest": 6 * gb, "/host": 1 * gb}),
+        )
+        assert w["thresholds"] == {"guest_min_bytes": 5 * gb, "host_min_bytes": 1 * gb}
+        assert w["low"] is False  # host 恰等覆盖后的阈值 → 不 low
+
+    def test_main_disk_check_writes_pause_file_and_exit_codes(self, tmp_path, monkeypatch, capsys):
+        """低水位 → paused=true 写盘 exit 2；正常 → paused=false 覆盖残留；写失败 → exit 1。"""
+        monkeypatch.setenv("FACTOR_RESEARCH_HOST_MOUNT", str(tmp_path))
+        monkeypatch.setenv("FACTOR_DISK_MIN_FREE_GB_GUEST", "100000000")  # 必然低水位
+        monkeypatch.setenv("FACTOR_DISK_MIN_FREE_GB_HOST", "0")
+
+        rc = agent.main(["--disk-check", "--workdir", str(tmp_path)])
+
+        assert rc == 2
+        pause_path = tmp_path / "factor_research_logs" / ".disk_pause.json"
+        pause = json.loads(pause_path.read_text(encoding="utf-8"))
+        assert pause["paused"] is True and pause["reason"] == "guest"
+        assert set(pause) == {
+            "paused",
+            "reason",
+            "guest_free_bytes",
+            "host_free_bytes",
+            "checked_at",
+        }
+
+        # 正常（阈值 0 → 永不低水位）也写 paused=false，防陈旧暂停态残留
+        monkeypatch.setenv("FACTOR_DISK_MIN_FREE_GB_GUEST", "0")
+        rc = agent.main(["--disk-check", "--workdir", str(tmp_path)])
+        assert rc == 0
+        pause = json.loads(pause_path.read_text(encoding="utf-8"))
+        assert pause["paused"] is False and pause["reason"] is None
+
+        # 暂停文件写失败 → exit 1
+        def broken_write(*args, **kwargs):
+            raise OSError("simulated write failure")
+
+        monkeypatch.setenv("FACTOR_DISK_MIN_FREE_GB_GUEST", "100000000")
+        monkeypatch.setattr(agent.cfs, "atomic_write_json", broken_write)
+        rc = agent.main(["--disk-check", "--workdir", str(tmp_path)])
+        assert rc == 1
+        assert "FAILED" in capsys.readouterr().err
+
+
+# ── TestSupervisorRender：看护脚本接线（incident 051 防复发 3/4）──────────────
+
+
+def _bash_usable() -> bool:
+    """bash 可执行性探测：Windows 的 msys bash 在部分原生进程环境下 fork 自爆（0xC0000142）。"""
+    bash = shutil.which("bash")
+    if bash is None:
+        return False
+    try:
+        probe = subprocess.run(  # noqa: S603 - bash 探测（PATH 解析），无外部输入
+            ["bash", "-c", "true"],  # noqa: S607 - bash 走 PATH 解析（同 agent 模块先例）
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
+class TestSupervisorRender:
+    """prune 与低水位停发进看护循环；既有 5 占位符替换语义不回归。"""
+
+    def test_rendered_script_gates_launch_and_prunes_after_session(self, tmp_path):
+        script = agent.render_supervisor_script(tmp_path)
+        # 计划逐字条款：launch 前低水位门禁；会话结束日志行后清理
+        gate = (
+            f'if ! python3 "{agent.AGENT_SCRIPT_PATH}" --disk-check; '
+            f"then sleep {agent.DISK_CHECK_BACKOFF_S}; continue; fi"
+        )
+        assert gate in script
+        prune_line = (
+            f'python3 "{agent.AGENT_SCRIPT_PATH}" --prune >> "$LOGDIR/prune.log" 2>&1 || true'
+        )
+        assert prune_line in script
+        # 顺序约束：门禁在 launch 之前；prune 在 session ended 日志之后
+        assert script.index("--disk-check") < script.index(f"bash {agent.LAUNCH_SCRIPT}")
+        assert script.index("--prune") > script.index("[supervisor] session ended")
+
+    def test_legacy_placeholders_still_replaced(self, tmp_path):
+        script = agent.render_supervisor_script(tmp_path)
+        for placeholder in (
+            "{{WORKDIR}}",
+            "{{LAUNCH}}",
+            "{{SHORT_THRESHOLD}}",
+            "{{SHORT_BACKOFF}}",
+            "{{SESSION_GAP}}",
+            "{{AGENT}}",
+            "{{DISK_BACKOFF}}",
+        ):
+            assert placeholder not in script
+        assert str(tmp_path) in script
+        assert agent.LAUNCH_SCRIPT in script
+        assert "-lt 120" in script  # 默认 short_session_threshold_s
+        assert "sleep 600 " in script  # 默认短命退避（带尾注）
+        assert "\n    sleep 60\n" in script  # 默认会话间隔
+
+    @pytest.mark.skipif(
+        not _bash_usable(), reason="环境 bash 不可执行（无 bash 或 msys fork 故障）"
+    )
+    def test_rendered_script_passes_bash_syntax_check(self, tmp_path):
+        script = agent.render_supervisor_script(tmp_path)
+        result = subprocess.run(  # noqa: S603 - bash -n 语法校验，无外部输入
+            ["bash", "-n"],  # noqa: S607 - bash 走 PATH 解析（同 agent 模块先例）
+            input=script.encode("utf-8"),
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")

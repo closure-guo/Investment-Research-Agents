@@ -2,7 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import App from '../App'
 import { FactorResearchPage } from '../pages/factors/FactorResearchPage'
-import { DEFAULT_FACTOR_RESEARCH_CONFIG } from '../lib/factorResearch'
+import {
+  DEFAULT_FACTOR_RESEARCH_CONFIG,
+  type FactorResearchDiskBlock,
+  type FactorResearchStatusResponseWithDisk,
+} from '../lib/factorResearch'
 import type { FactorResearchControl, FactorResearchStatusResponse } from '../types'
 
 /**
@@ -35,7 +39,9 @@ function controlBlock(overrides: Partial<FactorResearchControl> = {}): FactorRes
   }
 }
 
-function snapshotBody(overrides: Partial<FactorResearchStatusResponse> = {}): FactorResearchStatusResponse {
+function snapshotBody(
+  overrides: Partial<FactorResearchStatusResponseWithDisk> = {}
+): FactorResearchStatusResponse {
   return {
     available: true,
     age_seconds: 12,
@@ -86,6 +92,19 @@ function snapshotBody(overrides: Partial<FactorResearchStatusResponse> = {}): Fa
       honor: 'live',
       honor_eta_seconds: 0,
     }),
+    ...overrides,
+  }
+}
+
+/** 磁盘水位块默认值（delta add-factor-workspace-retention-disk-watch；端点派生块契约）。 */
+function diskBlock(overrides: Partial<FactorResearchDiskBlock> = {}): FactorResearchDiskBlock {
+  return {
+    guest_free_gb: null,
+    host_free_gb: null,
+    workspace_gb: null,
+    low_watermark: false,
+    low_watermark_reason: null,
+    paused_reason: null,
     ...overrides,
   }
 }
@@ -836,6 +855,145 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
     expect(badge).toHaveAttribute('data-status', 'degraded')
     expect(badge.textContent).toBe('状态未知')
   })
+
+  // ── 停止按钮（delta add-factor-research-stop-button）──
+
+  it('停止按钮：运行中可用 → 二次确认前零请求 → 确认后请求体仅 desired_running=false', async () => {
+    const { putCalls } = mockControlFetch([
+      snapshotBody(),
+      snapshotBody({
+        control: controlBlock({
+          desired_running: false,
+          requested_at: '2026-10-17T23:10:00+08:00',
+          pending: true,
+          honor: 'live',
+          honor_eta_seconds: 0,
+        }),
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const stop = await screen.findByTestId('factor-research-stop-button')
+    expect((stop as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(stop)
+
+    // 与开关关闭方向同一确认弹窗；未确认前 MUST NOT 发请求
+    const dialog = await screen.findByTestId('factor-research-control-confirm-dialog')
+    expect(dialog.textContent).toContain('将终止当前研发会话')
+    expect(putCalls).toHaveLength(0)
+
+    fireEvent.click(screen.getByTestId('factor-research-control-confirm'))
+    await waitFor(() => expect(putCalls).toHaveLength(1))
+    expect(putCalls[0].body).toEqual({ desired_running: false })
+
+    // pending → 与开关同禁用；开关位置不翻转（仍为实态开）
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('factor-research-stop-button') as HTMLButtonElement).disabled
+      ).toBe(true)
+    )
+    expect(screen.getByTestId('factor-research-control-switch').getAttribute('aria-checked')).toBe(
+      'true'
+    )
+  })
+
+  it('停止按钮：取消确认 → 零请求且保持可用', async () => {
+    const { putCalls } = mockControlFetch([snapshotBody()])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    fireEvent.click(await screen.findByTestId('factor-research-stop-button'))
+    fireEvent.click(await screen.findByTestId('factor-research-control-cancel'))
+    expect(putCalls).toHaveLength(0)
+    expect(
+      (screen.getByTestId('factor-research-stop-button') as HTMLButtonElement).disabled
+    ).toBe(false)
+  })
+
+  it('停止按钮：已停止且无运行意图 → 禁用（无可停止对象）', async () => {
+    mockControlFetch([
+      snapshotBody({
+        supervisor: { running: false, pid: null, started_at: null },
+        control: controlBlock({
+          desired_running: false,
+          pending: false,
+          honor: 'live',
+          honor_eta_seconds: 0,
+        }),
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const stop = await screen.findByTestId('factor-research-stop-button')
+    expect((stop as HTMLButtonElement).disabled).toBe(true)
+    // 开关仍可操作（启动方向）
+    expect(
+      (screen.getByTestId('factor-research-control-switch') as HTMLButtonElement).disabled
+    ).toBe(false)
+  })
+
+  it('停止按钮：离线但有运行意图（launcher 可用）→ 可撤销意图', async () => {
+    const { putCalls } = mockControlFetch([
+      snapshotBody({
+        stale: true,
+        age_seconds: 400,
+        control: controlBlock({
+          desired_running: true,
+          requested_at: null,
+          pending: false,
+          honor: 'launcher',
+          honor_eta_seconds: 180,
+        }),
+        launcher: { available: true, fresh: true, agent_ok: true, age_seconds: 30 },
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const stop = await screen.findByTestId('factor-research-stop-button')
+    expect((stop as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(stop)
+    fireEvent.click(await screen.findByTestId('factor-research-control-confirm'))
+    await waitFor(() => expect(putCalls).toHaveLength(1))
+    expect(putCalls[0].body).toEqual({ desired_running: false })
+  })
+
+  it('停止按钮：控制通道不可用（honor=unavailable）→ 禁用', async () => {
+    mockControlFetch([
+      snapshotBody({
+        stale: true,
+        age_seconds: 400,
+        control: controlBlock({
+          desired_running: true,
+          requested_at: null,
+          pending: false,
+          honor: 'unavailable',
+          honor_eta_seconds: null,
+        }),
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const stop = await screen.findByTestId('factor-research-stop-button')
+    expect((stop as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('停止按钮：restart_pending 期间禁用（与开关同禁用条件）', async () => {
+    const restartAt = new Date().toISOString()
+    mockControlFetch([
+      snapshotBody({
+        control: controlBlock({
+          desired_running: true,
+          restart_requested_at: restartAt,
+          restart_requested_at_epoch: Math.floor(Date.now() / 1000),
+          restart_request_id: 'r1',
+          restart_pending: true,
+        }),
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const stop = await screen.findByTestId('factor-research-stop-button')
+    expect((stop as HTMLButtonElement).disabled).toBe(true)
+  })
 })
 
 /**
@@ -1237,5 +1395,112 @@ describe('收割链路区块（add-factor-harvest-ui）', () => {
     expect(screen.getByTestId('factor-research-harvest-empty').textContent).toContain('未接入')
     // 主区块不受影响
     expect(screen.getByTestId('factor-research-supervisor')).toBeTruthy()
+  })
+})
+
+/**
+ * 磁盘水位卡与低水位横幅（delta add-factor-workspace-retention-disk-watch；spec
+ * factor-research-monitor「磁盘水位采集与只读派生」「低水位停发保护」）。
+ *
+ * - 正常 disk 块 → 水位卡渲染三格 GB 读数（1 位小数），无横幅；
+ * - low_watermark=true → 横幅出现（低水位侧 + 当前读数），零命令面；
+ * - paused_reason 非空而 low_watermark=false → 横幅仍出现并注明「保护行为，不是故障」；
+ * - 旧快照无 disk 块 / 兜底块（全 null + false）→ 卡与横幅均不渲染且页面不崩；
+ * - 读数未上报 → 「—」+ title 说明，MUST NOT 编造数字。
+ */
+describe('因子研发监控页 · 磁盘水位卡与低水位横幅（delta add-factor-workspace-retention-disk-watch）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('正常读数：卡渲染三格 GB 读数（1 位小数），无低水位横幅', async () => {
+    mockFetch(
+      snapshotBody({
+        disk: diskBlock({ guest_free_gb: 41.26, host_free_gb: 122.4, workspace_gb: 210.5 }),
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const card = await screen.findByTestId('factor-research-disk-card')
+    expect(card.textContent).toContain('磁盘水位')
+    expect(screen.getByTestId('factor-research-disk-guest').textContent).toContain('41.3')
+    expect(screen.getByTestId('factor-research-disk-host').textContent).toContain('122.4')
+    expect(screen.getByTestId('factor-research-disk-workspace').textContent).toContain('210.5')
+    expect(screen.queryByTestId('factor-research-low-watermark-banner')).toBeNull()
+  })
+
+  it('低水位（guest）：横幅出现且文案含 guest 侧与当前读数；零命令面', async () => {
+    mockFetch(
+      snapshotBody({
+        disk: diskBlock({
+          guest_free_gb: 25.3,
+          host_free_gb: 122.4,
+          workspace_gb: 210.5,
+          low_watermark: true,
+          low_watermark_reason: 'guest',
+        }),
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const banner = await screen.findByTestId('factor-research-low-watermark-banner')
+    expect(banner.textContent).toContain('guest')
+    expect(banner.textContent).toContain('25.3')
+    // 水位卡仍渲染（有读数）
+    expect(screen.getByTestId('factor-research-disk-card')).toBeTruthy()
+    // 零命令面：横幅内无可点击处置入口
+    expect(banner.querySelectorAll('button, a')).toHaveLength(0)
+  })
+
+  it('仅 paused_reason 非空（low_watermark=false）：横幅仍出现并注明保护行为非故障', async () => {
+    mockFetch(
+      snapshotBody({
+        disk: diskBlock({
+          guest_free_gb: 45.0,
+          host_free_gb: 150.0,
+          workspace_gb: 180.0,
+          paused_reason: 'disk_low_watermark',
+        }),
+      })
+    )
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const banner = await screen.findByTestId('factor-research-low-watermark-banner')
+    expect(banner.textContent).toContain('看护已暂停拉起新会话')
+    expect(banner.textContent).toContain('disk_low_watermark')
+    expect(banner.textContent).toContain('不是故障')
+  })
+
+  it('旧快照无 disk 块：卡与横幅都不出现且页面正常渲染', async () => {
+    mockFetch(snapshotBody()) // overrides 不带 disk（旧快照形态）
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-supervisor')
+    expect(screen.queryByTestId('factor-research-disk-card')).toBeNull()
+    expect(screen.queryByTestId('factor-research-low-watermark-banner')).toBeNull()
+  })
+
+  it('读数未上报：显示「—」并配 title 说明，不编造数字', async () => {
+    mockFetch(snapshotBody({ disk: diskBlock({ host_free_gb: 122.4 }) }))
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-disk-card')
+    const guest = screen.getByTestId('factor-research-disk-guest')
+    expect(guest.textContent).toContain('—')
+    expect(guest.getAttribute('title')).toBe('读数未上报')
+  })
+
+  it('兜底块（三读数全 null 且未判低水位）：卡不渲染', async () => {
+    mockFetch(snapshotBody({ disk: diskBlock() }))
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    await screen.findByTestId('factor-research-supervisor')
+    expect(screen.queryByTestId('factor-research-disk-card')).toBeNull()
+    expect(screen.queryByTestId('factor-research-low-watermark-banner')).toBeNull()
   })
 })

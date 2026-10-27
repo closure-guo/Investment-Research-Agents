@@ -339,6 +339,60 @@ test('6. 看护开关：停止需确认 → 控制文件真写入 → 「切换�
   await expect(page.getByTestId('factor-research-control-state')).toContainText('已关闭')
 })
 
+test('6b. 停止按钮：二次确认后真写控制文件 → 与开关同禁用 → 停止后无可停止对象禁用（delta add-factor-research-stop-button）', async ({
+  page,
+}) => {
+  const fixture = snapshotBody()
+  writeSnapshot(fixture) // running=true，新鲜
+  removeControl()
+  await page.goto('/factor-research')
+
+  // 前置守卫（同 test 6）：后端必须读隔离 fixture，否则拒绝继续（防写生产控制文件）
+  const probe = (await (
+    await page.request.get('/api/factor-research/status')
+  ).json()) as { collected_at?: string; available?: boolean }
+  expect(
+    probe.available === true && probe.collected_at === fixture.collected_at,
+    '后端未读取隔离 fixture（疑似复用了生产栈）——拒绝继续，防控制文件写入生产'
+  ).toBe(true)
+
+  const stop = page.getByTestId('factor-research-stop-button')
+  await expect(stop).toBeVisible()
+  await expect(stop).toContainText('停止')
+  await expect(stop).toBeEnabled()
+
+  // 点击停止 → 与开关关闭方向同一二次确认；未确认前零写入
+  await stop.click()
+  const dialog = page.getByTestId('factor-research-control-confirm-dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('将终止当前研发会话')
+  expect(existsSync(CONTROL_PATH)).toBe(false)
+
+  // 确认 → 真实 PUT → 控制文件真值落地（非 mock）
+  await page.getByTestId('factor-research-control-confirm').click()
+  await expect.poll(() => readControl()?.desired_running).toBe(false)
+
+  // pending → 停止按钮与开关同禁用；开关位置不翻转（仍为实态开）
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('切换中', {
+    timeout: 15_000,
+  })
+  await expect(stop).toBeDisabled()
+  await expect(page.getByTestId('factor-research-control-switch')).toHaveAttribute(
+    'aria-checked',
+    'true'
+  )
+
+  // 研究侧调和完成 → 实态停止 → 停止按钮保持禁用（无可停止对象）
+  writeSnapshot(snapshotBody({ supervisor: { running: false, pid: null, started_at: null } }))
+  await expect(page.getByTestId('factor-research-control-switch')).toHaveAttribute(
+    'aria-checked',
+    'false',
+    { timeout: 15_000 }
+  )
+  await expect(stop).toBeDisabled()
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('已关闭')
+})
+
 test('7. 陈旧数据：开关禁用 + 明示理由（控制通道无存活证据）', async ({ page }) => {
   const epoch = Math.floor(Date.now() / 1000) - 400
   writeSnapshot(snapshotBody({ collected_at: isoAt(epoch), collected_at_epoch: epoch }))
@@ -605,4 +659,64 @@ test('19. distro 探活正常：保持既有陈旧表述且无探活提示', asy
   await expect(staleBanner).toContainText('采集器可能已停止')
   await expect(page.getByTestId('factor-research-distro-probe-banner')).toHaveCount(0)
   removeDistroProbe()
+})
+
+// ── 磁盘水位卡与低水位横幅（delta add-factor-workspace-retention-disk-watch）──
+
+test('20. 低水位：横幅出现（低水位侧 + 读数 + 停发说明）、水位卡渲染 GB 读数', async ({ page }) => {
+  writeSnapshot(
+    snapshotBody({
+      // 采集器原始契约（字节）；low_watermark 由端点按阈值（guest 30GB / host 20GB）派生
+      disk: {
+        guest_free_bytes: Math.floor(25.3 * 2 ** 30), // < 30GB 阈值 → low_watermark=true (guest)
+        host_free_bytes: Math.floor(122.4 * 2 ** 30),
+        workspace_bytes: Math.floor(210.5 * 2 ** 30),
+        paused_reason: 'guest',
+      },
+    })
+  )
+  await page.goto('/factor-research')
+
+  const banner = page.getByTestId('factor-research-low-watermark-banner')
+  await expect(banner).toBeVisible()
+  await expect(banner).toContainText('guest 空闲 25.3 GB')
+  await expect(banner).toContainText('guest 侧空闲不足')
+  await expect(banner).toContainText('这是保护行为，不是故障')
+  // 零命令面：横幅内无处置入口
+  await expect(banner.locator('button, a')).toHaveCount(0)
+
+  const card = page.getByTestId('factor-research-disk-card')
+  await expect(card).toBeVisible()
+  await expect(page.getByTestId('factor-research-disk-guest')).toContainText('25.3')
+  await expect(page.getByTestId('factor-research-disk-host')).toContainText('122.4')
+  await expect(page.getByTestId('factor-research-disk-workspace')).toContainText('210.5')
+})
+
+test('21. 水位正常：disk-card 渲染且无低水位横幅（旧快照兼容不崩）', async ({ page }) => {
+  writeSnapshot(
+    snapshotBody({
+      disk: {
+        guest_free_bytes: Math.floor(41.3 * 2 ** 30), // > 30GB 阈值 → 不判低水位
+        host_free_bytes: Math.floor(122.4 * 2 ** 30),
+        workspace_bytes: Math.floor(210.5 * 2 ** 30),
+        paused_reason: null,
+      },
+    })
+  )
+  await page.goto('/factor-research')
+
+  await expect(page.getByTestId('factor-research-supervisor')).toBeVisible()
+  const card = page.getByTestId('factor-research-disk-card')
+  await expect(card).toBeVisible()
+  await expect(page.getByTestId('factor-research-disk-guest')).toContainText('41.3')
+  await expect(page.getByTestId('factor-research-low-watermark-banner')).toHaveCount(0)
+})
+
+test('22. 旧快照无 disk 块：水位卡与横幅均不渲染、页面照常', async ({ page }) => {
+  writeSnapshot(snapshotBody())
+  await page.goto('/factor-research')
+
+  await expect(page.getByTestId('factor-research-supervisor')).toBeVisible()
+  await expect(page.getByTestId('factor-research-disk-card')).toHaveCount(0)
+  await expect(page.getByTestId('factor-research-low-watermark-banner')).toHaveCount(0)
 })

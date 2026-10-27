@@ -4483,6 +4483,13 @@ FACTOR_RESEARCH_STALL_AFTER_S = 900  # 会话日志静默阈值（实测历史�
 FACTOR_RESEARCH_LAUNCHER_FRESH_AFTER_S = 300  # 2× 启动器节拍（120s）+ 余量
 FACTOR_RESEARCH_LAUNCHER_HONOR_ETA_S = 180  # 离线受理的披露上界（与陈旧阈值同值）
 
+# 磁盘低水位阈值（delta add-factor-workspace-retention-disk-watch，incident 051）：
+# guest ext4 空闲默认 30GB / 宿主工作盘默认 20GB。与 distro 侧
+# factor_research_agent.disk_thresholds（FACTOR_DISK_MIN_FREE_GB_GUEST/HOST）字面同步；
+# env 同名可覆盖（调用期读，E2E/演练注入即生效）。
+FACTOR_RESEARCH_DISK_MIN_FREE_GB_GUEST = 30
+FACTOR_RESEARCH_DISK_MIN_FREE_GB_HOST = 20
+
 # 研发节奏配置（delta add-factor-research-settings）：四个旋钮的默认值与合法区间。
 # 与 distro 侧 factor_research_agent.DEFAULT_CONFIG / CONFIG_BOUNDS 字面同步。
 FACTOR_RESEARCH_CONFIG_DEFAULTS: dict[str, int] = {
@@ -4522,14 +4529,82 @@ def _factor_research_progress_block(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {"log_age_seconds": log_age, "stalled": stalled}
 
 
+def _bytes_to_gb(value: Any) -> float | None:
+    """bytes → GiB（2**30）保 1 位小数；非数值（含 bool）→ None（读数失败如实置空）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return round(value / 2**30, 1)
+
+
+def _disk_min_free_gb(env_key: str, default_gb: int) -> float:
+    """低水位阈值（GB）：env 同名可覆盖（调用期读），非法值回退默认。"""
+    raw = os.environ.get(env_key)
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            return float(default_gb)
+    return float(default_gb)
+
+
+def _factor_research_disk_block(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """磁盘水位只读派生块（delta add-factor-workspace-retention-disk-watch）。
+
+    阈值单源：FACTOR_RESEARCH_DISK_MIN_FREE_GB_GUEST/HOST（与 distro 侧
+    factor_research_agent 字面同步，env 同名可覆盖）。低水位 = 任一侧空闲 GB **严格小于**
+    阈值（恰等不算，与 distro 侧 disk_watermark 同判）；None 读数不计入（MUST NOT 编造），
+    reason 取先命中的（guest 优先）。快照缺 disk 块（旧采集器/兜底）→ 全 None + False
+    （降级不崩）。
+    """
+    raw = snapshot.get("disk")
+    if not isinstance(raw, dict):
+        return {
+            "guest_free_gb": None,
+            "host_free_gb": None,
+            "workspace_gb": None,
+            "low_watermark": False,
+            "low_watermark_reason": None,
+            "paused_reason": None,
+        }
+    guest_gb = _bytes_to_gb(raw.get("guest_free_bytes"))
+    host_gb = _bytes_to_gb(raw.get("host_free_bytes"))
+    guest_min = _disk_min_free_gb(
+        "FACTOR_RESEARCH_DISK_MIN_FREE_GB_GUEST", FACTOR_RESEARCH_DISK_MIN_FREE_GB_GUEST
+    )
+    host_min = _disk_min_free_gb(
+        "FACTOR_RESEARCH_DISK_MIN_FREE_GB_HOST", FACTOR_RESEARCH_DISK_MIN_FREE_GB_HOST
+    )
+    low_guest = guest_gb is not None and guest_gb < guest_min
+    low_host = host_gb is not None and host_gb < host_min
+    # 看护停发原因透传（--disk-check 落盘的 .disk_pause.json，经采集器 disk 块上行）；
+    # 前端横幅条件「low_watermark 或 paused_reason 非空」依赖它。
+    paused = raw.get("paused_reason")
+    return {
+        "guest_free_gb": guest_gb,
+        "host_free_gb": host_gb,
+        "workspace_gb": _bytes_to_gb(raw.get("workspace_bytes")),
+        "low_watermark": bool(low_guest or low_host),
+        "low_watermark_reason": "guest" if low_guest else ("host" if low_host else None),
+        "paused_reason": paused if isinstance(paused, str) and paused else None,
+    }
+
+
 def _factor_research_snapshot_payload() -> dict[str, Any]:
-    """快照面：透传 + 派生 ``available``/``age_seconds``/``stale``/``progress``。"""
+    """快照面：透传 + 派生 ``available``/``age_seconds``/``stale``/``progress``/``disk``。"""
     path = Path(os.environ.get("FACTOR_RESEARCH_STATUS_PATH", "data/factor_research/status.json"))
     if not path.is_file():
         return {
             "available": False,
             "reason": "missing",
             "progress": {"log_age_seconds": None, "stalled": False},
+            "disk": {
+                "guest_free_gb": None,
+                "host_free_gb": None,
+                "workspace_gb": None,
+                "low_watermark": False,
+                "low_watermark_reason": None,
+                "paused_reason": None,
+            },
         }
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -4548,6 +4623,14 @@ def _factor_research_snapshot_payload() -> dict[str, Any]:
             "available": False,
             "reason": "corrupt",
             "progress": {"log_age_seconds": None, "stalled": False},
+            "disk": {
+                "guest_free_gb": None,
+                "host_free_gb": None,
+                "workspace_gb": None,
+                "low_watermark": False,
+                "low_watermark_reason": None,
+                "paused_reason": None,
+            },
         }
     age = max(0, int(time.time() - epoch))
     payload = dict(data)
@@ -4559,6 +4642,7 @@ def _factor_research_snapshot_payload() -> dict[str, Any]:
         }
     )
     payload["progress"] = _factor_research_progress_block(payload)
+    payload["disk"] = _factor_research_disk_block(payload)
     return payload
 
 

@@ -84,6 +84,15 @@ _NO_LAUNCHER = {"available": False, "reason": "missing"}
 _NO_PROGRESS = {"log_age_seconds": None, "stalled": False}
 # distro 探活文件缺失/不可解析时的派生块（spec「distro 探活只读派生」：MUST NOT 伪结论）。
 _NO_DISTRO = {"available": False, "reason": "missing"}
+# 快照不可用/缺 disk 块时的派生块（spec「磁盘水位采集与只读派生」：实态不可证 → 不伪结论）。
+_NO_DISK = {
+    "guest_free_gb": None,
+    "host_free_gb": None,
+    "workspace_gb": None,
+    "low_watermark": False,
+    "low_watermark_reason": None,
+    "paused_reason": None,
+}
 _DEFAULT_CONFIG_VALUES = {
     "snapshot_interval_s": 15,
     "session_gap_s": 60,
@@ -172,6 +181,7 @@ def test_missing_file_reports_missing():
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
         "progress": _NO_PROGRESS,
+        "disk": _NO_DISK,
         "distro": _NO_DISTRO,
     }
 
@@ -188,6 +198,7 @@ def test_corrupt_text_reports_corrupt(_status_path):
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
         "progress": _NO_PROGRESS,
+        "disk": _NO_DISK,
         "distro": _NO_DISTRO,
     }
 
@@ -202,6 +213,7 @@ def test_non_object_json_reports_corrupt(_status_path):
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
         "progress": _NO_PROGRESS,
+        "disk": _NO_DISK,
         "distro": _NO_DISTRO,
     }
 
@@ -217,6 +229,7 @@ def test_missing_timestamp_reports_corrupt(_status_path):
         "control": _NO_CONTROL,
         "launcher": _NO_LAUNCHER,
         "progress": _NO_PROGRESS,
+        "disk": _NO_DISK,
         "distro": _NO_DISTRO,
     }
 
@@ -874,6 +887,119 @@ class TestProgressStall:
 
         assert body["available"] is False
         assert body["progress"] == {"log_age_seconds": None, "stalled": False}
+
+
+# ── 磁盘水位只读派生块（delta add-factor-workspace-retention-disk-watch；
+#    spec「磁盘水位采集与只读派生」）──
+#
+# 阈值单源 FACTOR_RESEARCH_DISK_MIN_FREE_GB_GUEST/HOST（30/20，与 distro 侧
+# factor_research_agent 字面同步，env 同名可覆盖）；bytes→GB（2**30）保 1 位小数；
+# 低水位=任一侧严格小于阈值（恰等不算），None 读数不计入（MUST NOT 编造）。
+
+
+class TestDiskWatermark:
+    """`GET /status` 顶层 disk 派生块：GB 换算 + 低水位真值表 + 缺块降级。"""
+
+    def _disk_body(self, _status_path, *, guest=None, host=None, workspace=None, **extra) -> dict:
+        """写入含 disk 块的新鲜快照并返回端点 disk 块（guest/host/workspace 单位 GB）。"""
+        snap = _snapshot(age_s=40)
+        disk = {
+            "guest_free_bytes": None if guest is None else int(guest * 2**30),
+            "host_free_bytes": None if host is None else int(host * 2**30),
+            "workspace_bytes": None if workspace is None else int(workspace * 2**30),
+            "paused_reason": None,
+        }
+        disk.update(extra)
+        snap["disk"] = disk
+        _status_path.write_text(json.dumps(snap), encoding="utf-8")
+        return TestClient(app).get(_ENDPOINT).json()["disk"]
+
+    def test_gb_conversion_one_decimal(self, _status_path):
+        body = self._disk_body(_status_path, guest=40, host=25.5, workspace=3.4)
+        assert body == {
+            "guest_free_gb": 40.0,
+            "host_free_gb": 25.5,
+            "workspace_gb": 3.4,
+            "low_watermark": False,
+            "low_watermark_reason": None,
+            "paused_reason": None,
+        }
+
+    def test_paused_reason_passthrough(self, _status_path):
+        """看护停发原因透传（--disk-check 暂停文件经采集器上行；前端横幅条件依赖）。"""
+        body = self._disk_body(_status_path, guest=40, host=25, paused_reason="guest")
+        assert body["paused_reason"] == "guest"
+        body = self._disk_body(_status_path, guest=40, host=25, paused_reason="")
+        assert body["paused_reason"] is None
+
+    def test_guest_at_threshold_not_low(self, _status_path):
+        """恰等阈值（30GB）不算低（严格小于才告警，与 distro 侧 disk_watermark 同判）。"""
+        body = self._disk_body(_status_path, guest=30.0, host=25.0)
+        assert body["low_watermark"] is False
+        assert body["low_watermark_reason"] is None
+
+    def test_guest_below_threshold_low_reason_guest(self, _status_path):
+        body = self._disk_body(_status_path, guest=29.9, host=25.0)
+        assert body["low_watermark"] is True
+        assert body["low_watermark_reason"] == "guest"
+
+    def test_host_at_threshold_not_low(self, _status_path):
+        body = self._disk_body(_status_path, guest=40.0, host=20.0)
+        assert body["low_watermark"] is False
+        assert body["low_watermark_reason"] is None
+
+    def test_host_below_threshold_low_reason_host(self, _status_path):
+        body = self._disk_body(_status_path, guest=40.0, host=19.9)
+        assert body["low_watermark"] is True
+        assert body["low_watermark_reason"] == "host"
+
+    def test_both_low_guest_priority(self, _status_path):
+        """双侧都低 → reason 取先命中的 guest（优先级固定，不由数据顺序决定）。"""
+        body = self._disk_body(_status_path, guest=5.0, host=2.0)
+        assert body["low_watermark"] is True
+        assert body["low_watermark_reason"] == "guest"
+
+    def test_none_side_not_counted(self, _status_path):
+        """读数失败的一侧 None → 不计入 low 判定（MUST NOT 编造），另一侧照常判定。"""
+        body = self._disk_body(_status_path, guest=None, host=19.9)
+        assert body["guest_free_gb"] is None
+        assert body["low_watermark"] is True
+        assert body["low_watermark_reason"] == "host"
+
+        body = self._disk_body(_status_path, guest=29.9, host=None)
+        assert body["host_free_gb"] is None
+        assert body["low_watermark"] is True
+        assert body["low_watermark_reason"] == "guest"
+
+    def test_non_numeric_bytes_reports_none(self, _status_path):
+        """非数值读数（旧采集器/损坏字段）→ 该侧 None，不 500 不猜。"""
+        body = self._disk_body(_status_path, guest=None, host=25.0, guest_free_bytes="n/a")
+        assert body["guest_free_gb"] is None
+        assert body["low_watermark"] is False
+
+    def test_snapshot_without_disk_block_degrades(self, _status_path):
+        """旧采集器快照（无 disk 块）→ 全 None + False（降级不崩）。"""
+        _status_path.write_text(json.dumps(_snapshot(age_s=40)), encoding="utf-8")
+        assert TestClient(app).get(_ENDPOINT).json()["disk"] == _NO_DISK
+
+    def test_missing_snapshot_fallback_includes_disk(self, _status_path):
+        assert not _status_path.exists()
+        body = TestClient(app).get(_ENDPOINT).json()
+        assert body["disk"] == _NO_DISK
+        assert body["disk"]["low_watermark"] is False
+
+    def test_corrupt_snapshot_fallback_includes_disk(self, _status_path):
+        _status_path.write_text("not json at all", encoding="utf-8")
+        assert TestClient(app).get(_ENDPOINT).json()["disk"] == _NO_DISK
+
+    def test_env_threshold_override(self, _status_path, monkeypatch):
+        monkeypatch.setenv("FACTOR_RESEARCH_DISK_MIN_FREE_GB_GUEST", "10")
+        body = self._disk_body(_status_path, guest=9.9, host=25.0)
+        assert body["low_watermark_reason"] == "guest"
+
+        monkeypatch.setenv("FACTOR_RESEARCH_DISK_MIN_FREE_GB_HOST", "30")
+        body = self._disk_body(_status_path, guest=40.0, host=29.9)
+        assert body["low_watermark_reason"] == "host"
 
 
 # ── distro 探活派生块（delta add-factor-research-distro-liveness-probe；

@@ -147,6 +147,59 @@ static class Program
             detail = Truncate(ex.Message);
         }
 
+        // delta add-factor-workspace-retention-disk-watch（incident 051）：exec 探针可被
+        // WSL 页缓存假阴性命中（/bin/true 走缓存成功而 ext4 文件系统 I/O 实际全挂）。
+        // exec 成功后追加读写探针：distro 内创建并删除临时文件，验证真实读写。
+        // 失败 → ok=false、exitCode 记 rw 退出码、detail=fs_rw_failed，与 exec 失败同走
+        // 自愈门控（计入 consecutive_failures）；exec 失败路径行为不变。
+        if (ok)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = @"C:\Windows\System32\wsl.exe",
+                    Arguments = string.Format(
+                        "-d {0} -e /bin/sh -c \": > /tmp/.factor_probe_rw && rm /tmp/.factor_probe_rw\"",
+                        distro),
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    WorkingDirectory = @"C:\Windows\System32",
+                };
+
+                using (Process p = Process.Start(psi))
+                {
+                    var outTask = p.StandardOutput.ReadToEndAsync();
+                    var errTask = p.StandardError.ReadToEndAsync();
+                    if (p.WaitForExit(ProbeTimeoutMs))
+                    {
+                        exitCode = p.ExitCode;
+                        ok = exitCode == 0;
+                        if (!ok)
+                        {
+                            detail = "fs_rw_failed";
+                        }
+                    }
+                    else
+                    {
+                        try { p.Kill(); } catch { }
+                        exitCode = -1;
+                        ok = false;
+                        detail = "fs_rw_failed";
+                    }
+                }
+            }
+            catch
+            {
+                exitCode = -1;
+                ok = false;
+                detail = "fs_rw_failed";
+            }
+        }
+
         // 读取上一次探活状态（best effort：自愈计数与冷却依赖它，缺失即从 0 起）
         int prevFailures = 0;
         long prevTerminatedEpoch = 0;

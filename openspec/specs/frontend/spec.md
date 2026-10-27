@@ -2345,7 +2345,7 @@ assistant 消息 hover SHALL 显示复制与重新生成操作；管线进度时
 ### Requirement: 因子研发监控页
 
 系统 SHALL 提供 `/factor-research` 路由页，展示外部因子研发（RD-Agent 持续循环）的运行状态
-（数据面只读）与研发看护控制（启停开关 + 重启按钮），形态为「看护状态区 + 当前会话进度区 +
+（数据面只读）与研发看护控制（启停开关 + 停止按钮 + 重启按钮），形态为「看护状态区 + 当前会话进度区 +
 会话历史表」：状态区 SHALL 含 看护状态徽章、看护 pid、启动时刻、已运行时长、累计会话数与
 候选实现数；进度区 SHALL 含 当前会话开始时刻与时长、循环序号、当前步骤名、步骤进度（x/5）、
 本会话因子名列表与日志尾（等宽字体，最近 N 行）；历史表 SHALL 列出各会话（开始时刻 / 时长 /
@@ -2371,6 +2371,14 @@ assistant 消息 hover SHALL 显示复制与重新生成操作；管线进度时
 「停止失败」（含动作时刻与 `last_error` 摘要）并注明代理将自动重试，MUST NOT 以「切换中」
 无限冒充进展。
 
+控制条 SHALL 提供「停止」按钮（常驻可见，与启停开关并列）：点击 SHALL 经二次确认（与开关关闭
+方向同一确认文案，明示将终止当前研发会话）后调用 `PUT /api/factor-research/control`
+（`desired_running=false`）；未确认前 MUST NOT 发出请求。停止按钮 SHALL 与启停开关共享禁用条件
+（提交中 / `control.pending=true` / `control.restart_pending=true` / 通道不可用 / 409 封禁），
+另在无可停止对象（`actual_state="stopped"` 且 `control.desired_running !== true`）时 SHALL 禁用。
+停止按钮 MUST NOT 改变开关位置语义（开关位置仍只取 `actual_state`），亦 MUST NOT 引入开关/重启
+之外的写路径（同一端点、同一确认）。
+
 控制条 SHALL 提供「重启管线」按钮（常驻可见）：点击 SHALL 经二次确认（明示将终止当前研发
 会话并重新拉起）后调用 `POST /api/factor-research/restart`；`control.restart_pending=true`
 期间 SHALL 展示「重启中…（发起时刻，等待研发侧受理）」并禁用重复操作；快照
@@ -2388,8 +2396,8 @@ MUST NOT 显示成功。重启请求发出后若 `restart_pending` 持续为真�
 问题。页面其余部分仍只读（MUST NOT 增设其它控制入口）。页面入口 SHALL 同源提供于侧边栏与
 命令面板。
 
-(Previously: 快照陈旧或不可用时，开关位置 SHALL 取控制块 `control.desired_running`，离线时把
-持久化意图当作唯一可信状态；页面无重启入口；状态徽章按快照 snapshot.running 二态展示。)
+(Previously: 控制条只有启停开关与「重启管线」两个入口——停止只能经开关的关闭方向触发，没有字面
+「停止」按钮；开关位置语义、二次确认与禁用条件均同本次更新，其余行为相同。)
 
 #### Scenario: 运行中状态与进度展示
 
@@ -2505,6 +2513,36 @@ MUST NOT 显示成功。重启请求发出后若 `restart_pending` 持续为真�
 - **GIVEN** 快照 `sessions` 最近 3 条 `duration_s` 均小于 120 秒
 - **WHEN** 打开监控页
 - **THEN** 页面展示「连续短命会话」告警（含最近 3 次时长），提示疑似凭证/配额问题
+
+#### Scenario: 停止按钮与开关共享二次确认与写路径
+
+- **GIVEN** 快照 `actual_state="running"`、`control.pending=false`、控制通道可用
+- **WHEN** 点击「停止」
+- **THEN** 出现二次确认（含「将终止当前研发会话」语义），未确认前 MUST NOT 发出请求
+- **AND** 确认后调用 `PUT /api/factor-research/control`，请求体为 `{"desired_running": false}`
+- **AND** `control.pending=true` 期间停止按钮禁用（与开关同禁用条件），开关位置不翻转
+
+#### Scenario: 停止按钮在无可停止对象时禁用
+
+- **GIVEN** 快照 `actual_state="stopped"` 且 `control.desired_running !== true`
+- **WHEN** 打开监控页
+- **THEN** 「停止」按钮禁用
+- **AND** 开关位置为关且开关本身可操作（启动方向不经二次确认）
+
+#### Scenario: 停止按钮在通道不可用时禁用
+
+- **GIVEN** `control.honor="unavailable"`（或最近一次控制请求返回 409 `control_unavailable`）
+- **WHEN** 打开监控页
+- **THEN** 「停止」按钮与开关、「重启管线」按钮一并禁用并明示理由
+- **AND** MUST NOT 可点击发出控制请求
+
+#### Scenario: 离线意图可撤销
+
+- **GIVEN** 快照陈旧（`actual_state="unverified"`）、`control.desired_running=true`、
+  `honor="launcher"`
+- **WHEN** 点击「停止」并在二次确认中确认
+- **THEN** 写入 `desired_running=false`（撤销持久化运行意图），状态文案披露等待启动器受理
+- **AND** MUST NOT 声称看护已停止（实态仍不可证）
 
 ### Requirement: 因子研发配置页
 
