@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS factors (
   ast_json        TEXT,
   source          TEXT NOT NULL DEFAULT 'proposal',
   alignment_score REAL,
+  orientation     INTEGER,
   pool_increment  REAL,
   created_at      TEXT NOT NULL,
   updated_at      TEXT NOT NULL
@@ -145,11 +146,14 @@ def _connect(db_path: str | Path | None) -> sqlite3.Connection:
 
 
 def init_library(db_path: str | Path | None = None) -> Path:
-    """幂等建 3 表 + 索引，返回实际使用的库路径。"""
+    """幂等建 3 表 + 索引（含存量库 orientation 列迁移），返回实际使用的库路径。"""
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
     try:
         conn.executescript(FACTOR_LIBRARY_DDL)
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(factors)")}
+        if "orientation" not in existing:
+            conn.execute("ALTER TABLE factors ADD COLUMN orientation INTEGER")
         conn.commit()
     finally:
         conn.close()
@@ -611,6 +615,20 @@ def set_pool_increment(factor_id: int, value: float, db_path: str | Path | None 
     try:
         _require_factor(conn, factor_id)
         conn.execute("UPDATE factors SET pool_increment = ? WHERE id = ?", (increment, factor_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_orientation(factor_id: int, value: int, db_path: str | Path | None = None) -> None:
+    """入池定向符号写入（-1/0/1；0=不可定）。越界 ValueError——列语义由监控判据消费。"""
+    if value not in (-1, 0, 1):
+        raise ValueError(f"orientation 限 {{-1, 0, 1}}，收到 {value!r}")
+    init_library(db_path)
+    conn = _connect(db_path)
+    try:
+        _require_factor(conn, factor_id)
+        conn.execute("UPDATE factors SET orientation = ? WHERE id = ?", (value, factor_id))
         conn.commit()
     finally:
         conn.close()

@@ -345,6 +345,48 @@ def test_microcap_lane_ignores_rules_config(
     assert result["l1_passed"] == 3
 
 
+def _seed_mode_row(ws: _Workspace, trade_date: str, mode: str) -> None:
+    record_screening_batch(
+        trade_date,
+        status="ok",
+        started_at=f"{trade_date}T15:40:00",
+        finished_at=f"{trade_date}T16:09:00",
+        l2_top=1,
+        pool_rows=(),
+        selection_mode=mode,
+        db_path=ws.screening_db,
+    )
+
+
+def test_batch_pool_eligibility_uses_batch_mode_not_mixed_axis(ws: _Workspace) -> None:
+    """日批资格判定以当日 selection_mode 定轴（fix-stability-gate-mode-axis）。
+
+    生产 10-27 形态：600519 因子口径命中 [当日,-6,-5] = 3 → 入池；旧行为（当日批次行
+    未落库 → 混合轴 [当日,-2,-3,-4,-5]）把它数成 2、反而让 fallback 日在榜的 000001
+    混到 4 命中入池——两者在两种口径下恰好互换，判别力最强。
+    """
+    _cal = _CALENDAR
+    _seed_l2(ws.screening_db, _cal[-6], ["600519"])
+    _seed_l2(ws.screening_db, _cal[-5], ["600519"])
+    _seed_l2(ws.screening_db, _cal[-4], ["000001"])  # 600519 模式内单日跌出
+    _seed_l2(ws.screening_db, _cal[-3], ["000001"])
+    _seed_l2(ws.screening_db, _cal[-2], ["000001"])
+    _seed_mode_row(ws, _cal[-6], "factor")
+    _seed_mode_row(ws, _cal[-5], "factor")
+    _seed_mode_row(ws, _cal[-4], "factor")
+    _seed_mode_row(ws, _cal[-3], "fallback")
+    _seed_mode_row(ws, _cal[-2], "fallback")
+
+    result = _run(ws)
+
+    assert result["status"] == "ok"
+    assert result["selection_mode"] == "factor"
+    # 同模式轴 [当日,-6,-5,-4]：600519 命中 3 → 入池；000001 命中 2 → 出池
+    assert [row["symbol"] for row in list_selection_pool(_AS_OF, db_path=ws.screening_db)] == [
+        "600519"
+    ]
+
+
 def test_batch_l3_systemic_failure_records_failed_and_zero_pool(ws: _Workspace) -> None:
     """spec 场景「中途失败不产残缺池」：LLM 网关整体不可用（全部降级）→ 批次 failed、
     当日精选池零行。"""

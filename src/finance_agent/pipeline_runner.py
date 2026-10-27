@@ -22,6 +22,7 @@ from collections.abc import Callable, Generator
 from typing import Any
 
 from finance_agent import session_store
+from finance_agent.failure_text import failure_reason_text
 from finance_agent.stream_registry import registry as stream_registry
 from finance_agent.timeline_builder import (
     NodeTimelineAccumulator,
@@ -394,9 +395,16 @@ class PipelineRunner:
             if pending and loop is not None:
                 batch = pending[:]
                 pending.clear()
-                asyncio.run_coroutine_threadsafe(
-                    stream_registry.publish_many(session_id, batch), loop
-                ).result(timeout=5)
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        stream_registry.publish_many(session_id, batch), loop
+                    ).result(timeout=5)
+                except TimeoutError:
+                    # 投递是 best-effort：主循环积压时跳过本批继续推进，不得崩管线
+                    # （issue #490：空 message TimeoutError 此前会把整条分析标 failed）
+                    logger.warning(
+                        "事件批量投递超时，跳过本批 session=%s n=%d", session_id, len(batch)
+                    )
 
         def _publish_terminal(ev: dict) -> None:
             """终态发布统一出口（后台线程侧）：走 publish_terminal 获得重试兜底。
@@ -468,9 +476,17 @@ class PipelineRunner:
                             _publish_terminal(event)
                         else:
                             _flush_pending()
-                            asyncio.run_coroutine_threadsafe(
-                                stream_registry.publish(session_id, event), loop
-                            ).result(timeout=5)
+                            try:
+                                asyncio.run_coroutine_threadsafe(
+                                    stream_registry.publish(session_id, event), loop
+                                ).result(timeout=5)
+                            except TimeoutError:
+                                # 同 _flush_pending：积压时跳过单事件，不终止管线（#490）
+                                logger.warning(
+                                    "事件投递超时，跳过 session=%s type=%s",
+                                    session_id,
+                                    event.get("type"),
+                                )
                 elif state is not None:
                     with state.lock:
                         state.events.append(sse_str)
@@ -516,16 +532,15 @@ class PipelineRunner:
                     session_store.update_pipeline_snapshot(session_id, snapshot)
         except Exception as e:
             logger.exception("后台管线执行异常 session=%s", session_id)
-            session_store.update_session_status(
-                session_id, "failed", failure_reason=f"{type(e).__name__}: {e}"
-            )
+            reason = failure_reason_text(e, context="管线事件源或事件处理")
+            session_store.update_session_status(session_id, "failed", failure_reason=reason)
             if loop is not None:
                 _flush_pending()
                 _publish_terminal(
                     {
                         "type": "error",
                         "session_id": session_id,
-                        "message": f"{type(e).__name__}: {e}",
+                        "message": reason,
                     }
                 )
                 terminalPublished = True

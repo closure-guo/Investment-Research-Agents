@@ -1099,7 +1099,6 @@ async def complete_stream_async(
         "messages": messages,
         "max_tokens": budget,
         "api_base": profile.base_url,
-        "tool_choice": tool_choice,
         # 关键：必须流式（raw_acompletion 非流式返回 ModelResponse 而非 async 迭代器）
         "stream": True,
         **{k: v for k, v in (profile.default_params or {}).items() if k != "max_tokens"},
@@ -1111,6 +1110,10 @@ async def complete_stream_async(
         request_kwargs["api_key"] = profile.api_key
     if tools:
         request_kwargs["tools"] = tools
+        # tool_choice 只在有 tools 时有意义：无 tools 携带会被严格网关拒绝
+        # （issue #481：opencode 400 "tool_choice requires at least one available tool"）
+        if tool_choice:
+            request_kwargs["tool_choice"] = tool_choice
     if not suppress_temperature and temperature is not None:
         request_kwargs["temperature"] = temperature
 

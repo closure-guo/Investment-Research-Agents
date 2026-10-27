@@ -27,6 +27,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from finance_agent.failure_text import failure_reason_text
 from finance_agent.harness import Agent, PermissionMode
 from finance_agent.harness.context import ContextBudget
 from finance_agent.llm import LLMConfig
@@ -1110,18 +1111,19 @@ def _make_run_deep_analysis(
             except Exception as e:
                 # 异常兜底：置 failed + failure_reason，并协作式终止生产端线程
                 graph_cancel.set()
+                _failure = failure_reason_text(e, context="深度分析管线/LLM 流")
                 if _track_snapshot:
                     await asyncio.to_thread(
                         _session_store.update_session_status,
                         session_id,
                         "failed",
-                        failure_reason=f"{type(e).__name__}: {e}",
+                        failure_reason=_failure,
                     )
                 # 下发错误事件，使 SSE 转发层能感知异常（不 re-raise，仅通知）
-                _error_note = f"深度分析管线异常终止：{type(e).__name__}: {e}"
+                _error_note = f"深度分析管线异常终止：{_failure}"
                 await _put_event(
                     StreamEvent.progress(
-                        content=f"分析失败：{type(e).__name__}: {e}",
+                        content=f"分析失败：{_failure}",
                     )
                 )
                 # 与超时同因：异常路径也必须发 TOOL_RESULT，Agent 才能向用户

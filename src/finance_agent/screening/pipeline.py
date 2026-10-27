@@ -467,12 +467,15 @@ def run_screening_batch(
         for decision in decisions:
             if decision.verdict != "keep":
                 continue
+            # 显式传当日模式（fix-stability-gate-mode-axis）：资格判定先于批次行落库，
+            # 当日批次行必然不存在——不传会退化为跨口径混合轴（fallback 日稀释因子命中）
             if not eligible_for_selection(
                 decision.symbol,
                 trade_date,
                 min_days=POOL_MIN_DAYS,
                 db_path=db_path,
                 pool=pool,
+                mode=selection_mode,
             ):
                 continue
             candidate = by_symbol[decision.symbol]

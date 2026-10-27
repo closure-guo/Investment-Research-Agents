@@ -71,6 +71,7 @@ from finance_agent.factors.style_exposure import (  # noqa: E402
     style_exposure_payload,
 )
 from finance_agent.factors.tools import IC_WINDOW as FACTOR_IC_WINDOW  # noqa: E402
+from finance_agent.failure_text import failure_reason_text  # noqa: E402
 from finance_agent.graph import build_5layer_graph  # noqa: E402
 from finance_agent.langfuse_tracing import get_langfuse  # noqa: E402
 from finance_agent.llm import LLMConfig  # noqa: E402
@@ -89,6 +90,7 @@ from finance_agent.screening.pipeline import (  # noqa: E402
     latest_successful_pool,
 )
 from finance_agent.screening.pool_analysis import (  # noqa: E402
+    list_pool_analysis_runs,
     prepare_pool_analysis_batch,
 )
 from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
@@ -1918,7 +1920,9 @@ def _run_graph_streaming(
         # DataFrame truth value ambiguous）完全无法定位
         import traceback as _tb
 
-        update_session_status(session_id, "failed", failure_reason=f"{type(e).__name__}: {e}")
+        update_session_status(
+            session_id, "failed", failure_reason=failure_reason_text(e, context="管线事件流")
+        )
         yield _sse(
             {
                 "type": "error",
@@ -2216,7 +2220,7 @@ async def _run_chat_task(
             update_session_status,
             session_id,
             "failed",
-            failure_reason=f"{type(exc).__name__}: {exc}",
+            failure_reason=failure_reason_text(exc, context="聊天分析事件流"),
         )
         # error 终态显式发布（收拢到 publish_terminal 重试兜底，与
         # _run_react_analysis except 对齐）。终态 CAS 拒绝返回 0 静默容忍；
@@ -2227,7 +2231,7 @@ async def _run_chat_task(
                 {
                     "type": "error",
                     "session_id": session_id,
-                    "message": f"{type(exc).__name__}: {exc}",
+                    "message": failure_reason_text(exc, context="聊天分析事件流"),
                 },
             )
         except Exception:
@@ -2428,7 +2432,7 @@ async def _run_react_analysis(
             update_session_status,
             session_id,
             "failed",
-            failure_reason=f"{type(exc).__name__}: {exc}",
+            failure_reason=failure_reason_text(exc, context="分析事件流"),
         )
         # error 终态显式发布（收拢到 publish_terminal 重试兜底，发布前冲刷残余
         # pending）。经 registry.start 包装运行时，_run_task 的自动 error 被
@@ -2441,7 +2445,7 @@ async def _run_react_analysis(
                 {
                     "type": "error",
                     "session_id": session_id,
-                    "message": f"{type(exc).__name__}: {exc}",
+                    "message": failure_reason_text(exc, context="分析事件流"),
                 },
             )
         except Exception:
@@ -3878,6 +3882,11 @@ def submit_pool_analysis_batch(
 
     只等待「建会话 + 入队」完成（通常 <1s/标的），不等待分析本身；分析由
     ``AnalyzeQueue`` 在后台补位执行并复用既有 SSE/journal。
+
+    交付等待超时 ≠ 派发失败（issue #490）：prepare 在 ``to_thread`` 里每建好一只
+    就落库（queued），超时只说明「主循环交付结果来不及返回」，行已派发。超时时
+    查当日 ``pool_analysis_runs`` 如实披露已派发行数（``timeout_partial``），
+    不再空手抛出——否则 job 历史是一条空失败、系统实际在跑。
     """
     loop = _MAIN_LOOP
     if loop is None or loop.is_closed():
@@ -3890,7 +3899,33 @@ def submit_pool_analysis_batch(
             enqueue=_enqueue_pool_analysis,
         )
 
-    return asyncio.run_coroutine_threadsafe(_run(), loop).result(timeout=timeout)
+    future = asyncio.run_coroutine_threadsafe(_run(), loop)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()  # to_thread 不可中断，尽力而为；结果被丢弃不影响已落库行
+        day = datetime.now().strftime("%Y-%m-%d")
+        try:
+            rows = list_pool_analysis_runs(day)
+        except Exception:  # noqa: BLE001 - 披露失败不得把超时升级成崩溃
+            rows = []
+        queued = sum(1 for row in rows if row.get("status") == "queued")
+        _logger.warning(
+            "池分析派发交付超时（%.0fs），已落库 %d 只（queued=%d），分析由 AnalyzeQueue 后台接续",
+            timeout,
+            len(rows),
+            queued,
+        )
+        return {
+            "trade_date": day,
+            "status": "timeout_partial",
+            "dispatched_so_far": len(rows),
+            "queued": queued,
+            "note": (
+                f"等待派发交付超时（{timeout:.0f}s）；已落库 {len(rows)} 只，"
+                "分析由 AnalyzeQueue 后台接续，勿按失败重跑"
+            ),
+        }
 
 
 def submit_report_trigger_batch(
