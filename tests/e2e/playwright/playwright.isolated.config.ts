@@ -1,6 +1,12 @@
 import { defineConfig } from '@playwright/test'
 import './test-env'
 
+// 隔离端口下的 API 直连基址注入：部分 spec（factor-library / agui 族 / smoke 等）
+// 用 `process.env.E2E_API_BASE ?? 'http://127.0.0.1:5173'` 直连 API——本机 5173/8000
+// 是生产栈端口（本隔离配置起的栈在 5174/8001），不注入时这些 spec 会打穿生产
+// （incident 038 家族；2026-10-27 实证：E2E 请求打到生产后端创建了真实会话）。
+process.env.E2E_API_BASE ??= 'http://127.0.0.1:5174'
+
 /**
  * 隔离配置：避免占用用户已在运行的 8000/5173 服务。
  * 后端 TESTING=1 起在 8001，前端起在 5174 并代理到 8001。
@@ -72,6 +78,12 @@ export default defineConfig({
         // distro 探活文件（delta add-factor-research-distro-liveness-probe）：隔离配置同样
         // 不得读生产 data/factor_research/distro_probe.json（启动器会周期刷新它）
         FACTOR_RESEARCH_DISTRO_PROBE_PATH: 'data/test-e2e-factor-research-distro-probe.json',
+        // 收割文件桥（delta add-factor-harvest-ui：spec fixture 写 test-e2e-* 文件名，
+        // 与默认 config 逐字一致；缺这三项时隔离后端读 worktree 相对生产路径 →
+        // factor-harvest-ui 的收割块永不渲染）
+        FACTOR_RESEARCH_HARVEST_STATE_PATH: 'data/test-e2e-factor-research-harvest-state.json',
+        FACTOR_RESEARCH_CANDIDATES_PATH: 'data/test-e2e-factor-research-candidates.json',
+        FACTOR_RESEARCH_HEARTBEAT_PATH: 'data/test-e2e-factor-research-heartbeat.json',
         // 并发设置文件（delta add-analysis-concurrency-setting：隔离配置同样不得读写
         // 生产 data/settings/analysis_concurrency.json）
         ANALYSIS_CONCURRENCY_PATH: 'data/test-e2e-analysis-concurrency.json',
