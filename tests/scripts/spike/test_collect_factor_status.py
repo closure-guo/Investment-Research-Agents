@@ -484,6 +484,255 @@ class TestLogAge:
         assert snap["current_session"]["log_age_s"] is None
 
 
+class TestCollectDisk:
+    """快照 disk 块（delta add-factor-workspace-retention-disk-watch，incident 051）。
+
+    双侧水位读数（guest ``/`` + 宿主工作盘 ``FACTOR_RESEARCH_HOST_MOUNT``）+
+    workspace 占用（st_blocks 口径，间隔内走 state 缓存）+ 看护低水位暂停原因；
+    任一读数失败如实 None，MUST NOT 编造。
+    """
+
+    def _fixture(self, tmp_path, *, workspace_files=()):
+        wd = _make_workdir(tmp_path, pid=os.getpid())
+        ws = wd / "git_ignore_folder" / "RD-Agent_workspace"
+        for name, size in workspace_files:
+            (ws / name).parent.mkdir(parents=True, exist_ok=True)
+            (ws / name).write_bytes(b"x" * size)
+        return wd
+
+    @staticmethod
+    def _fake_usage(readings):
+        """shutil.disk_usage 兼容形：登记路径返回 (total, used, free)，未登记 → OSError。"""
+
+        def fake(path):
+            key = str(path)
+            if key not in readings:
+                raise OSError(f"[Errno 2] no such mount: {key}")
+            return (100, 50, readings[key])
+
+        return fake
+
+    def test_disk_block_shape_and_readings(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FACTOR_RESEARCH_HOST_MOUNT", raising=False)
+        wd = self._fixture(tmp_path, workspace_files=(("task-a/factor.py", 100),))
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        seen: list[str] = []
+
+        def counting_usage(path):
+            seen.append(str(path))
+            return self._fake_usage({"/": 40 * 2**30, "/mnt/d": 25 * 2**30})(path)
+
+        snap = cfs.collect_once(
+            wd,
+            out,
+            state,
+            now_epoch=1_800_000_000.0,
+            session_alive=lambda: True,
+            disk_usage_fn=counting_usage,
+        )
+        disk = snap["disk"]
+        assert disk["guest_free_bytes"] == 40 * 2**30
+        assert disk["host_free_bytes"] == 25 * 2**30
+        assert disk["paused_reason"] is None
+        # 双侧路径各探测一次：guest 根 + 宿主挂载点（默认 /mnt/d）
+        assert set(seen) == {"/", "/mnt/d"}
+        # workspace 占用：与该平台 stat 口径一致（Windows 无 st_blocks → size 向上取 512 倍数）
+        st = (wd / "git_ignore_folder" / "RD-Agent_workspace" / "task-a" / "factor.py").stat()
+        blocks = getattr(st, "st_blocks", None)
+        expected = blocks * 512 if blocks is not None else (st.st_size + 511) // 512 * 512
+        assert disk["workspace_bytes"] == expected
+        # 缓存写回 state（epoch = 采集时刻）
+        assert json.loads(state.read_text(encoding="utf-8"))["disk_cache"] == {
+            "workspace_bytes": expected,
+            "epoch": 1_800_000_000,
+        }
+
+    def test_host_mount_env_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FACTOR_RESEARCH_HOST_MOUNT", "/host-d")
+        wd = self._fixture(tmp_path)
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        snap = cfs.collect_once(
+            wd,
+            out,
+            state,
+            now_epoch=1_800_000_000.0,
+            session_alive=lambda: True,
+            disk_usage_fn=self._fake_usage({"/": 40 * 2**30, "/host-d": 7 * 2**30}),
+        )
+        assert snap["disk"]["host_free_bytes"] == 7 * 2**30
+
+    def test_guest_oserror_reports_none(self, tmp_path):
+        """guest 读数失败 → 该侧 None（如实），host 照常；不阻断快照。"""
+        wd = self._fixture(tmp_path)
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+
+        def usage(path):
+            if str(path) == "/":
+                raise OSError("simulated statvfs failure")
+            return (10, 5, 25 * 2**30)
+
+        snap = cfs.collect_once(
+            wd,
+            out,
+            state,
+            now_epoch=1_800_000_000.0,
+            session_alive=lambda: True,
+            disk_usage_fn=usage,
+        )
+        assert snap["disk"]["guest_free_bytes"] is None
+        assert snap["disk"]["host_free_bytes"] == 25 * 2**30
+        assert snap["disk"]["workspace_bytes"] == 0  # 空 workspace（目录不存在）如实为 0
+
+    def test_host_oserror_reports_none(self, tmp_path):
+        wd = self._fixture(tmp_path)
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+
+        def usage(path):
+            if str(path) == "/mnt/d":
+                raise OSError("simulated statvfs failure")
+            return (10, 5, 40 * 2**30)
+
+        snap = cfs.collect_once(
+            wd,
+            out,
+            state,
+            now_epoch=1_800_000_000.0,
+            session_alive=lambda: True,
+            disk_usage_fn=usage,
+        )
+        assert snap["disk"]["guest_free_bytes"] == 40 * 2**30
+        assert snap["disk"]["host_free_bytes"] is None
+
+    def test_workspace_bytes_cached_within_interval(self, tmp_path, monkeypatch):
+        """间隔内第二拍直接用缓存，不重算 workspace（os.walk 全树成本有界）。"""
+        monkeypatch.delenv("FACTOR_WORKSPACE_BYTES_INTERVAL_S", raising=False)
+        wd = self._fixture(tmp_path, workspace_files=(("a.txt", 100),))
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        calls: list[str] = []
+        real = cfs._workspace_bytes
+
+        def counting(workspace):
+            calls.append(str(workspace))
+            return real(workspace)
+
+        monkeypatch.setattr(cfs, "_workspace_bytes", counting)
+        cfs.collect_once(wd, out, state, now_epoch=1_800_000_000.0, session_alive=lambda: True)
+        cfs.collect_once(wd, out, state, now_epoch=1_800_000_030.0, session_alive=lambda: True)
+        assert len(calls) == 1
+        cached = json.loads(state.read_text(encoding="utf-8"))["disk_cache"]
+        assert cached == {"workspace_bytes": cached["workspace_bytes"], "epoch": 1_800_000_000}
+
+    def test_workspace_bytes_cached_across_session_change(self, tmp_path, monkeypatch):
+        """会话切换会重置增量状态——disk_cache 必须跨会话存活（否则缓存形同虚设）。"""
+        monkeypatch.delenv("FACTOR_WORKSPACE_BYTES_INTERVAL_S", raising=False)
+        wd = self._fixture(tmp_path, workspace_files=(("a.txt", 100),))
+        logdir = wd / "factor_research_logs"
+        out = tmp_path / "status.json"
+        state = logdir / ".collector_state.json"
+        calls: list[str] = []
+        real = cfs._workspace_bytes
+
+        def counting(workspace):
+            calls.append(str(workspace))
+            return real(workspace)
+
+        monkeypatch.setattr(cfs, "_workspace_bytes", counting)
+        cfs.collect_once(wd, out, state, now_epoch=1_800_000_000.0, session_alive=lambda: True)
+        (logdir / "session-20261017-120000.log").write_text("new session\n", encoding="utf-8")
+        cfs.collect_once(wd, out, state, now_epoch=1_800_000_030.0, session_alive=lambda: True)
+        assert len(calls) == 1
+
+    def test_workspace_bytes_recompute_after_expiry(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FACTOR_WORKSPACE_BYTES_INTERVAL_S", "60")
+        wd = self._fixture(tmp_path, workspace_files=(("a.txt", 100),))
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        calls: list[str] = []
+        real = cfs._workspace_bytes
+
+        def counting(workspace):
+            calls.append(str(workspace))
+            return real(workspace)
+
+        monkeypatch.setattr(cfs, "_workspace_bytes", counting)
+        cfs.collect_once(wd, out, state, now_epoch=1_800_000_000.0, session_alive=lambda: True)
+        cfs.collect_once(wd, out, state, now_epoch=1_800_000_100.0, session_alive=lambda: True)
+        assert len(calls) == 2
+        assert json.loads(state.read_text(encoding="utf-8"))["disk_cache"]["epoch"] == 1_800_000_100
+
+    def test_paused_reason_from_pause_file(self, tmp_path):
+        """看护 ``--disk-check`` 低水位写的暂停文件 → paused_reason 透出。"""
+        wd = self._fixture(tmp_path)
+        pause = wd / "factor_research_logs" / ".disk_pause.json"
+        pause.write_text(
+            json.dumps({"paused": True, "reason": "guest", "guest_free_bytes": 1}),
+            encoding="utf-8",
+        )
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        snap = cfs.collect_once(
+            wd,
+            out,
+            state,
+            now_epoch=1_800_000_000.0,
+            session_alive=lambda: True,
+            disk_usage_fn=self._fake_usage({"/": 2**30, "/mnt/d": 2**30}),
+        )
+        assert snap["disk"]["paused_reason"] == "guest"
+
+    def test_paused_reason_none_when_not_paused(self, tmp_path):
+        """看护正常节拍也写 paused=false（防陈旧暂停态）→ 不得误报暂停。"""
+        wd = self._fixture(tmp_path)
+        pause = wd / "factor_research_logs" / ".disk_pause.json"
+        pause.write_text(
+            json.dumps({"paused": False, "reason": None, "guest_free_bytes": 2**30}),
+            encoding="utf-8",
+        )
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        snap = cfs.collect_once(
+            wd,
+            out,
+            state,
+            now_epoch=1_800_000_000.0,
+            session_alive=lambda: True,
+            disk_usage_fn=self._fake_usage({"/": 2**30, "/mnt/d": 2**30}),
+        )
+        assert snap["disk"]["paused_reason"] is None
+
+    def test_paused_reason_none_when_file_missing_or_corrupt(self, tmp_path):
+        """暂停文件缺失/损坏 → None（如实不猜），不阻断快照。"""
+        wd = self._fixture(tmp_path)
+        pause = wd / "factor_research_logs" / ".disk_pause.json"
+        pause.write_text("not json at all", encoding="utf-8")
+        out = tmp_path / "status.json"
+        state = wd / "factor_research_logs" / ".collector_state.json"
+        snap = cfs.collect_once(
+            wd,
+            out,
+            state,
+            now_epoch=1_800_000_000.0,
+            session_alive=lambda: True,
+            disk_usage_fn=self._fake_usage({"/": 2**30, "/mnt/d": 2**30}),
+        )
+        assert snap["disk"]["paused_reason"] is None
+        pause.unlink()
+        snap = cfs.collect_once(
+            wd,
+            out,
+            state,
+            now_epoch=1_800_000_030.0,
+            session_alive=lambda: True,
+            disk_usage_fn=self._fake_usage({"/": 2**30, "/mnt/d": 2**30}),
+        )
+        assert snap["disk"]["paused_reason"] is None
+
+
 class TestProcessAliveWindows:
     """issue #451：Windows 上 ``os.kill(pid, 0)`` 实为 GenerateConsoleCtrlEvent(CTRL_C_EVENT)
     ——把 Ctrl-C 打进共享控制台，连同 pytest 与外层 shell 一起打断。存活探测在 Windows

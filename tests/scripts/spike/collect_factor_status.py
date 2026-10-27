@@ -7,7 +7,7 @@
 契约（openspec delta factor-research-monitor「状态快照采集契约」）：
 - 周期 ≤60s；写入原子（tmp + os.replace）；只读观测（不改研发进程状态）；
 - 快照含 collected_at / collected_at_epoch / supervisor / current_session /
-  sessions / totals；未知字段如实置空，MUST NOT 编造进度数字；
+  sessions / totals / disk；未知字段如实置空，MUST NOT 编造进度数字；
 - 看护停止后由 stop 流程以 ``--once`` 写末次快照（running=false）后退出。
 
 运行（distro 内，root）：
@@ -22,6 +22,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import uuid
@@ -38,6 +39,12 @@ INCREMENT_CHUNK_BYTES = 16 * 1024 * 1024
 LOG_TAIL_LINES = 25
 LOG_TAIL_LINE_CHARS = 220
 SESSIONS_HISTORY_LIMIT = 50
+# 磁盘水位（delta add-factor-workspace-retention-disk-watch，incident 051）：
+# guest ext4 根 + 宿主工作盘（env FACTOR_RESEARCH_HOST_MOUNT 可覆盖，经桥挂载）；
+# workspace 全树 stat 成本高 → 按 state 缓存间隔重算（env 可覆盖，默认 1200s）
+HOST_MOUNT = "/mnt/d"
+WORKSPACE_BYTES_INTERVAL_S = 1200
+DISK_PAUSE_NAME = ".disk_pause.json"  # 看护 --disk-check 写的低水位暂停文件
 
 try:
     from zoneinfo import ZoneInfo
@@ -301,6 +308,103 @@ def _load_state(state_path: Path) -> dict:
     return {}
 
 
+def _disk_free_bytes(disk_usage_fn, path: str) -> int | None:
+    """shutil.disk_usage 兼容函数的空闲字节；路径不存在/OSError → None（如实不编造）。"""
+    try:
+        return int(disk_usage_fn(path)[2])
+    except OSError:
+        return None
+
+
+def _workspace_bytes(workspace: Path) -> int | None:
+    """workspace 目录总占用：文件 ``st_blocks * 512`` 之和（os.walk 全树）。
+
+    无 ``st_blocks`` 的文件系统（Windows NTFS）按 size 向上取 512 倍数退化（getattr
+    判别）；单文件 stat 失败跳过该文件（不编造其占用），根级失败整体 None。
+    """
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(workspace):
+            for name in files:
+                try:
+                    st = os.stat(os.path.join(root, name))
+                except OSError:
+                    continue
+                blocks = getattr(st, "st_blocks", None)
+                if blocks is not None:
+                    total += int(blocks) * 512
+                else:
+                    total += (st.st_size + 511) // 512 * 512
+    except OSError:
+        return None
+    return total
+
+
+def _disk_pause_reason(logdir: Path) -> str | None:
+    """看护低水位暂停原因：``--disk-check`` 暂停文件 paused=true → 取 reason。
+
+    文件缺失/损坏/未暂停（看护正常节拍也写 paused=false 防陈旧残留）→ None（如实）。
+    """
+    try:
+        data = json.loads((logdir / DISK_PAUSE_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("paused") is not True:
+        return None
+    reason = data.get("reason")
+    return reason if isinstance(reason, str) else None
+
+
+def _disk_block(
+    workdir: Path,
+    logdir: Path,
+    *,
+    disk_usage_fn=None,
+    now_epoch: float,
+    disk_cache: dict | None,
+) -> tuple[dict, dict]:
+    """快照 ``disk`` 块 + workspace 缓存条目（写回 state，间隔内直接复用读数）。
+
+    双侧水位：guest ``/`` + 宿主挂载（env ``FACTOR_RESEARCH_HOST_MOUNT``，默认
+    ``HOST_MOUNT``），``disk_usage_fn`` 为 shutil.disk_usage 兼容形（测试注入），
+    任一侧 OSError → 该侧 None。workspace_bytes 缓存键 ``disk_cache``，间隔
+    env ``FACTOR_WORKSPACE_BYTES_INTERVAL_S``（默认 ``WORKSPACE_BYTES_INTERVAL_S``），
+    首轮/过期/缓存损坏 → 重算并写回。
+    """
+    usage_fn = disk_usage_fn or shutil.disk_usage
+    host_mount = os.environ.get("FACTOR_RESEARCH_HOST_MOUNT") or HOST_MOUNT
+    interval = WORKSPACE_BYTES_INTERVAL_S
+    raw_interval = os.environ.get("FACTOR_WORKSPACE_BYTES_INTERVAL_S")
+    if raw_interval:
+        with contextlib.suppress(ValueError):
+            interval = int(raw_interval)
+    cached_ws: int | None = None
+    cached_epoch: int | None = None
+    if isinstance(disk_cache, dict):
+        ws = disk_cache.get("workspace_bytes")
+        epoch = disk_cache.get("epoch")
+        if (
+            isinstance(ws, int)
+            and not isinstance(ws, bool)
+            and isinstance(epoch, int)
+            and not isinstance(epoch, bool)
+        ):
+            cached_ws, cached_epoch = ws, epoch
+    if cached_ws is not None and cached_epoch is not None and (now_epoch - cached_epoch) < interval:
+        workspace_bytes = cached_ws
+        cache_entry = {"workspace_bytes": cached_ws, "epoch": cached_epoch}
+    else:
+        workspace_bytes = _workspace_bytes(workdir / "git_ignore_folder" / "RD-Agent_workspace")
+        cache_entry = {"workspace_bytes": workspace_bytes, "epoch": int(now_epoch)}
+    block = {
+        "guest_free_bytes": _disk_free_bytes(usage_fn, "/"),
+        "host_free_bytes": _disk_free_bytes(usage_fn, host_mount),
+        "workspace_bytes": workspace_bytes,
+        "paused_reason": _disk_pause_reason(logdir),
+    }
+    return block, cache_entry
+
+
 def _incremental_factors(log_path: Path, state: dict) -> tuple[list[str], list[dict], dict]:
     """增量提取因子名（会话内）+ 因子块（全局候选）：仅解析新增字节，会话切换重置。
 
@@ -380,6 +484,7 @@ def collect_once(
     now_epoch: float | None = None,
     session_alive=None,
     agent_meta: dict | None = None,
+    disk_usage_fn=None,
 ) -> dict:
     """采集一次并原子落盘；返回快照（单字段失败不阻断整体，如实置空）。
 
@@ -387,6 +492,8 @@ def collect_once(
     候选文件——因子块（name/description/formulation）全局去重追加。
     ``agent_meta``（delta add-factor-research-selfheal）：代理调和动作块（由代理传入；
     独立采集器不传 → 写 ``agent: null``，如实表示「无调和留痕」）。
+    ``disk_usage_fn``（delta add-factor-workspace-retention-disk-watch）：shutil.disk_usage
+    兼容函数（测试注入；缺省即 shutil.disk_usage）——disk 块双侧水位读数用。
     """
     now_epoch = time.time() if now_epoch is None else now_epoch
     alive_probe = session_alive or _rdagent_session_alive
@@ -423,6 +530,8 @@ def collect_once(
 
     current_session: dict | None = None
     new_state = _load_state(state_path)
+    # disk 缓存先于增量状态读取：会话切换会把增量状态重置，缓存必须跨会话存活
+    disk_cache = new_state.get("disk_cache")
     if session_files:
         latest = session_files[-1]
         # 进度新鲜度原始读数：日志 mtime 距采集时刻的秒数（采集器只报读数，判定归后端）
@@ -462,6 +571,15 @@ def collect_once(
             "log_tail": _normalized_tail_lines(_read_tail(latest, TAIL_BYTES)),
         }
 
+    disk_block, disk_cache_entry = _disk_block(
+        workdir,
+        logdir,
+        disk_usage_fn=disk_usage_fn,
+        now_epoch=now_epoch,
+        disk_cache=disk_cache,
+    )
+    new_state["disk_cache"] = disk_cache_entry
+
     candidates, tasks = _workspace_totals(workdir)
     snapshot = {
         "collected_at": datetime.fromtimestamp(now_epoch, tz=_TZ).isoformat(),
@@ -478,6 +596,7 @@ def collect_once(
             "candidates": candidates,
             "workspace_tasks": tasks,
         },
+        "disk": disk_block,
         "agent": agent_meta,
     }
     atomic_write_json(out_path, snapshot)

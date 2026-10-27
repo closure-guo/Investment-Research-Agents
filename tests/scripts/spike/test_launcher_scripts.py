@@ -38,3 +38,15 @@ def test_register_script_uses_windowless_helper():
     assert "New-ScheduledTaskAction -Execute $helperExe" in text
     assert "-Execute 'powershell.exe'" not in text
     assert (REPO / "scripts" / "FinanceAgentLauncher.cs").exists()
+
+
+def test_launcher_cs_probes_fs_rw():
+    """探活读写双探针（delta add-factor-workspace-retention-disk-watch，incident 051）。
+
+    exec 探针（/bin/true）可被 WSL 页缓存假阴性命中——/bin/true 可执行不代表文件系统
+    可读写。探活必须在 exec 成功后追加真实读写验证（distro 内创建并删除临时文件
+    .factor_probe_rw），失败原因区分 ``fs_rw_failed``（spec「distro 探活覆盖页缓存假阴性」）。
+    """
+    text = (REPO / "scripts" / "FinanceAgentLauncher.cs").read_text(encoding="utf-8")
+    assert "factor_probe_rw" in text
+    assert "fs_rw_failed" in text
