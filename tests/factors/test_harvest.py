@@ -872,6 +872,15 @@ class TestClassifyCategory:
         for name, desc, expected in self.CASES:
             assert classify_category(name, desc) == expected, f"{name} → 期望 {expected}"
 
+    def test_rdagent_prefix_label_skipped(self):
+        # 存量 hypothesis 形态：首个方括号是 [RD-Agent/名] 前缀，机理标签在第二段
+        from finance_agent.factors.harvest import classify_category
+
+        hyp = "[RD-Agent/volratio20] [Volume/Liquidity Factor] Twenty-day abnormal volume ratio"
+        assert classify_category("volratio20", hyp) == "量与流动性"
+        hyp2 = "[RD-Agent/RANGE_EXPANSION_20D] [Volatility/News-Burst Factor] range expansion"
+        assert classify_category("RANGE_EXPANSION_20D", hyp2) == "波动率"
+
     def test_never_raises_and_never_empty(self):
         from finance_agent.factors.harvest import classify_category
 

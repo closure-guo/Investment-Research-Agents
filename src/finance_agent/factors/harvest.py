@@ -81,10 +81,19 @@ _LABEL_RE = re.compile(r"\[([^\]]+)\]")
 
 
 def _mechanism_text(name: Any, description: Any) -> str:
-    """机理标签（首个方括号段）优先 + 因子名；无标签 → 整段描述兜底。"""
+    """机理标签（首个方括号段）优先 + 因子名；无标签 → 整段描述兜底。
+
+    存量 hypothesis 形态 ``[RD-Agent/名] [机理标签] …``：首段是来源前缀，机理
+    标签在第二段——前缀段跳过。
+    """
     text = str(description or "")
     labels = _LABEL_RE.findall(text)
-    base = labels[0] if labels else text
+    if labels and labels[0].lower().startswith("rd-agent") and len(labels) > 1:
+        base = labels[1]
+    elif labels:
+        base = labels[0]
+    else:
+        base = text
     return f"{base} {str(name or '')}".lower()
 
 
