@@ -15,8 +15,10 @@ import {
   FACTOR_RESEARCH_POLL_MS,
   controlErrorMessage,
   deriveControlView,
+  deriveDiskView,
   fetchFactorResearchStatus,
   fetchHarvestChain,
+  formatDiskGb,
   formatDurationS,
   submitFactorResearchControl,
   submitFactorResearchRestart,
@@ -260,6 +262,10 @@ export function FactorResearchPage({
   const distroProbe = distroDown ? (data?.distro ?? null) : null
   const distroName = distroProbe?.distro ?? null
   const distroFailures = distroProbe?.consecutive_failures ?? null
+  // 磁盘水位（delta add-factor-workspace-retention-disk-watch）：旧快照无 disk 块 /
+  // 读数全未上报且未判低水位 → 卡与横幅均不渲染（兼容降级，不崩）。
+  const diskView = deriveDiskView(data)
+  const disk = diskView.disk
   // 收割台账：后端契约保证数组；防御式兜底避免单次畸形响应拖垮整页
   const recentAdmitted = harvest?.recent_admitted ?? []
   const recentRejected = harvest?.recent_rejected ?? []
@@ -561,6 +567,34 @@ export function FactorResearchPage({
               </div>
             )}
 
+            {/* 低水位横幅（delta add-factor-workspace-retention-disk-watch）：只陈述事实
+                （低水位侧与当前读数；停发时注明保护行为非故障），不提供可点击处置入口
+                （零命令面，同 distro 探活横幅先例） */}
+            {diskView.showBanner && (
+              <div
+                data-testid="factor-research-low-watermark-banner"
+                className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs"
+                style={{ background: 'var(--status-warning-default)', color: 'white' }}
+              >
+                <i className="fas fa-hard-drive"></i>
+                磁盘水位：guest 空闲 {formatDiskGb(disk.guest_free_gb)} GB · 宿主空闲{' '}
+                {formatDiskGb(disk.host_free_gb)} GB · workspace 占用{' '}
+                {formatDiskGb(disk.workspace_gb)} GB
+                {disk.low_watermark && (
+                  <>
+                    ；已判低水位
+                    {disk.low_watermark_reason === 'guest' && '（guest 侧空闲不足）'}
+                    {disk.low_watermark_reason === 'host' && '（宿主工作盘侧空闲不足）'}
+                  </>
+                )}
+                {disk.paused_reason !== null && (
+                  <>
+                    ；看护已暂停拉起新会话（{disk.paused_reason}）——这是保护行为，不是故障
+                  </>
+                )}
+              </div>
+            )}
+
             {/* 看护状态区 */}
             <section
               data-testid="factor-research-supervisor"
@@ -593,6 +627,51 @@ export function FactorResearchPage({
                 </span>
               </div>
             </section>
+
+            {/* 磁盘水位卡（delta add-factor-workspace-retention-disk-watch）：读数未上报 →
+                显示「—」并配 title 说明，MUST NOT 编造数字；兜底块（全 null 且未判低水位）
+                不渲染本卡。 */}
+            {diskView.showCard && (
+              <section
+                data-testid="factor-research-disk-card"
+                className="rounded-xl border border-border p-4"
+                style={{ background: 'var(--bg-base-secondary)' }}
+              >
+                <div className="mb-2 text-xs font-medium text-foreground">磁盘水位</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { key: 'guest', label: 'guest 空闲', value: disk.guest_free_gb },
+                      { key: 'host', label: 'host 空闲', value: disk.host_free_gb },
+                      { key: 'workspace', label: 'workspace 占用', value: disk.workspace_gb },
+                    ] as const
+                  ).map((item) => (
+                    <div
+                      key={item.key}
+                      data-testid={`factor-research-disk-${item.key}`}
+                      className="rounded-lg border border-border px-3 py-2"
+                      style={{ background: 'var(--bg-overlay-l1)' }}
+                      title={item.value === null ? '读数未上报' : undefined}
+                    >
+                      <div className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
+                        {item.label}
+                      </div>
+                      <div className="text-lg font-semibold text-foreground">
+                        {formatDiskGb(item.value)}
+                        {item.value !== null && (
+                          <span
+                            className="ml-1 text-[11px] font-normal"
+                            style={{ color: 'var(--text-tertiary)' }}
+                          >
+                            GB
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
 
             {/* 当前会话进度区 */}
             <section

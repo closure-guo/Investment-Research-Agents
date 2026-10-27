@@ -606,3 +606,63 @@ test('19. distro 探活正常：保持既有陈旧表述且无探活提示', asy
   await expect(page.getByTestId('factor-research-distro-probe-banner')).toHaveCount(0)
   removeDistroProbe()
 })
+
+// ── 磁盘水位卡与低水位横幅（delta add-factor-workspace-retention-disk-watch）──
+
+test('20. 低水位：横幅出现（低水位侧 + 读数 + 停发说明）、水位卡渲染 GB 读数', async ({ page }) => {
+  writeSnapshot(
+    snapshotBody({
+      // 采集器原始契约（字节）；low_watermark 由端点按阈值（guest 30GB / host 20GB）派生
+      disk: {
+        guest_free_bytes: Math.floor(25.3 * 2 ** 30), // < 30GB 阈值 → low_watermark=true (guest)
+        host_free_bytes: Math.floor(122.4 * 2 ** 30),
+        workspace_bytes: Math.floor(210.5 * 2 ** 30),
+        paused_reason: 'guest',
+      },
+    })
+  )
+  await page.goto('/factor-research')
+
+  const banner = page.getByTestId('factor-research-low-watermark-banner')
+  await expect(banner).toBeVisible()
+  await expect(banner).toContainText('guest 空闲 25.3 GB')
+  await expect(banner).toContainText('guest 侧空闲不足')
+  await expect(banner).toContainText('这是保护行为，不是故障')
+  // 零命令面：横幅内无处置入口
+  await expect(banner.locator('button, a')).toHaveCount(0)
+
+  const card = page.getByTestId('factor-research-disk-card')
+  await expect(card).toBeVisible()
+  await expect(page.getByTestId('factor-research-disk-guest')).toContainText('25.3')
+  await expect(page.getByTestId('factor-research-disk-host')).toContainText('122.4')
+  await expect(page.getByTestId('factor-research-disk-workspace')).toContainText('210.5')
+})
+
+test('21. 水位正常：disk-card 渲染且无低水位横幅（旧快照兼容不崩）', async ({ page }) => {
+  writeSnapshot(
+    snapshotBody({
+      disk: {
+        guest_free_bytes: Math.floor(41.3 * 2 ** 30), // > 30GB 阈值 → 不判低水位
+        host_free_bytes: Math.floor(122.4 * 2 ** 30),
+        workspace_bytes: Math.floor(210.5 * 2 ** 30),
+        paused_reason: null,
+      },
+    })
+  )
+  await page.goto('/factor-research')
+
+  await expect(page.getByTestId('factor-research-supervisor')).toBeVisible()
+  const card = page.getByTestId('factor-research-disk-card')
+  await expect(card).toBeVisible()
+  await expect(page.getByTestId('factor-research-disk-guest')).toContainText('41.3')
+  await expect(page.getByTestId('factor-research-low-watermark-banner')).toHaveCount(0)
+})
+
+test('22. 旧快照无 disk 块：水位卡与横幅均不渲染、页面照常', async ({ page }) => {
+  writeSnapshot(snapshotBody())
+  await page.goto('/factor-research')
+
+  await expect(page.getByTestId('factor-research-supervisor')).toBeVisible()
+  await expect(page.getByTestId('factor-research-disk-card')).toHaveCount(0)
+  await expect(page.getByTestId('factor-research-low-watermark-banner')).toHaveCount(0)
+})
