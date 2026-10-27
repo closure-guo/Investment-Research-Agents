@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+from pathlib import Path
 
 import collect_factor_status as cfs
 import factor_research_agent as agent
@@ -731,3 +733,110 @@ def test_run_tick_reports_agent_config(tmp_path, monkeypatch):
     assert snap["agent"]["config"]["values"] == agent.DEFAULT_CONFIG_VALUES
     assert snap["agent"]["config"]["source"] == "defaults"
     assert snap["agent"]["restart"] is None
+
+
+# ── TestPruneWorkspace：保留窗清理（incident 051 防复发 1/4）─────────────────
+
+
+def _touch_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# candidate\n", encoding="utf-8")
+
+
+def _set_mtime(path: Path, epoch: float) -> None:
+    os.utime(path, (epoch, epoch))
+
+
+def _disk_bytes(path: Path) -> int:
+    """单文件占用字节（st_blocks*512；无 st_blocks 的平台按 apparent size 512 对齐）。"""
+    st = path.stat()
+    blocks = getattr(st, "st_blocks", None)
+    if blocks is None:
+        return ((st.st_size + 511) // 512) * 512
+    return blocks * 512
+
+
+class TestPruneWorkspace:
+    """spec「会话产物保留窗清理」：删过期任务目录、保留窗内不碰、失败容忍不致崩。"""
+
+    @staticmethod
+    def _workspace(tmp_path) -> Path:
+        return tmp_path / "git_ignore_folder" / "RD-Agent_workspace"
+
+    def test_expired_deleted_and_fresh_kept(self, tmp_path):
+        now = time.time()
+        ws = self._workspace(tmp_path)
+        _touch_file(ws / "task-old" / "factor.py")
+        _touch_file(ws / "task-fresh" / "factor.py")
+        _touch_file(ws / "loose-file.txt")  # workspace 根下的散文件不是任务目录
+        _set_mtime(ws / "task-old" / "factor.py", now - 72 * 3600)
+        _set_mtime(ws / "task-fresh" / "factor.py", now - 10 * 3600)
+        _set_mtime(ws / "loose-file.txt", now - 72 * 3600)
+
+        result = agent.prune_workspace(tmp_path, 48, now_epoch=now)
+
+        assert result["deleted"] == ["task-old"]
+        assert result["kept"] == 1
+        assert result["failed"] == []
+        assert not (ws / "task-old").exists()
+        assert (ws / "task-fresh").exists()
+        assert (ws / "loose-file.txt").exists()
+
+    def test_boundary_exact_threshold_kept_one_second_earlier_deleted(self, tmp_path):
+        now = 1_800_000_000.0
+        ws = self._workspace(tmp_path)
+        _touch_file(ws / "task-eq" / "factor.py")
+        _touch_file(ws / "task-early" / "factor.py")
+        cutoff = now - 48 * 3600
+        _set_mtime(ws / "task-eq" / "factor.py", cutoff)  # 恰好等于阈值 → 留
+        _set_mtime(ws / "task-early" / "factor.py", cutoff - 1)  # 低 1 秒 → 删
+
+        result = agent.prune_workspace(tmp_path, 48, now_epoch=now)
+
+        assert result["deleted"] == ["task-early"]
+        assert result["kept"] == 1
+        assert (ws / "task-eq").exists()
+
+    def test_walk_error_recorded_and_others_pruned_with_freed_bytes(self, tmp_path, monkeypatch):
+        """整树遍历失败 → 进 failed 不中断；freed_bytes=已删目录文件 st_blocks*512 之和。"""
+        now = time.time()
+        ws = self._workspace(tmp_path)
+        _touch_file(ws / "task-bad" / "factor.py")
+        _touch_file(ws / "task-old" / "factor.py")
+        _set_mtime(ws / "task-bad" / "factor.py", now - 72 * 3600)
+        _set_mtime(ws / "task-old" / "factor.py", now - 72 * 3600)
+
+        real_walk = os.walk
+
+        def fake_walk(path, *args, **kwargs):
+            if Path(path).name == "task-bad":
+                raise OSError("simulated I/O error")
+            return real_walk(path, *args, **kwargs)
+
+        monkeypatch.setattr(agent.os, "walk", fake_walk)
+
+        expected = sum(_disk_bytes(p) for p in (ws / "task-old").rglob("*") if p.is_file())
+
+        result = agent.prune_workspace(tmp_path, 48, now_epoch=now)
+
+        assert result["deleted"] == ["task-old"]
+        assert len(result["failed"]) == 1
+        assert result["failed"][0]["path"].endswith("task-bad")
+        assert result["failed"][0]["error"]
+        assert result["freed_bytes"] == expected
+        assert (ws / "task-bad").exists()
+
+    def test_main_prune_prints_json_exit_zero(self, tmp_path, capsys):
+        now = time.time()
+        ws = self._workspace(tmp_path)
+        _touch_file(ws / "task-old" / "factor.py")
+        _set_mtime(ws / "task-old" / "factor.py", now - 72 * 3600)
+
+        rc = agent.main(["--prune", "--workdir", str(tmp_path)])
+
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert data["deleted"] == ["task-old"]
+        assert data["kept"] == 0
+        assert data["failed"] == []
+        assert not (ws / "task-old").exists()

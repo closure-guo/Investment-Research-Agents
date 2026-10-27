@@ -19,6 +19,8 @@
     python3 factor_research_agent.py --reconcile-once  # 立即调和一次（脚本用）
     python3 factor_research_agent.py --ensure-daemon   # 确保守护存活（脚本用）
     python3 factor_research_agent.py --set-intent running|stopped   # 写期望态（脚本用）
+    python3 factor_research_agent.py --prune           # 保留窗清理一次（看护会话后调用）
+    python3 factor_research_agent.py --disk-check      # 磁盘水位检查并写暂停文件（脚本用）
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -61,6 +64,16 @@ SUPERVISOR_SCRIPT_NAME = ".factor_research_supervisor.sh"
 RESTART_STATE_NAME = ".agent_restart_state.json"
 # 手动 reconcile-once 等锁上限（应急通道不被守护的长采集无限阻塞；超时降级继续并告警）
 RECONCILE_LOCK_TIMEOUT_S = 8.0
+
+# 保留窗与磁盘水位默认值（incident 051 防复发；与 api.py 同名常量字面同步——plan 全局约束）
+DEFAULT_RETENTION_H = 48
+DEFAULT_DISK_MIN_FREE_GB_GUEST = 30
+DEFAULT_DISK_MIN_FREE_GB_HOST = 20
+DEFAULT_HOST_MOUNT = "/mnt/d"
+DISK_CHECK_BACKOFF_S = 300
+AGENT_SCRIPT_PATH = "/root/factor_research_agent.py"  # distro 部署位（plan 部署面）
+DISK_PAUSE_NAME = ".disk_pause.json"
+RDAGENT_WORKSPACE_REL = Path("git_ignore_folder") / "RD-Agent_workspace"
 
 # 研发节奏配置（delta add-factor-research-settings）：与后端
 # FACTOR_RESEARCH_CONFIG_DEFAULTS / BOUNDS 字面同步。
@@ -280,6 +293,104 @@ def restart_summary(workdir: str | Path) -> dict[str, Any] | None:
         "handled_at": state.get("handled_at"),
         "handled_at_epoch": state.get("handled_at_epoch"),
     }
+
+
+# ── 保留窗清理（incident 051 防复发 1/4：workspace 快照磁盘撑爆）─────────────
+
+
+def _int_env(name: str, default: int) -> int:
+    """env 整数读取：缺失/非整数 → 默认值（fail-safe，不因配置崩）。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _file_blocks_bytes(st: os.stat_result) -> int:
+    """单文件占用字节：``st_blocks*512``；无 st_blocks 的平台按 apparent size 512 对齐。"""
+    blocks = getattr(st, "st_blocks", None)
+    if blocks is None:  # Windows 测试环境无 st_blocks → 以文件大小按 512 块对齐近似
+        return ((st.st_size + 511) // 512) * 512
+    return blocks * 512
+
+
+def _latest_mtime_under(entry: Path) -> float | None:
+    """目录树内最新文件 mtime（含子目录）；单文件 stat 失败 → 跳过该文件（容忍）。"""
+    latest: float | None = None
+    for root, _dirs, files in os.walk(entry):
+        for name in files:
+            try:
+                mtime = (Path(root) / name).stat().st_mtime
+            except OSError:
+                continue
+            if latest is None or mtime > latest:
+                latest = mtime
+    return latest
+
+
+def _tree_files_blocks_bytes(entry: Path) -> int:
+    """目录树内文件的 ``st_blocks*512`` 之和（目录本身不计）。"""
+    total = 0
+    for root, _dirs, files in os.walk(entry):
+        for name in files:
+            try:
+                total += _file_blocks_bytes((Path(root) / name).stat())
+            except OSError:
+                continue
+    return total
+
+
+def prune_workspace(
+    workdir: str | Path, retention_h: int, *, now_epoch: float | None = None
+) -> dict[str, Any]:
+    """会话产物保留窗清理（spec「会话产物保留窗清理」）。
+
+    删除 ``<workdir>/git_ignore_folder/RD-Agent_workspace`` 下「目录内最新文件 mtime」
+    **早于** ``now - retention_h*3600`` 的任务目录（恰好等于阈值不删；运行中会话的
+    目录 mtime 必在保留窗内，天然不受影响）。整树遍历失败 → 记入 ``failed`` 不中断
+    其余目录（spec「清理失败不致崩」）；workspace 根缺失 → 空结果（不视为错误）。
+
+    返回 ``{"deleted": [目录名...], "failed": [{"path","error"}...], "kept": int,
+    "freed_bytes": int}``；``freed_bytes`` 为已删目录内文件 st_blocks*512 之和
+    （目录本身不计），``kept`` 为保留的任务目录数。
+    """
+    now = time.time() if now_epoch is None else now_epoch
+    cutoff = now - retention_h * 3600
+    workspace = Path(workdir) / RDAGENT_WORKSPACE_REL
+    deleted: list[str] = []
+    failed: list[dict[str, str]] = []
+    kept = 0
+    freed = 0
+    if not workspace.is_dir():
+        return {"deleted": deleted, "failed": failed, "kept": kept, "freed_bytes": freed}
+    try:
+        entries = sorted(workspace.iterdir())
+    except OSError as exc:
+        failed.append({"path": str(workspace), "error": str(exc)})
+        return {"deleted": deleted, "failed": failed, "kept": kept, "freed_bytes": freed}
+    for entry in entries:
+        if not entry.is_dir():
+            continue  # workspace 根下的散文件不属任务目录，不删
+        try:
+            latest = _latest_mtime_under(entry)
+        except OSError as exc:
+            failed.append({"path": str(entry), "error": str(exc)})
+            continue
+        if latest is None or latest >= cutoff:
+            kept += 1  # 空目录无 mtime 证据 → 保留（不猜）
+            continue
+        try:
+            freed_here = _tree_files_blocks_bytes(entry)
+            shutil.rmtree(entry)
+        except OSError as exc:
+            failed.append({"path": str(entry), "error": str(exc)})
+            continue
+        freed += freed_here
+        deleted.append(entry.name)
+    return {"deleted": deleted, "failed": failed, "kept": kept, "freed_bytes": freed}
 
 
 # ── 实态与启停动作（与旧脚本逐字同语义）────────────────────────────────────
@@ -739,6 +850,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_S)
     parser.add_argument(
+        "--retention-h",
+        type=int,
+        default=_int_env("FACTOR_WORKSPACE_RETENTION_H", DEFAULT_RETENTION_H),
+        help="保留窗小时数（默认取 env FACTOR_WORKSPACE_RETENTION_H，默认 48）",
+    )
+    parser.add_argument(
         "--pidfile",
         default=None,
         help="守护模式写入自身 pid（默认 <workdir>/factor_research_agent.pid）",
@@ -751,6 +868,12 @@ def main(argv: list[str] | None = None) -> int:
         "--launcher-tick", action="store_true", help="启动器节拍：确保守护 + 写心跳（脚本用）"
     )
     modes.add_argument("--set-intent", choices=("running", "stopped"), help="写期望态（脚本用）")
+    modes.add_argument(
+        "--prune", action="store_true", help="保留窗清理一次（看护在会话结束后调用）"
+    )
+    modes.add_argument(
+        "--disk-check", action="store_true", help="磁盘水位检查并写暂停文件（看护在拉起会话前调用）"
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -780,6 +903,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"launcher tick: agent_ok={payload['agent_ok']} pid={payload['agent_pid']}")
         return 0 if payload["agent_ok"] else 1
+
+    if args.prune:
+        print(json.dumps(prune_workspace(workdir, args.retention_h), ensure_ascii=False))
+        return 0
 
     if args.set_intent is not None:
         payload = set_intent(control_path, args.set_intent == "running")
