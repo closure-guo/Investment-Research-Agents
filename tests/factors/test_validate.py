@@ -1547,3 +1547,13 @@ def test_monotonicity_rejection_wired_into_gate2(tmp_path) -> None:
     entries = list_ledger_entries(db_path=tmp_path / "lib.db")
     # 账本 rejected_gate 列为 TEXT 型（SQLite 亲和），admitted 还原为布尔
     assert str(entries[0]["rejected_gate"]) == "2" and entries[0]["admitted"] is False
+
+
+def test_admitted_factor_persists_orientation(tmp_path):
+    """入库因子行持久化闸④训练段定向符号（add-factor-direction-reversal-monitor）。"""
+    db = _empty_db(tmp_path)
+    result = admit_candidates([_candidate("volume")], _signal_panel(), seed=1, db_path=db)[0]
+    gate4 = next(gate for gate in result.gates if gate.gate == 4)
+    rows = {row["id"]: row for row in list_factors(db_path=db)}
+    assert rows[result.factor_id]["orientation"] == gate4.detail["orientation"]
+    assert rows[result.factor_id]["orientation"] in (-1, 1)

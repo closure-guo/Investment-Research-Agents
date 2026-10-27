@@ -101,6 +101,7 @@ from finance_agent.factors.library import (
     find_structural_duplicate,
     list_active_factors,
     list_ic_series,
+    set_orientation,
     set_pool_increment,
     set_status,
 )
@@ -979,6 +980,9 @@ def admit_candidates(
         increment = gate4.detail.get("increment")
         if isinstance(increment, (int, float)) and not isinstance(increment, bool):
             set_pool_increment(factor_id, float(increment), db_path=db_path)
+        orientation = gate4.detail.get("orientation")
+        if orientation in (-1, 0, 1):
+            set_orientation(factor_id, int(orientation), db_path=db_path)
         retired = apply_bucket_quota(item.category, db_path=db_path)
         status = STATUS_RETIRED if factor_id in retired else STATUS_ACTIVE
         outcomes[item.position] = AdmissionResult(factor_id, status, tuple(item.gates), None)
