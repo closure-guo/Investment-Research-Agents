@@ -12,10 +12,13 @@ prompt 组装路径无第二数据源（门禁测试：全组装路径扫描未�
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
+import re
 import sqlite3
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -137,11 +140,32 @@ _STATUS_LABELS = {
 _DIRECTION_ORDER = ("long", "short", "neutral")
 _LLM_MAX_CLAUSES = 10
 
+# #485：LLM 常把「样本量不足，无法提炼…」这类对任务的元陈述当作条款返回。候选定义是
+# 「经验条款」（spec decision-memory），元陈述不是条款 → 出口过滤；过滤后一条不剩则
+# 返回 None，调用方按既有降级路径回退规则式。只匹配「说提炼不出」的句式，不误杀
+# 「样本不足时应降低仓位」这类真经验（测试钉死）。
+_METADATA_CLAUSE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(无法|不能|难以|不足以|无从).{0,6}(提炼|总结|归纳|概括|生成|形成|给出).{0,12}"
+        r"(条款|结论|经验|规律)"
+    ),
+    re.compile(r"(无|没有|缺少|缺乏).{0,6}(可提炼|可用|足够|充分).{0,8}(条款|样本|数据|结论|经验)"),
+    re.compile(
+        r"(样本量?|数据|信息|素材)(不足|不够|匮乏|缺失)[，,。；;]?\s*(无法|不能|难以|不足以|暂无法)"
+    ),
+)
+
+
+def _is_metadata_statement(text: str) -> bool:
+    """是否「无内容可提炼」的元陈述（不是可注入的经验条款）。"""
+    return any(pattern.search(text) for pattern in _METADATA_CLAUSE_PATTERNS)
+
 
 def _llm_extract(settled: list[dict[str, Any]], client: Any) -> list[str] | None:
     """LLM 提炼（可选路径）：client 可为 callable 或带 complete_text 的对象。
 
-    任何失败（异常/空产出）→ None（调用方降级规则式提炼，月批不因端点故障中断）。
+    任何失败（异常/空产出/只剩元陈述）→ None（调用方降级规则式提炼，月批不因
+    端点故障或模型「无话可说」而中断）。
     """
     digest = "\n".join(
         f"{e.get('date')} {e.get('symbol')} {e.get('direction')} "
@@ -150,7 +174,9 @@ def _llm_extract(settled: list[dict[str, Any]], client: Any) -> list[str] | None
     )
     prompt = (
         "以下是已结算历史决策清单，请提炼可复用的经验条款（每行一条，不要编号与解释；"
-        "只写有统计依据的结论，样本不足不要编造）:\n已结算决策:\n" + digest
+        "每条必须包含方向、样本数与占比或胜率等统计要素；只写有统计依据的结论；"
+        "若不足以支撑任何条款，请只输出空行，不要输出解释或说明性文字）:\n"
+        "已结算决策:\n" + digest
     )
     try:
         raw = client(prompt) if callable(client) else client.complete_text(prompt)
@@ -160,7 +186,11 @@ def _llm_extract(settled: list[dict[str, Any]], client: Any) -> list[str] | None
     if not isinstance(raw, str):
         return None
     lines = [line.strip(" \t-*#0123456789.、") for line in raw.splitlines()]
-    texts = [line for line in lines if line and not line.startswith("```")]
+    texts = [
+        line
+        for line in lines
+        if line and not line.startswith("```") and not _is_metadata_statement(line)
+    ]
     return texts[:_LLM_MAX_CLAUSES] or None
 
 
@@ -242,14 +272,33 @@ def extract_candidate_clauses(
 # ── 落库与人工确认门禁 ──────────────────────────────────────────────────────
 
 
+def _clause_item(raw: str | dict[str, Any], default_evidence: str | None) -> tuple[str, str | None]:
+    """落库项归一：裸文本沿用调用方统一 evidence；dict 项带自己的出处。
+
+    #486：月批两条入口此前只传正文，`extract_candidate_clauses` 算出的出处
+    （LLM `{"source": "llm"}` / 规则式统计分组）在落库时丢失。dict 项的 evidence
+    统一序列化为 JSON 文本（与前端 ``evidenceLines`` 的解析口径一致）。
+    """
+    if isinstance(raw, dict):
+        text = str(raw.get("text") or "").strip()
+        evidence: Any = raw.get("evidence", default_evidence)
+        if evidence is not None and not isinstance(evidence, str):
+            evidence = json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+        return text, evidence
+    return str(raw or "").strip(), default_evidence
+
+
 def store_candidate_clauses(
-    texts: list[str],
+    items: Sequence[str | dict[str, Any]],
     *,
     db_path: str | Path | None = None,
     source: str = "monthly_batch",
     evidence: str | None = None,
 ) -> list[str]:
     """候选条款落 pending（写入路径建表），返回新入库的 clause_id 列表。
+
+    ``items`` 可为裸文本（沿用参数 ``evidence``）或 ``{"text", "evidence"}`` 字典
+    （月批两条入口传字典，保留 LLM / 规则式出处）。
 
     去重口径：库内任意状态同文本已存在即跳过（月批全量重提炼不产生重复行；
     已驳回条款不会被下月重新塞回待确认队列——非目标：不做自动改写/遗忘）。
@@ -260,8 +309,8 @@ def store_candidate_clauses(
     now = _now_iso()
     conn = _connect(db_path)
     try:
-        for raw in texts:
-            text = str(raw or "").strip()
+        for raw in items:
+            text, row_evidence = _clause_item(raw, evidence)
             if not text or text in existing:
                 continue
             clause_id = f"c_{uuid.uuid4().hex[:12]}"
@@ -269,7 +318,7 @@ def store_candidate_clauses(
                 """INSERT INTO memory_clauses
                      (clause_id, text, status, source, evidence, created_at, updated_at)
                    VALUES (?,?,'pending',?,?,?,?)""",
-                (clause_id, text, source, evidence, now, now),
+                (clause_id, text, source, row_evidence, now, now),
             )
             existing.add(text)
             new_ids.append(clause_id)
@@ -346,6 +395,4 @@ def run_monthly_extraction(
 
     settled = settled_records(as_of=as_of, db_path=db_path)
     clauses = extract_candidate_clauses(settled, client=client, min_samples=min_samples)
-    return store_candidate_clauses(
-        [str(c["text"]) for c in clauses], db_path=db_path, source="monthly_batch"
-    )
+    return store_candidate_clauses(clauses, db_path=db_path, source="monthly_batch")

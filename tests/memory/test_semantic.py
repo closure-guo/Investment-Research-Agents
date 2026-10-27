@@ -9,6 +9,7 @@ spec decision-memory「语义记忆人工确认」：
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -136,6 +137,69 @@ class TestRuleBasedExtraction:
         assert any("看多方向历史决策 2 条" in t for t in texts)
 
 
+class TestLlmExtractionGuards:
+    """#485：LLM 产物必须是「经验条款」；只想说「没法提炼」时回退规则式。"""
+
+    def test_metadata_only_output_falls_back_to_rule(self):
+        prompts: list[str] = []
+
+        def _client(prompt: str) -> str:
+            prompts.append(prompt)
+            return "样本量不足，无法提炼具备统计依据的可复用经验条款"
+
+        settled = [
+            _settled("300750", "2026-08-01", status="resolved_win"),
+            _settled("300750", "2026-08-02", status="resolved_win"),
+        ]
+        texts = [c["text"] for c in extract_candidate_clauses(settled, client=_client)]
+
+        # 元陈述不得成为候选；同批素材由规则式产出真条款
+        assert all("样本量不足" not in text for text in texts)
+        assert "看多方向历史决策 2 条：结算命中（占该方向 100%）" in texts
+        # prompt 明示要素要求与「无内容时输出空行」（防模型把「没法提炼」当产出）
+        assert "统计要素" in prompts[0]
+        assert "空行" in prompts[0]
+
+    @pytest.mark.parametrize(
+        "meta",
+        [
+            "样本量不足，无法提炼具备统计依据的可复用经验条款",
+            "数据不足，暂无可提炼的条款",
+            "无足够样本，无法总结",
+        ],
+    )
+    def test_metadata_variants_fall_back_to_rule(self, meta: str):
+        settled = [
+            _settled("300750", "2026-08-01", status="resolved_win"),
+            _settled("300750", "2026-08-02", status="resolved_win"),
+        ]
+        texts = [c["text"] for c in extract_candidate_clauses(settled, client=lambda _p: meta)]
+        assert any("看多方向历史决策 2 条" in text for text in texts)
+
+    def test_metadata_lines_dropped_real_clauses_kept(self):
+        def _client(_prompt: str) -> str:
+            return (
+                "样本量不足，无法提炼具备统计依据的可复用经验条款\n"
+                "小盘股高换手信号命中率持续低于四成"
+            )
+
+        clauses = extract_candidate_clauses(
+            [_settled("300750", "2026-08-01", status="resolved_win")], client=_client
+        )
+        assert [c["text"] for c in clauses] == ["小盘股高换手信号命中率持续低于四成"]
+        assert clauses[0]["evidence"] == {"source": "llm"}
+
+    def test_behavioral_clause_mentioning_sample_size_kept(self):
+        """过滤只针对「提炼不出」的元陈述，经验本身提到样本量不误杀。"""
+
+        clause = "样本不足时应降低仓位"
+        clauses = extract_candidate_clauses(
+            [_settled("300750", "2026-08-01", status="resolved_win")],
+            client=lambda _p: clause,
+        )
+        assert [c["text"] for c in clauses] == [clause]
+
+
 class TestClauseStore:
     """pending 落库 + 人工确认门禁 + 幂等/去重。"""
 
@@ -154,6 +218,20 @@ class TestClauseStore:
         assert not fresh.exists()
         store_candidate_clauses(["条款甲"], db_path=fresh)
         assert fresh.exists()
+
+    def test_store_persists_evidence_json(self, db: Path):
+        """#486：提炼出处随条款落库（dict → JSON 文本），不再恒为 NULL。"""
+        (clause_id,) = store_candidate_clauses(
+            [{"text": "条款甲", "evidence": {"source": "llm"}}], db_path=db
+        )
+        row = list_clauses(db_path=db)[0]
+        assert row["clause_id"] == clause_id
+        assert json.loads(row["evidence"]) == {"source": "llm"}
+
+    def test_store_keeps_evidence_null_when_absent(self, db: Path):
+        """无出处的裸文本仍写 NULL（不伪造 "null" 字符串）。"""
+        store_candidate_clauses(["条款乙"], db_path=db)
+        assert list_clauses(db_path=db)[0]["evidence"] is None
 
     def test_confirm_and_reject_transitions(self, db: Path):
         (first, second) = store_candidate_clauses(["条款甲", "条款乙"], db_path=db)

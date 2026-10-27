@@ -117,9 +117,7 @@ def run_memory_extract_monthly(
         client=client if client is not None else _default_client(),
         min_samples=min_samples,
     )
-    new_ids = store_candidate_clauses(
-        [str(clause["text"]) for clause in clauses], db_path=db_path, source="monthly_batch"
-    )
+    new_ids = store_candidate_clauses(clauses, db_path=db_path, source="monthly_batch")
     summary = {
         "window_days": int(window_days),
         "settled_count": len(settled),
