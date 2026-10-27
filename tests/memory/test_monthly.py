@@ -12,6 +12,7 @@ spec decision-memory delta「月批提炼排程」三个场景：
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -203,6 +204,47 @@ class TestLlmPath:
             "小盘股高换手信号命中率持续低于四成",
             "应避免在缩量反弹中加仓",
         ]
+
+    def test_llm_path_persists_source_evidence(self, db: Path):
+        """#486：LLM 路径条款带 {"source": "llm"} 出处落库。"""
+        _settled(db, "p1", "2026-09-01", "resolved_win")
+
+        run_memory_extract_monthly(
+            db_path=db, as_of=AS_OF, client=lambda _p: "小盘股高换手信号命中率持续低于四成"
+        )
+
+        rows = list_pending_clauses(db_path=db)
+        assert len(rows) == 1
+        assert json.loads(rows[0]["evidence"]) == {"source": "llm"}
+
+    def test_metadata_only_llm_output_falls_back_to_rule(self, db: Path):
+        """#485：只输出「没法提炼」按无有效产出处理，由规则式兜底。"""
+        _settled(db, "p1", "2026-09-01", "resolved_win")
+        _settled(db, "p2", "2026-09-02", "resolved_win")
+
+        summary = run_memory_extract_monthly(
+            db_path=db,
+            as_of=AS_OF,
+            client=lambda _p: "样本量不足，无法提炼具备统计依据的可复用经验条款",
+        )
+
+        assert summary["path"] == "rule"
+        rows = list_pending_clauses(db_path=db)
+        assert rows and all("样本量不足" not in row["text"] for row in rows)
+        assert any("看多方向" in row["text"] for row in rows)
+
+    def test_rule_path_persists_statistical_evidence(self, db: Path):
+        """#486：规则式路径的统计依据（方向/样本数）随条款落库。"""
+        _settled(db, "p1", "2026-09-01", "resolved_win")
+        _settled(db, "p2", "2026-09-02", "resolved_win")
+
+        summary = run_memory_extract_monthly(db_path=db, as_of=AS_OF)
+
+        assert summary["path"] == "rule"
+        evidence = json.loads(list_pending_clauses(db_path=db)[0]["evidence"])
+        assert evidence["direction"] == "long"
+        assert evidence["count"] == 2
+        assert evidence["direction_total"] == 2
 
     def test_client_failure_falls_back_to_rule(self, db: Path):
         _settled(db, "p1", "2026-09-01", "resolved_win")
