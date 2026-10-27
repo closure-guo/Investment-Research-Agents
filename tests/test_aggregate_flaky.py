@@ -148,15 +148,20 @@ def test_main_writes_markdown(tmp_path, capsys, monkeypatch):
     日期——不冻结时钟时记录会随日期滚动出 14 天窗（2026-10-27T10:00Z 起 CI
     必败，实证于 PR #496）。此处冻结到 ``_NOW``（其余 aggregate 专测同锚点）。
     """
-    from datetime import UTC, datetime
-    from types import SimpleNamespace
+    from datetime import datetime
 
     from scripts.ci import aggregate_flaky
 
     frozen = datetime.fromisoformat(_NOW.replace("Z", "+00:00"))
-    monkeypatch.setattr(
-        aggregate_flaky, "datetime", SimpleNamespace(now=lambda tz=None: frozen.astimezone(tz))
-    )
+
+    class _FrozenDatetime(datetime):
+        """仅覆写 ``now``；``fromisoformat`` 等其余类方法继承原语义。"""
+
+        @classmethod
+        def now(cls, tz=None):  # noqa: ARG003
+            return frozen.astimezone(tz)
+
+    monkeypatch.setattr(aggregate_flaky, "datetime", _FrozenDatetime)
 
     records_dir = _write(tmp_path, [_record("1", suites={"default": _suite(flaky=1)})])
     out = tmp_path / "summary.md"
