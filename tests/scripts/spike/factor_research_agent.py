@@ -99,18 +99,21 @@ class SingletonBusy(RuntimeError):  # noqa: N818 - 「单例被占」判定，�
 # 占位符用 {{...}} 显式替换（bash 的 ${DUR} 等花括号与 str.format 冲突）。
 SUPERVISOR_SCRIPT = """#!/usr/bin/env bash
 # 研发看护：无界 fin_factor 循环 + 崩溃自动重启（由 factor_research_agent 写/管）。
+# 低水位停发与保留窗清理见 incident 051 防复发（delta add-factor-workspace-retention-disk-watch）。
 set -u
 WORKDIR={{WORKDIR}}
 LOGDIR="$WORKDIR/factor_research_logs"
 echo $$ > "$WORKDIR/factor_research.pid"
 echo "[supervisor] started at $(date -Is) pid $$" >> "$LOGDIR/supervisor.log"
 while true; do
+  if ! python3 "{{AGENT}}" --disk-check; then sleep {{DISK_BACKOFF}}; continue; fi   # 低水位停发（运行中会话不受影响）
   LOG="$LOGDIR/session-$(date +%Y%m%d-%H%M%S).log"
   START=$(date +%s)
   bash {{LAUNCH}} > "$LOG" 2>&1
   END=$(date +%s)
   DUR=$((END - START))
   echo "[supervisor] session ended after ${DUR}s (log: $LOG) at $(date -Is)" >> "$LOGDIR/supervisor.log"
+  python3 "{{AGENT}}" --prune >> "$LOGDIR/prune.log" 2>&1 || true
   if [ "$DUR" -lt {{SHORT_THRESHOLD}} ]; then
     sleep {{SHORT_BACKOFF}}   # 短命会话（配额/网络故障）→ 退避
   else
@@ -124,12 +127,16 @@ def render_supervisor_script(workdir: str | Path, config: dict[str, int] | None 
     """看护脚本渲染（占位符替换；bash 花括号原样保留）。
 
     ``config`` 取节奏配置的生效值（缺省用 DEFAULT_CONFIG_VALUES）；会话间隔与退避
-    在下次启动看护时生效（页面已明示）。
+    在下次启动看护时生效（页面已明示）。``{{AGENT}}``/``{{DISK_BACKOFF}}`` 为
+    incident 051 防复发新增（--disk-check 门禁 + --prune 清理），与既有五占位符
+    同一替换语义。
     """
     values = {**DEFAULT_CONFIG_VALUES, **(config or {})}
     return (
         SUPERVISOR_SCRIPT.replace("{{WORKDIR}}", str(workdir))
         .replace("{{LAUNCH}}", LAUNCH_SCRIPT)
+        .replace("{{AGENT}}", AGENT_SCRIPT_PATH)
+        .replace("{{DISK_BACKOFF}}", str(DISK_CHECK_BACKOFF_S))
         .replace("{{SHORT_THRESHOLD}}", str(values["short_session_threshold_s"]))
         .replace("{{SHORT_BACKOFF}}", str(values["short_session_backoff_s"]))
         .replace("{{SESSION_GAP}}", str(values["session_gap_s"]))

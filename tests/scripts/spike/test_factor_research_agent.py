@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -979,3 +981,72 @@ class TestDiskWatermark:
         rc = agent.main(["--disk-check", "--workdir", str(tmp_path)])
         assert rc == 1
         assert "FAILED" in capsys.readouterr().err
+
+
+# ── TestSupervisorRender：看护脚本接线（incident 051 防复发 3/4）──────────────
+
+
+def _bash_usable() -> bool:
+    """bash 可执行性探测：Windows 的 msys bash 在部分原生进程环境下 fork 自爆（0xC0000142）。"""
+    bash = shutil.which("bash")
+    if bash is None:
+        return False
+    try:
+        probe = subprocess.run(  # noqa: S603 - bash 探测（PATH 解析），无外部输入
+            ["bash", "-c", "true"],  # noqa: S607 - bash 走 PATH 解析（同 agent 模块先例）
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
+class TestSupervisorRender:
+    """prune 与低水位停发进看护循环；既有 5 占位符替换语义不回归。"""
+
+    def test_rendered_script_gates_launch_and_prunes_after_session(self, tmp_path):
+        script = agent.render_supervisor_script(tmp_path)
+        # 计划逐字条款：launch 前低水位门禁；会话结束日志行后清理
+        gate = (
+            f'if ! python3 "{agent.AGENT_SCRIPT_PATH}" --disk-check; '
+            f"then sleep {agent.DISK_CHECK_BACKOFF_S}; continue; fi"
+        )
+        assert gate in script
+        prune_line = (
+            f'python3 "{agent.AGENT_SCRIPT_PATH}" --prune >> "$LOGDIR/prune.log" 2>&1 || true'
+        )
+        assert prune_line in script
+        # 顺序约束：门禁在 launch 之前；prune 在 session ended 日志之后
+        assert script.index("--disk-check") < script.index(f"bash {agent.LAUNCH_SCRIPT}")
+        assert script.index("--prune") > script.index("[supervisor] session ended")
+
+    def test_legacy_placeholders_still_replaced(self, tmp_path):
+        script = agent.render_supervisor_script(tmp_path)
+        for placeholder in (
+            "{{WORKDIR}}",
+            "{{LAUNCH}}",
+            "{{SHORT_THRESHOLD}}",
+            "{{SHORT_BACKOFF}}",
+            "{{SESSION_GAP}}",
+            "{{AGENT}}",
+            "{{DISK_BACKOFF}}",
+        ):
+            assert placeholder not in script
+        assert str(tmp_path) in script
+        assert agent.LAUNCH_SCRIPT in script
+        assert "-lt 120" in script  # 默认 short_session_threshold_s
+        assert "sleep 600 " in script  # 默认短命退避（带尾注）
+        assert "\n    sleep 60\n" in script  # 默认会话间隔
+
+    @pytest.mark.skipif(
+        not _bash_usable(), reason="环境 bash 不可执行（无 bash 或 msys fork 故障）"
+    )
+    def test_rendered_script_passes_bash_syntax_check(self, tmp_path):
+        script = agent.render_supervisor_script(tmp_path)
+        result = subprocess.run(  # noqa: S603 - bash -n 语法校验，无外部输入
+            ["bash", "-n"],  # noqa: S607 - bash 走 PATH 解析（同 agent 模块先例）
+            input=script.encode("utf-8"),
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
