@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from scripts.ci.aggregate_flaky import aggregate, build_report, load_records, main
@@ -141,29 +142,14 @@ def test_aggregate_invalid_record_file_disclosed(tmp_path):
     assert "broken" in result["invalid_files"][0]
 
 
-def test_main_writes_markdown(tmp_path, capsys, monkeypatch):
-    """main 落盘 markdown + stdout 同步可见（nightly 日志）。
-
-    ``main`` 内部用真实时钟（``datetime.now(UTC)``），而 fixture 记录锚在固定
-    日期——不冻结时钟时记录会随日期滚动出 14 天窗（2026-10-27T10:00Z 起 CI
-    必败，实证于 PR #496）。此处冻结到 ``_NOW``（其余 aggregate 专测同锚点）。
-    """
-    from datetime import datetime
-
-    from scripts.ci import aggregate_flaky
-
-    frozen = datetime.fromisoformat(_NOW.replace("Z", "+00:00"))
-
-    class _FrozenDatetime(datetime):
-        """仅覆写 ``now``；``fromisoformat`` 等其余类方法继承原语义。"""
-
-        @classmethod
-        def now(cls, tz=None):  # noqa: ARG003
-            return frozen.astimezone(tz)
-
-    monkeypatch.setattr(aggregate_flaky, "datetime", _FrozenDatetime)
-
-    records_dir = _write(tmp_path, [_record("1", suites={"default": _suite(flaky=1)})])
+def test_main_writes_markdown(tmp_path, capsys):
+    # main() 走真实时钟算近 14 天窗，fixture 记录须动态取「昨天」——写死日期会随
+    # 时间滚出窗口（2026-10-27 UTC 10:00 起实证：generated_at=10-13T10:00Z 被超窗
+    # 排除，报告空表断言红）。其余用例经 now=_NOW 注入固定时钟，不受影响。
+    generated_at = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    records_dir = _write(
+        tmp_path, [_record("1", generated_at=generated_at, suites={"default": _suite(flaky=1)})]
+    )
     out = tmp_path / "summary.md"
     code = main(
         [

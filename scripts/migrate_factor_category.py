@@ -32,9 +32,7 @@ def migrate_category(*, db_path: str | None = None) -> dict[str, int]:
             if str(row.get("category")) != _OLD_CATEGORY:
                 continue
             fid = int(row["id"])
-            new_category = classify_category(
-                str(row.get("expression")), str(row.get("hypothesis"))
-            )
+            new_category = classify_category(str(row.get("expression")), str(row.get("hypothesis")))
             conn.execute("UPDATE factors SET category = ? WHERE id = ?", (new_category, fid))
             conn.execute(
                 "INSERT INTO factor_events (factor_id, event, from_status, to_status, detail, "

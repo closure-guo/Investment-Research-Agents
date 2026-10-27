@@ -184,6 +184,29 @@ async def test_glm_tool_choice_required_proceeds(monkeypatch):
     assert captured["tools"][0]["function"]["name"] == "f"
 
 
+async def test_no_tools_omits_tool_choice(monkeypatch):
+    """无 tools 时不得发 tool_choice（issue #481）。
+
+    nightly @live 实证：opencode 网关对「tool_choice 无 tools」返回
+    400 `tool_choice requires at least one available tool`——纯 reasoning 流
+    （未带 tools）默认 tool_choice="auto" 即报错。语义上 tool_choice 只在
+    有 tools 时有意义，无 tools 的请求不得携带。
+    """
+    captured = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return _AsyncIter([_chunk(text="答", finish="stop")])
+
+    monkeypatch.setattr(
+        "finance_agent.llm.adapters.litellm_adapter.raw_acompletion", fake_acompletion
+    )
+    monkeypatch.setattr("finance_agent.llm.gateway.guard_params_supported", lambda *a, **kw: None)
+    await _collect(complete_stream_async([{"role": "user", "content": "hi"}], llm_config=CFG))
+    assert "tools" not in captured
+    assert "tool_choice" not in captured
+
+
 async def test_retryable_error_then_success(monkeypatch):
     calls = {"n": 0}
 
