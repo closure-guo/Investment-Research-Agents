@@ -100,11 +100,16 @@ def _record_missing_ic(
     return int(eligible.size), written
 
 
-def _decay_snapshot(factor_id: int, as_of: str, *, db_path: Any) -> dict[str, Any] | None:
+def _decay_snapshot(
+    factor_id: int, as_of: str, *, db_path: Any, orientation: int = 0
+) -> dict[str, Any] | None:
     """滚动 IC 判定快照；历史不足 → ``None``（不判降级）。
 
-    返回 ``{"degraded": bool, "rolling_ic_mean": float, "rolling_icir": float|None,
-    "tail_means": [...], "tail_icirs": [...], "tail_dates": [...]}``。
+    返回 ``{"degraded": bool, "reversal": bool, "rolling_ic_mean": float,
+    "rolling_icir": float|None, "tail_means": [...], "tail_icirs": [...],
+    "tail_dates": [...]}``。``degraded`` = 衰减（负且弱）或反转（滚动均值连续
+    20 点与入池定向相反）任一命中；``reversal`` 标记反转路径（判定 precedence
+    由调用方落事件 reason 时使用）。
     """
     history = list_ic_series(factor_id, limit=_REQUIRED_IC_POINTS, db_path=db_path)
     if len(history) < DECAY_WINDOW:
@@ -120,9 +125,18 @@ def _decay_snapshot(factor_id: int, as_of: str, *, db_path: Any) -> dict[str, An
     if int(tail_means.size) < DECAY_NEGATIVE_DAYS:
         return None
     tail_icirs = rolling_icir.reindex(tail_means.index)
-    degraded = bool((tail_means < 0.0).all() and (tail_icirs.abs() < DECAY_ICIR_FLOOR).all())
+    decay_hit = bool((tail_means < 0.0).all() and (tail_icirs.abs() < DECAY_ICIR_FLOOR).all())
+    # 反转判据：滚动均值连续 20 点与入池定向相反（无 ICIR 幅度门槛——60 日平滑后
+    # 连续 20 点反向的噪声穿越概率可忽略；定向 0 不判反转）。
+    if orientation == -1:
+        reversal_hit = bool((tail_means > 0.0).all())
+    elif orientation == 1:
+        reversal_hit = bool((tail_means < 0.0).all())
+    else:
+        reversal_hit = False
     return {
-        "degraded": degraded,
+        "degraded": decay_hit or reversal_hit,
+        "reversal": reversal_hit,
         "rolling_ic_mean": float(tail_means.iloc[-1]),
         "rolling_icir": _finite_or_none(tail_icirs.iloc[-1]),
         "tail_means": [float(value) for value in tail_means],
@@ -139,9 +153,10 @@ def run_factor_monitor(
     ``as_of`` 为数据截止交易日，**必须在面板日期内**（否则 ``ValueError``，
     fail loud）；面板须含 ``close`` 字段（``forward_returns`` 输入）。返回
     ``{"recorded", "days_recorded", "checked", "skipped", "degraded": [id...],
-    "judged": [...]}``——``recorded`` = 有可算 IC 的因子数（语义不变），
-    ``days_recorded`` = 本次实际写入的 IC 行数（缺口回填的可观测读数），
-    ``judged`` 为逐因子判定快照（报告/运维排查）；``degraded`` 为本次降级 id。
+    "reversed": [id...], "judged": [...]}``——``recorded`` = 有可算 IC 的因子数
+    （语义不变），``days_recorded`` = 本次实际写入的 IC 行数（缺口回填的可观测
+    读数），``judged`` 为逐因子判定快照（报告/运维排查）；``degraded`` 为本次
+    降级 id，``reversed`` 为其中走方向反转判据的 id。
     """
     if "close" not in panel.fields:
         raise ValueError("面板缺少 close 字段（forward_returns 输入）")
@@ -153,9 +168,11 @@ def run_factor_monitor(
     checked = 0
     skipped = 0
     degraded: list[int] = []
+    reversed_ids: list[int] = []
     judged: list[dict[str, Any]] = []
     for row in list_active_factors(db_path=db_path):
         factor_id = int(row["id"])
+        orientation = int(row.get("orientation") or 0)
         outcome = _record_missing_ic(row, panel, fwd, as_of, db_path=db_path)
         if outcome is None:
             skipped += 1
@@ -163,7 +180,9 @@ def run_factor_monitor(
             continue
         recorded += 1
         days_recorded += outcome[1]
-        snapshot = _decay_snapshot(factor_id, as_of, db_path=db_path)
+        snapshot = _decay_snapshot(
+            factor_id, as_of, db_path=db_path, orientation=orientation
+        )
         if snapshot is None:
             skipped += 1
             continue
@@ -172,17 +191,20 @@ def run_factor_monitor(
             {
                 "factor_id": factor_id,
                 "degraded": snapshot["degraded"],
+                "reversal": snapshot["reversal"],
                 "rolling_ic_mean": snapshot["rolling_ic_mean"],
                 "rolling_icir": snapshot["rolling_icir"],
             }
         )
         if not snapshot["degraded"]:
             continue
+        reversal = bool(snapshot["reversal"])
         set_status(
             factor_id,
             "degraded",
             detail={
-                "reason": "DECAY",
+                "reason": "DIRECTION_REVERSAL" if reversal else "DECAY",
+                "orientation": orientation,
                 "as_of": as_of,
                 "window": DECAY_WINDOW,
                 "negative_days": DECAY_NEGATIVE_DAYS,
@@ -194,18 +216,28 @@ def run_factor_monitor(
             db_path=db_path,
         )
         degraded.append(factor_id)
-        logger.warning(
-            "因子 %s 衰减降级（滚动 IC 连续 %d 日为负且 |ICIR| < %.2f）",
-            factor_id,
-            DECAY_NEGATIVE_DAYS,
-            DECAY_ICIR_FLOOR,
-        )
+        if reversal:
+            reversed_ids.append(factor_id)
+            logger.warning(
+                "因子 %s 方向反转降级（滚动 IC 连续 %d 日与入池定向 %d 相反）",
+                factor_id,
+                DECAY_NEGATIVE_DAYS,
+                orientation,
+            )
+        else:
+            logger.warning(
+                "因子 %s 衰减降级（滚动 IC 连续 %d 日为负且 |ICIR| < %.2f）",
+                factor_id,
+                DECAY_NEGATIVE_DAYS,
+                DECAY_ICIR_FLOOR,
+            )
     return {
         "recorded": recorded,
         "days_recorded": days_recorded,
         "checked": checked,
         "skipped": skipped,
         "degraded": degraded,
+        "reversed": reversed_ids,
         "judged": judged,
     }
 
