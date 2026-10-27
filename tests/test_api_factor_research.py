@@ -91,6 +91,7 @@ _NO_DISK = {
     "workspace_gb": None,
     "low_watermark": False,
     "low_watermark_reason": None,
+    "paused_reason": None,
 }
 _DEFAULT_CONFIG_VALUES = {
     "snapshot_interval_s": 15,
@@ -921,7 +922,15 @@ class TestDiskWatermark:
             "workspace_gb": 3.4,
             "low_watermark": False,
             "low_watermark_reason": None,
+            "paused_reason": None,
         }
+
+    def test_paused_reason_passthrough(self, _status_path):
+        """看护停发原因透传（--disk-check 暂停文件经采集器上行；前端横幅条件依赖）。"""
+        body = self._disk_body(_status_path, guest=40, host=25, paused_reason="guest")
+        assert body["paused_reason"] == "guest"
+        body = self._disk_body(_status_path, guest=40, host=25, paused_reason="")
+        assert body["paused_reason"] is None
 
     def test_guest_at_threshold_not_low(self, _status_path):
         """恰等阈值（30GB）不算低（严格小于才告警，与 distro 侧 disk_watermark 同判）。"""

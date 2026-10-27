@@ -4564,6 +4564,7 @@ def _factor_research_disk_block(snapshot: dict[str, Any]) -> dict[str, Any]:
             "workspace_gb": None,
             "low_watermark": False,
             "low_watermark_reason": None,
+            "paused_reason": None,
         }
     guest_gb = _bytes_to_gb(raw.get("guest_free_bytes"))
     host_gb = _bytes_to_gb(raw.get("host_free_bytes"))
@@ -4575,12 +4576,16 @@ def _factor_research_disk_block(snapshot: dict[str, Any]) -> dict[str, Any]:
     )
     low_guest = guest_gb is not None and guest_gb < guest_min
     low_host = host_gb is not None and host_gb < host_min
+    # 看护停发原因透传（--disk-check 落盘的 .disk_pause.json，经采集器 disk 块上行）；
+    # 前端横幅条件「low_watermark 或 paused_reason 非空」依赖它。
+    paused = raw.get("paused_reason")
     return {
         "guest_free_gb": guest_gb,
         "host_free_gb": host_gb,
         "workspace_gb": _bytes_to_gb(raw.get("workspace_bytes")),
         "low_watermark": bool(low_guest or low_host),
         "low_watermark_reason": "guest" if low_guest else ("host" if low_host else None),
+        "paused_reason": paused if isinstance(paused, str) and paused else None,
     }
 
 
@@ -4598,6 +4603,7 @@ def _factor_research_snapshot_payload() -> dict[str, Any]:
                 "workspace_gb": None,
                 "low_watermark": False,
                 "low_watermark_reason": None,
+                "paused_reason": None,
             },
         }
     try:
@@ -4623,6 +4629,7 @@ def _factor_research_snapshot_payload() -> dict[str, Any]:
                 "workspace_gb": None,
                 "low_watermark": False,
                 "low_watermark_reason": None,
+                "paused_reason": None,
             },
         }
     age = max(0, int(time.time() - epoch))
