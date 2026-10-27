@@ -141,3 +141,29 @@ $ uv run pytest tests/ -q -m "not live"
 ## 未修改任何源码声明
 
 本次仅新增 `tests/validation/2026-10-13-add-market-snapshot-reconcile.py` 与本报告；其余文件改动为执行期临时产物（`tmp/val-snapshot.db`，gitignore 覆盖）。未发现需上报为 bug 的既有代码缺陷（唯一系统性问题——live 数据源 IP 封禁——已定性为环境/数据源问题并归档于异常记录 1）。
+
+
+---
+
+### 8. 补验完成（issue #325，2026-10-27）：新浪基准跨源对账
+
+**东财复测**（2026-10-27 19:4x 北京时）：`ak.stock_zh_a_spot_em` 仍 `ConnectionError: RemoteDisconnected`（5.7s 失败）——东财行情域 IP 封禁长期化，原东财基准对账脚本仍不可执行。新浪 `stock_zh_a_spot` 正常（5576 行/10.9s）。
+
+**日批真实数据冒烟**（原待办 1 前半）：**已由生产每日运行隐式完成**——`market_snapshot_daily` 10-26/10-27 均 ok（written 5577、rebased 6、suspended 4，`spot_source=sina`），东财→新浪回退链路在生产实际生效。
+
+**单数据源降级评估**（原风险提示）：已由 `add-market-data-fallback` 落地——`AkshareClient.fetch_market_spot` 东财主源失败/空表/缺列即回退新浪（列形归一 `_map_sina_spot_to_em`），两源皆败返回 None 并留 ERROR（不写空快照）；流通市值缺列时另有腾讯批量兜底。生产摘要 `spot_source` 字段如实上报实际生效源。
+
+**20×20 逐字段对账**（原待办 1 后半，改用新浪基准）：新脚本 `2026-10-27-add-market-snapshot-reconcile-sina.py`（seed=20261027）对 2024-10-01–2025-12-31 回填区间抽 **20 个交易日** × **20 只跨板样本**（与原清单一致，不含北交所）逐字段比对：
+
+```
+抽样交易日（seed=20261027，命中 20/304）:
+  2024-10-25 ... 2025-12-03（完整列表见脚本输出）
+口径：open/close_raw/close_qfq 与新浪 ak.stock_zh_a_daily（不复权 / qfq）比对；
+      volume 库=手、新浪=股（×100 后比对）
+对账符号数: 20/20；总格数: 1600
+全部一致 ✓
+```
+
+**保证与局限**：库内回填数据原产于东财 hist，参考源新浪为独立数据商——跨源一致（1600/1600）同时验证了回填解析/映射/存储保真度与两源价格一致性。不覆盖：北交所（新浪无日线）、状态字段与 prev_close 语义（回填显式 0/NULL）。新浪 qfq 偶有两位小数舍入，容差 0.011。
+
+**对 #325 待办的影响**：原「东财恢复后补跑东财基准对账」不再必要（跨源验证强于同源自证）；#325 可关闭。
