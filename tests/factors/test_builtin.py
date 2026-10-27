@@ -325,3 +325,38 @@ def test_builtin_registration_writes_admission_ledger(tmp_path) -> None:
     assert summary["total"] == len(BUILTIN_FACTORS)
     assert summary["tested"] == len(admitted)
     assert by_expr  # 表达式逐字落账（防错位）
+
+
+# ── 拒绝池交互（add-rejected-factor-pool T3）────────────────────────────────
+
+
+def test_missing_builtins_treats_rejected_row_as_missing(tmp_path):
+    """拒绝池行不构成已存在：被拒 builtin 次日注册仍重试（MUST NOT 被跳过）。"""
+    from finance_agent.factors.builtin import missing_builtins
+    from finance_agent.factors.library import record_rejected_factor
+
+    db = str(tmp_path / "factor_library.db")
+    item = BUILTIN_FACTORS[0]
+    record_rejected_factor(
+        expression=item.expression,
+        hypothesis="曾过闸失败（闸②）",
+        category="builtin",
+        ast_json=None,
+        source="builtin",
+        gate=2,
+        reason="WEAK_ICIR",
+        detail={},
+        db_path=db,
+    )
+    assert item in missing_builtins(db_path=db)
+    # 对照：active 行仍构成已存在
+    from finance_agent.factors.library import add_factor
+
+    add_factor(
+        expression=item.expression,
+        hypothesis="已注册",
+        category="builtin",
+        status="active",
+        db_path=db,
+    )
+    assert item not in missing_builtins(db_path=db)
