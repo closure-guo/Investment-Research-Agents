@@ -34,7 +34,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -391,6 +391,65 @@ def prune_workspace(
         freed += freed_here
         deleted.append(entry.name)
     return {"deleted": deleted, "failed": failed, "kept": kept, "freed_bytes": freed}
+
+
+# ── 磁盘水位（incident 051 防复发 2/4：磁盘撑爆后停发新会话）─────────────────
+
+
+def disk_thresholds() -> tuple[int, int]:
+    """低水位阈值（字节）：env ``FACTOR_DISK_MIN_FREE_GB_GUEST/HOST``（GB→×2**30），默认 30/20。
+
+    与 api.py 同名常量字面同步（plan 全局约束：阈值单源）。
+    """
+    guest_gb = _int_env("FACTOR_DISK_MIN_FREE_GB_GUEST", DEFAULT_DISK_MIN_FREE_GB_GUEST)
+    host_gb = _int_env("FACTOR_DISK_MIN_FREE_GB_HOST", DEFAULT_DISK_MIN_FREE_GB_HOST)
+    return guest_gb * 2**30, host_gb * 2**30
+
+
+def disk_watermark(
+    *,
+    guest_path: str | Path = "/",
+    host_path: str | Path | None = None,
+    disk_usage_fn: Callable[[str | Path], tuple[int, int, int]] | None = None,
+) -> dict[str, Any]:
+    """双侧磁盘水位判定（spec「低水位停发保护」的看护侧判定源）。
+
+    ``disk_usage_fn(path)`` 返回 ``(total, used, free)``（shutil.disk_usage 兼容形，
+    缺省即 shutil.disk_usage）。任一侧读取失败 / 路径不存在 → 该侧 None（fail-open，
+    不计入 low——读数失败 MUST NOT 编造）；双侧全失败 → ``low=False`` 且 ``error``
+    非空（放行研发但留痕，不静默阻断）。``host_path`` 缺省取 env
+    ``FACTOR_RESEARCH_HOST_MOUNT``（默认 /mnt/d）。空闲**恰等**阈值不算 low。
+
+    返回 ``{"guest_free_bytes", "host_free_bytes", "low", "reason", "thresholds",
+    "error"}``。
+    """
+    usage_fn = disk_usage_fn or shutil.disk_usage
+    if host_path is None:
+        host_path = os.environ.get("FACTOR_RESEARCH_HOST_MOUNT") or DEFAULT_HOST_MOUNT
+
+    def _free_bytes(path: str | Path) -> int | None:
+        try:  # shutil.disk_usage 对不存在的路径抛 FileNotFoundError（OSError 子类）→ 统一兜
+            return int(usage_fn(path)[2])
+        except OSError:
+            return None
+
+    guest_min, host_min = disk_thresholds()
+    guest_free = _free_bytes(guest_path)
+    host_free = _free_bytes(host_path)
+    error: str | None = None
+    if guest_free is None and host_free is None:
+        error = "磁盘读数双侧失败（guest/host 均不可得）→ fail-open 放行"
+    low_guest = guest_free is not None and guest_free < guest_min
+    low_host = host_free is not None and host_free < host_min
+    low = low_guest or low_host
+    return {
+        "guest_free_bytes": guest_free,
+        "host_free_bytes": host_free,
+        "low": low,
+        "reason": "guest" if low_guest else ("host" if low_host else None),
+        "thresholds": {"guest_min_bytes": guest_min, "host_min_bytes": host_min},
+        "error": error,
+    }
 
 
 # ── 实态与启停动作（与旧脚本逐字同语义）────────────────────────────────────
@@ -907,6 +966,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.prune:
         print(json.dumps(prune_workspace(workdir, args.retention_h), ensure_ascii=False))
         return 0
+
+    if args.disk_check:
+        result = disk_watermark()
+        payload = {
+            "paused": result["low"],
+            "reason": result["reason"],
+            "guest_free_bytes": result["guest_free_bytes"],
+            "host_free_bytes": result["host_free_bytes"],
+            "checked_at": datetime.now().astimezone().isoformat(),
+        }
+        try:  # 正常时也写 paused=false（防陈旧暂停态残留——看护以文件存在性为准）
+            cfs.atomic_write_json(workdir / "factor_research_logs" / DISK_PAUSE_NAME, payload)
+        except OSError as exc:
+            print(f"FAILED to write disk pause file: {exc}", file=sys.stderr)
+            return 1
+        return 2 if result["low"] else 0
 
     if args.set_intent is not None:
         payload = set_intent(control_path, args.set_intent == "running")
