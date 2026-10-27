@@ -1274,3 +1274,42 @@ def test_missing_batch_mode_falls_back_to_unfiltered_axis(tmp_path) -> None:
     _in_top(db, _D3, "OTHER")
     assert days_in_top_recent("Y", _D5, db_path=db) == 4
     assert eligible_for_selection("Y", _D5, db_path=db) is True
+
+
+def test_explicit_mode_uses_same_mode_axis_when_as_of_row_absent(tmp_path) -> None:
+    """日批形态（fix-stability-gate-mode-axis）：资格判定先于当日批次行落库，当日批次行
+    必然不存在。显式传当日模式 → 轴只含同模式交易日，fallback 日不稀释。
+
+    生产 10-27 形态：Y 因子口径命中 D1/D2/D6 = 3 → 入池；旧行为（当日无批次行 → 全轴
+    混合 [D6..D2]）把 D1 命中推出窗外、只数出 2 → 挡在池外。缺省路径的降级语义保留
+    （spec「无模式带外调用降级保留」）。
+    """
+    db = str(tmp_path / "screening.db")
+    _D6 = "2026-10-13"
+    _seed_mode(db, _D1, "factor")
+    _seed_mode(db, _D2, "factor")
+    _seed_mode(db, _D3, "fallback")
+    _seed_mode(db, _D4, "fallback")
+    _seed_mode(db, _D5, "factor")
+    _in_top(db, _D1, "Y")
+    _in_top(db, _D2, "Y")
+    _in_top(db, _D3, "OTHER")
+    _in_top(db, _D4, "OTHER")
+    _in_top(db, _D5, "OTHER")  # 模式内单日跌出
+    _in_top(db, _D6, "Y")  # as_of 在榜；**不落 D6 批次行**（= 生产判定时点）
+    assert days_in_top_recent("Y", _D6, mode="factor", db_path=db) == 3
+    assert eligible_for_selection("Y", _D6, mode="factor", db_path=db) is True
+    # 对照：缺省路径（不传 mode）仍是「读当日批次行 → 缺失退全轴」，带外兼容不变
+    assert days_in_top_recent("Y", _D6, db_path=db) == 2
+    assert eligible_for_selection("Y", _D6, db_path=db) is False
+
+
+def test_explicit_mode_rejects_invalid_values(tmp_path) -> None:
+    """非法 mode 值 fail loud（与 ``pool`` 参数校验同风格，防静默 misuse）。"""
+    db = str(tmp_path / "screening.db")
+    _seed_mode(db, _D1, "factor")
+    _in_top(db, _D1, "Y")
+    with pytest.raises(ValueError, match="非法 selection_mode"):
+        days_in_top_recent("Y", _D1, mode="bogus", db_path=db)
+    with pytest.raises(ValueError, match="非法 selection_mode"):
+        eligible_for_selection("Y", _D1, mode="bogus", db_path=db)
