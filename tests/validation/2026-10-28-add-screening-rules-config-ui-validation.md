@@ -42,7 +42,8 @@
 ## 异常记录
 
 - 首次全量 stub 套件在本机运行时因内存压力中止（43 用例 did not run，12GB WSL 上限 +
-  生产 Docker 栈并存）；以 `--workers=2` 限定并发后重跑，结果见下节。
+  生产 Docker 栈并存）；以 `--workers=2` 限定并发后重跑至完成（78 passed / 7 failed，
+  7 项失败经基线 A/B 判定为 origin/main 存量，见下节）。
 - 首次 E2E 运行曾复用宿主 Docker 栈的 8000/5173 端口转发（reuseExistingServer 静默复用
   生产前端旧代码 → 用例假失败）；已通过 playwright.config 端口对参数化修复
   （E2E_BACKEND_PORT / E2E_FRONTEND_PORT，默认值不变），该修复已入本分支。
@@ -50,7 +51,17 @@
 ## E2E 全量门禁
 
 - 命令：`E2E_BACKEND_PORT=8010 E2E_FRONTEND_PORT=5183 npx playwright test --workers=2`
-- 结果：见运行输出（通过/失败/跳过计数与 EXIT_CODE 一并记录于运行日志）
+- 结果：**78 passed / 22 skipped / 7 failed**（EXIT=1）
+- 失败 7 项全部位于本分支改动域之外：agui-chat、agui-session-switch-isolation、
+  concurrent-streaming-integrity ×2、session-switch-resumption（流式族）与
+  factor-library、memory-confirmation（30ms 级种子快速失败）。
+- **基线 A/B 判定**：以 origin/main（4951b0c5）独立 worktree + 同端口对同命令复跑
+  session-switch-resumption / memory-confirmation / factor-library 三文件 →
+  同样 3 failed / EXIT=1（日志 /tmp/e2e-baseline.log），其余 4 个流式族失败与
+  已复现三例同签名。结论：7 项失败为 **origin/main 存量环境问题**（本机 12GB WSL
+  上限 + 生产 Docker 栈并存下的流式族与种子竞态），非本分支引入。
+- 本分支新增 spec：`settings-screening-rules.spec.ts` 4/4 通过（两次运行稳定）。
+- 权威门禁以 PR 上 CI 的 stub 套件运行为准。
 
 ## 结论
 
