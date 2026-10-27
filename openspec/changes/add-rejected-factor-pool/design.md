@@ -5,7 +5,7 @@
 ### 1. 状态机与库层（`factors/library.py`）
 
 - `_TRANSITIONS` 增加 `"rejected"` 为**终态**（`frozenset()`）：拒绝池行永不参与状态迁移（复苏走未来的重评 delta，产生新行，不改写历史）。`add_factor` 的合法初始状态集合增加 `"rejected"`。
-- 新增 `list_factors_by_status(status, db_path)`：按状态枚举行（active 路径已有 `list_active_factors`，拒绝池跟踪复用同款连接纪律）。
+- `list_factors` 增加 `include_rejected: bool = False`：缺省排除 `rejected` 行（拒绝池对既有读路径不可见，一处改动覆盖 api/monthly/builtin 全部消费方）；`status` 显式给定时精确返回（拒绝池跟踪走 `status="rejected"`）。实施时以此替代原计划的独立 `list_factors_by_status`——枚举能力本就存在，无需新函数。
 - 新增 `find_rejected_duplicate(ast_json, db_path)`：仅在 `status='rejected'` 行内做与 `find_structural_duplicate` 同款的同构比对（复用规范串精确命中快路径 + 全量同构扫描）。**不改** `find_structural_duplicate` 与 `_DEDUP_STATES`——查重范围维持 `candidate/active/degraded`，`rejected` 天然不在其中。
 - 新增 `record_rejected_factor(expression, hypothesis, category, ast_json, source, gate, reason, detail, db_path)`：命中同构 rejected 行 → `UPDATE updated_at` + 追加事件（`event='rejected_again'`？不——事件词表收紧，复用 `status_change` 不合适；新增事件类型 `EVENT_RE_REJECTED = "re_rejected"`）；未命中 → `add_factor(status='rejected')` + created 事件（`detail={"gate": N, "reason": ..., **判定读数}`）。
 
