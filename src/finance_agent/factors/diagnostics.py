@@ -88,6 +88,7 @@ def run_factor_diagnostics(
             continue
         candidates.append(row)
 
+    as_of: str | None
     if panel is not None:
         as_of = str(panel.fields["close"].index[-1])
     else:

@@ -106,7 +106,9 @@ def test_backfills_eligible_and_skips_low_samples(_panel) -> None:
     assert stored["as_of"] == str(panel.fields["close"].index[-1])
     assert stored["style_exposure"] is not None
     assert stored["monotonicity"] is not None
-    assert {"passed", "spearman", "q10_q1", "valid_days", "threshold"} <= set(stored["monotonicity"])
+    assert {"passed", "spearman", "q10_q1", "valid_days", "threshold"} <= set(
+        stored["monotonicity"]
+    )
     assert get_factor_diagnostics(low) is None
 
 

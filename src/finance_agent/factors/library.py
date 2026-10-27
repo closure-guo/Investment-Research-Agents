@@ -462,7 +462,13 @@ def reset_factor_library(db_path: str | Path | None = None) -> dict[str, int]:
     removed: dict[str, int] = {}
     try:
         # 先子表后主表（无外键，仅语义顺序：事件/IC/读数属于因子）
-        for table in ("factor_diagnostics", "factor_admission_ledger", "factor_events", "factor_ic", "factors"):
+        for table in (
+            "factor_diagnostics",
+            "factor_admission_ledger",
+            "factor_events",
+            "factor_ic",
+            "factors",
+        ):
             cursor = conn.execute(f"DELETE FROM {table}")  # noqa: S608 -- 表名来自模块常量
             removed[table] = int(cursor.rowcount)
         conn.commit()
@@ -703,7 +709,9 @@ def set_factor_diagnostics(
             (
                 int(factor_id),
                 str(as_of),
-                json.dumps(style_exposure, ensure_ascii=False) if style_exposure is not None else None,
+                json.dumps(style_exposure, ensure_ascii=False)
+                if style_exposure is not None
+                else None,
                 json.dumps(monotonicity, ensure_ascii=False) if monotonicity is not None else None,
                 _now_iso(),
             ),
@@ -713,7 +721,9 @@ def set_factor_diagnostics(
         conn.close()
 
 
-def get_factor_diagnostics(factor_id: int, db_path: str | Path | None = None) -> dict[str, Any] | None:
+def get_factor_diagnostics(
+    factor_id: int, db_path: str | Path | None = None
+) -> dict[str, Any] | None:
     """读单因子诊断读数；无记录 → ``None``（详情接口据此置 null，不虚构）。"""
     conn = _connect(db_path)
     try:
