@@ -73,6 +73,7 @@ from finance_agent.data.snapshot_job import run_market_snapshot_batch
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.execution.driver import run_execution_daily
 from finance_agent.factors.builtin import run_factor_builtin_register
+from finance_agent.factors.diagnostics import run_factor_diagnostics
 from finance_agent.factors.harvest import run_factor_harvest_until_drained
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
@@ -233,6 +234,16 @@ def _factor_harvest_job() -> None:
     网关/面板不可得上抛（run_job 记 failed，下次重试；state 幂等不重复消费）。
     """
     _with_retry("factor_harvest_daily", "factor harvest daily", run_factor_harvest_until_drained)
+
+
+def _factor_diagnostics_job() -> None:
+    """add-factor-diagnostics-batch：因子诊断读数日批（17:15，收割之后、cohort 之前）。
+
+    风格暴露/单调性读数生产移出 HTTP 详情路径（生产实测请求内现算 500 日面板把
+    详情拖成数十分钟）。增量待算（读数缺失或 as_of 落后）+ 按需面板 + 逐因子失败
+    隔离；快照无新交易日 → 零面板构建近零成本。批内失败不上抛（作业记 ok）。
+    """
+    _with_retry("factor_diagnostics_daily", "factor diagnostics daily", run_factor_diagnostics)
 
 
 def _settle_job() -> None:
@@ -688,6 +699,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         _foreign_broker_news_job,
         _cron_for("foreign_broker_news_daily"),
         id="foreign_broker_news_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-factor-diagnostics-batch：因子诊断读数日批（17:15）——外资快讯（17:05）
+    # 之后、cohort 之前；读数生产移出 HTTP 详情路径，详情接口纯读库。
+    scheduler.add_job(
+        _factor_diagnostics_job,
+        _cron_for("factor_diagnostics_daily"),
+        id="factor_diagnostics_daily",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )

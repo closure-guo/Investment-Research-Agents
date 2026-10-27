@@ -161,3 +161,32 @@ def test_failure_isolation_keeps_others_and_does_not_raise(_panel, monkeypatch) 
     assert stored is not None
     assert stored["as_of"] == str(panel.fields["close"].index[-1])
     assert get_factor_diagnostics(bad) is None  # 失败因子无读数（不虚构）
+
+
+def test_diagnostics_job_registered() -> None:
+    """作业注册（add-factor-diagnostics-batch Task 4）：17:15、含周末、触发序正确。
+
+    既有 ops 侧顺序断言（tests/test_ops_api.py）动态对照 list(JOB_IDS)，插位不破坏。
+    """
+    from finance_agent.outcome.ops.jobs import JOB_FUNCS, JOB_IDS, JOB_LABELS, SCHEDULES
+
+    assert "factor_diagnostics_daily" in JOB_IDS
+    assert JOB_LABELS["factor_diagnostics_daily"] == "因子诊断读数"
+    assert callable(JOB_FUNCS["factor_diagnostics_daily"])
+    sched = SCHEDULES["factor_diagnostics_daily"]
+    assert sched == {"day_of_week": "*", "hour": 17, "minute": 15, "timezone": "Asia/Shanghai"}
+    # 触发序：17:15 在外资快讯（17:05）之后、cohort 之前
+    assert JOB_IDS.index("factor_diagnostics_daily") > JOB_IDS.index("foreign_broker_news_daily")
+    assert JOB_IDS.index("factor_diagnostics_daily") < JOB_IDS.index("cohort_batch")
+
+
+def test_diagnostics_scheduler_wiring() -> None:
+    """scheduler 接线：wrapper 存在、cron 可解析、start_scheduler 注册块就位。"""
+    import inspect
+
+    from finance_agent.outcome import scheduler as sched
+
+    assert callable(sched._factor_diagnostics_job)
+    assert sched._cron_for("factor_diagnostics_daily")
+    src = inspect.getsource(sched.start_scheduler)
+    assert 'id="factor_diagnostics_daily"' in src
