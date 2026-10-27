@@ -187,7 +187,7 @@ def main() -> int:
     if not days:
         print(f"库内区间 {args.start}..{args.end} 无行——无可对账（回填未做？）")
         return 2
-    rng = random.Random(args.seed)
+    rng = random.Random(args.seed)  # noqa: S311 - 对账抽样可复现用，非密码学场景
     sample_days = sorted(rng.sample(days, min(args.dates, len(days))))
     print(f"抽样交易日（seed={args.seed}，命中 {len(sample_days)}/{len(days)}）:")
     print("  " + ", ".join(sample_days))
@@ -198,7 +198,7 @@ def main() -> int:
     for code in DEFAULT_SYMBOLS:
         placeholders = ",".join("?" * len(sample_days))
         rows = cur.execute(
-            f"SELECT trade_date, open, close_raw, close_qfq, volume FROM market_snapshot "
+            "SELECT trade_date, open, close_raw, close_qfq, volume FROM market_snapshot "  # noqa: S608 - 占位符为 ? 拼接,非用户输入
             f"WHERE code = ? AND trade_date IN ({placeholders})",
             (code, *sample_days),
         ).fetchall()
