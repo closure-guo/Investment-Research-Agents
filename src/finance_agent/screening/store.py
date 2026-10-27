@@ -712,9 +712,7 @@ def eligible_for_selection(
     """
     if isinstance(min_days, bool) or not isinstance(min_days, int) or min_days < 1:
         raise ValueError(f"min_days 必须是正整数: {min_days!r}")
-    return (
-        days_in_top_recent(symbol, as_of, db_path=db_path, pool=pool, mode=mode) >= min_days
-    )
+    return days_in_top_recent(symbol, as_of, db_path=db_path, pool=pool, mode=mode) >= min_days
 
 
 # ── triage 决策（C5 决策部分） ──────────────────────────────────────────────
