@@ -31,11 +31,11 @@ ENV_VARS: dict[str, str] = {
     "min_avg_amount_20d": "SCREENING_MIN_AVG_AMOUNT_20D",
     "l2_top_n": "SCREENING_L2_TOP_N",
 }
-# 键 → (下限, 上限, 期望类型)；bool 是 int 子类，_valid 先排除
-_BOUNDS: dict[str, tuple[float, float, type]] = {
-    "min_trading_days": (1, 250, int),
-    "min_avg_amount_20d": (1_000_000.0, 1_000_000_000.0, (int, float)),
-    "l2_top_n": (1, 500, int),
+# 键 → (下限, 上限)；成交额项接受 int/float，整数项仅 int（bool 是 int 子类，先排除）
+_BOUNDS: dict[str, tuple[float, float]] = {
+    "min_trading_days": (1, 250),
+    "min_avg_amount_20d": (1_000_000.0, 1_000_000_000.0),
+    "l2_top_n": (1, 500),
 }
 _DEFAULTS: dict[str, int | float] = {
     "min_trading_days": DEFAULT_MIN_TRADING_DAYS,
@@ -50,18 +50,26 @@ def settings_path() -> Path:
 
 def _valid(key: str, value: Any) -> int | float | None:
     """合法值 → int/float；bool / 类型不符 / 越界 → None。"""
-    low, high, expected = _BOUNDS[key]
-    if isinstance(value, bool) or not isinstance(value, expected):
+    low, high = _BOUNDS[key]
+    if isinstance(value, bool):
         return None
-    if not low <= value <= high:
+    if key == "min_avg_amount_20d":
+        if not isinstance(value, (int, float)):
+            return None
+        checked: int | float = value
+    else:
+        if not isinstance(value, int):
+            return None
+        checked = value
+    if not low <= checked <= high:
         return None
-    return value
+    return checked
 
 
 def validate(key: str, value: Any) -> int | float:
     parsed = _valid(key, value)
     if parsed is None:
-        low, high, _ = _BOUNDS[key]
+        low, high = _BOUNDS[key]
         raise ValueError(f"{key} 必须是 {low:g}–{high:g} 范围内的合法数值: {value!r}")
     return parsed
 
@@ -119,7 +127,7 @@ def resolve() -> dict[str, Any]:
     saved, file_status = _read_settings_file()
     updated_at = _file_updated_at() if file_status in ("ok", "invalid") else None
     result: dict[str, Any] = {}
-    for key, (low, high, _expected) in _BOUNDS.items():
+    for key, (low, high) in _BOUNDS.items():
         env_value = _env_value(key)
         if key in saved:
             value, source = saved[key], "file"
