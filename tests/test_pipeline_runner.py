@@ -133,6 +133,43 @@ def test_event_source_exception_marks_failed(tmp_path, monkeypatch):
     assert session_store.get_session(sid)["status"] == "failed"
 
 
+def test_publish_timeout_does_not_kill_pipeline(tmp_path, monkeypatch):
+    """单次事件投递等待超时（主循环积压）不得崩掉整条管线（issue #490）。
+
+    投递是 best-effort：`run_coroutine_threadsafe(...).result(timeout=5)` 在积压时
+    抛空 message TimeoutError，若按管线异常处理会把整条分析标 failed——2026-10-26
+    生产 `'TimeoutError: '` 会话族即此类无信息量失败。超时应跳过该事件继续推进。
+    """
+    import finance_agent.pipeline_runner as pipeline_runner_module
+
+    monkeypatch.setattr(session_store, "_DB_PATH", tmp_path / "t.db")
+    session_store.init_db()
+    sid = session_store.create_session(stock_code="600519", stock_name="茅台", status="running")
+
+    class _TimeoutFuture:
+        def result(self, timeout=None):
+            raise TimeoutError()
+
+    def _fake_rct(coro, loop):
+        coro.close()  # 未被调度的协程显式关闭，避免 never-awaited 警告
+        return _TimeoutFuture()
+
+    monkeypatch.setattr(pipeline_runner_module.asyncio, "run_coroutine_threadsafe", _fake_rct)
+
+    PipelineRunner.start(
+        sid,
+        _fake_events,
+        {"layerTree": [], "currentNodeId": "", "progress": 0.0, "updatedAt": 0},
+        loop=object(),  # 非 None → Fast path（publish 桥接）
+    )
+    deadline = time.time() + 10
+    while PipelineRunner.is_running(sid) and time.time() < deadline:
+        time.sleep(0.05)
+
+    assert not PipelineRunner.is_running(sid)
+    assert session_store.get_session(sid)["status"] != "failed"
+
+
 def test_get_events_cleanup_after_done(tmp_path, monkeypatch):
     """管线跑完后 get_events 消费取空 → _running 条目被清理。"""
     monkeypatch.setattr(session_store, "_DB_PATH", tmp_path / "t.db")
