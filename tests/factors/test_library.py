@@ -905,3 +905,10 @@ class TestOrientationColumn:
         assert value == -1
         with pytest.raises(ValueError):
             set_orientation(fid, 7, db_path=db)
+
+
+class TestSetOrientationRequire:
+    def test_missing_factor_raises(self, tmp_path):
+        db = str(tmp_path / "factor_library.db")
+        with pytest.raises(FactorStateError):
+            set_orientation(9999, 1, db_path=db)

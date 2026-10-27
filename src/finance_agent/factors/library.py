@@ -624,8 +624,10 @@ def set_orientation(factor_id: int, value: int, db_path: str | Path | None = Non
     """入池定向符号写入（-1/0/1；0=不可定）。越界 ValueError——列语义由监控判据消费。"""
     if value not in (-1, 0, 1):
         raise ValueError(f"orientation 限 {{-1, 0, 1}}，收到 {value!r}")
+    init_library(db_path)
     conn = _connect(db_path)
     try:
+        _require_factor(conn, factor_id)
         conn.execute("UPDATE factors SET orientation = ? WHERE id = ?", (value, factor_id))
         conn.commit()
     finally:
