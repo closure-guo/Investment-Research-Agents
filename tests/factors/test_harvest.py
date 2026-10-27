@@ -831,3 +831,94 @@ def test_errors_breakdown_splits_placeholders_from_real(tmp_path):
         )
     assert replayed["errors"] == 3
     assert replayed["errors_breakdown"] == {"placeholders": 2, "real": 1}
+
+
+class TestClassifyCategory:
+    """机理分桶（update-harvest-factor-category）：标签优先、确定性、兜底不丢因子。
+
+    锚定集按生产库 12 条 external 因子的真实机理标签校准（标签 = hypothesis /
+    description 首个方括号段，如 ``[Volume/Liquidity Factor]``）。正文里的跨族
+    提及（如 volume_autocorr 描述提到 "price-volume correlation family"）不得
+    影响归属——只认标签与因子名。
+    """
+
+    CASES = [
+        # (name, description, 期望桶)
+        ("volratio20", "[Volume/Liquidity Factor] Twenty-day abnormal volume ratio", "量与流动性"),
+        ("volcv20", "[Liquidity Stability Factor] volume coefficient of variation", "量与流动性"),
+        # 正文含 "price-volume correlation family"（跨族提及）→ 标签仍是 Volume
+        ("volume_autocorr_10d",
+         "[Volume Autocorrelation Factor] orthogonal to the price-volume correlation family",
+         "量与流动性"),
+        ("VolumeTrend_20_60", "[Slow Volume-Regime Trend Factor] ln(MA20/MA60)", "量与流动性"),
+        ("VOL_CONCENTRATION_10D", "[Volume Concentration Factor] max/sum", "量与流动性"),
+        ("AMIHUD_ILLIQ_20D", "[Amihud Illiquidity Factor] price impact", "量与流动性"),
+        ("range1", "[Intraday Range Factor] high-low range", "波动率"),
+        ("RANGE_EXPANSION_20D", "[Volatility/News-Burst Factor] range expansion", "波动率"),
+        ("F_range_expansion", "[Volatility Regime Factor] 5d/20d range ratio", "波动率"),
+        ("LOW_VOLATILITY_20D", "low volatility stocks screening", "波动率"),
+        ("CORR5", "[Price-Volume Co-movement Factor] 5-day rolling corr", "量价交互"),
+        ("pv_corr_10d", "[Price-Volume Confirmation Factor] rolling corr", "量价交互"),
+        ("VOL_RET_CORR_20D", "[Price-Volume Interaction Factor] volume-return corr", "量价交互"),
+        ("REV_5D_VOLADJ", "volume adjusted reversal 5 day", "动量反转"),
+        ("mom20", "momentum 20 day", "动量反转"),
+        ("KLOW", "[Candlestick Shape Factor] lower shadow support", "外部-其他"),
+        ("totally_unknown_xyz", "some exotic construction", "外部-其他"),
+    ]
+
+    def test_anchored_buckets(self):
+        from finance_agent.factors.harvest import classify_category
+
+        for name, desc, expected in self.CASES:
+            assert classify_category(name, desc) == expected, f"{name} → 期望 {expected}"
+
+    def test_never_raises_and_never_empty(self):
+        from finance_agent.factors.harvest import classify_category
+
+        assert classify_category("", "") == "外部-其他"
+        assert classify_category(None, None) == "外部-其他"
+
+
+class TestHarvestCategoryWiring:
+    """收割 payload 走机理分桶（update-harvest-factor-category）：入库 category = 分类结果。"""
+
+    def test_payload_categories_classified_by_mechanism(self, tmp_path, monkeypatch):
+        from finance_agent.factors import harvest as harvest_module
+
+        candidates = [
+            _candidate("volx", description="[Volume/Liquidity Factor] 20 日量比",
+                       formulation="v/ma(v,20)"),
+            _candidate("rngx", description="[Intraday Range Factor] 高低差",
+                       formulation="(h-l)/c"),
+        ]
+        cand_path = tmp_path / "candidates.json"
+        cand_path.write_text(
+            json.dumps({"candidates": candidates}, ensure_ascii=False), encoding="utf-8"
+        )
+        client = _StubClient(
+            {
+                "volx": {"qlib_expression": "Mean($close, 5)"},
+                "rngx": {"qlib_expression": "Mean($close, 10)"},
+            }
+        )
+        captured: dict[str, list[str]] = {}
+
+        def fake_import(payload, **kwargs):
+            captured["categories"] = [item["category"] for item in payload]
+            return {
+                "admitted": 0,
+                "rejected": len(payload),
+                "errors": 0,
+                "outcomes": [
+                    {"admitted": False, "gate": 2, "reason": "WEAK_ICIR", "detail": {}}
+                ] * len(payload),
+                "rejections": [],
+            }
+
+        monkeypatch.setattr(harvest_module, "run_factor_external_import", fake_import)
+        run_factor_harvest(
+            candidates_path=cand_path,
+            state_path=tmp_path / "harvest_state.json",
+            client=client,
+        )
+        assert captured["categories"] == ["量与流动性", "波动率"]
