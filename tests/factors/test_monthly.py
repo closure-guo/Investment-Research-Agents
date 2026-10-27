@@ -376,3 +376,38 @@ class TestBatchAdmission:
             )
         assert client.prompts == []
         assert list_factors(db_path=db) == []
+
+
+class TestPostAdmissionReviewHook:
+    """add-factor-post-admission-review：月批尾部入库后复核挂载。"""
+
+    def test_monthly_summary_includes_review_block(self, db: str):
+        client = _RoutingStubClient(
+            broad_payload=_proposals(FAIL_EXPRESSIONS[0]),
+            deep_payload=_proposals(ADMITTED_EXPRESSION),
+        )
+        summary = run_factor_proposal_monthly(client=client, panel=_signal_panel(), db_path=db)
+        assert "review" in summary
+        assert set(summary["review"].keys()) == {"reviewed", "degraded", "skipped"}
+        # 新入库因子无 IC 样本 → 复核样本不足，不判定
+        assert summary["review"]["reviewed"] == 0
+
+    def test_monthly_review_degrades_weak_seeded_factor(self, db: str):
+        """预置 80 条恒定 IC 的 active 因子（ICIR=0）→ 月批复核降级。"""
+        fid = add_factor(
+            expression="ts_std(close,10)", hypothesis="h", category="测试",
+            status="active", db_path=db,
+        )
+        for i in range(80):
+            record_ic(fid, (date(2025, 1, 1) + timedelta(days=i)).isoformat(), 0.04, db_path=db)
+        client = _RoutingStubClient(
+            broad_payload=_proposals(FAIL_EXPRESSIONS[0]),
+            deep_payload=_proposals(ADMITTED_EXPRESSION),
+        )
+        summary = run_factor_proposal_monthly(client=client, panel=_signal_panel(), db_path=db)
+        assert fid in summary["review"]["degraded"]
+        rows = {row["id"]: row for row in list_factors(db_path=db)}
+        assert rows[fid]["status"] == "degraded"
+        events = list_events(fid, db_path=db)
+        assert events[-1]["to_status"] == "degraded"
+        assert events[-1]["detail"]["reason"] == "POST_ADMISSION_REVIEW"
