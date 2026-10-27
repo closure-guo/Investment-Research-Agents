@@ -47,7 +47,7 @@ from finance_agent.data.snapshot import (
 from finance_agent.factors.eval_engine import PANEL_FIELDS as _PANEL_FIELDS
 from finance_agent.factors.eval_engine import MarketPanel, build_panel_from_rows
 from finance_agent.factors.library import list_active_factors
-from finance_agent.screening import constraints
+from finance_agent.screening import constraints, rules_config
 from finance_agent.screening.candidate_llm import (
     GatewayTriageClient,
     TriageLLMClient,
@@ -279,6 +279,17 @@ def run_screening_batch(
     _ = seed  # 签名保留：管道全确定（无 RNG），仅记录设计口径
     if pool not in POOLS:
         raise ValueError(f"非法批次 pool {pool!r}；允许: {list(POOLS)}")
+    # 选股规则运行时配置（add-screening-rules-config-ui）：主档批次开始时解析一次，
+    # 批内不再读取（运行中批次不受保存影响）；显式 thresholds（小票通道）完全绕过。
+    if thresholds is None:
+        resolved_rules = rules_config.resolve()
+        thresholds = FilterThresholds(
+            min_trading_days=int(resolved_rules["min_trading_days"]["value"]),
+            min_avg_amount_20d=float(resolved_rules["min_avg_amount_20d"]["value"]),
+        )
+        l2_top_n = int(resolved_rules["l2_top_n"]["value"])
+    else:
+        l2_top_n = L2_TOP_N
     started_at = _now_iso()
     latest = latest_snapshot_date(snapshot_db_path)
     if as_of is None:
@@ -388,7 +399,7 @@ def run_screening_batch(
                 ic_counts=ic_counts,
                 top_n=max(1, len(passed)),
             )
-            candidates = ranked_all[:L2_TOP_N]
+            candidates = ranked_all[:l2_top_n]
             liquidity_ranked = liquidity_fallback_rank(
                 amounts_by_code=amounts,
                 passed_codes=passed,
@@ -422,7 +433,7 @@ def run_screening_batch(
                 amounts_by_code=amounts,
                 passed_codes=passed,
                 as_of=trade_date,
-                top_n=L2_TOP_N,
+                top_n=l2_top_n,
             )
         rewrite_day_l2_board(trade_date, candidates, db_path=db_path, pool=pool)
         l2_top = len(candidates)
