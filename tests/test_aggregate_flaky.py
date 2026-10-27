@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from scripts.ci.aggregate_flaky import aggregate, build_report, load_records, main
@@ -142,7 +143,15 @@ def test_aggregate_invalid_record_file_disclosed(tmp_path):
 
 
 def test_main_writes_markdown(tmp_path, capsys):
-    records_dir = _write(tmp_path, [_record("1", suites={"default": _suite(flaky=1)})])
+    # main() 走真实时钟算近 14 天窗，fixture 记录须动态取「昨天」——写死日期会随
+    # 时间滚出窗口（2026-10-27 UTC 10:00 起实证：generated_at=10-13T10:00Z 被超窗
+    # 排除，报告空表断言红）。其余用例经 now=_NOW 注入固定时钟，不受影响。
+    generated_at = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    records_dir = _write(
+        tmp_path, [_record("1", generated_at=generated_at, suites={"default": _suite(flaky=1)})]
+    )
     out = tmp_path / "summary.md"
     code = main(
         [
