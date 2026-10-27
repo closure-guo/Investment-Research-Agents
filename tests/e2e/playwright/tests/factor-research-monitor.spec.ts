@@ -339,6 +339,60 @@ test('6. 看护开关：停止需确认 → 控制文件真写入 → 「切换�
   await expect(page.getByTestId('factor-research-control-state')).toContainText('已关闭')
 })
 
+test('6b. 停止按钮：二次确认后真写控制文件 → 与开关同禁用 → 停止后无可停止对象禁用（delta add-factor-research-stop-button）', async ({
+  page,
+}) => {
+  const fixture = snapshotBody()
+  writeSnapshot(fixture) // running=true，新鲜
+  removeControl()
+  await page.goto('/factor-research')
+
+  // 前置守卫（同 test 6）：后端必须读隔离 fixture，否则拒绝继续（防写生产控制文件）
+  const probe = (await (
+    await page.request.get('/api/factor-research/status')
+  ).json()) as { collected_at?: string; available?: boolean }
+  expect(
+    probe.available === true && probe.collected_at === fixture.collected_at,
+    '后端未读取隔离 fixture（疑似复用了生产栈）——拒绝继续，防控制文件写入生产'
+  ).toBe(true)
+
+  const stop = page.getByTestId('factor-research-stop-button')
+  await expect(stop).toBeVisible()
+  await expect(stop).toContainText('停止')
+  await expect(stop).toBeEnabled()
+
+  // 点击停止 → 与开关关闭方向同一二次确认；未确认前零写入
+  await stop.click()
+  const dialog = page.getByTestId('factor-research-control-confirm-dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('将终止当前研发会话')
+  expect(existsSync(CONTROL_PATH)).toBe(false)
+
+  // 确认 → 真实 PUT → 控制文件真值落地（非 mock）
+  await page.getByTestId('factor-research-control-confirm').click()
+  await expect.poll(() => readControl()?.desired_running).toBe(false)
+
+  // pending → 停止按钮与开关同禁用；开关位置不翻转（仍为实态开）
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('切换中', {
+    timeout: 15_000,
+  })
+  await expect(stop).toBeDisabled()
+  await expect(page.getByTestId('factor-research-control-switch')).toHaveAttribute(
+    'aria-checked',
+    'true'
+  )
+
+  // 研究侧调和完成 → 实态停止 → 停止按钮保持禁用（无可停止对象）
+  writeSnapshot(snapshotBody({ supervisor: { running: false, pid: null, started_at: null } }))
+  await expect(page.getByTestId('factor-research-control-switch')).toHaveAttribute(
+    'aria-checked',
+    'false',
+    { timeout: 15_000 }
+  )
+  await expect(stop).toBeDisabled()
+  await expect(page.getByTestId('factor-research-control-state')).toContainText('已关闭')
+})
+
 test('7. 陈旧数据：开关禁用 + 明示理由（控制通道无存活证据）', async ({ page }) => {
   const epoch = Math.floor(Date.now() / 1000) - 400
   writeSnapshot(snapshotBody({ collected_at: isoAt(epoch), collected_at_epoch: epoch }))

@@ -207,6 +207,8 @@ export interface FactorResearchControlView {
   reachable: boolean
   switchDisabled: boolean
   restartDisabled: boolean
+  /** 「停止」按钮禁用（与开关同禁用源 + 无可停止对象判定） */
+  stopDisabled: boolean
   stateText: string
   /** 最近一次重启失败（同 request_id）的可读文案；无 → null */
   restartFailureText: string | null
@@ -249,6 +251,11 @@ export function deriveControlView(
   const switchDisabled =
     submitting || restartSubmitting || pending || restartPending || channelBlocked || !reachable
   const restartDisabled = switchDisabled
+  // 停止按钮（delta add-factor-research-stop-button）：与开关共享禁用源；另在「无可停止对象」
+  // （实态已停止且无运行意图）时禁用。实态不可证（unverified）但有运行意图 → 可点，用于撤销
+  // 持久化意图（与设置分区同一判定）。
+  const stopDisabled =
+    switchDisabled || (actualState === 'stopped' && control?.desired_running !== true)
 
   const collectedAt = data?.collected_at ? formatSessionTime(data.collected_at) : '—'
   const requestedAt = control?.requested_at ? formatSessionTime(control.requested_at) : null
@@ -352,6 +359,7 @@ export function deriveControlView(
     reachable,
     switchDisabled,
     restartDisabled,
+    stopDisabled,
     stateText,
     restartFailureText,
     restartTimedOut,

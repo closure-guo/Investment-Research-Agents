@@ -261,6 +261,8 @@ data/test-e2e-track-record.db*
 data/test-e2e-track-record-execution.db*
 data/test-e2e-ingest-*.db*
 data/test-e2e-operator-*.db*
+# 停止按钮 UI 专属套件独立库（playwright.factor-stop.config.ts 注入）
+data/test-e2e-stop-*.db*
 data/test-e2e-eval-ops.db*
 # 选股页 E2E 独立测试库（playwright.config.ts 注入 SCREENING_DB_PATH）
 data/test-e2e-screening.db*

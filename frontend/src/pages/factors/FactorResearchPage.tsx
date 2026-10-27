@@ -39,7 +39,8 @@ import type {
  * - 取数 ``GET /api/factor-research/status``（端点透传采集器快照 + 派生 stale + control 块）；
  * - 看护状态区：实际态徽章（运行中/已停止/状态未知）+ pid + 启动时刻 + 已运行时长 +
  *   累计会话/候选实现数；
- * - 控制条（常驻）：启停开关 + 重启按钮 + 状态文案。开关位置反映**验证过的实际状态**
+ * - 控制条（常驻）：启停开关 + 「停止」按钮 + 「重启管线」按钮 + 状态文案。开关位置反映
+ *   **验证过的实际状态**
  *   （``actual_state``）；快照失联时显示「状态未知」并披露持久化意图，MUST NOT 用意图冒充
  *   运行中。停止/重启经二次确认后调用端点；``pending`` / ``restart_pending`` 期间显示
  *   切换中/重启中并禁用重复操作；
@@ -50,7 +51,8 @@ import type {
  * - 缺失/损坏（available=false）→ 如实空态二分（「采集器未接入」/「快照损坏」）；
  * - 轮询自动刷新（默认 10s，≤ 15s 契约；测试可注入间隔）；单轮失败静默重试。
  *
- * 数据面只读；控制面仅启停 + 重启两项（MUST NOT 增设其它控制入口）。
+ * 数据面只读；控制面仅启停（开关 + 停止按钮，同一写路径）与重启两项动作（MUST NOT 增设其它
+ * 控制入口）。
  */
 
 /** RD-Agent 步骤名 → 中文（未知步骤名原值如实，不臆造映射） */
@@ -296,6 +298,7 @@ export function FactorResearchPage({
     snapshotLive,
     switchDisabled,
     restartDisabled,
+    stopDisabled,
     stateText: controlStateText,
   } = view
 
@@ -375,6 +378,21 @@ export function FactorResearchPage({
               style={{ transform: running ? 'translateX(1.125rem)' : 'translateX(0.125rem)' }}
             />
           </button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            data-testid="factor-research-stop-button"
+            disabled={stopDisabled}
+            onClick={() => {
+              if (stopDisabled) return
+              setConfirmOpen(true) // 与开关关闭方向同一确认弹窗
+            }}
+            className="h-6 px-2 text-xs"
+          >
+            <i className="fas fa-stop mr-1"></i>
+            停止
+          </Button>
           <Button
             type="button"
             variant="outline"

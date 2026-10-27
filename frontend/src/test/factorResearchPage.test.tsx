@@ -855,6 +855,145 @@ describe('因子研发监控页 · 看护启停开关（delta add-factor-researc
     expect(badge).toHaveAttribute('data-status', 'degraded')
     expect(badge.textContent).toBe('状态未知')
   })
+
+  // ── 停止按钮（delta add-factor-research-stop-button）──
+
+  it('停止按钮：运行中可用 → 二次确认前零请求 → 确认后请求体仅 desired_running=false', async () => {
+    const { putCalls } = mockControlFetch([
+      snapshotBody(),
+      snapshotBody({
+        control: controlBlock({
+          desired_running: false,
+          requested_at: '2026-10-17T23:10:00+08:00',
+          pending: true,
+          honor: 'live',
+          honor_eta_seconds: 0,
+        }),
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const stop = await screen.findByTestId('factor-research-stop-button')
+    expect((stop as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(stop)
+
+    // 与开关关闭方向同一确认弹窗；未确认前 MUST NOT 发请求
+    const dialog = await screen.findByTestId('factor-research-control-confirm-dialog')
+    expect(dialog.textContent).toContain('将终止当前研发会话')
+    expect(putCalls).toHaveLength(0)
+
+    fireEvent.click(screen.getByTestId('factor-research-control-confirm'))
+    await waitFor(() => expect(putCalls).toHaveLength(1))
+    expect(putCalls[0].body).toEqual({ desired_running: false })
+
+    // pending → 与开关同禁用；开关位置不翻转（仍为实态开）
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('factor-research-stop-button') as HTMLButtonElement).disabled
+      ).toBe(true)
+    )
+    expect(screen.getByTestId('factor-research-control-switch').getAttribute('aria-checked')).toBe(
+      'true'
+    )
+  })
+
+  it('停止按钮：取消确认 → 零请求且保持可用', async () => {
+    const { putCalls } = mockControlFetch([snapshotBody()])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    fireEvent.click(await screen.findByTestId('factor-research-stop-button'))
+    fireEvent.click(await screen.findByTestId('factor-research-control-cancel'))
+    expect(putCalls).toHaveLength(0)
+    expect(
+      (screen.getByTestId('factor-research-stop-button') as HTMLButtonElement).disabled
+    ).toBe(false)
+  })
+
+  it('停止按钮：已停止且无运行意图 → 禁用（无可停止对象）', async () => {
+    mockControlFetch([
+      snapshotBody({
+        supervisor: { running: false, pid: null, started_at: null },
+        control: controlBlock({
+          desired_running: false,
+          pending: false,
+          honor: 'live',
+          honor_eta_seconds: 0,
+        }),
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const stop = await screen.findByTestId('factor-research-stop-button')
+    expect((stop as HTMLButtonElement).disabled).toBe(true)
+    // 开关仍可操作（启动方向）
+    expect(
+      (screen.getByTestId('factor-research-control-switch') as HTMLButtonElement).disabled
+    ).toBe(false)
+  })
+
+  it('停止按钮：离线但有运行意图（launcher 可用）→ 可撤销意图', async () => {
+    const { putCalls } = mockControlFetch([
+      snapshotBody({
+        stale: true,
+        age_seconds: 400,
+        control: controlBlock({
+          desired_running: true,
+          requested_at: null,
+          pending: false,
+          honor: 'launcher',
+          honor_eta_seconds: 180,
+        }),
+        launcher: { available: true, fresh: true, agent_ok: true, age_seconds: 30 },
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const stop = await screen.findByTestId('factor-research-stop-button')
+    expect((stop as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(stop)
+    fireEvent.click(await screen.findByTestId('factor-research-control-confirm'))
+    await waitFor(() => expect(putCalls).toHaveLength(1))
+    expect(putCalls[0].body).toEqual({ desired_running: false })
+  })
+
+  it('停止按钮：控制通道不可用（honor=unavailable）→ 禁用', async () => {
+    mockControlFetch([
+      snapshotBody({
+        stale: true,
+        age_seconds: 400,
+        control: controlBlock({
+          desired_running: true,
+          requested_at: null,
+          pending: false,
+          honor: 'unavailable',
+          honor_eta_seconds: null,
+        }),
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const stop = await screen.findByTestId('factor-research-stop-button')
+    expect((stop as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('停止按钮：restart_pending 期间禁用（与开关同禁用条件）', async () => {
+    const restartAt = new Date().toISOString()
+    mockControlFetch([
+      snapshotBody({
+        control: controlBlock({
+          desired_running: true,
+          restart_requested_at: restartAt,
+          restart_requested_at_epoch: Math.floor(Date.now() / 1000),
+          restart_request_id: 'r1',
+          restart_pending: true,
+        }),
+      }),
+    ])
+    render(<FactorResearchPage onBack={() => {}} pollIntervalMs={60_000} />)
+
+    const stop = await screen.findByTestId('factor-research-stop-button')
+    expect((stop as HTMLButtonElement).disabled).toBe(true)
+  })
 })
 
 /**
