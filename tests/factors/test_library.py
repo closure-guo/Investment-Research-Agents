@@ -28,6 +28,7 @@ from finance_agent.factors.library import (
     list_factors,
     list_ic_series,
     record_ic,
+    set_orientation,
     set_pool_increment,
     set_status,
 )
@@ -82,6 +83,7 @@ def test_init_library_creates_tables_and_is_idempotent(tmp_path):
             "ast_json",
             "source",
             "alignment_score",
+            "orientation",
             "pool_increment",
             "created_at",
             "updated_at",
@@ -851,3 +853,55 @@ def test_find_structural_duplicate_fast_path_and_variants(tmp_path):
     assert find_structural_duplicate("ts_std(close,5)", db_path=db) == legacy_id
     # 无同构
     assert find_structural_duplicate("log(amount)", db_path=db) is None
+
+
+class TestOrientationColumn:
+    def test_fresh_db_has_orientation_column(self, tmp_path):
+        db = str(tmp_path / "factor_library.db")
+        init_library(db)
+        conn = sqlite3.connect(db)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(factors)")}
+        conn.close()
+        assert "orientation" in cols
+
+    def test_existing_db_migrated_idempotently(self, tmp_path):
+        db = str(tmp_path / "factor_library.db")
+        # 模拟旧库：先手工建旧 schema（无 orientation 列）
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS factors (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              expression TEXT NOT NULL, hypothesis TEXT NOT NULL,
+              category TEXT NOT NULL, status TEXT NOT NULL,
+              ast_json TEXT, source TEXT NOT NULL DEFAULT 'proposal',
+              alignment_score REAL, pool_increment REAL,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.commit()
+        conn.close()
+        init_library(db)  # 迁移
+        init_library(db)  # 重跑幂等（不抛 duplicate column）
+        conn = sqlite3.connect(db)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(factors)")}
+        conn.close()
+        assert "orientation" in cols
+
+    def test_set_orientation_writes_and_validates(self, tmp_path):
+        db = str(tmp_path / "factor_library.db")
+        fid = add_factor(
+            expression="ts_mean(close,5)",
+            hypothesis="h",
+            category="测试",
+            status="active",
+            db_path=db,
+        )
+        set_orientation(fid, -1, db_path=db)
+        conn = sqlite3.connect(db)
+        value = conn.execute("SELECT orientation FROM factors WHERE id=?", (fid,)).fetchone()[0]
+        conn.close()
+        assert value == -1
+        with pytest.raises(ValueError):
+            set_orientation(fid, 7, db_path=db)
