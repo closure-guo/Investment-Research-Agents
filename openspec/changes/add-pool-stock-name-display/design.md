@@ -25,7 +25,7 @@ L1 记录就地可得。因此改动收敛为三段：
      `"stock_name": names_by_symbol.get(candidate.symbol, "")`；
    - keep 标的缺名 → `_logger.warning`（逐标的一次，含 symbol 与 trade_date），不抛。
 3. **frontend（展示）**
-   - 池行类型加 `stock_name?: string | null`；表格在「标的」与综合分之间插
+   - 池行类型加 `stock_name: string | null`（**必填**键——迁移后后端恒返回该键，tsc 强制所有字面量构造点补字段）；表格在「标的」与综合分之间插
      「股票名称」列，渲染 `row.stock_name || '—'`；组件测试与 e2e 补断言。
 
 主档与小票通道共享全部读写函数（`pool` 参数只进 WHERE），加列自动同享，零额外接线。

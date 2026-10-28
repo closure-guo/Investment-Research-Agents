@@ -1019,7 +1019,10 @@ _NEW_SHAPE_BATCHES_DDL = (
     "selection_mode TEXT NOT NULL DEFAULT 'factor', frontier_gate TEXT, "
     "exec_constraints TEXT, PRIMARY KEY (trade_date, pool))"
 )
-_NEW_SHAPE_POOL_DDL = (
+# 复刻 add-pool-stock-name-display 之前（microcap 迁移后、加名前）的池表形状：
+# 中断恢复路径换入此形状的 migrate 表后，init ② 池列补齐必须兜住 stock_name
+# （MUST NOT 改成当前权威形状——那会让恢复路径的补列断言失去前提）
+_PRE_DELTA_POOL_DDL = (
     "CREATE TABLE {name} ("
     "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', symbol TEXT NOT NULL, "
     "composite_score REAL NOT NULL, rank INTEGER NOT NULL, consecutive_days INTEGER NOT NULL, "
@@ -1065,7 +1068,7 @@ def _create_empty_migrate_tables(db) -> None:
         conn.executescript(
             _NEW_SHAPE_BATCHES_DDL.format(name="screening_batches__migrate")
             + ";"
-            + _NEW_SHAPE_POOL_DDL.format(name="selection_pool__migrate")
+            + _PRE_DELTA_POOL_DDL.format(name="selection_pool__migrate")
         )
         conn.commit()
     finally:
@@ -1125,7 +1128,7 @@ def test_recovery_guard_keeps_real_table_when_migrate_has_fewer_rows(tmp_path) -
         conn.executescript(
             _NEW_SHAPE_BATCHES_DDL.format(name="screening_batches__migrate")
             + ";"
-            + _NEW_SHAPE_POOL_DDL.format(name="selection_pool__migrate")
+            + _PRE_DELTA_POOL_DDL.format(name="selection_pool__migrate")
         )
         conn.execute(
             "INSERT INTO screening_batches__migrate (trade_date, pool, status, started_at, "
