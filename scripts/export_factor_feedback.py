@@ -19,6 +19,7 @@ from pathlib import Path
 from finance_agent.factors.feedback import (
     DEFAULT_LIMIT,
     DEFAULT_OUTPUT_PATH,
+    PER_GATE_FLOOR,
     UNTRANSLATABLE_QUOTA,
     export_feedback,
 )
@@ -39,6 +40,12 @@ def main(argv: list[str] | None = None) -> int:
         default=UNTRANSLATABLE_QUOTA,
         help="untranslatable 条目保底配额（不足时空位归还 rejected）",
     )
+    parser.add_argument(
+        "--gate-floor",
+        type=int,
+        default=PER_GATE_FLOOR,
+        help="rejected 档每闸保底出场条数（累计不足则全量；余量按占比）",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -48,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
             output_path=Path(args.out),
             limit=args.limit,
             untranslatable_quota=args.untranslatable_quota,
+            gate_floor=args.gate_floor,
         )
     except (OSError, ValueError) as exc:
         print(f"export failed: {exc}", file=sys.stderr)

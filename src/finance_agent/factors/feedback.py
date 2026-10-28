@@ -10,14 +10,18 @@ RD-Agent 的 feedback 只在**同一 trace**（会话）内传递（`trace.hist`
 
 口径：
 - 表达式按 DSL 规范化（``1e-6`` 以下常数视为 0）去重——epsilon 守卫变体不应各占一条；
-- 排序：admitted → untranslatable（保底配额，最近优先）→ rejected（闸②优先）→
-  transcription_error，各档内按时间倒序；
+- 排序：admitted → untranslatable（保底配额，按日轮转 × stage 交织）→ rejected
+  （每闸保底 + 占比余量，闸间轮转输出）→ transcription_error，各档内按时间倒序；
 - ``untranslatable_quota``：untranslatable 条目的保底配额（默认 20）。该档条目
   远超 rejected 档（实测 991 vs 190），若按原「状态优先」整体截断会被结构性
   饿死——生成侧永远看不到「某机制族不可译」的经验，同一族因子（如残差×反转）
   跨会话反复重提。配额不足时空位归还 rejected；
 - untranslatable 条目紧凑化（desc 60 字符 / detail 40 字符）：渲染侧有字符预算，
   配额条目必须挤得进去；
+- rejected 档 per-gate 保底分配（``PER_GATE_FLOOR``，不足全量）：单一闸口不得独占
+  出场位——按闸号升序整体截断曾把闸④（REDUNDANT_WITH_POOL）结构性饿死（闸②累计
+  数百条占满全部出场位），生成侧永远收不到「与池冗余」的拒收经验；余量按各闸累计
+  拒收量占比分配，保底/占比未用满的空位归还使用；
 - 条目数由 ``limit`` 截断（默认 80），供 prompt 预算使用；
 - ``contract`` 块（复杂度上限 / 算子与字段白名单 / 表达规则）+ ``gate_rejections`` 聚合——
   生成侧表达契约回喂（feed-dsl-contract-to-factor-generator）：数值与白名单 import
@@ -49,6 +53,9 @@ DEFAULT_LIMIT = 80
 # untranslatable 保底配额：该档经验（机制族不可译）决定生成侧是否重提同族因子，
 # 按状态优先整体截断会使其被 admitted+rejected 挤成 0 条，故单列配额。
 UNTRANSLATABLE_QUOTA = 20
+# rejected 档每闸保底出场数：出现过拒收的闸口至少出场 N 条（累计不足则全量），
+# 防「排序 + 总量截断」把低频闸口饿死。
+PER_GATE_FLOOR = 5
 _MAX_DESC = 160
 _MAX_DESC_UNTRANSLATABLE = 60
 _MAX_DETAIL = 80
@@ -129,28 +136,111 @@ def _reason(
     return (int(gate) if isinstance(gate, int) else None), (str(reason) if reason else None)
 
 
+def _entry_stage(entry: dict[str, Any]) -> str:
+    """失败类别（stage）：从 reason 前缀 ``untranslatable:{stage}（detail）`` 解析。"""
+    reason = str(entry.get("reason") or "")
+    if reason.startswith("untranslatable:"):
+        return reason.split("（", 1)[0][len("untranslatable:") :].strip() or "unknown"
+    return "unknown"
+
+
 def _select_untranslatable(entries: list[dict[str, Any]], quota: int) -> list[dict[str, Any]]:
-    """untranslatable 配额选取：按日轮转，防止单一批次垄断（批内按时间倒序）。
+    """untranslatable 配额选取：按日轮转（防单批垄断）× 批内按 stage 交织（防单类垄断）。
 
     收割一批常在同一分钟内产出数十条不可译候选——纯「最近优先」会让配额被最后
-    一批吃满，早期批次的机制族（如残差×反转）永远看不到。按 ``at`` 的日期分桶
-    轮转选取；结果回按时间倒序呈现。
+    一批吃满，早期批次的机制族（如残差×反转）永远看不到；同一批内单一失败类别
+    （如「缺横截面算子」最大桶）同样会吃满整档。外层按 ``at`` 日期轮转、内层按
+    stage 交织，每轮各取一条；结果回按时间倒序呈现。
     """
     if quota <= 0:
         return []
-    buckets: dict[str, list[dict[str, Any]]] = {}
+    buckets: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for entry in entries:  # 已按时间倒序
-        buckets.setdefault(str(entry.get("at") or "")[:10], []).append(entry)
+        day = str(entry.get("at") or "")[:10]
+        buckets.setdefault(day, {}).setdefault(_entry_stage(entry), []).append(entry)
     days = sorted(buckets, reverse=True)
     picked: list[dict[str, Any]] = []
-    while len(picked) < quota and any(buckets[day] for day in days):
+    while len(picked) < quota:
+        progressed = False
         for day in days:
+            for stage in sorted(buckets[day]):
+                queue = buckets[day][stage]
+                if queue and len(picked) < quota:
+                    picked.append(queue.pop(0))
+                    progressed = True
             if len(picked) >= quota:
                 break
-            if buckets[day]:
-                picked.append(buckets[day].pop(0))
+        if not progressed:
+            break
     picked.sort(key=lambda e: str(e["at"]), reverse=True)
     return picked
+
+
+def _allocate_rejected(
+    entries: list[dict[str, Any]], budget: int, floor: int = PER_GATE_FLOOR
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """rejected 档 per-gate 保底分配。
+
+    三段：① 保底——闸间轮转分配（每轮各闸 1 条，至多 ``floor`` 条；预算不足时
+    公平分摊，**单闸不得独占**）；② 余量——按各闸剩余池占比分配（最大余数法）；
+    ③ 回填——某闸池耗尽导致的缺额按闸轮转归还其他闸。预算先截顶到
+    ``min(budget, len(entries))``，``floor`` 负数钳制为 0。
+
+    输出为**闸间轮转**顺序（保底与占比名额均匀铺开），这是端到端要求：消费端渲染
+    有 9000 字符预算的第二层截断，若按闸号分组输出，闸④/⑤ 条目会落在渲染窗之外
+    （payload 有、prompt 里看不到）。返回 (选中条目, 按闸号分配读数)。
+    """
+    by_gate: dict[int, list[dict[str, Any]]] = {}
+    for entry in entries:
+        gate = entry["gate"] if isinstance(entry["gate"], int) else 99
+        by_gate.setdefault(gate, []).append(entry)
+    gates = sorted(by_gate)
+    counts = dict.fromkeys(gates, 0)
+    budget = max(0, min(budget, len(entries)))
+    floor = max(0, floor)  # 与 untranslatable_quota 的 max(0, ...) 对称钳制
+
+    def _filled() -> int:
+        return sum(counts.values())
+
+    eligible = {gate: min(floor, len(by_gate[gate])) for gate in gates}
+    while _filled() < budget and any(counts[g] < eligible[g] for g in gates):
+        for gate in gates:
+            if _filled() >= budget:
+                break
+            if counts[gate] < eligible[gate]:
+                counts[gate] += 1
+    remaining = budget - _filled()
+    if remaining > 0:
+        pools = {gate: len(by_gate[gate]) - counts[gate] for gate in gates}
+        pool_total = sum(pools.values())
+        if pool_total > 0:
+            shares = {gate: remaining * pools[gate] // pool_total for gate in gates}
+            leftover = remaining - sum(shares.values())
+            order = sorted(gates, key=lambda g: (-(remaining * pools[g] % pool_total), g))
+            for gate in order[:leftover]:
+                shares[gate] += 1
+            for gate in gates:
+                counts[gate] += min(shares[gate], pools[gate])
+        while _filled() < budget:
+            progressed = False
+            for gate in gates:
+                if counts[gate] < len(by_gate[gate]) and _filled() < budget:
+                    counts[gate] += 1
+                    progressed = True
+            if not progressed:
+                break
+    selected: list[dict[str, Any]] = []
+    pointers = dict.fromkeys(gates, 0)
+    while len(selected) < _filled():
+        progressed = False
+        for gate in gates:
+            if pointers[gate] < counts[gate]:
+                selected.append(by_gate[gate][pointers[gate]])
+                pointers[gate] += 1
+                progressed = True
+        if not progressed:
+            break
+    return selected, {str(gate): counts[gate] for gate in gates}
 
 
 def build_payload(
@@ -159,12 +249,14 @@ def build_payload(
     *,
     limit: int = DEFAULT_LIMIT,
     untranslatable_quota: int = UNTRANSLATABLE_QUOTA,
+    gate_floor: int = PER_GATE_FLOOR,
 ) -> dict[str, Any]:
     """状态 + 候选表 → 生成侧清单载荷（按规范化表达式去重、分档配额、截断）。
 
-    分档顺序：admitted（全部）→ untranslatable（最近 ``untranslatable_quota`` 条）
-    → rejected（按闸号升序）→ transcription_error。untranslatable 不足配额时空位
-    归还 rejected；``limit`` 仍是总量上限。
+    分档顺序：admitted（全部）→ untranslatable（最近 ``untranslatable_quota`` 条，
+    档内按日轮转 × stage 交织）→ rejected（per-gate 保底 ``gate_floor`` 条 + 余量
+    按占比）→ transcription_error。untranslatable 不足配额或 rejected 保底未用满时
+    空位归还使用；``limit`` 仍是总量上限。
     """
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -208,12 +300,23 @@ def build_payload(
     untranslatable = [e for e in entries if e["status"] == "untranslatable"]
     rejected = [e for e in entries if e["status"] == "rejected"]
     transcription = [e for e in entries if e["status"] == "transcription_error"]
-    rejected.sort(key=lambda e: e["gate"] if isinstance(e["gate"], int) else 99)
     transcription.sort(key=lambda e: e["gate"] if isinstance(e["gate"], int) else 99)
 
     quota = max(0, min(untranslatable_quota, len(untranslatable)))
-    ordered = admitted + _select_untranslatable(untranslatable, quota) + rejected + transcription
+    picked_untranslatable = _select_untranslatable(untranslatable, quota)
+    rejected_budget = max(0, limit - len(admitted) - len(picked_untranslatable))
+    picked_rejected = _allocate_rejected(rejected, rejected_budget, gate_floor)[0]
+    ordered = admitted + picked_untranslatable + picked_rejected + transcription
     trimmed = ordered[: max(limit, 0)]
+    rejected_by_gate: dict[str, int] = {}
+    untranslatable_by_stage: dict[str, int] = {}
+    for entry in trimmed:  # 从实际出场统计，读数与清单天然一致
+        if entry["status"] == "rejected":
+            key = str(entry["gate"]) if isinstance(entry["gate"], int) else "unknown"
+            rejected_by_gate[key] = rejected_by_gate.get(key, 0) + 1
+        elif entry["status"] == "untranslatable":
+            stage = _entry_stage(entry)
+            untranslatable_by_stage[stage] = untranslatable_by_stage.get(stage, 0) + 1
     return {
         "generated_at": datetime.now().astimezone().isoformat(),
         "total_explored": len(entries),
@@ -222,6 +325,10 @@ def build_payload(
             status: sum(1 for e in entries if e["status"] == status) for status in _STATUS_ORDER
         },
         "gate_rejections": dict(sorted(gate_rejections.items())),
+        "quota_allocation": {
+            "rejected_by_gate": dict(sorted(rejected_by_gate.items())),
+            "untranslatable_by_stage": dict(sorted(untranslatable_by_stage.items())),
+        },
         "contract": _contract_block(),
         "explored": trimmed,
     }
@@ -259,6 +366,7 @@ def export_feedback(
     output_path: str | Path = DEFAULT_OUTPUT_PATH,
     limit: int = DEFAULT_LIMIT,
     untranslatable_quota: int = UNTRANSLATABLE_QUOTA,
+    gate_floor: int = PER_GATE_FLOOR,
 ) -> dict[str, Any]:
     """一步导出（CLI 与测试共用）：返回写出载荷。"""
     processed = load_state(state_path)
@@ -268,6 +376,7 @@ def export_feedback(
         candidates,
         limit=limit,
         untranslatable_quota=untranslatable_quota,
+        gate_floor=gate_floor,
     )
     write_payload(payload, output_path)
     return payload
