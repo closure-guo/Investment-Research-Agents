@@ -83,6 +83,7 @@ def _pool_rows(count: int = 5) -> list[dict]:
     return [
         {
             "symbol": f"60000{index}",
+            "stock_name": "贵州茅台" if index == 1 else None,
             "composite_score": 2.0 - 0.1 * index,
             "rank": index,
             "consecutive_days": 3 + index,
@@ -139,6 +140,31 @@ def test_pool_endpoint_returns_latest_success_pool(pool_seed) -> None:
     assert first["l3_verdict"] == "keep" and first["l3_reason"] == "无风险事件1"
     assert first["factor_contribs"][0]["factor_id"] == 7
     assert body["queue"] == []
+
+
+def test_pool_endpoint_pool_rows_carry_stock_name(pool_seed) -> None:
+    """池行透传 stock_name（add-pool-stock-name-display）；缺名行落空串。"""
+    body = TestClient(app).get("/api/screening/pool").json()
+
+    by_symbol = {row["symbol"]: row for row in body["pool"]}
+    assert by_symbol["600001"]["stock_name"] == "贵州茅台"
+    assert by_symbol["600002"]["stock_name"] == ""
+
+
+def test_pool_endpoint_legacy_row_returns_null_stock_name(pool_seed) -> None:
+    """迁移前历史行（stock_name 为 NULL）→ 接口返回 null（前端退化 — 展示）。"""
+    import sqlite3
+
+    conn = sqlite3.connect(pool_seed)
+    try:
+        conn.execute("UPDATE selection_pool SET stock_name = NULL WHERE symbol = '600001'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    body = TestClient(app).get("/api/screening/pool").json()
+    by_symbol = {row["symbol"]: row for row in body["pool"]}
+    assert by_symbol["600001"]["stock_name"] is None
 
 
 def test_pool_endpoint_without_success_returns_empty(_screening_db) -> None:
