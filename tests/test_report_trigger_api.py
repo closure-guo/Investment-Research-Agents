@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from fastapi.testclient import TestClient
 
 from finance_agent.api import app
@@ -21,11 +23,16 @@ def _isolate(tmp_path, monkeypatch):
 
 def test_trigger_dry_run_no_side_effects(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
+    # 端点走真实时钟算 7 天新鲜度窗（DEFAULT_MAX_AGE_DAYS），report_date 须动态取
+    # 「昨天」——写死日期会滚出窗口被判 stale（2026-10-28 起实证：写死 10-20 在
+    # UTC 10-28 后 diff=8 > 7 → candidates 0，CI 必红）。测试意图不变：窗内报告
+    # → 1 候选。其余用例经 as_of= 注入固定时钟，不受影响。
+    fresh_date = (date.today() - timedelta(days=1)).isoformat()
     rr_store.upsert_extraction(
         "d1",
         {
             "broker": "中信证券",
-            "report_date": "2026-10-20",
+            "report_date": fresh_date,
             "report_type": "个股研报",
             "stocks": [{"code": "600519", "name": "贵州茅台"}],
             "core_logic": [],
