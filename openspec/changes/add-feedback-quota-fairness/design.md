@@ -4,12 +4,12 @@
 
 分配逻辑全部收敛在 `factors/feedback.py` 的 `build_payload` 内，替换现行的「档内单一键排序 + 总量截断」为**两段式分配**：
 
-1. **rejected 档 per-gate 分配**：`floor = PER_GATE_FLOOR`（默认 5）。先对每个出现过的 gate 取前 `floor` 条（批内时间倒序），余量 `slots = rejected_budget - sum(floors_actual)` 按 gate 累计拒收量占比分配（最大余数法取整）；某 gate 条数不足 floor 时全量出场，空位归还余量池。`rejected_budget` 不是新常数——沿用现行行为隐含的预算（`limit - len(admitted) - untranslatable_quota`），不引入第二套预算。
+1. **rejected 档 per-gate 分配**：`floor = PER_GATE_FLOOR`（默认 5，`gate_floor` 参数可配，负数钳制为 0）。保底按**闸间轮转**分配（每轮每闸 1 条，至多 floor 条）——预算不足以给满所有闸保底时公平分摊，**单闸不得独占**（spec MUST NOT 的绝对句）；余量 `slots = rejected_budget - sum(floors_actual)` 按 gate 剩余池占比分配（最大余数法取整），池耗尽缺额按闸轮转回填。`rejected_budget` 不是新常数——沿用现行行为隐含的预算（`limit - len(admitted) - untranslatable_quota`），不引入第二套预算。
 2. **untranslatable 档 stage 代表性**：`_select_untranslatable` 的按日轮转外层之内、单日桶选取时，按 `untranslatable:{stage}` 前缀分组轮转（同一轮转指针先取每 stage 一条再循环），保证单一 stage 无法独占；stage 取自现有 `_reason` 产出的 reason 前缀，无新解析。
 
-配额读数：payload 新增顶层字段 `quota_allocation`（`{"rejected_by_gate": {"2": n, "4": n}, "untranslatable_by_stage": {"translator": n, "LLM": n}}` 形态），由分配器实际产出统计，不做事后重算——读数与清单天然一致（对应 Scenario 4）。
+配额读数：payload 新增顶层字段 `quota_allocation`（`{"rejected_by_gate": {"2": n, "4": n}, "untranslatable_by_stage": {"translator": n, "LLM": n}}` 形态，非 int gate 计入 `"unknown"` 桶保证全量对账），由**实际出场条目**统计，不做事后重算——读数与清单天然一致（对应 Scenario 4）。
 
-消费端零改动：`explored_feedback.py` 按 `explored` 数组逐行渲染，条目顺序变化与新增顶层字段对其透明；9000 字符预算截断仍作用于行级，闸④ 条目因保底已进入清单前部，不再被两层截断双双吃掉。
+**输出顺序为闸间轮转**（而非闸号分组）：消费端 `explored_feedback.py` 的 9000 字符行级预算构成**第二层截断**——真实数据下渲染在第 ~42 条截断，若按闸号分组输出，闸④/⑤（闸号大）条目落在渲染窗之外，payload 有而 prompt 里看不到（审查 C1）。轮转输出使每个闸的条目前置铺开，配合新增的**渲染层回归测试**（真实规模合成数据 + 消费端渲染，断言 `gate4` 行在渲染块内）钉住端到端可见性。消费端本身零改动。
 
 ## Alternatives Considered
 
