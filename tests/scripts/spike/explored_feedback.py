@@ -13,6 +13,8 @@
 feed-dsl-contract-to-factor-generator：载荷含 `contract` 块（复杂度上限/算子与
 字段白名单/表达规则）与 `gate_rejections` 时，先渲染契约段再渲染已探索清单
 （数据驱动，约束文本不硬编码在本端）；契约缺失 → 仅渲染已探索清单（旧行为）。
+optimize-factor-supply-funnel B2：载荷含 ``style_gap`` 块时，在契约段与已探索清单
+之间渲染风格缺口披露段（只披露，无硬性指令；缺失/损坏 → 跳过该段，既有输出逐字不变）。
 """
 
 from __future__ import annotations
@@ -78,6 +80,35 @@ def _render_contract(contract: dict, gate_rejections: dict | None) -> list[str]:
         pairs = ", ".join(f"gate{k}={v}" for k, v in sorted(gate_rejections.items()))
         lines.append(f"- Historical gate rejections to date: {pairs} (advisory).")
     return lines
+
+
+def _render_style_gap(style_gap: dict) -> list[str]:
+    """风格缺口段（数据驱动披露；字段异常逐项跳过，全不可用 → 空段）。"""
+    lines = ["# Style gap (disclosure only — advisory, no hard rule):"]
+    pool = style_gap.get("pool_by_category")
+    if isinstance(pool, dict) and pool:
+        parts = [f"{k}×{v}" for k, v in sorted(pool.items()) if isinstance(v, int)]
+        if parts:
+            lines.append(f"- Active pool composition by family: {', '.join(parts)}.")
+    rejections = style_gap.get("rejections_by_category")
+    by_gate = style_gap.get("rejections_by_category_gate")
+    if isinstance(rejections, dict) and rejections:
+        parts: list[str] = []
+        for family in sorted(rejections):
+            total = rejections[family]
+            if not isinstance(total, int):
+                continue
+            piece = f"{family}×{total}"
+            if isinstance(by_gate, dict) and isinstance(by_gate.get(family), dict):
+                gate_parts = [
+                    f"gate{g}×{n}" for g, n in sorted(by_gate[family].items()) if isinstance(n, int)
+                ]
+                if gate_parts:
+                    piece += f" ({', '.join(gate_parts)})"
+            parts.append(piece)
+        if parts:
+            lines.append(f"- Rejected structures by family: {'; '.join(parts)}.")
+    return lines if len(lines) > 1 else []
 
 
 def render_contract_block(path: str | None = None) -> str:
@@ -157,9 +188,11 @@ def render_explored_block(path: str | None = None) -> str:
     items = payload.get("explored")
     contract = payload.get("contract")
     gate_rejections = payload.get("gate_rejections")
+    style_gap = payload.get("style_gap")
     has_contract = isinstance(contract, dict)
     has_items = isinstance(items, list) and bool(items)
-    if not has_contract and not has_items:
+    has_style_gap = isinstance(style_gap, dict) and bool(style_gap)
+    if not has_contract and not has_items and not has_style_gap:
         return ""
 
     lines: list[str] = []
@@ -168,6 +201,12 @@ def render_explored_block(path: str | None = None) -> str:
         for line in _render_contract(
             contract, gate_rejections if isinstance(gate_rejections, dict) else None
         ):
+            lines.append(line)
+            used += len(line) + 1
+        lines.append("")
+        used += 1
+    if has_style_gap:
+        for line in _render_style_gap(style_gap):
             lines.append(line)
             used += len(line) + 1
         lines.append("")
