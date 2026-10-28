@@ -254,7 +254,9 @@ class TestMonthlyBatchRegistration:
         assert JOB_FUNCS["memory_extract_monthly"] is run_memory_extract_monthly
         assert JOB_FUNCS["factor_proposal_monthly"] is run_factor_proposal_monthly
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
-        assert len(JOB_IDS) == 29  # 12→13：+内置注册；13→14：+因子收割；18→19：+小票通道；28→29：+factor_diagnostics_daily（17:15）
+        assert (
+            len(JOB_IDS) == 29
+        )  # 12→13：+内置注册；13→14：+因子收割；18→19：+小票通道；28→29：+factor_diagnostics_daily（17:15）
         # 19→20：+cb_daily（转债日批，16:50 插于小票通道与 cohort 之间）
         # 14→15：+regime_daily（拥挤度，15:35 日批链内插入）；15→18：+事件线三件
         # 月批附于末尾：月批两任务下标不动；cohort 因日批链内插入后移
