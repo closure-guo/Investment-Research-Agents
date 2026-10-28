@@ -15,6 +15,16 @@ from finance_agent.factors.feedback import (
 )
 
 
+def _admitted_processed() -> dict[str, dict[str, str]]:
+    return {
+        "mom20": {
+            "status": "admitted",
+            "expression": "sub(div(volume,ts_mean(volume,20)),1)",
+            "at": "2026-10-20T16:00:00+08:00",
+        }
+    }
+
+
 def test_canonical_epsilon_guard_collapses() -> None:
     plain = "div(close,ts_mean(volume,20))"
     guarded = "div(close,add(ts_mean(volume,20),0.000000000001))"
@@ -608,3 +618,93 @@ def test_export_feedback_gate_floor_passthrough(tmp_path) -> None:
     )
     gates = [e["gate"] for e in payload["explored"] if e["status"] == "rejected"]
     assert set(gates) == {2, 4}  # 两闸均保底出场
+
+
+def test_build_payload_includes_style_gap_block() -> None:
+    style_gap = {
+        "pool_by_category": {"量与流动性": 8},
+        "rejections_by_category": {"动量反转": 36},
+        "rejections_by_category_gate": {"动量反转": {"2": 30, "4": 6}},
+    }
+    payload = build_payload(_admitted_processed(), {}, style_gap=style_gap)
+    assert payload["style_gap"] == style_gap
+
+
+def test_build_payload_omits_style_gap_by_default_and_when_empty() -> None:
+    assert "style_gap" not in build_payload(_admitted_processed(), {})
+    assert "style_gap" not in build_payload(_admitted_processed(), {}, style_gap={})
+
+
+def test_style_gap_block_reads_factor_library(tmp_path) -> None:
+    from finance_agent.factors import library
+    from finance_agent.factors.feedback import _style_gap_block
+
+    db = tmp_path / "factor_library.db"
+    library.add_factor(
+        expression="div(volume,ts_mean(volume,20))",
+        hypothesis="量比",
+        category="量与流动性",
+        status="active",
+        db_path=db,
+    )
+    # 两个表达式必须结构不同构（拒绝池按同构 upsert，数字只按「有」匹配）
+    for expression, gate, reason in (
+        ("sub(close,ref(close,2))", 2, "WEAK_ICIR"),
+        ("add(div(close,ref(close,1)),1)", 4, "REDUNDANT_WITH_POOL"),
+    ):
+        library.record_rejected_factor(
+            expression=expression,
+            hypothesis="反转",
+            category="动量反转",
+            ast_json=None,
+            source="proposal",
+            gate=gate,
+            reason=reason,
+            detail=None,
+            db_path=db,
+        )
+    block = _style_gap_block(str(db))
+    assert block is not None
+    assert block["pool_by_category"] == {"量与流动性": 1}
+    assert block["rejections_by_category"] == {"动量反转": 2}
+    assert block["rejections_by_category_gate"] == {"动量反转": {"2": 1, "4": 1}}
+
+
+def test_style_gap_block_fail_safe_on_unreadable_db(tmp_path) -> None:
+    from finance_agent.factors.feedback import _style_gap_block
+
+    bad = tmp_path / "not-a-db"
+    bad.write_text("this is not sqlite", encoding="utf-8")
+    assert _style_gap_block(str(bad)) is None
+    assert _style_gap_block(str(tmp_path / "missing.db")) is None
+
+
+def test_style_gap_block_empty_library_returns_none(tmp_path) -> None:
+    from finance_agent.factors.feedback import _style_gap_block
+
+    assert _style_gap_block(str(tmp_path / "fresh.db")) is None
+
+
+def test_export_feedback_wires_style_gap(tmp_path) -> None:
+    from finance_agent.factors import library
+
+    db = tmp_path / "factor_library.db"
+    library.add_factor(
+        expression="div(volume,ts_mean(volume,20))",
+        hypothesis="量比",
+        category="量与流动性",
+        status="active",
+        db_path=db,
+    )
+    state = tmp_path / "state.json"
+    state.write_text(
+        json.dumps({"processed": _admitted_processed()}),
+        encoding="utf-8",
+    )
+    candidates = tmp_path / "candidates.json"
+    candidates.write_text(json.dumps({"candidates": []}), encoding="utf-8")
+    out = tmp_path / "explored.json"
+    payload = export_feedback(
+        state_path=state, candidates_path=candidates, output_path=out, library_db_path=db
+    )
+    assert payload["style_gap"]["pool_by_category"] == {"量与流动性": 1}
