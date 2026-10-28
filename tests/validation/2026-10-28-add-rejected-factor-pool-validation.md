@@ -28,8 +28,20 @@
 
 ## 待补录（5.3 第二半）
 
-- [ ] 10-28 17:55 窗口 `factor_decay_monitor` 日批后：`GET /api/v1/ops/jobs` 核对摘要含 `rejected_checked=182` 且 `rejected_days_recorded>0`；补录到本报告。
-- [ ] 补录完成后：openspec sync + archive（tasks.md 5.3 勾选）。
+- [x] 10-28 17:55 窗口 `factor_decay_monitor` 日批后：`GET /api/v1/ops/jobs` 核对摘要含 `rejected_checked=182` 且 `rejected_days_recorded>0`；补录到本报告。
+- [x] 补录完成后：openspec sync + archive（tasks.md 5.3 勾选）。
+
+### 补录读数（2026-10-28 18:32 核对，定时任务）
+
+`factor_decay_monitor` run 330（工作日 15:45 排程，15:45:00 → 16:04:32，status=ok；实际排程为 15:45 而非报告早前所写 17:55——17:55 属收割/cohort 族，此处更正）：
+
+| 字段 | 读数 | 判定 |
+|---|---|---|
+| `rejected_checked` | 182 | ✓ 与核对时刻拒绝池行数精确一致 |
+| `rejected_recorded` | 181 | ✓（1 行无可算 IC，计入跳过语义） |
+| `rejected_days_recorded` | 13835 | ✓ 缺口回填一次补齐面板窗口（≈182 行 × ~76 交易日） |
+
+补充闭环证据：监控运行后 15:55 收割日批产生的新拒收**自动落池**（核对时池 182 → 191 行，+9），收割导入路径的拒收持久化无需人工干预即生效。归档顺延条件未触发，tasks 5.3 全勾，sync + archive 随本次提交。
 
 ## 回滚位
 
