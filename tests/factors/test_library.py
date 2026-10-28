@@ -21,6 +21,7 @@ from finance_agent.factors.library import (
     _connect,
     add_factor,
     apply_bucket_quota,
+    find_rejected_duplicate,
     find_structural_duplicate,
     init_library,
     list_active_factors,
@@ -28,6 +29,8 @@ from finance_agent.factors.library import (
     list_factors,
     list_ic_series,
     record_ic,
+    record_rejected_factor,
+    reset_factor_library,
     set_orientation,
     set_pool_increment,
     set_status,
@@ -146,8 +149,8 @@ def test_primary_keys_enforce_uniqueness(tmp_path):
 
 
 def test_states_vocabulary_is_verbatim():
-    """状态枚举逐字：candidate/active/degraded/retired。"""
-    assert tuple(FACTOR_STATES) == ("candidate", "active", "degraded", "retired")
+    """状态枚举逐字：candidate/active/degraded/retired/rejected（拒绝池终态）。"""
+    assert tuple(FACTOR_STATES) == ("candidate", "active", "degraded", "retired", "rejected")
 
 
 def test_add_factor_accepts_candidate_and_active_only(tmp_path):
@@ -276,8 +279,8 @@ def test_set_status_unknown_factor_raises(tmp_path):
 
 
 def listed_status(db: str, factor_id: int) -> str:
-    """按 id 读回状态（测试辅助；不假设行序）。"""
-    for row in list_factors(db_path=db):
+    """按 id 读回状态（测试辅助；不假设行序；含拒绝池行）。"""
+    for row in list_factors(include_rejected=True, db_path=db):
         if row["id"] == factor_id:
             return str(row["status"])
     raise AssertionError(f"因子不存在: {factor_id}")
@@ -912,3 +915,160 @@ class TestSetOrientationRequire:
         db = str(tmp_path / "factor_library.db")
         with pytest.raises(FactorStateError):
             set_orientation(9999, 1, db_path=db)
+
+
+# ── 拒绝池：rejected 终态 + 拒绝池读写原语（add-rejected-factor-pool T1）──────
+
+
+class TestRejectedStateAndPool:
+    def test_states_vocabulary_includes_rejected(self):
+        """状态枚举逐字：原四态 + rejected（终态）。"""
+        assert tuple(FACTOR_STATES) == ("candidate", "active", "degraded", "retired", "rejected")
+
+    def test_rejected_is_valid_initial_state_and_terminal(self, tmp_path):
+        db = _db(tmp_path)
+        fid = add_factor(
+            expression="ts_mean(close,5)",
+            hypothesis="h",
+            category=_CATEGORY,
+            status="rejected",
+            db_path=db,
+        )
+        assert listed_status(db, fid) == "rejected"
+        # 终态：不可迁出
+        for target in ("active", "degraded", "retired", "candidate"):
+            with pytest.raises(FactorStateError):
+                set_status(fid, target, db_path=db)
+        # 也只能经 add_factor 初始状态到达，set_status 不可迁入
+        cid = add_factor(expression="close", hypothesis="h", category=_CATEGORY, db_path=db)
+        with pytest.raises(FactorStateError):
+            set_status(cid, "rejected", db_path=db)
+
+    def test_record_rejected_factor_creates_row_and_event(self, tmp_path):
+        db = _db(tmp_path)
+        result = record_rejected_factor(
+            expression="ts_mean(close,5)",
+            hypothesis="弱 IC 因子",
+            category=_CATEGORY,
+            ast_json=None,
+            source="proposal",
+            gate=2,
+            reason="WEAK_ICIR",
+            detail={"ic_mean": 0.01},
+            db_path=db,
+        )
+        assert result["action"] == "created"
+        rows = list_factors(status="rejected", db_path=db)
+        assert len(rows) == 1
+        assert rows[0]["expression"] == "ts_mean(close,5)"
+        # ast_json 缺失 → 现算规范串
+        assert rows[0]["ast_json"] == serialize(parse("ts_mean(close,5)"))
+        events = list_events(result["factor_id"], db_path=db)
+        assert [e["event"] for e in events] == ["created"]
+        assert events[0]["detail"]["gate"] == 2
+        assert events[0]["detail"]["reason"] == "WEAK_ICIR"
+        assert events[0]["detail"]["ic_mean"] == 0.01
+
+    def test_record_rejected_factor_upserts_on_structural_match(self, tmp_path):
+        db = _db(tmp_path)
+        first = record_rejected_factor(
+            expression="add(close, close)",
+            hypothesis="第一次",
+            category=_CATEGORY,
+            ast_json=None,
+            source="s",
+            gate=2,
+            reason="WEAK_ICIR",
+            detail={},
+            db_path=db,
+        )
+        second = record_rejected_factor(
+            expression="add(close,close)",
+            hypothesis="第二次",
+            category=_CATEGORY,
+            ast_json=None,
+            source="s",
+            gate=3,
+            reason="NOT_SIGNIFICANT",
+            detail={},
+            db_path=db,
+        )
+        assert second["factor_id"] == first["factor_id"]
+        assert second["action"] == "updated"
+        assert len(list_factors(status="rejected", db_path=db)) == 1
+        events = list_events(first["factor_id"], db_path=db)
+        assert [e["event"] for e in events] == ["created", "re_rejected"]
+        assert events[1]["detail"]["gate"] == 3
+
+    def test_list_factors_excludes_rejected_by_default(self, tmp_path):
+        db = _db(tmp_path)
+        fid = add_factor(
+            expression="ts_mean(volume,5)",
+            hypothesis="h",
+            category=_CATEGORY,
+            status="active",
+            db_path=db,
+        )
+        record_rejected_factor(
+            expression="volume",
+            hypothesis="r",
+            category=_CATEGORY,
+            ast_json="volume",
+            source="s",
+            gate=2,
+            reason="WEAK_ICIR",
+            detail={},
+            db_path=db,
+        )
+        assert [int(r["id"]) for r in list_factors(db_path=db)] == [fid]
+        assert len(list_factors(include_rejected=True, db_path=db)) == 2
+        assert len(list_factors(status="rejected", db_path=db)) == 1
+        assert len(list_factors(status="active", db_path=db)) == 1
+
+    def test_find_rejected_duplicate_scopes_to_rejected_only(self, tmp_path):
+        # 拒绝池行单独存在：re_rejected 查重命中，闸0 查重不命中（rejected 不参与）
+        db = _db(tmp_path)
+        rid = record_rejected_factor(
+            expression="close",
+            hypothesis="r",
+            category=_CATEGORY,
+            ast_json="close",
+            source="s",
+            gate=2,
+            reason="WEAK_ICIR",
+            detail={},
+            db_path=db,
+        )["factor_id"]
+        assert find_rejected_duplicate("close", db_path=db) == rid
+        assert find_structural_duplicate("close", db_path=db) is None
+
+    def test_find_structural_duplicate_scopes_exclude_rejected(self, tmp_path):
+        # active 行单独存在：闸0 查重命中，拒绝池查重不命中（范围互斥）
+        db = _db(tmp_path)
+        add_factor(
+            expression="close",
+            hypothesis="h",
+            category=_CATEGORY,
+            status="active",
+            ast_json="close",
+            db_path=db,
+        )
+        assert find_structural_duplicate("close", db_path=db) is not None
+        assert find_rejected_duplicate("close", db_path=db) is None
+
+    def test_reset_factor_library_clears_rejected_pool(self, tmp_path):
+        db = _db(tmp_path)
+        record_rejected_factor(
+            expression="volume",
+            hypothesis="r",
+            category=_CATEGORY,
+            ast_json="volume",
+            source="s",
+            gate=2,
+            reason="WEAK_ICIR",
+            detail={},
+            db_path=db,
+        )
+        assert len(list_factors(status="rejected", db_path=db)) == 1
+        reset_factor_library(db_path=db)
+        assert list_factors(include_rejected=True, db_path=db) == []

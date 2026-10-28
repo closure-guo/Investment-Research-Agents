@@ -484,3 +484,31 @@ def test_detail_monotonicity_observed_with_panel(_factors_db, monkeypatch) -> No
     assert {"passed", "spearman", "q10_q1", "decile_returns", "valid_days", "threshold"} <= set(
         mono
     )
+
+
+# ── 拒绝池不可见性（add-rejected-factor-pool T6）──────────────────────────
+
+
+def test_rejected_row_absent_from_list_but_detail_reachable(_factors_db) -> None:
+    """列表不返回 rejected 行；详情按 id 仍可直查（只读诊断：IC 跟踪序列可观测）。"""
+    from finance_agent.factors.library import record_rejected_factor
+
+    rejected_id = record_rejected_factor(
+        expression="volume",
+        hypothesis="闸②拒收的量因子",
+        category="价量",
+        ast_json="volume",
+        source="harvest",
+        gate=2,
+        reason="WEAK_ICIR",
+        detail={},
+    )["factor_id"]
+
+    resp = TestClient(app).get(_FACTORS)
+    assert resp.status_code == 200
+    assert all(row["status"] != "rejected" for row in resp.json()["factors"])
+
+    detail = TestClient(app).get(f"{_FACTORS}/{rejected_id}")
+    assert detail.status_code == 200
+    assert detail.json()["expression"] == "volume"
+    assert detail.json()["events"][0]["detail"]["gate"] == 2

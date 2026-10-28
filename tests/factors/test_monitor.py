@@ -251,6 +251,9 @@ def test_run_factor_monitor_empty_library_is_noop(tmp_path):
         "degraded": [],
         "reversed": [],
         "judged": [],
+        "rejected_checked": 0,
+        "rejected_recorded": 0,
+        "rejected_days_recorded": 0,
     }
 
 
@@ -495,3 +498,62 @@ def test_run_factor_monitor_reversal_skipped_when_orientation_unknown(tmp_path):
     assert result["degraded"] == []
     rows = list_factors(db_path=db)
     assert rows[0]["status"] == "active"
+
+
+# ── 拒绝池 IC 跟踪（add-rejected-factor-pool T4）────────────────────────────
+
+
+def _rejected_volume_factor(db: str) -> int:
+    """建一条 rejected 行（``volume`` 命中面板构造信号），返回 factor_id。"""
+    from finance_agent.factors.library import record_rejected_factor
+
+    return int(
+        record_rejected_factor(
+            expression="volume",
+            hypothesis="曾于闸②拒收的量因子",
+            category="价量",
+            ast_json="volume",
+            source="harvest",
+            gate=2,
+            reason="WEAK_ICIR",
+            detail={},
+            db_path=db,
+        )["factor_id"]
+    )
+
+
+def test_run_factor_monitor_records_ic_for_rejected_rows(tmp_path):
+    """日批为 rejected 行缺口回填记 IC（同 active 口径、幂等 upsert）。"""
+    db = _db(tmp_path)
+    rid = _rejected_volume_factor(db)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+    assert result["rejected_checked"] == 1
+    assert result["rejected_recorded"] == 1
+    assert result["rejected_days_recorded"] >= 1
+    assert len(list_ic_series(rid, db_path=db)) >= 1
+    # 幂等重跑：不再新增
+    rerun = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+    assert rerun["rejected_days_recorded"] == 0
+    assert rerun["rejected_recorded"] == 1
+
+
+def test_rejected_rows_never_degrade_or_transition(tmp_path):
+    """rejected 行滚动 IC 全负也不触发降级/任何状态迁移（degraded 判定仅限 active）。"""
+    db = _db(tmp_path)
+    rid = _rejected_volume_factor(db)
+    _craft_history(db, rid, [-0.5] * 40)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+    assert result["degraded"] == []
+    rows = {int(row["id"]): row for row in list_factors(include_rejected=True, db_path=db)}
+    assert rows[rid]["status"] == "rejected"
+    assert list_events(rid, db_path=db)[0]["event"] == "created"  # 无 status_change 事件
+
+
+def test_monitor_summary_rejected_fields_zero_without_pool(tmp_path):
+    """无 rejected 行时拒绝池读数归零；既有 active 侧字段语义不变。"""
+    db, _fid = _active_factor(tmp_path)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+    assert result["rejected_checked"] == 0
+    assert result["rejected_recorded"] == 0
+    assert result["rejected_days_recorded"] == 0
+    assert result["recorded"] == 1  # active 侧照旧

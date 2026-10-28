@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from finance_agent.factors.external import run_factor_external_import
-from finance_agent.factors.library import list_factors
+from finance_agent.factors.library import list_events, list_factors
 from tests.factors.test_builtin import _STRONG_SEED, _strong_panel
 from tests.factors.test_monthly import _seed_snapshot_dates
 
@@ -134,3 +134,25 @@ def test_outcomes_aligned_with_input_order(tmp_path):
     assert rejected["gate"] == 2
     assert rejected["reason"] == "WEAK_ICIR"
     assert "icir" in rejected["detail"]
+
+
+# ── 拒绝池持久化集成（add-rejected-factor-pool T6）─────────────────────────
+
+
+def test_gate_rejected_candidate_persists_into_rejected_pool(tmp_path):
+    """收割导入的闸②拒收候选持久化为拒绝池行（source=external，事件带原因码）。"""
+    db = _db(tmp_path)
+    summary = run_factor_external_import(
+        [_candidate(_REJECTED_EXPRESSION, external_ic=0.9, external_note="外部回测 IC 显著")],
+        panel=_strong_panel(),
+        seed=_STRONG_SEED,
+        db_path=db,
+    )
+    assert summary["rejected"] == 1
+    rejected = list_factors(status="rejected", db_path=db)
+    assert len(rejected) == 1
+    assert rejected[0]["expression"] == _REJECTED_EXPRESSION
+    assert rejected[0]["source"] == "external"
+    events = list_events(int(rejected[0]["id"]), db_path=db)
+    assert events[0]["detail"]["gate"] == 2
+    assert events[0]["detail"]["reason"] == "WEAK_ICIR"

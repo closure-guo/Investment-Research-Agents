@@ -55,6 +55,7 @@ from finance_agent.factors.eval_engine import (
 )
 from finance_agent.factors.library import (
     list_active_factors,
+    list_factors,
     list_ic_series,
     record_ic,
     set_status,
@@ -229,6 +230,18 @@ def run_factor_monitor(
                 DECAY_NEGATIVE_DAYS,
                 DECAY_ICIR_FLOOR,
             )
+    # 拒绝池 IC 跟踪（add-rejected-factor-pool）：同口径缺口回填，无衰减判定、
+    # 无状态迁移——`rejected` 行的 IC 序列只作观测，供未来复评 delta 消费。
+    rejected_checked = 0
+    rejected_recorded = 0
+    rejected_days_recorded = 0
+    for row in list_factors(status="rejected", db_path=db_path):
+        rejected_checked += 1
+        rejected_outcome = _record_missing_ic(row, panel, fwd, as_of, db_path=db_path)
+        if rejected_outcome is None:
+            continue
+        rejected_recorded += 1
+        rejected_days_recorded += rejected_outcome[1]
     return {
         "recorded": recorded,
         "days_recorded": days_recorded,
@@ -237,6 +250,9 @@ def run_factor_monitor(
         "degraded": degraded,
         "reversed": reversed_ids,
         "judged": judged,
+        "rejected_checked": rejected_checked,
+        "rejected_recorded": rejected_recorded,
+        "rejected_days_recorded": rejected_days_recorded,
     }
 
 

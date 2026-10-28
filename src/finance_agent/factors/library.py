@@ -47,22 +47,25 @@ from finance_agent.factors.constraints import BUCKET_TOP_K
 from finance_agent.factors.dsl import is_subtree_isomorphic, parse, serialize
 
 # 状态机（逐字；Global Constraints）
-FACTOR_STATES: tuple[str, ...] = ("candidate", "active", "degraded", "retired")
-# 允许作为 add_factor 初始状态的两态（degraded/retired 只能经监控/保种到达）
-_INITIAL_STATES: frozenset[str] = frozenset({"candidate", "active"})
-# 合法迁移表：retired → ∅（空集）
+FACTOR_STATES: tuple[str, ...] = ("candidate", "active", "degraded", "retired", "rejected")
+# 允许作为 add_factor 初始状态的三态（degraded/retired 只能经监控/保种到达；
+# rejected 只能经准入拒收路径 add_factor 到达）
+_INITIAL_STATES: frozenset[str] = frozenset({"candidate", "active", "rejected"})
+# 合法迁移表：retired / rejected → ∅（空集，均为终态；rejected 行永不迁移）
 _TRANSITIONS: dict[str, frozenset[str]] = {
     "candidate": frozenset({"active"}),
     "active": frozenset({"degraded", "retired"}),
     "degraded": frozenset({"active", "retired"}),
     "retired": frozenset(),
+    "rejected": frozenset(),
 }
-# 结构查重参与状态（retired 允许重提）
+# 结构查重参与状态（retired 允许重提；rejected 拒绝池行不参与——重提不受阻）
 _DEDUP_STATES: tuple[str, ...] = ("candidate", "active", "degraded")
 
 # 事件类型（逐字）
 EVENT_CREATED = "created"
 EVENT_STATUS_CHANGE = "status_change"
+EVENT_RE_REJECTED = "re_rejected"
 
 # 三表 DDL（幂等 CREATE IF NOT EXISTS；列名与 Global Constraints 逐字一致）
 FACTOR_LIBRARY_DDL = """
@@ -233,11 +236,12 @@ def add_factor(
     ast_json: str | None = None,
     source: str = "proposal",
     alignment_score: float | None = None,
+    event_detail: dict[str, Any] | None = None,
     db_path: str | Path | None = None,
 ) -> int:
-    """新增因子行，返回 ``factors.id``；落 ``created`` 事件。
+    """新增因子行，返回 ``factors.id``；落 ``created`` 事件（``event_detail`` 并入其 detail）。
 
-    仅校验**初始状态合法性**（``candidate``/``active``；其余 → ``FactorStateError``）
+    仅校验**初始状态合法性**（``candidate``/``active``/``rejected``；其余 → ``FactorStateError``）
     ——结构查重与五道闸由调用方（``validate.admit_candidates``）在入库前完成，
     本函数不做表达式解析、不复核类别词表（库层保持通用存储语义）。
     """
@@ -267,7 +271,7 @@ def add_factor(
             ),
         )
         factor_id = int(cursor.lastrowid or 0)
-        _insert_event(conn, factor_id, EVENT_CREATED, None, status, None, now)
+        _insert_event(conn, factor_id, EVENT_CREATED, None, status, event_detail, now)
         conn.commit()
         return factor_id
     finally:
@@ -347,6 +351,97 @@ def find_structural_duplicate(ast_json: str, *, db_path: str | Path | None = Non
     return None
 
 
+def find_rejected_duplicate(ast_json: str, *, db_path: str | Path | None = None) -> int | None:
+    """拒绝池（``status='rejected'``）内同构因子 id；无 → ``None``。
+
+    与 ``find_structural_duplicate`` 同款比对逻辑（规范串精确命中快路径 +
+    全量同构扫描），仅范围限定在拒绝池行——供 ``record_rejected_factor``
+    的 upsert 幂等语义使用，与闸0 查重（``_DEDUP_STATES``）互不影响。
+    解析失败 → ``DSLParseError``（fail loud，不当作无重复）。
+    """
+    init_library(db_path)
+    candidate = parse(ast_json, enforce_complexity=False)
+    canonical = serialize(candidate)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, expression, ast_json FROM factors WHERE status = 'rejected' ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        stored = row["ast_json"] or row["expression"]
+        if stored == canonical:  # 规范串精确命中 → 必同构
+            return int(row["id"])
+    for row in rows:
+        stored = row["ast_json"] or row["expression"]
+        if is_subtree_isomorphic(candidate, parse(stored, enforce_complexity=False)):
+            return int(row["id"])
+    return None
+
+
+def record_rejected_factor(
+    *,
+    expression: str,
+    hypothesis: str,
+    category: str,
+    ast_json: str | None,
+    source: str,
+    gate: int | None,
+    reason: str | None,
+    detail: dict[str, Any] | None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """拒绝池写入（upsert 幂等）：同构已有 ``rejected`` 行则更新并追加事件，否则新建。
+
+    - 新建：``add_factor(status="rejected")``，created 事件 detail 携带
+      ``gate`` / ``reason`` 与判定读数（``detail``）。
+    - 更新：刷新既有行 ``updated_at``，追加 ``re_rejected`` 事件（历史裁决经事件表保留，
+      行身份不重复——IC 序列不因重提被切碎）。
+    - ``ast_json`` 缺失 → 由 ``expression`` 现算规范串（回填旧数据的回退路径，与
+      ``find_structural_duplicate`` 同款）。
+
+    返回 ``{"factor_id": int, "action": "created" | "updated"}``。
+    """
+    node = parse(ast_json or expression, enforce_complexity=False)
+    canonical = serialize(node)
+    rejection_detail: dict[str, Any] = {
+        "gate": gate,
+        "reason": reason,
+        **(dict(detail) if detail else {}),
+    }
+    duplicate = find_rejected_duplicate(canonical, db_path=db_path)
+    now = _now_iso()
+    if duplicate is not None:
+        conn = _connect(db_path)
+        try:
+            conn.execute("UPDATE factors SET updated_at = ? WHERE id = ?", (now, duplicate))
+            _insert_event(
+                conn,
+                duplicate,
+                EVENT_RE_REJECTED,
+                "rejected",
+                "rejected",
+                rejection_detail,
+                now,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"factor_id": duplicate, "action": "updated"}
+    factor_id = add_factor(
+        expression=expression,
+        hypothesis=hypothesis,
+        category=category,
+        status="rejected",
+        ast_json=canonical,
+        source=source,
+        event_detail=rejection_detail,
+        db_path=db_path,
+    )
+    return {"factor_id": factor_id, "action": "created"}
+
+
 # ── factor_ic：幂等 upsert 与序列读取 ──────────────────────────────────────
 
 
@@ -414,9 +509,16 @@ def list_factors(
     *,
     status: str | None = None,
     category: str | None = None,
+    include_rejected: bool = False,
     db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    """因子行列表（按 id 升序）；可选 status/category 过滤。"""
+    """因子行列表（按 id 升序）；可选 status/category 过滤。
+
+    ``include_rejected=False``（缺省）且 ``status`` 未显式给定时排除 ``rejected``
+    拒绝池行——拒绝池对既有读路径不可见（既有调用方语义不变）。``status``
+    显式给定时按 status 精确返回（拒绝池跟踪走 ``status="rejected"``）；
+    ``include_rejected=True`` 用于按 id 诊断类读取。
+    """
     init_library(db_path)
     sql = "SELECT * FROM factors"
     conditions: list[str] = []
@@ -424,6 +526,8 @@ def list_factors(
     if status is not None:
         conditions.append("status = ?")
         params.append(status)
+    elif not include_rejected:
+        conditions.append("status != 'rejected'")
     if category is not None:
         conditions.append("category = ?")
         params.append(category)

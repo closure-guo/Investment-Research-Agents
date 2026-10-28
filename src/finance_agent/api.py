@@ -4452,8 +4452,15 @@ def _factors_payload() -> list[dict[str, Any]]:
 
 
 def _factor_detail_payload(factor_id: int) -> dict[str, Any] | None:
-    """详情载荷：摘要字段 + IC 序列（近 60 点升序）+ 事件历史；无该因子 → None。"""
-    row = next((item for item in list_factors() if int(item["id"]) == factor_id), None)
+    """详情载荷：摘要字段 + IC 序列（近 60 点升序）+ 事件历史；无该因子 → None。
+
+    按 id 直查含拒绝池行（只读诊断：IC 跟踪序列可经详情接口观测）；列表接口
+    维持排除（见 ``list_factors`` 缺省排除语义）。
+    """
+    row = next(
+        (item for item in list_factors(include_rejected=True) if int(item["id"]) == factor_id),
+        None,
+    )
     if row is None:
         return None
     events = list_events(factor_id)

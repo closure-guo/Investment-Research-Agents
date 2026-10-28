@@ -136,7 +136,8 @@ def register_builtins(
 
 
 def missing_builtins(*, db_path: str | Path | None = None) -> list[BuiltinFactor]:
-    """库内缺失的 builtin 条目（存在性判据 = 同表达式，**任意状态**含 retired/degraded）。
+    """库内缺失的 builtin 条目（存在性判据 = 同表达式，任意状态含 retired/degraded；
+    ``rejected`` 拒绝池行**不**构成已存在——被拒 builtin 视为缺失、次日可重试）。
 
     retired 视为已注册（MUST NOT 复活——「retired 可重提」属提案路径语义，基线包
     固定表达式不参与）；结构等价但字符串不同的条目由闸 0 兜底（提交后被
