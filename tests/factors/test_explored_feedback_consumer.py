@@ -178,3 +178,67 @@ def test_template_contract_consistent_with_context_contract(tmp_path: Path) -> N
     ctx_ops_line = next(ln for ln in ctx.splitlines() if "Expressible operators (Qlib form):" in ln)
     ctx_ops = ctx_ops_line.split(":", 1)[1].rstrip(".").split(", ")
     assert len(ctx_ops) == 3
+
+
+def _style_gap_payload() -> dict:
+    return {
+        "contract": _CONTRACT,
+        "gate_rejections": {"2": 322},
+        "style_gap": {
+            "pool_by_category": {"量与流动性": 8, "外部": 2},
+            "rejections_by_category": {"动量反转": 36, "量与流动性": 49},
+            "rejections_by_category_gate": {
+                "动量反转": {"2": 30, "4": 6},
+                "量与流动性": {"2": 41, "4": 8},
+            },
+        },
+        "explored": [{"name": "mom20", "status": "rejected", "gate": 2, "reason": "WEAK_ICIR"}],
+    }
+
+
+def test_style_gap_rendered_between_contract_and_explored(tmp_path: Path) -> None:
+    mod = _load_consumer()
+    path = _write_payload(tmp_path, _style_gap_payload())
+    block = mod.render_explored_block(path)
+    assert "Style gap" in block
+    assert "量与流动性×8" in block
+    assert "gate2×30" in block
+    assert block.index("Hard contract") < block.index("Style gap") < block.index("mom20")
+
+
+def test_style_gap_absent_keeps_legacy_output(tmp_path: Path) -> None:
+    mod = _load_consumer()
+    base_payload = {k: v for k, v in _style_gap_payload().items() if k != "style_gap"}
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    base = mod.render_explored_block(_write_payload(tmp_path / "a", base_payload))
+    styled = mod.render_explored_block(_write_payload(tmp_path / "b", _style_gap_payload()))
+    marker = "# Cross-session memory"
+    assert base[base.index(marker) :] == styled[styled.index(marker) :]
+    assert base.splitlines()[0] == styled.splitlines()[0]
+    assert "Style gap" not in base
+
+
+def test_style_gap_malformed_fields_fail_safe(tmp_path: Path) -> None:
+    mod = _load_consumer()
+    payload = _style_gap_payload()
+    payload["style_gap"] = {
+        "pool_by_category": {"x": "not-int", 3: None},
+        "rejections_by_category_gate": {"fam": "not-a-dict", "ok": {"2": "bad", "3": 1}},
+    }
+    path = _write_payload(tmp_path, payload)
+    block = mod.render_explored_block(path)
+    assert "mom20" in block  # 损坏字段不致命，清单照常
+    assert "Style gap" not in block  # 字段全不可用 → 整段省略（不渲染空抬头）
+
+
+def test_style_gap_only_payload_renders_style_gap(tmp_path: Path) -> None:
+    mod = _load_consumer()
+    path = _write_payload(
+        tmp_path,
+        {"style_gap": {"pool_by_category": {"量与流动性": 8}}},
+    )
+    block = mod.render_explored_block(path)
+    assert "Style gap" in block
+    assert "Hard contract" not in block
+    assert "量与流动性×8" in block
