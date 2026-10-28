@@ -311,3 +311,140 @@ def test_cli_prints_contract_presence(tmp_path) -> None:
         cwd=repo,
     )
     assert "contract=yes" in proc.stdout
+
+
+def _gate_floor_processed() -> dict[str, dict]:
+    """真实漏斗比例的合成状态：闸② 395 / 闸④ 84 / admitted 12 / untranslatable 30。"""
+    processed: dict[str, dict] = {}
+    for i in range(395):
+        processed[f"g2_{i}"] = {
+            "status": "rejected",
+            "expression": f"sub(div(close,ref(close,{i + 2})),1)",
+            "gate": 2,
+            "reason": "WEAK_ICIR",
+            "at": "2026-10-27T16:00:00+08:00",
+        }
+    for i in range(84):
+        processed[f"g4_{i}"] = {
+            "status": "rejected",
+            "expression": f"mul(sub(div(volume,ts_mean(volume,20)),1),{i + 1})",
+            "gate": 4,
+            "reason": "REDUNDANT_WITH_POOL",
+            "at": "2026-10-26T16:00:00+08:00",
+        }
+    for i in range(12):
+        processed[f"adm_{i}"] = {
+            "status": "admitted",
+            "expression": f"div(volume,ts_mean(volume,{i + 5}))",
+            "at": "2026-10-20T16:00:00+08:00",
+        }
+    for i in range(30):
+        processed[f"unt_{i}"] = {
+            "status": "untranslatable",
+            "stage": "translator",
+            "detail": "复杂度超限",
+            "at": "2026-10-27T09:00:00+08:00",
+        }
+    return processed
+
+
+def test_build_payload_gate_floor_breaks_gate2_monopoly() -> None:
+    """闸② 不得独占 rejected 档：每个出现过拒收的闸口须有保底出场（闸④ 现状恒 0）。"""
+    payload = build_payload(_gate_floor_processed(), {}, limit=80)
+    gates = [e["gate"] for e in payload["explored"] if e["status"] == "rejected"]
+    assert sum(1 for g in gates if g == 4) >= 5
+    assert sum(1 for g in gates if g == 2) < 48  # rejected 档预算 = 80 - 12 admitted - 20 配额
+    assert payload["returned"] == 80  # 总量不被保底机制缩水
+
+
+def test_build_payload_gate_floor_underfull_gate_fully_shown() -> None:
+    """累计拒收不足保底数的闸口全量出场，空位由余量池使用（不缩水 payload）。"""
+    processed = {
+        f"g2_{i}": {
+            "status": "rejected",
+            "expression": f"sub(div(close,ref(close,{i + 2})),1)",
+            "gate": 2,
+            "reason": "WEAK_ICIR",
+            "at": "2026-10-27T16:00:00+08:00",
+        }
+        for i in range(100)
+    }
+    processed["g6_a"] = {
+        "status": "rejected",
+        "expression": "sub(close,ref(close,1))",
+        "gate": 6,
+        "reason": "NO_POOL_INCREMENT",
+        "at": "2026-10-27T16:00:00+08:00",
+    }
+    processed["g6_b"] = {
+        "status": "rejected",
+        "expression": "sub(close,ref(close,3))",
+        "gate": 6,
+        "reason": "NO_POOL_INCREMENT",
+        "at": "2026-10-27T15:00:00+08:00",
+    }
+    payload = build_payload(processed, {}, limit=20)
+    g6 = [e for e in payload["explored"] if e["gate"] == 6]
+    assert len(g6) == 2
+    assert payload["returned"] == 20
+
+
+def _stage_mix_processed() -> dict[str, dict]:
+    """同日双 stage 的 untranslatable：translator 300 条 / llm 60 条（LLM 段=最大损耗桶）。"""
+    processed: dict[str, dict] = {}
+    for i in range(300):
+        processed[f"tr_{i}"] = {
+            "status": "untranslatable",
+            "stage": "translator",
+            "detail": "复杂度超限：自由参数 4 > 上限 3",
+            "at": f"2026-10-25T16:{i % 60:02d}:{i % 60:02d}+08:00",
+        }
+    for i in range(60):
+        processed[f"ll_{i}"] = {
+            "status": "untranslatable",
+            "stage": "llm",
+            "detail": "缺少按日期的横截面算子",
+            "at": f"2026-10-25T17:{i % 60:02d}:{i % 60:02d}+08:00",
+        }
+    return processed
+
+
+def test_build_payload_untranslatable_stage_representativeness() -> None:
+    """单一失败类别（stage）不得独占 untranslatable 档：translator/llm 均须出场。"""
+    payload = build_payload(_stage_mix_processed(), {}, limit=80)
+    stages = [
+        e["reason"].split("（", 1)[0].removeprefix("untranslatable:")
+        for e in payload["explored"]
+        if e["status"] == "untranslatable"
+    ]
+    assert set(stages) == {"translator", "llm"}
+    assert 0 < stages.count("llm") < 20
+
+
+def test_build_payload_quota_allocation_readout_consistent() -> None:
+    """配额分配读数须与 explored 清单实际构成逐项一致（可程序核对）。"""
+    processed = _stage_mix_processed()
+    processed["g2_0"] = {
+        "status": "rejected",
+        "expression": "sub(div(close,ref(close,2)),1)",
+        "gate": 2,
+        "reason": "WEAK_ICIR",
+        "at": "2026-10-27T16:00:00+08:00",
+    }
+    processed["g4_0"] = {
+        "status": "rejected",
+        "expression": "mul(sub(div(volume,ts_mean(volume,20)),1),7)",
+        "gate": 4,
+        "reason": "REDUNDANT_WITH_POOL",
+        "at": "2026-10-26T16:00:00+08:00",
+    }
+    payload = build_payload(processed, {}, limit=80)
+    alloc = payload["quota_allocation"]
+    rej_gates = [str(e["gate"]) for e in payload["explored"] if e["status"] == "rejected"]
+    assert alloc["rejected_by_gate"] == {g: rej_gates.count(g) for g in set(rej_gates)}
+    unt_stages = [
+        e["reason"].split("（", 1)[0].removeprefix("untranslatable:")
+        for e in payload["explored"]
+        if e["status"] == "untranslatable"
+    ]
+    assert alloc["untranslatable_by_stage"] == {s: unt_stages.count(s) for s in set(unt_stages)}
