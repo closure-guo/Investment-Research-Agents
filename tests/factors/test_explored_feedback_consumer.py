@@ -96,3 +96,51 @@ def test_total_length_bounded_with_truncation_marker(tmp_path: Path) -> None:
     block = mod.render_explored_block(path)
     assert len(block) <= mod.MAX_CHARS + 200
     assert "(truncated)" in block
+
+
+def test_template_contract_block_renders_summary(tmp_path: Path) -> None:
+    """任务指令层契约段：规则/复杂度/字段全量，算子做摘要（总数+样例，预算让给全量白名单所在记忆块）。"""
+    mod = _load_consumer()
+    path = _write_payload(tmp_path, {"contract": _CONTRACT, "explored": []})
+    block = mod.render_contract_block(path)
+    assert "BINDING" in block
+    for token in (
+        "epsilon",
+        "cross-sectional",
+        "Complexity limits: max_ast_depth <= 8",
+        "$close",
+    ):
+        assert token in block
+    assert "3 kinds in total" in block and "Mean" in block  # 总数 + 样例，不逐项罗列
+    assert "gate2" not in block  # 拒收计数只属上下文段，模板段不带
+
+
+def test_template_contract_block_fails_safe(tmp_path: Path) -> None:
+    mod = _load_consumer()
+    p = tmp_path / "explored.json"
+    p.write_text("{bad json", encoding="utf-8")
+    assert mod.render_contract_block(str(p)) == ""  # 损坏 → 空串
+    assert (
+        mod.render_contract_block(_write_payload(tmp_path, {"explored": []})) == ""
+    )  # 无契约 → 空串
+    assert mod.render_contract_block(str(tmp_path / "missing.json")) == ""  # 缺失 → 空串
+
+
+def test_template_contract_block_budget_bounded(tmp_path: Path) -> None:
+    mod = _load_consumer()
+    huge = dict(_CONTRACT, rules=["x" * 5000])
+    path = _write_payload(tmp_path, {"contract": huge, "explored": []})
+    block = mod.render_contract_block(path)
+    assert len(block) <= mod.TEMPLATE_CONTRACT_MAX_CHARS + 15
+    assert "(truncated)" in block
+
+
+def test_template_contract_consistent_with_context_contract(tmp_path: Path) -> None:
+    """同源一致性：模板段与记忆块契约段的复杂度数值必须一致（同一 contract 块派生）。"""
+    mod = _load_consumer()
+    path = _write_payload(
+        tmp_path, {"contract": _CONTRACT, "gate_rejections": {"2": 322}, "explored": []}
+    )
+    tpl = mod.render_contract_block(path)
+    ctx = mod.render_explored_block(path)
+    assert "max_ast_depth <= 8" in tpl and "max_ast_depth <= 8" in ctx

@@ -4,7 +4,9 @@
 （由 `scripts/export_factor_feedback.py` 从收割状态导出）。
 部署到 `/opt/rdagent/lib/python3.11/site-packages/rdagent/scenarios/qlib/proposal/`，
 由补丁（`tests/scripts/spike/patch-explored-feedback.py`）在
-`QlibFactorHypothesisGen.prepare_context` 的 `hypothesis_and_feedback` 末尾追加本块。
+`QlibFactorHypothesisGen.prepare_context` 的 `hypothesis_and_feedback` 末尾追加本块；
+`render_contract_block()` 由 `patch-prompt-contract.py` 注入 prompt 模板本体的
+任务指令层（`hypothesis_specification` 前置，每轮生效）。
 
 契约：文件缺失/损坏/字段异常 → 返回空串（fail-safe，绝不阻断生成）；
 渲染结果超过 MAX_CHARS → 截断并标注；不修改任何全局状态。
@@ -24,6 +26,8 @@ DEFAULT_PATH = "/mnt/d/WorkSpace/finance_analysis_agent/data/factor_research/exp
 MAX_CHARS = 9000
 _DESC_CHARS = 110
 _EXPR_CHARS = 90
+# 任务指令层契约段预算：模板本体占位须小（全量白名单已随记忆块给出，本段做摘要）。
+TEMPLATE_CONTRACT_MAX_CHARS = 1600
 
 
 def _format_item(item: dict) -> str:
@@ -71,6 +75,51 @@ def _render_contract(contract: dict, gate_rejections: dict | None) -> list[str]:
         pairs = ", ".join(f"gate{k}={v}" for k, v in sorted(gate_rejections.items()))
         lines.append(f"- Historical gate rejections to date: {pairs} (advisory).")
     return lines
+
+
+def render_contract_block(path: str | None = None) -> str:
+    """任务指令层契约段（prompt 模板本体注入用）：同源读载荷 ``contract`` 块。
+
+    与 ``render_explored_block`` 的契约段同源（同一 ``contract`` 块派生，数值一致
+    由同源结构性保证）；差异只在表达形态——本段做摘要（规则/复杂度/字段全量，
+    算子给总数+样例），避免与记忆块的全量白名单双份挤占 prompt 预算。
+    fail-safe：源缺失/损坏/无契约 → 空串（不阻断生成、不虚构契约）；
+    超 ``TEMPLATE_CONTRACT_MAX_CHARS`` → 截断并标注。
+    """
+    resolved = Path(path or os.environ.get("FACTOR_FEEDBACK_PATH", DEFAULT_PATH))
+    try:
+        payload: Any = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    contract = payload.get("contract")
+    if not isinstance(contract, dict) or not contract:
+        return ""
+    lines = ["# Hard contract for factor expressions (BINDING, checked BEFORE evaluation):"]
+    rules = contract.get("rules")
+    if isinstance(rules, list):
+        for rule in rules:
+            if isinstance(rule, str) and rule.strip():
+                lines.append(f"- {rule.strip()}")
+    complexity = contract.get("complexity")
+    if isinstance(complexity, dict) and complexity:
+        parts = [f"{k} <= {v}" for k, v in sorted(complexity.items())]
+        lines.append(f"- Complexity limits: {', '.join(parts)}.")
+    operators = contract.get("operators")
+    if isinstance(operators, list) and operators:
+        sample = ", ".join(str(o) for o in operators[:8])
+        lines.append(
+            f"- Expressible operators: {len(operators)} kinds in total (examples: {sample}); "
+            "any operator not listed is inexpressible — do not use it."
+        )
+    fields = contract.get("fields")
+    if isinstance(fields, list) and fields:
+        lines.append(f"- Expressible fields: {', '.join(str(f) for f in fields)}.")
+    text = "\n".join(lines)
+    if len(text) > TEMPLATE_CONTRACT_MAX_CHARS:
+        text = text[:TEMPLATE_CONTRACT_MAX_CHARS] + "\n(truncated)"
+    return text
 
 
 def render_explored_block(path: str | None = None) -> str:
