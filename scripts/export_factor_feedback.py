@@ -46,6 +46,11 @@ def main(argv: list[str] | None = None) -> int:
         default=PER_GATE_FLOOR,
         help="rejected 档每闸保底出场条数（累计不足则全量；余量按占比）",
     )
+    parser.add_argument(
+        "--library-db",
+        default=None,
+        help="因子库路径（风格缺口定向块数据源；缺省走 FACTOR_LIBRARY_DB_PATH 环境变量）",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -56,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             untranslatable_quota=args.untranslatable_quota,
             gate_floor=args.gate_floor,
+            library_db_path=args.library_db,
         )
     except (OSError, ValueError) as exc:
         print(f"export failed: {exc}", file=sys.stderr)
@@ -66,7 +72,8 @@ def main(argv: list[str] | None = None) -> int:
         f"wrote {args.out}: explored={payload['total_explored']} returned={payload['returned']} "
         f"admitted={counts.get('admitted', 0)} rejected={counts.get('rejected', 0)} "
         f"untranslatable={counts.get('untranslatable', 0)} "
-        f"contract={'yes' if payload.get('contract') else 'no'}"
+        f"contract={'yes' if payload.get('contract') else 'no'} "
+        f"style_gap={'yes' if payload.get('style_gap') else 'no'}"
     )
     return 0
 
