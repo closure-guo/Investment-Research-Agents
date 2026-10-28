@@ -68,6 +68,7 @@ from finance_agent.factors.readiness import (  # noqa: E402
     factor_signal_payload,
 )
 from finance_agent.factors.tools import IC_WINDOW as FACTOR_IC_WINDOW  # noqa: E402
+from finance_agent.failure_text import failure_reason_text  # noqa: E402
 from finance_agent.graph import build_5layer_graph  # noqa: E402
 from finance_agent.langfuse_tracing import get_langfuse  # noqa: E402
 from finance_agent.llm import LLMConfig  # noqa: E402
@@ -80,11 +81,13 @@ from finance_agent.memory.semantic import (  # noqa: E402
 )
 from finance_agent.models import HoldingsContext  # noqa: E402
 from finance_agent.pipeline_runner import PipelineRunner, build_layer_tree  # noqa: E402
+from finance_agent.screening import rules_config  # noqa: E402
 from finance_agent.screening.freshness import screening_freshness_removals  # noqa: E402
 from finance_agent.screening.pipeline import (  # noqa: E402
     latest_successful_pool,
 )
 from finance_agent.screening.pool_analysis import (  # noqa: E402
+    list_pool_analysis_runs,
     prepare_pool_analysis_batch,
 )
 from finance_agent.screening.queue import AnalyzeQueue  # noqa: E402
@@ -1914,7 +1917,9 @@ def _run_graph_streaming(
         # DataFrame truth value ambiguous）完全无法定位
         import traceback as _tb
 
-        update_session_status(session_id, "failed", failure_reason=f"{type(e).__name__}: {e}")
+        update_session_status(
+            session_id, "failed", failure_reason=failure_reason_text(e, context="管线事件流")
+        )
         yield _sse(
             {
                 "type": "error",
@@ -2212,7 +2217,7 @@ async def _run_chat_task(
             update_session_status,
             session_id,
             "failed",
-            failure_reason=f"{type(exc).__name__}: {exc}",
+            failure_reason=failure_reason_text(exc, context="聊天分析事件流"),
         )
         # error 终态显式发布（收拢到 publish_terminal 重试兜底，与
         # _run_react_analysis except 对齐）。终态 CAS 拒绝返回 0 静默容忍；
@@ -2223,7 +2228,7 @@ async def _run_chat_task(
                 {
                     "type": "error",
                     "session_id": session_id,
-                    "message": f"{type(exc).__name__}: {exc}",
+                    "message": failure_reason_text(exc, context="聊天分析事件流"),
                 },
             )
         except Exception:
@@ -2424,7 +2429,7 @@ async def _run_react_analysis(
             update_session_status,
             session_id,
             "failed",
-            failure_reason=f"{type(exc).__name__}: {exc}",
+            failure_reason=failure_reason_text(exc, context="分析事件流"),
         )
         # error 终态显式发布（收拢到 publish_terminal 重试兜底，发布前冲刷残余
         # pending）。经 registry.start 包装运行时，_run_task 的自动 error 被
@@ -2437,7 +2442,7 @@ async def _run_react_analysis(
                 {
                     "type": "error",
                     "session_id": session_id,
-                    "message": f"{type(exc).__name__}: {exc}",
+                    "message": failure_reason_text(exc, context="分析事件流"),
                 },
             )
         except Exception:
@@ -3662,6 +3667,39 @@ async def put_analysis_concurrency(req: AnalysisConcurrencyUpdate) -> dict[str, 
     return payload
 
 
+# ── 选股规则设置（delta add-screening-rules-config-ui）──
+
+
+class ScreeningRulesUpdate(BaseModel):
+    """保存入参：三项整体校验由 rules_config.save 统一执行（非法 → 400）。"""
+
+    min_trading_days: Any = None
+    min_avg_amount_20d: Any = None
+    l2_top_n: Any = None
+
+
+@app.get("/api/settings/screening-rules")
+async def get_screening_rules() -> dict[str, Any]:
+    """选股规则配置（只读）：逐项生效值 + 来源 + 区间 + env 披露 + file_status。"""
+    return await asyncio.to_thread(rules_config.resolve)
+
+
+@app.put("/api/settings/screening-rules")
+async def put_screening_rules(req: ScreeningRulesUpdate) -> dict[str, Any]:
+    """保存选股规则：整体校验 → 原子落盘；下一批次生效（运行中批次不受影响）。"""
+    try:
+        return await asyncio.to_thread(
+            rules_config.save,
+            {
+                "min_trading_days": req.min_trading_days,
+                "min_avg_amount_20d": req.min_avg_amount_20d,
+                "l2_top_n": req.l2_top_n,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 # 降级披露文案（add-screening-empty-library-fallback：单源在后端，前端原样渲染；
 # MUST 明示「非因子信号」——spec「无可打分因子降级通道」披露义务）
 _SCREENING_FALLBACK_NOTICE = (
@@ -3841,6 +3879,11 @@ def submit_pool_analysis_batch(
 
     只等待「建会话 + 入队」完成（通常 <1s/标的），不等待分析本身；分析由
     ``AnalyzeQueue`` 在后台补位执行并复用既有 SSE/journal。
+
+    交付等待超时 ≠ 派发失败（issue #490）：prepare 在 ``to_thread`` 里每建好一只
+    就落库（queued），超时只说明「主循环交付结果来不及返回」，行已派发。超时时
+    查当日 ``pool_analysis_runs`` 如实披露已派发行数（``timeout_partial``），
+    不再空手抛出——否则 job 历史是一条空失败、系统实际在跑。
     """
     loop = _MAIN_LOOP
     if loop is None or loop.is_closed():
@@ -3853,7 +3896,33 @@ def submit_pool_analysis_batch(
             enqueue=_enqueue_pool_analysis,
         )
 
-    return asyncio.run_coroutine_threadsafe(_run(), loop).result(timeout=timeout)
+    future = asyncio.run_coroutine_threadsafe(_run(), loop)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()  # to_thread 不可中断，尽力而为；结果被丢弃不影响已落库行
+        day = datetime.now().strftime("%Y-%m-%d")
+        try:
+            rows = list_pool_analysis_runs(day)
+        except Exception:  # noqa: BLE001 - 披露失败不得把超时升级成崩溃
+            rows = []
+        queued = sum(1 for row in rows if row.get("status") == "queued")
+        _logger.warning(
+            "池分析派发交付超时（%.0fs），已落库 %d 只（queued=%d），分析由 AnalyzeQueue 后台接续",
+            timeout,
+            len(rows),
+            queued,
+        )
+        return {
+            "trade_date": day,
+            "status": "timeout_partial",
+            "dispatched_so_far": len(rows),
+            "queued": queued,
+            "note": (
+                f"等待派发交付超时（{timeout:.0f}s）；已落库 {len(rows)} 只，"
+                "分析由 AnalyzeQueue 后台接续，勿按失败重跑"
+            ),
+        }
 
 
 def submit_report_trigger_batch(
@@ -4380,8 +4449,15 @@ def _factors_payload() -> list[dict[str, Any]]:
 
 
 def _factor_detail_payload(factor_id: int) -> dict[str, Any] | None:
-    """详情载荷：摘要字段 + IC 序列（近 60 点升序）+ 事件历史；无该因子 → None。"""
-    row = next((item for item in list_factors() if int(item["id"]) == factor_id), None)
+    """详情载荷：摘要字段 + IC 序列（近 60 点升序）+ 事件历史；无该因子 → None。
+
+    按 id 直查含拒绝池行（只读诊断：IC 跟踪序列可经详情接口观测）；列表接口
+    维持排除（见 ``list_factors`` 缺省排除语义）。
+    """
+    row = next(
+        (item for item in list_factors(include_rejected=True) if int(item["id"]) == factor_id),
+        None,
+    )
     if row is None:
         return None
     events = list_events(factor_id)

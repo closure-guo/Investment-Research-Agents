@@ -147,3 +147,65 @@ class TestCatchUpJobOrder:
         )
         outcome = catch_up_job()
         assert outcome["planned"] == ["screening_daily"]
+
+
+class TestSweepReconcilesPoolAnalysis:
+    """issue #489：清扫同一时机回写池分析运行行——会话终态不得等下一次编排（最长 24h）。
+
+    2026-10-26 生产实证：10 会话全 failed，行停 ``queued``；10-27 11:08 重启的启动
+    清扫只动 job_runs，行仍 ``queued``，直到 16:22 编排起跑才 ``reconciled=10``。
+    """
+
+    _SEED_DAY = "2026-10-26"
+    _SEED_SYMBOL = "688008"
+
+    def _seed_row_with_terminal_session(self, status: str, reason: str | None) -> None:
+        from finance_agent import session_store
+        from finance_agent.screening import pool_analysis
+
+        sid = session_store.create_session(
+            stock_code="",
+            stock_name="",
+            display_name="688008 自动选股分析",
+            status="clarifying",
+            session_type="analysis",
+        )
+        session_store.update_session_status(sid, status, reason)
+        pool_analysis.record_pool_analysis_run(self._SEED_DAY, self._SEED_SYMBOL, sid, "queued")
+
+    def test_failed_session_heals_row_on_sweep(self, tmp_path):
+        from finance_agent.screening import pool_analysis
+
+        self._seed_row_with_terminal_session("failed", "TimeoutError: ")
+
+        sweep_stale_running(db_path=tmp_path / "ops.db")
+
+        row = pool_analysis.get_pool_analysis_run(self._SEED_DAY, self._SEED_SYMBOL)
+        assert row["status"] == "failed"
+        assert "TimeoutError" in str(row["error"])
+
+    def test_completed_session_heals_row_on_sweep(self, tmp_path):
+        from finance_agent.screening import pool_analysis
+
+        self._seed_row_with_terminal_session("completed", None)
+
+        sweep_stale_running(db_path=tmp_path / "ops.db")
+
+        row = pool_analysis.get_pool_analysis_run(self._SEED_DAY, self._SEED_SYMBOL)
+        assert row["status"] == "completed"
+        assert row["error"] is None
+
+    def test_reconcile_failure_does_not_block_sweep(self, tmp_path, monkeypatch):
+        """清扫与回写同点位的失败隔离：回写抛错不得吞掉悬挂行清扫结果（#455 纪律）。"""
+        import finance_agent.screening.pool_analysis as pool_analysis_module
+
+        db = tmp_path / "ops.db"
+        run_id = insert_job_run("screening_daily", "scheduled", "running", db_path=db)
+        _backdate(db, run_id)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("reconcile broken")
+
+        monkeypatch.setattr(pool_analysis_module, "reconcile_pool_analysis_runs", boom)
+
+        assert sweep_stale_running(db_path=db) == [run_id]

@@ -28,7 +28,7 @@ import pytest
 from finance_agent.data.snapshot import set_meta_many, write_snapshot_rows
 from finance_agent.factors.eval_engine import MarketPanel, build_panel_from_rows
 from finance_agent.factors.library import add_factor, record_ic
-from finance_agent.screening import pipeline
+from finance_agent.screening import pipeline, rules_config
 from finance_agent.screening.ranker import Candidate
 from finance_agent.screening.store import (
     consecutive_days_in_top,
@@ -295,6 +295,93 @@ def test_batch_drops_excluded_from_pool(ws: _Workspace) -> None:
     assert result["status"] == "ok"
     assert result["l3_keep"] == 2
     assert result["pool_size"] == 1
+    assert [row["symbol"] for row in list_selection_pool(_AS_OF, db_path=ws.screening_db)] == [
+        "600519"
+    ]
+
+
+def test_main_lane_reads_rules_config(
+    ws: _Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """主档批次（thresholds 缺省路径）从运行时配置取 Top-N（add-screening-rules-config-ui）。"""
+    config_path = tmp_path / "screening_rules.json"
+    config_path.write_text(
+        json.dumps({"min_trading_days": 60, "min_avg_amount_20d": 5e7, "l2_top_n": 1}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(rules_config.ENV_VAR_PATH, str(config_path))
+
+    result = _run(ws)
+
+    assert result["status"] == "ok"
+    assert result["l2_top"] == 1
+    l2_symbols = [row["symbol"] for row in list_l2_candidates(_AS_OF, db_path=ws.screening_db)]
+    assert len(l2_symbols) == 1
+
+
+def test_microcap_lane_ignores_rules_config(
+    ws: _Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式 thresholds（小票通道）完全绕过运行时配置：配置若被读取（250 日/9e8 元）
+    L1 应为 0 通过，实际仍按 MICROCAP_THRESHOLDS 通过 3 只正常标的。"""
+    config_path = tmp_path / "screening_rules.json"
+    config_path.write_text(
+        json.dumps({"min_trading_days": 250, "min_avg_amount_20d": 9e8, "l2_top_n": 1}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(rules_config.ENV_VAR_PATH, str(config_path))
+
+    result = pipeline.run_microcap_lane_daily(
+        as_of=_AS_OF,
+        panel=ws.panel,
+        events_by_symbol={},
+        triage_client=_ScriptedClient(),
+        db_path=ws.screening_db,
+        snapshot_db_path=ws.snapshot_db,
+        library_db_path=ws.library_db,
+    )
+
+    assert result["status"] == "ok"
+    assert result["l1_passed"] == 3
+
+
+def _seed_mode_row(ws: _Workspace, trade_date: str, mode: str) -> None:
+    record_screening_batch(
+        trade_date,
+        status="ok",
+        started_at=f"{trade_date}T15:40:00",
+        finished_at=f"{trade_date}T16:09:00",
+        l2_top=1,
+        pool_rows=(),
+        selection_mode=mode,
+        db_path=ws.screening_db,
+    )
+
+
+def test_batch_pool_eligibility_uses_batch_mode_not_mixed_axis(ws: _Workspace) -> None:
+    """日批资格判定以当日 selection_mode 定轴（fix-stability-gate-mode-axis）。
+
+    生产 10-27 形态：600519 因子口径命中 [当日,-6,-5] = 3 → 入池；旧行为（当日批次行
+    未落库 → 混合轴 [当日,-2,-3,-4,-5]）把它数成 2、反而让 fallback 日在榜的 000001
+    混到 4 命中入池——两者在两种口径下恰好互换，判别力最强。
+    """
+    _cal = _CALENDAR
+    _seed_l2(ws.screening_db, _cal[-6], ["600519"])
+    _seed_l2(ws.screening_db, _cal[-5], ["600519"])
+    _seed_l2(ws.screening_db, _cal[-4], ["000001"])  # 600519 模式内单日跌出
+    _seed_l2(ws.screening_db, _cal[-3], ["000001"])
+    _seed_l2(ws.screening_db, _cal[-2], ["000001"])
+    _seed_mode_row(ws, _cal[-6], "factor")
+    _seed_mode_row(ws, _cal[-5], "factor")
+    _seed_mode_row(ws, _cal[-4], "factor")
+    _seed_mode_row(ws, _cal[-3], "fallback")
+    _seed_mode_row(ws, _cal[-2], "fallback")
+
+    result = _run(ws)
+
+    assert result["status"] == "ok"
+    assert result["selection_mode"] == "factor"
+    # 同模式轴 [当日,-6,-5,-4]：600519 命中 3 → 入池；000001 命中 2 → 出池
     assert [row["symbol"] for row in list_selection_pool(_AS_OF, db_path=ws.screening_db)] == [
         "600519"
     ]

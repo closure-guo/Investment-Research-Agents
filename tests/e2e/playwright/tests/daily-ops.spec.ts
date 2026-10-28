@@ -9,10 +9,16 @@ import { expect, test, type APIRequestContext } from '@playwright/test'
  * 用例串行（serial）：共享同一 screening 库，seed/screening_reset 互相覆盖，并行会
  * 互踩；每例前后均 reset（同 screening-page.spec / broker-console.spec 隔离纪律）。
  *
- * 时间线断言不依赖运行历史状态（共享 ops DB 的 job_runs 可能有历史行）：
- * 注册表 10 项与排程时刻来自后端 SCHEDULES（数据驱动载荷），运行态只断言
- * 「徽章 ∈ 五态」这一不变量；「补跑」用例允许 ok/failed 两个终态（integrity_check
- * 依赖 sessions 库表存在与否，沿 eval-ops-console.spec 手动补跑先例）。
+ * 时间线断言依赖冻结的 ops 状态时钟（issue #503）：「今日漏跑」覆盖层（#472）由服务器
+ * 时钟判定（当天计划时刻已过且当天无运行行），真实时钟下 CI 落在 UTC 15:30 后
+ * （runner naive UTC 被 scheduled_fire_time 按上海时区解读）15:30 行情快照必判漏跑，
+ * 徽章文本五态白名单必红——#496/#501 的 stub 红均为此 flake（main 同红实证）。
+ * beforeAll 经 /api/test/seed ``ops.now`` 冻结到周二 09:00（早于全部日批排程 15:30+；
+ * 月批非排程日 → fire=None），missed_today 恒 false，五态不变量确定性成立；
+ * afterAll 解除冻结 + 清运行行，不污染共享后端上的其他 spec（本文件是默认套件唯一
+ * 打 /api/v1/ops 的 spec）。注册表项与排程时刻仍来自后端 SCHEDULES（数据驱动载荷）；
+ * 「补跑」用例允许 ok/failed 两个终态（integrity_check 依赖 sessions 库表存在与否，
+ * 沿 eval-ops-console.spec 手动补跑先例；run 端点无时钟门禁，冻结不影响其语义）。
  *
  * 运行命令（默认端口 8000/5173 被 Docker 生产栈占用时改跑 isolated config——
  * 该 config 已按 add-broker-console 先例注入 SCREENING_DB_PATH，
@@ -23,6 +29,11 @@ test.describe.configure({ mode: 'serial', timeout: 60_000 })
 
 const OK_DATE = '2026-10-13'
 const FAILED_DATE = '2026-10-14'
+
+/** ops 状态时钟冻结面（issue #503，机制同 ops-missed-badge.spec 的 FROZEN_THURSDAY_1610）：
+ *  周二 09:00 早于全部日批排程（15:30+），月批（每月 1 日）非排程日 → missed_today 恒
+ *  false，时间线徽章恒五态。「今日漏跑」的确定性覆盖由 ops-missed-badge.spec 承担。 */
+const FROZEN_TUESDAY_0900 = '2026-10-13T09:00:00'
 
 /**
  * 造数 API 基址：取 config ``use.baseURL`` 的 origin 并把 localhost 换成 127.0.0.1
@@ -90,6 +101,21 @@ async function seedBatchHistory(request: APIRequestContext) {
   })
   expect(resp.ok()).toBeTruthy()
 }
+
+async function seedOps(request: APIRequestContext, body: Record<string, unknown>) {
+  const resp = await request.post(`${apiBase()}/api/test/seed`, { data: body })
+  expect(resp.ok()).toBeTruthy()
+}
+
+test.beforeAll(async ({ request }) => {
+  // 冻结 ops 状态时钟 + 清共享测试库的 job_runs 残留（本地库可能有历史行）；
+  // afterAll 解除冻结，不污染共享后端上的其他 spec。
+  await seedOps(request, { ops_runs_reset: true, ops: { now: FROZEN_TUESDAY_0900 } })
+})
+
+test.afterAll(async ({ request }) => {
+  await seedOps(request, { ops_runs_reset: true, ops: { now: null } })
+})
 
 test.beforeEach(async ({ request }) => {
   await resetScreening(request)
@@ -169,7 +195,9 @@ test('当日时间线：注册表全部任务按排程时刻升序渲染，每�
   await expect(items.nth(27)).toContainText('20:30')
   await expect(items.nth(27)).toContainText('每日汇报')
 
-  // 每项状态徽章 ∈ 五态（成功/失败/未跑/运行中/跳过；运行历史不由本 spec 控制，只断言枚举不变量）
+  // 每项状态徽章 ∈ 五态（成功/失败/未跑/运行中/跳过；ops 时钟已冻结 + job_runs 已清
+  // （beforeAll），徽章确定性落在「未跑」；「今日漏跑」覆盖层的确定性覆盖归
+  // ops-missed-badge.spec）
   for (let index = 0; index < 28; index += 1) {
     const badge = items.nth(index).getByTestId('status-badge')
     await expect(badge).toHaveAttribute('data-status', /^(active|failed|retired|running|degraded)$/)

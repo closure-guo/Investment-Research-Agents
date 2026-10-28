@@ -248,7 +248,8 @@ def _factor_facts(path: Path) -> dict[str, Any]:
     window = [str(row["trade_date"]) for row in dates]
     factors = _read(
         path,
-        "SELECT id, expression, status FROM factors ORDER BY id",
+        # 拒绝池行（rejected）不进日报因子区（add-rejected-factor-pool：既有读路径不可见）
+        "SELECT id, expression, status FROM factors WHERE status != 'rejected' ORDER BY id",
     )
     per_factor: list[dict[str, Any]] = []
     if window:

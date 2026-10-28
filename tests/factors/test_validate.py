@@ -309,7 +309,9 @@ def test_admit_candidates_rejects_low_coverage(tmp_path):
     assert result.rejected_gate == 1
     assert result.gates[1].reason == "LOW_COVERAGE"
     assert result.gates[0].passed is True
+    # add-rejected-factor-pool：闸①拒收持久化进拒绝池，默认读视图仍不可见
     assert list_factors(db_path=db) == []
+    assert len(list_factors(status="rejected", db_path=db)) == 1
 
 
 def test_admit_candidates_rejects_weak_icir(tmp_path):
@@ -322,7 +324,9 @@ def test_admit_candidates_rejects_weak_icir(tmp_path):
     assert result.gates[1].passed is True
     assert result.gates[2].reason == "WEAK_ICIR"
     assert result.gates[2].detail["n_samples"] >= 30
+    # add-rejected-factor-pool：闸②拒收持久化进拒绝池，默认读视图仍不可见
     assert list_factors(db_path=db) == []
+    assert len(list_factors(status="rejected", db_path=db)) == 1
 
 
 def test_admit_candidates_admits_strong_factor_end_to_end(tmp_path):
@@ -1547,3 +1551,78 @@ def test_monotonicity_rejection_wired_into_gate2(tmp_path) -> None:
     entries = list_ledger_entries(db_path=tmp_path / "lib.db")
     # 账本 rejected_gate 列为 TEXT 型（SQLite 亲和），admitted 还原为布尔
     assert str(entries[0]["rejected_gate"]) == "2" and entries[0]["admitted"] is False
+
+
+def test_admitted_factor_persists_orientation(tmp_path):
+    """入库因子行持久化闸④训练段定向符号（add-factor-direction-reversal-monitor）。"""
+    db = _empty_db(tmp_path)
+    result = admit_candidates([_candidate("volume")], _signal_panel(), seed=1, db_path=db)[0]
+    gate4 = next(gate for gate in result.gates if gate.gate == 4)
+    rows = {row["id"]: row for row in list_factors(db_path=db)}
+    assert rows[result.factor_id]["orientation"] == gate4.detail["orientation"]
+    assert rows[result.factor_id]["orientation"] in (-1, 1)
+
+
+# ── 拒绝池持久化（add-rejected-factor-pool T2）──────────────────────────────
+
+
+def test_admit_candidates_persists_gate1_rejected_row(tmp_path):
+    """闸①拒收候选持久化为 rejected 行 + created 事件（detail 携带闸口/原因/读数）。"""
+    db = _empty_db(tmp_path)
+    results = admit_candidates(
+        [_candidate("delta(close,200)")], _signal_panel(), seed=1, db_path=db
+    )
+    assert results[0].rejected_gate == 1
+    rejected = list_factors(status="rejected", db_path=db)
+    assert len(rejected) == 1
+    assert rejected[0]["expression"] == "delta(close,200)"
+    assert rejected[0]["status"] == "rejected"
+    events = list_events(int(rejected[0]["id"]), db_path=db)
+    assert [e["event"] for e in events] == ["created"]
+    assert events[0]["detail"]["gate"] == 1
+    assert events[0]["detail"]["reason"] == "LOW_COVERAGE"
+
+
+def test_admit_candidates_persists_gate2_rejected_row(tmp_path):
+    """闸②拒收候选持久化：事件 detail 携带闸②原因码与判定读数。"""
+    db = _empty_db(tmp_path)
+    results = admit_candidates([_candidate("amount")], _signal_panel(), seed=1, db_path=db)
+    assert results[0].rejected_gate == 2
+    rejected = list_factors(status="rejected", db_path=db)
+    assert len(rejected) == 1
+    events = list_events(int(rejected[0]["id"]), db_path=db)
+    assert events[0]["detail"]["gate"] == 2
+    assert events[0]["detail"]["reason"] == "WEAK_ICIR"
+    assert "n_samples" in events[0]["detail"]
+
+
+def test_admit_candidates_same_batch_duplicates_upsert_not_duplicate_rows(tmp_path):
+    """同批逐字重复双双拒收 → 拒绝池单行 + created/re_rejected 两事件。"""
+    db = _empty_db(tmp_path)
+    admit_candidates(
+        [_candidate("amount"), _candidate("amount")], _signal_panel(), seed=1, db_path=db
+    )
+    rejected = list_factors(status="rejected", db_path=db)
+    assert len(rejected) == 1
+    events = list_events(int(rejected[0]["id"]), db_path=db)
+    assert [e["event"] for e in events] == ["created", "re_rejected"]
+
+
+def test_admit_candidates_gate0_duplicate_not_persisted(tmp_path):
+    """闸0 拒收（库内已有同构）不落拒绝池——查重范围语义不变。"""
+    db, _seeded = _seed_library(tmp_path)
+    admit_candidates([_candidate("ts_mean(close,11)")], _signal_panel(), seed=1, db_path=db)
+    assert list_factors(status="rejected", db_path=db) == []
+    assert len(list_factors(db_path=db)) == 1
+
+
+def test_admit_candidates_ledger_rejection_factor_id_stays_null(tmp_path):
+    """账本口径不变：拒收行 ledger.factor_id 仍 NULL（不回填拒绝池 id）。"""
+    from finance_agent.factors.library import list_ledger_entries
+
+    db = _empty_db(tmp_path)
+    admit_candidates([_candidate("amount")], _signal_panel(), seed=1, db_path=db)
+    entries = list_ledger_entries(db_path=db)
+    assert len(entries) == 1
+    assert entries[0]["admitted"] == 0
+    assert entries[0]["factor_id"] is None

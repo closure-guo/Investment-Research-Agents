@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
+from datetime import datetime
 
 from finance_agent import api
 from finance_agent.outcome.ops.jobs import JOB_FUNCS, JOB_IDS, JOB_LABELS, SCHEDULES
@@ -86,3 +88,43 @@ def test_submit_batch_raises_without_loop(monkeypatch):
         assert "主事件循环不可用" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected RuntimeError")
+
+
+def test_submit_batch_timeout_reports_dispatched_so_far(monkeypatch):
+    """等待交付超时 ≠ 派发失败（issue #490）：返回已落库行数摘要，不空手抛错。
+
+    2026-10-26 三连 TimeoutError 时 10 个会话其实都已建好、管线已启动——job 视角
+    却是空失败。超时后须查当日 pool_analysis_runs 如实披露「已派发 N 只」。
+    """
+    loop = asyncio.new_event_loop()
+    ready = threading.Event()
+
+    def _run() -> None:
+        asyncio.set_event_loop(loop)
+        ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    assert ready.wait(2.0)
+    try:
+        monkeypatch.setattr(api, "_MAIN_LOOP", loop)
+
+        def _slow_prepare(**kwargs):  # 交付必晚于 0.1s 超时窗
+            time.sleep(0.6)
+            return {"status": "ok"}
+
+        monkeypatch.setattr(api, "prepare_pool_analysis_batch", _slow_prepare)
+        day = datetime.now().strftime("%Y-%m-%d")
+        pool_analysis.record_pool_analysis_run(day, "600150", "sid-600150", "queued")
+        pool_analysis.record_pool_analysis_run(day, "600176", "sid-600176", "queued")
+
+        out = api.submit_pool_analysis_batch(timeout=0.1)
+
+        assert out["status"] == "timeout_partial"
+        assert out["dispatched_so_far"] == 2
+        assert "2" in out["note"]
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(2.0)
+        loop.close()

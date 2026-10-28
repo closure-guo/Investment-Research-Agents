@@ -36,6 +36,7 @@ from finance_agent.factors.library import (
     list_factors,
     list_ic_series,
     record_ic,
+    set_orientation,
 )
 from finance_agent.factors.monitor import run_factor_decay_monitor, run_factor_monitor
 from finance_agent.outcome.ops.jobs import JOB_FUNCS, JOB_IDS, JOB_LABELS, SCHEDULES
@@ -248,7 +249,11 @@ def test_run_factor_monitor_empty_library_is_noop(tmp_path):
         "checked": 0,
         "skipped": 0,
         "degraded": [],
+        "reversed": [],
         "judged": [],
+        "rejected_checked": 0,
+        "rejected_recorded": 0,
+        "rejected_days_recorded": 0,
     }
 
 
@@ -439,3 +444,116 @@ def test_run_factor_monitor_routine_day_writes_exactly_one_new_day(tmp_path):
     result = run_factor_monitor(_daily_ic_panel(), _day(_MONITOR_DATES - 1), db_path=db)
     assert result["days_recorded"] == 1
     assert len(list_ic_series(factor_id, db_path=db)) == 80
+
+
+# ── 方向反转判据（add-factor-direction-reversal-monitor） ────────────────────
+
+
+def _active_factor_with_orientation(tmp_path, orientation: int):
+    """建库 + active 因子 + 写入入池定向符号。"""
+    db, factor_id = _active_factor(tmp_path)
+    set_orientation(factor_id, orientation, db_path=db)
+    return db, factor_id
+
+
+def test_run_factor_monitor_degrades_on_reversal_for_negative_orientation(tmp_path):
+    """定向 -1（负向因子）滚动均值连续 20 点为正 → DIRECTION_REVERSAL 降级。"""
+    db, factor_id = _active_factor_with_orientation(tmp_path, -1)
+    # 前 79 天 IC 全 +0.05；本次记录 -0.02 → 60 日窗均值仍 > 0（≈ +0.049）
+    _craft_history(db, factor_id, [0.05] * _CRAFTED_DATES)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+
+    assert result["reversed"] == [factor_id]
+    assert result["degraded"] == [factor_id]
+    assert result["judged"][0]["reversal"] is True
+    rows = list_factors(db_path=db)
+    assert rows[0]["status"] == "degraded"
+    events = list_events(factor_id, db_path=db)
+    assert events[-1]["detail"]["reason"] == "DIRECTION_REVERSAL"
+    assert events[-1]["detail"]["orientation"] == -1
+
+
+def test_run_factor_monitor_reversal_requires_twenty_positive_points(tmp_path):
+    """末 5 个滚动点为正、前 15 个为负 → 反转窗口未满足，不降级。"""
+    db, factor_id = _active_factor_with_orientation(tmp_path, -1)
+    # 造序列：前 70 点 -0.05、后 9 点 +0.5、本次 -0.02 →
+    # 滚动点 60..74 均值 < 0，75..79 均值 > 0（仅 5 个正点）
+    _craft_history(db, factor_id, [-0.05] * 70 + [0.5] * 9)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+
+    assert result["reversed"] == []
+    assert result["degraded"] == []
+    assert result["judged"][0]["reversal"] is False
+    rows = list_factors(db_path=db)
+    assert rows[0]["status"] == "active"
+
+
+def test_run_factor_monitor_reversal_skipped_when_orientation_unknown(tmp_path):
+    """定向 0（不可定）→ 反转判据不触发（全正序列仅走原衰减判据且不命中）。"""
+    db, factor_id = _active_factor_with_orientation(tmp_path, 0)
+    _craft_history(db, factor_id, [0.05] * _CRAFTED_DATES)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+
+    assert result["reversed"] == []
+    assert result["degraded"] == []
+    rows = list_factors(db_path=db)
+    assert rows[0]["status"] == "active"
+
+
+# ── 拒绝池 IC 跟踪（add-rejected-factor-pool T4）────────────────────────────
+
+
+def _rejected_volume_factor(db: str) -> int:
+    """建一条 rejected 行（``volume`` 命中面板构造信号），返回 factor_id。"""
+    from finance_agent.factors.library import record_rejected_factor
+
+    return int(
+        record_rejected_factor(
+            expression="volume",
+            hypothesis="曾于闸②拒收的量因子",
+            category="价量",
+            ast_json="volume",
+            source="harvest",
+            gate=2,
+            reason="WEAK_ICIR",
+            detail={},
+            db_path=db,
+        )["factor_id"]
+    )
+
+
+def test_run_factor_monitor_records_ic_for_rejected_rows(tmp_path):
+    """日批为 rejected 行缺口回填记 IC（同 active 口径、幂等 upsert）。"""
+    db = _db(tmp_path)
+    rid = _rejected_volume_factor(db)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+    assert result["rejected_checked"] == 1
+    assert result["rejected_recorded"] == 1
+    assert result["rejected_days_recorded"] >= 1
+    assert len(list_ic_series(rid, db_path=db)) >= 1
+    # 幂等重跑：不再新增
+    rerun = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+    assert rerun["rejected_days_recorded"] == 0
+    assert rerun["rejected_recorded"] == 1
+
+
+def test_rejected_rows_never_degrade_or_transition(tmp_path):
+    """rejected 行滚动 IC 全负也不触发降级/任何状态迁移（degraded 判定仅限 active）。"""
+    db = _db(tmp_path)
+    rid = _rejected_volume_factor(db)
+    _craft_history(db, rid, [-0.5] * 40)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+    assert result["degraded"] == []
+    rows = {int(row["id"]): row for row in list_factors(include_rejected=True, db_path=db)}
+    assert rows[rid]["status"] == "rejected"
+    assert list_events(rid, db_path=db)[0]["event"] == "created"  # 无 status_change 事件
+
+
+def test_monitor_summary_rejected_fields_zero_without_pool(tmp_path):
+    """无 rejected 行时拒绝池读数归零；既有 active 侧字段语义不变。"""
+    db, _fid = _active_factor(tmp_path)
+    result = run_factor_monitor(_monitor_panel(), _day(_MONITOR_DATES - 1), db_path=db)
+    assert result["rejected_checked"] == 0
+    assert result["rejected_recorded"] == 0
+    assert result["rejected_days_recorded"] == 0
+    assert result["recorded"] == 1  # active 侧照旧

@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -61,7 +62,50 @@ DEFAULT_BATCH_LIMIT = 60
 DEFAULT_MAX_BATCHES_PER_RUN = 12
 # 聚合摘要里保留的拒收明细上限（job_runs 摘要体积保护）
 MAX_AGGREGATED_REJECTIONS = 100
-DEFAULT_CATEGORY = "外部"
+# 机理分桶（update-harvest-factor-category）：有序关键词表，首中即停。顺序刻意：
+# 量价交互先于量与流动性/动量反转——标签 "[Price-Volume ...]" 含 "volume"，且
+# "volume adjusted reversal" 应归动量反转而非量族。只匹配**首个方括号机理标签**
+# + 因子名（正文里的跨族提及不计——实测 volume_autocorr 正文含 "price-volume
+# correlation family"，整段匹配会误分类）。未命中落兜底桶（不丢因子、不影响准入）。
+CATEGORY_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "量价交互",
+        ("price-volume", "price volume", "co-movement", "pv corr", "volume return correlation"),
+    ),
+    ("动量反转", ("momentum", "reversal", "动量", "反转")),
+    ("量与流动性", ("volume", "liquidity", "vol ratio", "amihud", "illiq", "换手", "turnover")),
+    ("波动率", ("volatility", "range", "波动")),
+)
+CATEGORY_FALLBACK = "外部-其他"
+_LABEL_RE = re.compile(r"\[([^\]]+)\]")
+
+
+def _mechanism_text(name: Any, description: Any) -> str:
+    """机理标签（首个方括号段）优先 + 因子名；无标签 → 整段描述兜底。
+
+    存量 hypothesis 形态 ``[RD-Agent/名] [机理标签] …``：首段是来源前缀，机理
+    标签在第二段——前缀段跳过。
+    """
+    text = str(description or "")
+    labels = _LABEL_RE.findall(text)
+    if labels and labels[0].lower().startswith("rd-agent") and len(labels) > 1:
+        base = labels[1]
+    elif labels:
+        base = labels[0]
+    else:
+        base = text
+    return f"{base} {str(name or '')}".lower()
+
+
+def classify_category(name: Any, description: Any) -> str:
+    """候选机理 → 固定桶集（确定性，零 LLM）；未命中/异常输入 → 兜底桶。"""
+    text = _mechanism_text(name, description)
+    for bucket, keywords in CATEGORY_BUCKETS:
+        if any(keyword.lower() in text for keyword in keywords):
+            return bucket
+    return CATEGORY_FALLBACK
+
+
 # 转译合同失败重试上限（共 3 次尝试；与「提案输出合同」修复重试上限同款——
 # recover-factor-supply-losses：2026-10-19 实测 2 条候选因 LLM 响应非 JSON 一次性落账）
 TRANSCRIPTION_MAX_ATTEMPTS: int = 3
@@ -406,7 +450,7 @@ def run_factor_harvest(
                 {
                     "expression": formulation,
                     "hypothesis": (f"[RD-Agent/{name}] 转译失败：输出截断（模型输出预算耗尽）"),
-                    "category": DEFAULT_CATEGORY,
+                    "category": classify_category(name, description),
                 }
             )
             continue
@@ -424,7 +468,7 @@ def run_factor_harvest(
                 {
                     "expression": formulation,
                     "hypothesis": f"[RD-Agent/{name}] 转译失败：{exc.cause}",
-                    "category": DEFAULT_CATEGORY,
+                    "category": classify_category(name, description),
                 }
             )
             continue
@@ -443,7 +487,7 @@ def run_factor_harvest(
                 {
                     "expression": formulation,
                     "hypothesis": f"[RD-Agent/{name}] 不可翻译（LLM）：{transcription.reason}",
-                    "category": DEFAULT_CATEGORY,
+                    "category": classify_category(name, description),
                 }
             )
             continue
@@ -468,7 +512,7 @@ def run_factor_harvest(
                         f"[RD-Agent/{name}] 不可翻译（确定性映射）："
                         f"{'；'.join(translated.blockers)}"
                     ),
-                    "category": DEFAULT_CATEGORY,
+                    "category": classify_category(name, description),
                 }
             )
             continue
@@ -489,7 +533,7 @@ def run_factor_harvest(
                     f"[RD-Agent/{name}] {description}；formulation: {formulation}；"
                     f"转译 {qlib_expression} → {translated.dsl_expression}"
                 ),
-                "category": DEFAULT_CATEGORY,
+                "category": classify_category(name, description),
             }
         )
         pending_payload_index[name] = len(payload) - 1

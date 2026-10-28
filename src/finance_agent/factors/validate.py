@@ -101,6 +101,8 @@ from finance_agent.factors.library import (
     find_structural_duplicate,
     list_active_factors,
     list_ic_series,
+    record_rejected_factor,
+    set_orientation,
     set_pool_increment,
     set_status,
 )
@@ -855,6 +857,43 @@ def _significance_key(position: int) -> str:
     return f"{position:04d}"
 
 
+def _pending_as_candidate(item: _PendingCandidate) -> dict[str, Any]:
+    """闸③后拒收点复用阶段 A 的持久化助手（字段同源映射，不含 DataFrame 大件）。"""
+    return {
+        "expression": item.expression,
+        "hypothesis": item.hypothesis,
+        "category": item.category,
+        "ast_json": item.ast_json,
+        "source": item.source,
+    }
+
+
+def _persist_rejection(
+    candidate: Mapping[str, Any],
+    gate_result: GateResult,
+    *,
+    ast_json: str | None = None,
+    db_path: str | Path | None,
+) -> None:
+    """拒收候选持久化进拒绝池（add-rejected-factor-pool：``admit_candidates`` 单点
+    承担，月批提案 / builtin 注册 / 收割导入三入口自动一致）。
+
+    闸0 前置查重拒收不落池（同构对象已在库内，拒绝池行不构成新信息）；闸①–⑤
+    与批内二次查重拒收落池。失败上抛（fail loud，与账本写入同一编排段）。
+    """
+    record_rejected_factor(
+        expression=str(candidate["expression"]),
+        hypothesis=str(candidate["hypothesis"]),
+        category=str(candidate["category"]),
+        ast_json=ast_json if ast_json is not None else candidate.get("ast_json"),
+        source=str(candidate.get("source", "proposal")),
+        gate=gate_result.gate,
+        reason=str(gate_result.reason) if gate_result.reason is not None else None,
+        detail=dict(gate_result.detail) if gate_result.detail else None,
+        db_path=db_path,
+    )
+
+
 def admit_candidates(
     candidates: list[dict],
     panel: MarketPanel,
@@ -890,6 +929,7 @@ def admit_candidates(
         values = evaluate(node, panel)
         gate1 = check_computability(values)
         if not gate1.passed:
+            _persist_rejection(candidate, gate1, ast_json=ast_json, db_path=db_path)
             outcomes[position] = AdmissionResult(
                 None, STATUS_REJECTED, (dedup, gate1), GATE_COMPUTABILITY
             )
@@ -897,12 +937,14 @@ def admit_candidates(
         ic = rank_ic_series(values, fwd)
         gate2 = check_single_factor(ic)
         if not gate2.passed:
+            _persist_rejection(candidate, gate2, ast_json=ast_json, db_path=db_path)
             outcomes[position] = AdmissionResult(
                 None, STATUS_REJECTED, (dedup, gate1, gate2), GATE_SINGLE_FACTOR
             )
             continue
         gate2m = check_monotonicity(values, fwd, ic)
         if not gate2m.passed:
+            _persist_rejection(candidate, gate2m, ast_json=ast_json, db_path=db_path)
             outcomes[position] = AdmissionResult(
                 None, STATUS_REJECTED, (dedup, gate1, gate2, gate2m), GATE_SINGLE_FACTOR
             )
@@ -931,6 +973,9 @@ def admit_candidates(
             gate3 = significance[_significance_key(item.position)]
             item.gates.append(gate3)
             if not gate3.passed:
+                _persist_rejection(
+                    _pending_as_candidate(item), gate3, ast_json=item.ast_json, db_path=db_path
+                )
                 outcomes[item.position] = AdmissionResult(
                     None, STATUS_REJECTED, tuple(item.gates), GATE_SIGNIFICANCE
                 )
@@ -948,6 +993,9 @@ def admit_candidates(
         )
         item.gates.append(gate4)
         if not gate4.passed:
+            _persist_rejection(
+                _pending_as_candidate(item), gate4, ast_json=item.ast_json, db_path=db_path
+            )
             outcomes[item.position] = AdmissionResult(
                 None, STATUS_REJECTED, tuple(item.gates), GATE_POOL_INCREMENT
             )
@@ -955,12 +1003,18 @@ def admit_candidates(
         gate5 = check_out_of_sample(item.values, fwd)
         item.gates.append(gate5)
         if not gate5.passed:
+            _persist_rejection(
+                _pending_as_candidate(item), gate5, ast_json=item.ast_json, db_path=db_path
+            )
             outcomes[item.position] = AdmissionResult(
                 None, STATUS_REJECTED, tuple(item.gates), GATE_OUT_OF_SAMPLE
             )
             continue
         dedup_again = _dedup_gate(item.ast_json, db_path=db_path)
         if not dedup_again.passed:
+            _persist_rejection(
+                _pending_as_candidate(item), dedup_again, ast_json=item.ast_json, db_path=db_path
+            )
             outcomes[item.position] = AdmissionResult(
                 None, STATUS_REJECTED, (*item.gates, dedup_again), GATE_DEDUP
             )
@@ -979,6 +1033,9 @@ def admit_candidates(
         increment = gate4.detail.get("increment")
         if isinstance(increment, (int, float)) and not isinstance(increment, bool):
             set_pool_increment(factor_id, float(increment), db_path=db_path)
+        orientation = gate4.detail.get("orientation")
+        if orientation in (-1, 0, 1):
+            set_orientation(factor_id, int(orientation), db_path=db_path)
         retired = apply_bucket_quota(item.category, db_path=db_path)
         status = STATUS_RETIRED if factor_id in retired else STATUS_ACTIVE
         outcomes[item.position] = AdmissionResult(factor_id, status, tuple(item.gates), None)

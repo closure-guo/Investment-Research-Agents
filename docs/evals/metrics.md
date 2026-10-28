@@ -611,3 +611,11 @@ positioning/sentiment 取方向符号 × 置信度；`direction=neutral|unknown`
 - ~~**hosted 实验路径仍是单次判分**：`python -m evals.run`（`reports/evals/*.json` 与跨实验对比的数据源）的 judge 仍单次调用，带 ±1 调用级噪声（本轮只把**消融**路径改成 K 次均值）。口径一致性候选：也给该路径加 K（成本 ×K、且会改变与历史报告的绝对分可比性）——需 owner 定；在此之前跨实验比较请按「同噪声下的相对差异」解读~~ **已落地（2026-09-22，delta `switch-hosted-judge-to-k-mean`）**：hosted 判分切换 `run_judge_mean`（K 经 `--judge-repeats` 声明默认 3，产物 config 记 `judge_repeats`），切点登记见 §1.1/§2——跨切点绝对分不可直接比较，owner 决策成本 ×K 换取噪声下限披露
 - **观测电池判定行不落盘**（2026-09-23 grounding 归因时暴露）：`run_battery` 只持久化汇总读数，grounding/B1/B2 行级明细须从 Langfuse 反解（Langfuse 不可达时归因材料不可得）。候选：三腿 judged rows 落盘（unit_id/argument/anchors/judge_label/reason）+ 产物路径写进 result——小改动，随下一次观测电池相关 delta 一并落地
 - mypy 全仓 75 个既有错误（本次触碰文件为 0），是否立清理任务
+
+### 1.21 因子 IC 回填与衰减监控口径（2026-10-27 登记；owner 裁决 issue #454）
+
+**回填边界**：`factor_decay_monitor` 的 IC 缺口回填窗口 = **90 交易日**（`DECAY_WINDOW 60 + 30`，`_PANEL_LOOKBACK_DAYS`）。依据：衰减判定只消费最近 **79** 个 IC 点（`DECAY_WINDOW + DECAY_NEGATIVE_DAYS − 1`），窗口外更早缺口诚实留洞；不得为衰减判定扩深面板（准入面板 250/500 日是独立口径，见 `constraints.py`），更长 IC 历史需求走独立回填工具、不挂日监控。
+
+**回填口径（硬约束）**：IC 缺口 MUST 按**历史日重算**——每个历史日用其自身的截面因子值与远期收益（`rank_ic_series` 面板逐日）；**禁止以最新面板冒充历史窗**：最新面板的因子值只在最新交易日成立，回填历史窗 = 前视污染，会系统性抬高闸②/衰减读数。
+
+**两个样本数不得混写**：`MIN_IC_SAMPLES_FOR_SCORING = 10`（选股打分的最少 IC 采样天数，不足走流动性降级 fallback）≠ `MIN_IC_SAMPLES = 30`（`rank_ic_series` 单日截面最少有效票数，不足该日 NaN）。口径变更先改本节再动代码。

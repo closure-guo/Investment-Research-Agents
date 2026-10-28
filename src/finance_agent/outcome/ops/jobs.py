@@ -503,6 +503,15 @@ def sweep_stale_running(
         return swept
     if swept:
         logger.warning("已清扫进程重启遗留的 running 行 %d 条: %s", len(swept), swept)
+    # 池分析运行行的终态回写与悬挂行清扫同一时机(issue #489):会话已终结但运行行停在
+    # queued/dispatch_failed 的记录不得挂到下一次编排(最长 24h)。幂等、只处理终态会话、
+    # 读会话失败只记日志;惰性导入避免 outcome ↔ screening 导入期成环。
+    try:
+        from finance_agent.screening.pool_analysis import reconcile_pool_analysis_runs
+
+        reconcile_pool_analysis_runs(None)
+    except Exception:  # noqa: BLE001 - 回写是自愈动作,失败不得阻断调用方(#455 同纪律)
+        logger.exception("池分析运行行终态回写失败(忽略)")
     return swept
 
 

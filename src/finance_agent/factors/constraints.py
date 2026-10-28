@@ -81,3 +81,5 @@ MIN_IC_SAMPLES: int = 30
 MIN_REDUNDANCY_SAMPLES: int = 5
 # 准入面板深度下限（交易日；三准入入口共用；独立于衰减监控口径——见模块 docstring）
 ADMISSION_PANEL_LOOKBACK_DAYS: int = 500
+# 入库后复核样本门槛（add-factor-post-admission-review）：入库后 IC 样本 ≥ 60 才判定
+POST_ADMISSION_MIN_SAMPLES: int = 60

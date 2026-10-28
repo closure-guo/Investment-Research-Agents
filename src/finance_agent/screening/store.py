@@ -625,6 +625,7 @@ def days_in_top_recent(
     window: int = STABILITY_WINDOW_DAYS,
     db_path: str | Path | None = None,
     pool: str = POOL_MAIN,
+    mode: str | None = None,
 ) -> int:
     """``symbol`` 在**同模式**最近 ``window`` 个交易日内的在榜天数（P0-1 滚动门槛）。
 
@@ -635,20 +636,29 @@ def days_in_top_recent(
     宽待，不因缺行重置历史）。``as_of`` 当日不在榜（含当日无榜单行 / 空库）→ 0；
     ``as_of`` 批次行缺 ``selection_mode`` → 不猜模式，退回全轴滚动（与旧口径
     兼容的降级态）。窗口不足 ``window`` 天时按实有天数计。
+
+    显式 ``mode``（fix-stability-gate-mode-axis）：日批路径的资格判定先于当日批次行
+    落库，当日批次行必然不存在——调用方（``run_screening_batch``）SHALL 传入批次自身
+    已知的 ``selection_mode`` 定轴，MUST NOT 依赖本函数回头读当日批次行（那会退化成
+    跨口径混合轴）。``mode=None``（缺省）保持既有「批次行查找 → 缺失退全轴」路径
+    （带外查询兼容）；非 None 非法值 fail loud。
     """
     normalized = _parse_trade_date(as_of)
     if pool not in POOLS:
         raise ValueError(f"非法池 pool {pool!r}；允许: {list(POOLS)}")
     if isinstance(window, bool) or not isinstance(window, int) or window < 1:
         raise ValueError(f"window 必须是正整数: {window!r}")
+    if mode is not None and mode not in SELECTION_MODES:
+        raise ValueError(f"非法 selection_mode {mode!r}；允许: {list(SELECTION_MODES)}")
     init_screening_db(db_path)
     conn = _connect(db_path)
     try:
-        mode_row = conn.execute(
-            "SELECT selection_mode FROM screening_batches WHERE trade_date = ? AND pool = ?",
-            (normalized, pool),
-        ).fetchone()
-        mode = str(mode_row[0]) if mode_row and mode_row[0] is not None else None
+        if mode is None:
+            mode_row = conn.execute(
+                "SELECT selection_mode FROM screening_batches WHERE trade_date = ? AND pool = ?",
+                (normalized, pool),
+            ).fetchone()
+            mode = str(mode_row[0]) if mode_row and mode_row[0] is not None else None
         if mode is None:
             axis_rows = conn.execute(
                 "SELECT DISTINCT trade_date FROM l2_candidates "
@@ -689,6 +699,7 @@ def eligible_for_selection(
     min_days: int = DEFAULT_MIN_DAYS,
     db_path: str | Path | None = None,
     pool: str = POOL_MAIN,
+    mode: str | None = None,
 ) -> bool:
     """精选池资格：**同模式**近 ``STABILITY_WINDOW_DAYS`` 个交易日命中 ≥ ``min_days``。
 
@@ -697,10 +708,11 @@ def eligible_for_selection(
     滚动命中后，其他口径的日子不进轴也不打断，模式内单日跌出榜不再一票否决。
     ``min_days`` 可配置语义不变；``pool`` 缺省 ``'main'``（主档口径不变）。
     ``consecutive_days_in_top`` 保留原语义，仍供精选池 ``consecutive_days`` 信息列。
+    ``mode`` 透传 ``days_in_top_recent``（显式定轴；缺省 = 批次行查找）。
     """
     if isinstance(min_days, bool) or not isinstance(min_days, int) or min_days < 1:
         raise ValueError(f"min_days 必须是正整数: {min_days!r}")
-    return days_in_top_recent(symbol, as_of, db_path=db_path, pool=pool) >= min_days
+    return days_in_top_recent(symbol, as_of, db_path=db_path, pool=pool, mode=mode) >= min_days
 
 
 # ── triage 决策（C5 决策部分） ──────────────────────────────────────────────
