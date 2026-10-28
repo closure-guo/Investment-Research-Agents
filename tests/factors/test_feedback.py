@@ -397,9 +397,7 @@ def test_build_payload_gate_floor_configurable() -> None:
     assert sum(1 for g in gates if g == 4) >= 2
     assert payload["returned"] == 80
     default = build_payload(processed, {}, limit=80)
-    default_g4 = sum(
-        1 for e in default["explored"] if e["status"] == "rejected" and e["gate"] == 4
-    )
+    default_g4 = sum(1 for e in default["explored"] if e["status"] == "rejected" and e["gate"] == 4)
     assert sum(1 for g in gates if g == 4) < default_g4  # 调低保底 → 闸④ 出场减少
 
 
