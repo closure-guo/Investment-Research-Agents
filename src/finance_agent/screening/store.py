@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS selection_pool (
   l3_verdict           TEXT NOT NULL,
   l3_reason            TEXT NOT NULL,
   factor_contribs_json TEXT NOT NULL,
+  stock_name           TEXT,
   PRIMARY KEY (trade_date, pool, symbol)
 );
 CREATE INDEX IF NOT EXISTS idx_selection_pool_date_rank
@@ -195,11 +196,11 @@ _POOL_TABLE_REBUILD_SQL: tuple[str, ...] = (
     "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', symbol TEXT NOT NULL, "
     "composite_score REAL NOT NULL, rank INTEGER NOT NULL, consecutive_days INTEGER NOT NULL, "
     "l3_verdict TEXT NOT NULL, l3_reason TEXT NOT NULL, factor_contribs_json TEXT NOT NULL, "
-    "PRIMARY KEY (trade_date, pool, symbol))",
+    "stock_name TEXT, PRIMARY KEY (trade_date, pool, symbol))",
     "INSERT INTO selection_pool__migrate (trade_date, pool, symbol, composite_score, rank, "
-    "consecutive_days, l3_verdict, l3_reason, factor_contribs_json) "
+    "consecutive_days, l3_verdict, l3_reason, factor_contribs_json, stock_name) "
     "SELECT trade_date, 'main', symbol, composite_score, rank, consecutive_days, l3_verdict, "
-    "l3_reason, factor_contribs_json FROM selection_pool",
+    "l3_reason, factor_contribs_json, stock_name FROM selection_pool",
     "DROP TABLE selection_pool",
     "ALTER TABLE selection_pool__migrate RENAME TO selection_pool",
     # DROP TABLE 连带删掉旧索引：重建后恢复（与 SCREENING_DDL 同名同形）
@@ -347,6 +348,19 @@ def _ensure_batch_columns(conn: sqlite3.Connection) -> None:
             conn.execute(ddl)
 
 
+_POOL_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("stock_name", "ALTER TABLE selection_pool ADD COLUMN stock_name TEXT"),
+)
+
+
+def _ensure_pool_columns(conn: sqlite3.Connection) -> None:
+    """旧库缺失的池表列 → 幂等 ALTER 补齐（新增列只在此声明，迁移单点）。"""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(selection_pool)")}
+    for name, ddl in _POOL_COLUMN_MIGRATIONS:
+        if name not in columns:
+            conn.execute(ddl)
+
+
 def _rebuild_pool_pk_if_needed(conn: sqlite3.Connection) -> None:
     """旧库主键（单列 ``trade_date``）→ 重建为含 ``pool`` 的复合主键（幂等）。
 
@@ -376,8 +390,8 @@ def init_screening_db(db_path: str | Path | None = None) -> Path:
     ① 残留 ``*__migrate``（上次重建中断）→ 按**行数守卫**恢复/清理
        （migrate 权威才换入；migrate 为空/更少则保留正式表并清理残留，
        见 ``_recover_interrupted_rebuild``）；
-    ② 批次表缺列 → 幂等 ALTER 补齐（``selection_mode`` / ``frontier_gate`` /
-       ``exec_constraints``，见 ``_BATCH_COLUMN_MIGRATIONS``）；
+    ② 批次表/池表缺列 → 幂等 ALTER 补齐（批次：``selection_mode`` / ``frontier_gate`` /
+       ``exec_constraints``；池：``stock_name``——add-pool-stock-name-display）；
     ③ 旧库主键为单列 ``trade_date`` → 重建为含 ``pool`` 的复合主键
        （add-microcap-lane-guardrails，旧行落 ``pool='main'``；显式事务，失败整体回滚）。
     ②在①之后：恢复可能换入旧版形状的表，列补齐必须在恢复之后重新判定。
@@ -394,7 +408,9 @@ def init_screening_db(db_path: str | Path | None = None) -> Path:
         ):  # ① 数据优先（行数守卫）
             _recover_interrupted_rebuild(conn, table)
         _ensure_batch_columns(conn)  # ② 列补齐（重建 SQL 引用这些列）
+        _ensure_pool_columns(conn)  # ② 池表列补齐（重建 SQL 引用这些列）
         _rebuild_pool_pk_if_needed(conn)  # ③ 主键重建（幂等）
+        _ensure_pool_columns(conn)  # ④ 列兜底：重建语句序列与新 DDL 漂移时兜住
         conn.commit()
     finally:
         conn.close()
@@ -876,6 +892,9 @@ def _pool_row_payload(
     """精选池行 dict → SQLite payload（字段 fail loud，坏值不入库）。
 
     输出列序与 ``selection_pool`` 表列一致：``(trade_date, pool, symbol, ...)``。
+    例外：``stock_name``（add-pool-stock-name-display）为纯展示字段——缺失/None →
+    空串（缺名不阻断批次，pipeline 记 warning），仅非 str 拒绝；迁移前历史行该列
+    为 NULL（读侧透传 None）。
     """
     if not isinstance(row, dict):
         raise ValueError(f"池行必须是 dict: {row!r}")
@@ -905,6 +924,14 @@ def _pool_row_payload(
         contribs_json = json.dumps(contribs, ensure_ascii=False, sort_keys=True)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"池行 factor_contribs 不可 JSON 序列化: {exc}") from exc
+    # stock_name 为纯展示字段（add-pool-stock-name-display）：缺失/None → 空串，
+    # 不 fail loud（缺名不阻断批次）；非 str 才拒绝（坏值不入库纪律）
+    stock_name = row.get("stock_name")
+    if stock_name is None:
+        stock_name = ""
+    if not isinstance(stock_name, str):
+        raise ValueError(f"池行 stock_name 必须是字符串或 None: {stock_name!r}（symbol={symbol}）")
+    stock_name = stock_name.strip()
     return (
         trade_date,
         pool,
@@ -915,6 +942,7 @@ def _pool_row_payload(
         verdict,
         reason,
         contribs_json,
+        stock_name,
     )
 
 
@@ -1022,8 +1050,8 @@ def record_screening_batch(
             conn.executemany(
                 "INSERT INTO selection_pool "
                 "(trade_date, pool, symbol, composite_score, rank, consecutive_days, "
-                "l3_verdict, l3_reason, factor_contribs_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "l3_verdict, l3_reason, factor_contribs_json, stock_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 payload,
             )
         conn.commit()
@@ -1049,7 +1077,7 @@ def list_selection_pool(
     try:
         rows = conn.execute(
             "SELECT trade_date, pool, symbol, composite_score, rank, consecutive_days, "
-            "l3_verdict, l3_reason, factor_contribs_json FROM selection_pool "
+            "l3_verdict, l3_reason, factor_contribs_json, stock_name FROM selection_pool "
             "WHERE trade_date = ? AND pool = ? ORDER BY rank, symbol",
             (normalized, pool),
         ).fetchall()
