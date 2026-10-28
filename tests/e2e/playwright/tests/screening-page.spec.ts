@@ -36,10 +36,12 @@ function apiBase(): string {
 }
 
 // 池行口径：consecutive_days 正整数、l3_verdict ∈ keep/drop、l3_reason 非空、
-// factor_contribs 可 JSON 序列化（后端 _pool_row_payload fail loud 校验）
+// factor_contribs 可 JSON 序列化（后端 _pool_row_payload fail loud 校验）；
+// stock_name 可选（add-pool-stock-name-display：缺键 → 后端 normalize 空串 → 页面渲染 —）
 const POOL = [
   {
     symbol: '600519',
+    stock_name: '贵州茅台',
     composite_score: 1.823,
     rank: 1,
     consecutive_days: 5,
@@ -53,6 +55,7 @@ const POOL = [
   },
   {
     symbol: '000001',
+    stock_name: '平安银行',
     composite_score: 1.204,
     rank: 2,
     consecutive_days: 3,
@@ -113,6 +116,10 @@ test('种子池 → 表格可见（含 L3 理由、连续在榜天数、批次�
   await expect(row).toContainText('无重大风险事件')
   await expect(row).toContainText('5') // 连续在榜天数
   await expect(row).toContainText(BATCH_DATE) // 批次日期列
+
+  // 股票名称列（add-pool-stock-name-display）：名称与代码并存
+  await expect(page.getByTestId('screening-stock-name-600519')).toContainText('贵州茅台')
+  await expect(page.getByTestId('screening-stock-name-000001')).toContainText('平安银行')
 
   await expect(page.getByTestId('screening-row-000001')).toContainText('无风险事件')
 })
@@ -206,6 +213,9 @@ test('降级批次 → 披露横幅可见 + 成交额列语义（add-screening-e
   await expect(page.getByTestId('screening-pool-table')).toBeVisible({ timeout: 15_000 })
   await expect(page.getByTestId('screening-pool-table')).toContainText('近 20 日日均成交额（亿元）')
   await expect(page.getByTestId('screening-row-600519')).toContainText('1.02')
+
+  // 缺名退化（add-pool-stock-name-display）：seed 行未带 stock_name → 空串 → 渲染 —
+  await expect(page.getByTestId('screening-stock-name-600519')).toContainText('—')
 })
 
 test('无成功批次 → 空态 + 分析按钮禁用', async ({ page }) => {
