@@ -36,6 +36,7 @@ function poolBody(overrides: Partial<ScreeningPoolResponse> = {}): ScreeningPool
     pool: [
       {
         symbol: '600519',
+        stock_name: '贵州茅台',
         composite_score: 1.823,
         rank: 1,
         consecutive_days: 5,
@@ -49,6 +50,7 @@ function poolBody(overrides: Partial<ScreeningPoolResponse> = {}): ScreeningPool
       },
       {
         symbol: '000001',
+        stock_name: null,
         composite_score: 1.204,
         rank: 2,
         consecutive_days: 3,
@@ -117,6 +119,7 @@ describe('降级模式披露（add-screening-empty-library-fallback）', () => {
     const fallbackPool = [
       {
         symbol: '600519',
+        stock_name: null,
         composite_score: 102000000, // 1.02 亿元（降级模式下 score = 近 20 日日均成交额）
         rank: 1,
         consecutive_days: 5,
@@ -172,6 +175,7 @@ describe('选股页（add-screening-pipeline T4）', () => {
 
     const table = await screen.findByTestId('screening-pool-table')
     expect(within(table).getByText('标的')).toBeTruthy()
+    expect(within(table).getByText('股票名称')).toBeTruthy()
     expect(within(table).getByText('综合分')).toBeTruthy()
     expect(within(table).getByText('连续在榜天数')).toBeTruthy()
     expect(within(table).getByText('L3 判定')).toBeTruthy()
@@ -183,6 +187,22 @@ describe('选股页（add-screening-pipeline T4）', () => {
     expect(row.getByText('5')).toBeTruthy()
     expect(row.getByText('无重大风险事件')).toBeTruthy()
     expect(row.getByText(BATCH_DATE)).toBeTruthy() // 批次日期列
+  })
+
+  it('股票名称列：有名称展示名称，缺名（null/空串）退化 —（add-pool-stock-name-display）', async () => {
+    mockFetch()
+    render(<ScreeningPage onBack={() => {}} />)
+
+    await screen.findByTestId('screening-pool-table')
+    // 名称列与代码列并存（名称不替代代码）
+    expect(within(screen.getByTestId('screening-row-600519')).getByText('600519')).toBeTruthy()
+    expect(
+      within(screen.getByTestId('screening-stock-name-600519')).getByText('贵州茅台')
+    ).toBeTruthy()
+    // null → —
+    expect(
+      within(screen.getByTestId('screening-stock-name-000001')).getByText('—')
+    ).toBeTruthy()
   })
 
   it('hover 综合分 → 浮层按 |contribution| 降序展示 factor_contribs', async () => {
