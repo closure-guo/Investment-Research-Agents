@@ -1,0 +1,25 @@
+# 真实 distro 快照（只读捕获，2026-10-28）
+# 来源：rdagent 发行版 site-packages/rdagent/scenarios/qlib/proposal/factor_proposal.py
+# 用途：patch-prompt-contract.py 的 OLD 锚点漂移守卫（测试断言 OLD in 本文件）。
+# 上游升级后重捕获：wsl -d rdagent -u root -- cat <path> | tr -d ''
+
+from rdagent.utils.agent.tpl import T
+from rdagent.scenarios.qlib.proposal.explored_feedback import render_explored_block
+
+
+class Gen:
+    def prepare_context(self, trace):
+        hypothesis_and_feedback = "x"
+        last_hypothesis_and_feedback = "x"
+        context_dict = {
+            "hypothesis_and_feedback": hypothesis_and_feedback,
+            "last_hypothesis_and_feedback": last_hypothesis_and_feedback,
+            "RAG": (
+                "Try the easiest and fastest factors to experiment with from various perspectives first."
+                if len(trace.hist) < 15
+                else "Now, you need to try factors that can achieve high IC (e.g., machine learning-based factors)."
+            ),
+            "hypothesis_output_format": T("scenarios.qlib.prompts:factor_hypothesis_output_format").r(),
+            "hypothesis_specification": T("scenarios.qlib.prompts:factor_hypothesis_specification").r(),
+        }
+        return context_dict, True

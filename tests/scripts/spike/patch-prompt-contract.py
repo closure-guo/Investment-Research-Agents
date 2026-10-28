@@ -27,13 +27,16 @@ TARGET = Path(
     "/opt/rdagent/lib/python3.11/site-packages/rdagent/scenarios/qlib/proposal/factor_proposal.py"
 )
 BACKUP_SUFFIX = ".bak-20261028-contract"
+# 依赖探针：render_contract_block 必须先随模块部署到位，否则导入即 ImportError 硬失败
+# （目标文件由 TARGET 同目录派生，见 _sibling_ready——测试可覆写 TARGET 而不失效）。
 IMPORT_OLD = "from rdagent.scenarios.qlib.proposal.explored_feedback import render_explored_block\n"
 IMPORT_COMBINED = (
     "from rdagent.scenarios.qlib.proposal.explored_feedback import "
     "render_contract_block, render_explored_block\n"
 )
 ANCHOR = "from rdagent.utils.agent.tpl import T\n"
-MARKER = "render_contract_block()"
+# 精确匹配注入语句（含赋值）——裸函数名会被注释里的提及误判为「已打过」。
+MARKER = "_contract = render_contract_block()"
 
 OLD = """        context_dict = {
             "hypothesis_and_feedback": hypothesis_and_feedback,
@@ -67,6 +70,14 @@ NEW = """        _spec_text = T("scenarios.qlib.prompts:factor_hypothesis_specif
         return context_dict, True"""
 
 
+def _sibling_ready() -> bool:
+    sibling = TARGET.with_name("explored_feedback.py")
+    try:
+        return "def render_contract_block" in sibling.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
 def main() -> int:
     if not TARGET.is_file():
         print(f"target not found: {TARGET}", file=sys.stderr)
@@ -75,11 +86,13 @@ def main() -> int:
     if MARKER in source:
         print("already patched; nothing to do")
         return 0
-
-    backup = TARGET.with_name(TARGET.name + BACKUP_SUFFIX)
-    if not backup.exists():
-        shutil.copy2(TARGET, backup)
-        print(f"backup: {backup}")
+    if not _sibling_ready():
+        print(
+            f"dependency missing: {TARGET.with_name('explored_feedback.py').name} "
+            "lacks render_contract_block (deploy the updated module first); aborting",
+            file=sys.stderr,
+        )
+        return 1
 
     if IMPORT_OLD in source:
         source = source.replace(IMPORT_OLD, IMPORT_COMBINED, 1)
@@ -94,8 +107,19 @@ def main() -> int:
         return 1
     source = source.replace(OLD, NEW, 1)
 
+    # 全部探针通过后才落备份（abort 不留残余）；编译失败回滚到备份。
+    backup = TARGET.with_name(TARGET.name + BACKUP_SUFFIX)
+    if not backup.exists():
+        shutil.copy2(TARGET, backup)
+        print(f"backup: {backup}")
+
     TARGET.write_text(source, encoding="utf-8")
-    py_compile.compile(str(TARGET), doraise=True)
+    try:
+        py_compile.compile(str(TARGET), doraise=True)
+    except py_compile.PyCompileError as exc:
+        shutil.copy2(backup, TARGET)
+        print(f"compile failed, rolled back from backup: {exc}", file=sys.stderr)
+        return 1
     print(f"patched + compiled: {TARGET}")
     return 0
 

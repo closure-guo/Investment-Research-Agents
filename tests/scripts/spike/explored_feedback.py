@@ -28,6 +28,9 @@ _DESC_CHARS = 110
 _EXPR_CHARS = 90
 # 任务指令层契约段预算：模板本体占位须小（全量白名单已随记忆块给出，本段做摘要）。
 TEMPLATE_CONTRACT_MAX_CHARS = 1600
+# 算子词表 ≤ 此数时全量列出（当前 16 个）：第 2 轮起本段是唯一算子指引，样例形式会让
+# 模型把未列出的 Ref/Rank/Sub 等主力算子误当不可表达；扩容后再回退为摘要。
+OPERATOR_LIST_LIMIT = 32
 
 
 def _format_item(item: dict) -> str:
@@ -81,10 +84,12 @@ def render_contract_block(path: str | None = None) -> str:
     """任务指令层契约段（prompt 模板本体注入用）：同源读载荷 ``contract`` 块。
 
     与 ``render_explored_block`` 的契约段同源（同一 ``contract`` 块派生，数值一致
-    由同源结构性保证）；差异只在表达形态——本段做摘要（规则/复杂度/字段全量，
-    算子给总数+样例），避免与记忆块的全量白名单双份挤占 prompt 预算。
-    fail-safe：源缺失/损坏/无契约 → 空串（不阻断生成、不虚构契约）；
-    超 ``TEMPLATE_CONTRACT_MAX_CHARS`` → 截断并标注。
+    由同源结构性保证）。算子词表 ≤ ``OPERATOR_LIST_LIMIT`` 时**全量列出**——第 2 轮
+    起本段是唯一算子指引，样例形式会把未列出的主力算子误导为不可表达；词表扩容后
+    回退为「总数 + 样例」摘要。
+    fail-safe：源缺失/损坏/无契约、或全部条款字段都不可用（只剩抬头）→ 空串
+    （不阻断生成、不虚构契约）；复杂度损坏值（非数值）逐项跳过；超
+    ``TEMPLATE_CONTRACT_MAX_CHARS`` 按行截断并标注（不按字符切片丢整行白名单）。
     """
     resolved = Path(path or os.environ.get("FACTOR_FEEDBACK_PATH", DEFAULT_PATH))
     try:
@@ -104,22 +109,41 @@ def render_contract_block(path: str | None = None) -> str:
                 lines.append(f"- {rule.strip()}")
     complexity = contract.get("complexity")
     if isinstance(complexity, dict) and complexity:
-        parts = [f"{k} <= {v}" for k, v in sorted(complexity.items())]
-        lines.append(f"- Complexity limits: {', '.join(parts)}.")
+        parts = [
+            f"{k} <= {v}"
+            for k, v in sorted(complexity.items())
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        ]
+        if parts:
+            lines.append(f"- Complexity limits: {', '.join(parts)}.")
     operators = contract.get("operators")
     if isinstance(operators, list) and operators:
-        sample = ", ".join(str(o) for o in operators[:8])
-        lines.append(
-            f"- Expressible operators: {len(operators)} kinds in total (examples: {sample}); "
-            "any operator not listed is inexpressible — do not use it."
-        )
+        ops = [str(op) for op in operators]
+        if len(ops) <= OPERATOR_LIST_LIMIT:
+            lines.append(
+                f"- Expressible operators: {len(ops)} in total: {', '.join(ops)}; "
+                "any operator outside this set is inexpressible — do not use it."
+            )
+        else:
+            sample = ", ".join(ops[:8])
+            lines.append(
+                f"- Expressible operators: {len(ops)} kinds in total (examples: {sample}); "
+                "any operator outside this expressible set is inexpressible — do not use it."
+            )
     fields = contract.get("fields")
     if isinstance(fields, list) and fields:
         lines.append(f"- Expressible fields: {', '.join(str(f) for f in fields)}.")
-    text = "\n".join(lines)
-    if len(text) > TEMPLATE_CONTRACT_MAX_CHARS:
-        text = text[:TEMPLATE_CONTRACT_MAX_CHARS] + "\n(truncated)"
-    return text
+    if len(lines) == 1:  # 只有抬头：规则/复杂度/算子/字段全部缺失或损坏 → 视为无契约
+        return ""
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > TEMPLATE_CONTRACT_MAX_CHARS:
+            kept.append("- ... (truncated)")
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept)
 
 
 def render_explored_block(path: str | None = None) -> str:
