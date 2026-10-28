@@ -7,8 +7,15 @@ import './test-env'
  * 后端以 TESTING=1 启动，走 LLM stub 占位（完整 stub 在 F3 落地）
  * 前端走 vite dev server
  *
- * 设计决策见 openspec/changes/add-e2e-test-infrastructure/design.md
+ * 端口对（incident 038/045 教训）：宿主 Docker 栈默认占用 8000/5173 端口转发，
+ * reuseExistingServer 会静默复用生产容器（旧代码）——用例假失败甚至误写生产。
+ * 本地与生产栈共存时经 E2E_BACKEND_PORT / E2E_FRONTEND_PORT 换到空闲端口对
+ * （如 8010/5183），CI 与默认本地行为不变（仍 8000/5173）。
+ * 前端 webServer 同步注入 VITE_API_TARGET 指向同端口对的后端（vite 代理消费）。
  */
+const BACKEND_PORT = process.env.E2E_BACKEND_PORT ?? '8000'
+const FRONTEND_PORT = process.env.E2E_FRONTEND_PORT ?? '5173'
+
 export default defineConfig({
   testDir: './tests',
   // 时间序列/管线 spec 需要专属 config（playwright.timeline.config.ts，STUB_SCENARIO=tool_call/pipeline/llm_failure），
@@ -97,7 +104,7 @@ export default defineConfig({
   reporter: [['list'], ['html', { open: 'never' }]],
 
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: `http://localhost:${FRONTEND_PORT}`,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
@@ -131,16 +138,17 @@ export default defineConfig({
       // seed/events_reset 会清事件线四表，绝不能落到开发库 data/events.db
       // ANALYSIS_CONCURRENCY_PATH 同理（delta add-analysis-concurrency-setting）：并发
       // 设置 E2E 会真写设置文件，绝不能落到生产 data/settings/analysis_concurrency.json
-      command: 'uv run uvicorn finance_agent.api:app --port 8000',
-      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', RESEARCH_REPORTS_DB_PATH: 'data/test-e2e-research-reports.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', REGIME_DB_PATH: 'data/test-e2e-regime.db', EVENTS_DB_PATH: 'data/test-e2e-events.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json', FACTOR_RESEARCH_LAUNCHER_PATH: 'data/test-e2e-factor-research-launcher.json', FACTOR_RESEARCH_CONFIG_PATH: 'data/test-e2e-factor-research-pipeline.json', FACTOR_RESEARCH_DISTRO_PROBE_PATH: 'data/test-e2e-factor-research-distro-probe.json', FACTOR_RESEARCH_HARVEST_STATE_PATH: 'data/test-e2e-factor-research-harvest-state.json', FACTOR_RESEARCH_CANDIDATES_PATH: 'data/test-e2e-factor-research-candidates.json', FACTOR_RESEARCH_HEARTBEAT_PATH: 'data/test-e2e-factor-research-heartbeat.json', ANALYSIS_CONCURRENCY_PATH: 'data/test-e2e-analysis-concurrency.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
-      url: 'http://localhost:8000/api/health',
+      command: `uv run uvicorn finance_agent.api:app --port ${BACKEND_PORT}`,
+      env: { TESTING: '1', SESSIONS_DB_PATH: 'data/test-e2e-sessions.db', SNAPSHOT_DB_PATH: 'data/test-e2e-snapshot.db', RESEARCH_REPORTS_DB_PATH: 'data/test-e2e-research-reports.db', SCREENING_DB_PATH: 'data/test-e2e-screening.db', FACTOR_LIBRARY_DB_PATH: 'data/test-e2e-factor-library.db', EXECUTION_DB_PATH: 'data/test-e2e-execution.db', REGIME_DB_PATH: 'data/test-e2e-regime.db', EVENTS_DB_PATH: 'data/test-e2e-events.db', FACTOR_RESEARCH_STATUS_PATH: 'data/test-e2e-factor-research-status.json', FACTOR_RESEARCH_CONTROL_PATH: 'data/test-e2e-factor-research-control.json', FACTOR_RESEARCH_LAUNCHER_PATH: 'data/test-e2e-factor-research-launcher.json', FACTOR_RESEARCH_CONFIG_PATH: 'data/test-e2e-factor-research-pipeline.json', FACTOR_RESEARCH_DISTRO_PROBE_PATH: 'data/test-e2e-factor-research-distro-probe.json', FACTOR_RESEARCH_HARVEST_STATE_PATH: 'data/test-e2e-factor-research-harvest-state.json', FACTOR_RESEARCH_CANDIDATES_PATH: 'data/test-e2e-factor-research-candidates.json', FACTOR_RESEARCH_HEARTBEAT_PATH: 'data/test-e2e-factor-research-heartbeat.json', ANALYSIS_CONCURRENCY_PATH: 'data/test-e2e-analysis-concurrency.json', SCREENING_RULES_CONFIG_PATH: 'data/test-e2e-screening-rules.json', REPORTS_DIR: 'tmp/e2e-reports-8000' },
+      url: `http://localhost:${BACKEND_PORT}/api/health`,
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
       cwd: '../../../',
     },
     {
-      command: 'npm run dev -- --port 5173',
-      url: 'http://localhost:5173',
+      command: `npm run dev -- --port ${FRONTEND_PORT}`,
+      env: { VITE_API_TARGET: `http://127.0.0.1:${BACKEND_PORT}` },
+      url: `http://localhost:${FRONTEND_PORT}`,
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
       cwd: '../../../frontend',

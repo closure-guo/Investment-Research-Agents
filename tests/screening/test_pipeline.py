@@ -28,7 +28,7 @@ import pytest
 from finance_agent.data.snapshot import set_meta_many, write_snapshot_rows
 from finance_agent.factors.eval_engine import MarketPanel, build_panel_from_rows
 from finance_agent.factors.library import add_factor, record_ic
-from finance_agent.screening import pipeline
+from finance_agent.screening import pipeline, rules_config
 from finance_agent.screening.ranker import Candidate
 from finance_agent.screening.store import (
     consecutive_days_in_top,
@@ -298,6 +298,51 @@ def test_batch_drops_excluded_from_pool(ws: _Workspace) -> None:
     assert [row["symbol"] for row in list_selection_pool(_AS_OF, db_path=ws.screening_db)] == [
         "600519"
     ]
+
+
+def test_main_lane_reads_rules_config(
+    ws: _Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """主档批次（thresholds 缺省路径）从运行时配置取 Top-N（add-screening-rules-config-ui）。"""
+    config_path = tmp_path / "screening_rules.json"
+    config_path.write_text(
+        json.dumps({"min_trading_days": 60, "min_avg_amount_20d": 5e7, "l2_top_n": 1}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(rules_config.ENV_VAR_PATH, str(config_path))
+
+    result = _run(ws)
+
+    assert result["status"] == "ok"
+    assert result["l2_top"] == 1
+    l2_symbols = [row["symbol"] for row in list_l2_candidates(_AS_OF, db_path=ws.screening_db)]
+    assert len(l2_symbols) == 1
+
+
+def test_microcap_lane_ignores_rules_config(
+    ws: _Workspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式 thresholds（小票通道）完全绕过运行时配置：配置若被读取（250 日/9e8 元）
+    L1 应为 0 通过，实际仍按 MICROCAP_THRESHOLDS 通过 3 只正常标的。"""
+    config_path = tmp_path / "screening_rules.json"
+    config_path.write_text(
+        json.dumps({"min_trading_days": 250, "min_avg_amount_20d": 9e8, "l2_top_n": 1}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(rules_config.ENV_VAR_PATH, str(config_path))
+
+    result = pipeline.run_microcap_lane_daily(
+        as_of=_AS_OF,
+        panel=ws.panel,
+        events_by_symbol={},
+        triage_client=_ScriptedClient(),
+        db_path=ws.screening_db,
+        snapshot_db_path=ws.snapshot_db,
+        library_db_path=ws.library_db,
+    )
+
+    assert result["status"] == "ok"
+    assert result["l1_passed"] == 3
 
 
 def _seed_mode_row(ws: _Workspace, trade_date: str, mode: str) -> None:

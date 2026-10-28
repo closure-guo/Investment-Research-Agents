@@ -11,6 +11,7 @@ import { RunInfoPane } from './panes/RunInfoPane'
 import { DataMonitorPane } from './panes/DataMonitorPane'
 import { TrackPrefsPane } from './panes/TrackPrefsPane'
 import { EvalOpsPane } from './panes/EvalOpsPane'
+import { ScreeningRulesPane } from './panes/ScreeningRulesPane'
 import { FactorResearchPane } from './panes/FactorResearchPane'
 import type { LLMConfig, CapabilityMatrix, ProfileStore } from '../../llmConfig'
 
@@ -23,6 +24,7 @@ export type ModuleId =
   | 'factor-research'
   | 'track'
   | 'eval-ops'
+  | 'screening-rules'
 
 const MODULES: { id: ModuleId; label: string }[] = [
   { id: 'llm', label: 'LLM 配置' },
@@ -33,6 +35,7 @@ const MODULES: { id: ModuleId; label: string }[] = [
   { id: 'factor-research', label: '因子研发配置' },
   { id: 'track', label: '战绩展示偏好' },
   { id: 'eval-ops', label: '评估运维' },
+  { id: 'screening-rules', label: '选股规则' },
 ]
 
 const navButtonStyle: CSSProperties = {
@@ -117,6 +120,7 @@ export function SettingsCenterPage(props: {
         )}
         {active === 'track' && <TrackPrefsPane />}
         {active === 'eval-ops' && <EvalOpsPane />}
+        {active === 'screening-rules' && <ScreeningRulesPane />}
       </main>
     </div>
   )

@@ -84,6 +84,7 @@ from finance_agent.memory.semantic import (  # noqa: E402
 )
 from finance_agent.models import HoldingsContext  # noqa: E402
 from finance_agent.pipeline_runner import PipelineRunner, build_layer_tree  # noqa: E402
+from finance_agent.screening import rules_config  # noqa: E402
 from finance_agent.screening.freshness import screening_freshness_removals  # noqa: E402
 from finance_agent.screening.pipeline import (  # noqa: E402
     latest_successful_pool,
@@ -3667,6 +3668,39 @@ async def put_analysis_concurrency(req: AnalysisConcurrencyUpdate) -> dict[str, 
     if queue.max_concurrency != payload["value"]:
         queue.set_max_concurrency(int(payload["value"]))
     return payload
+
+
+# ── 选股规则设置（delta add-screening-rules-config-ui）──
+
+
+class ScreeningRulesUpdate(BaseModel):
+    """保存入参：三项整体校验由 rules_config.save 统一执行（非法 → 400）。"""
+
+    min_trading_days: Any = None
+    min_avg_amount_20d: Any = None
+    l2_top_n: Any = None
+
+
+@app.get("/api/settings/screening-rules")
+async def get_screening_rules() -> dict[str, Any]:
+    """选股规则配置（只读）：逐项生效值 + 来源 + 区间 + env 披露 + file_status。"""
+    return await asyncio.to_thread(rules_config.resolve)
+
+
+@app.put("/api/settings/screening-rules")
+async def put_screening_rules(req: ScreeningRulesUpdate) -> dict[str, Any]:
+    """保存选股规则：整体校验 → 原子落盘；下一批次生效（运行中批次不受影响）。"""
+    try:
+        return await asyncio.to_thread(
+            rules_config.save,
+            {
+                "min_trading_days": req.min_trading_days,
+                "min_avg_amount_20d": req.min_avg_amount_20d,
+                "l2_top_n": req.l2_top_n,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # 降级披露文案（add-screening-empty-library-fallback：单源在后端，前端原样渲染；
