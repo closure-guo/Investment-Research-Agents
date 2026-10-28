@@ -96,3 +96,85 @@ def test_total_length_bounded_with_truncation_marker(tmp_path: Path) -> None:
     block = mod.render_explored_block(path)
     assert len(block) <= mod.MAX_CHARS + 200
     assert "(truncated)" in block
+
+
+def test_template_contract_block_renders_summary(tmp_path: Path) -> None:
+    """任务指令层契约段：规则/复杂度/字段全量；算子词表 ≤32 时也全量列出（第 2 轮起是唯一算子指引）。"""
+    mod = _load_consumer()
+    path = _write_payload(tmp_path, {"contract": _CONTRACT, "explored": []})
+    block = mod.render_contract_block(path)
+    assert "BINDING" in block
+    for token in (
+        "epsilon",
+        "cross-sectional",
+        "Complexity limits: max_ast_depth <= 8",
+        "$close",
+    ):
+        assert token in block
+    # 全量算子，而非样例：Ref/Rank 等主力算子不得因摘要被遗漏
+    assert "Abs, Mean, Ref" in block
+    assert "any operator outside this set is inexpressible" in block
+    assert "gate2" not in block  # 拒收计数只属上下文段，模板段不带
+
+
+def test_template_contract_block_fails_safe(tmp_path: Path) -> None:
+    mod = _load_consumer()
+    p = tmp_path / "explored.json"
+    p.write_text("{bad json", encoding="utf-8")
+    assert mod.render_contract_block(str(p)) == ""  # 损坏 → 空串
+    assert (
+        mod.render_contract_block(_write_payload(tmp_path, {"explored": []})) == ""
+    )  # 无契约 → 空串
+    assert mod.render_contract_block(str(tmp_path / "missing.json")) == ""  # 缺失 → 空串
+
+
+def test_template_contract_block_header_only_returns_empty(tmp_path: Path) -> None:
+    """契约非空但无任何可用条款（rules 空/字段损坏）→ 视为无契约，不注入空抬头。"""
+    mod = _load_consumer()
+    path = _write_payload(tmp_path, {"contract": {"rules": []}, "explored": []})
+    assert mod.render_contract_block(path) == ""
+    path = _write_payload(
+        tmp_path,
+        {"contract": {"rules": [1, None], "complexity": {"max_fields": None}}, "explored": []},
+    )
+    assert mod.render_contract_block(path) == ""
+
+
+def test_template_contract_complexity_bad_values_filtered(tmp_path: Path) -> None:
+    """复杂度损坏值不得原样渲染成 'max_fields <= None'（MUST NOT 虚构契约数值）。"""
+    mod = _load_consumer()
+    contract = dict(_CONTRACT, complexity={"max_ast_depth": 8, "max_fields": None})
+    path = _write_payload(tmp_path, {"contract": contract, "explored": []})
+    block = mod.render_contract_block(path)
+    assert "max_ast_depth <= 8" in block
+    assert "None" not in block
+
+
+def test_template_contract_block_budget_bounded(tmp_path: Path) -> None:
+    mod = _load_consumer()
+    huge = dict(_CONTRACT, rules=["x" * 5000])
+    path = _write_payload(tmp_path, {"contract": huge, "explored": []})
+    block = mod.render_contract_block(path)
+    assert len(block) <= mod.TEMPLATE_CONTRACT_MAX_CHARS + 15
+    assert "(truncated)" in block
+
+
+def test_template_contract_consistent_with_context_contract(tmp_path: Path) -> None:
+    """同源一致性：两段复杂度条款逐项相等、算子总数 == 记忆块算子列表长度。"""
+    mod = _load_consumer()
+    path = _write_payload(
+        tmp_path, {"contract": _CONTRACT, "gate_rejections": {"2": 322}, "explored": []}
+    )
+    tpl = mod.render_contract_block(path)
+    ctx = mod.render_explored_block(path)
+
+    def _complexity_items(block: str) -> set[str]:
+        line = next(ln for ln in block.splitlines() if "Complexity limits:" in ln)
+        return {p.strip() for p in line.split("Complexity limits:", 1)[1].rstrip(".").split(",")}
+
+    assert _complexity_items(tpl) == _complexity_items(ctx)
+    tpl_count_line = next(ln for ln in tpl.splitlines() if "Expressible operators:" in ln)
+    assert "3 in total" in tpl_count_line
+    ctx_ops_line = next(ln for ln in ctx.splitlines() if "Expressible operators (Qlib form):" in ln)
+    ctx_ops = ctx_ops_line.split(":", 1)[1].rstrip(".").split(", ")
+    assert len(ctx_ops) == 3
