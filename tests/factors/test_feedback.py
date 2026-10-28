@@ -389,6 +389,20 @@ def test_build_payload_gate_floor_underfull_gate_fully_shown() -> None:
     assert payload["returned"] == 20
 
 
+def test_build_payload_gate_floor_configurable() -> None:
+    """spec「默认每闸 ≥5 条，可配置」：gate_floor 可显式调低，保底数随之生效。"""
+    processed = _gate_floor_processed()
+    payload = build_payload(processed, {}, limit=80, gate_floor=2)
+    gates = [e["gate"] for e in payload["explored"] if e["status"] == "rejected"]
+    assert sum(1 for g in gates if g == 4) >= 2
+    assert payload["returned"] == 80
+    default = build_payload(processed, {}, limit=80)
+    default_g4 = sum(
+        1 for e in default["explored"] if e["status"] == "rejected" and e["gate"] == 4
+    )
+    assert sum(1 for g in gates if g == 4) < default_g4  # 调低保底 → 闸④ 出场减少
+
+
 def _stage_mix_processed() -> dict[str, dict]:
     """同日双 stage 的 untranslatable：translator 300 条 / llm 60 条（LLM 段=最大损耗桶）。"""
     processed: dict[str, dict] = {}

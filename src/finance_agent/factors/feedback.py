@@ -230,12 +230,14 @@ def build_payload(
     *,
     limit: int = DEFAULT_LIMIT,
     untranslatable_quota: int = UNTRANSLATABLE_QUOTA,
+    gate_floor: int = PER_GATE_FLOOR,
 ) -> dict[str, Any]:
     """状态 + 候选表 → 生成侧清单载荷（按规范化表达式去重、分档配额、截断）。
 
-    分档顺序：admitted（全部）→ untranslatable（最近 ``untranslatable_quota`` 条）
-    → rejected（按闸号升序）→ transcription_error。untranslatable 不足配额时空位
-    归还 rejected；``limit`` 仍是总量上限。
+    分档顺序：admitted（全部）→ untranslatable（最近 ``untranslatable_quota`` 条，
+    档内按日轮转 × stage 交织）→ rejected（per-gate 保底 ``gate_floor`` 条 + 余量
+    按占比）→ transcription_error。untranslatable 不足配额或 rejected 保底未用满时
+    空位归还使用；``limit`` 仍是总量上限。
     """
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -284,7 +286,7 @@ def build_payload(
     quota = max(0, min(untranslatable_quota, len(untranslatable)))
     picked_untranslatable = _select_untranslatable(untranslatable, quota)
     rejected_budget = max(0, limit - len(admitted) - len(picked_untranslatable))
-    picked_rejected = _allocate_rejected(rejected, rejected_budget)[0]
+    picked_rejected = _allocate_rejected(rejected, rejected_budget, gate_floor)[0]
     ordered = admitted + picked_untranslatable + picked_rejected + transcription
     trimmed = ordered[: max(limit, 0)]
     rejected_by_gate: dict[str, int] = {}
@@ -345,6 +347,7 @@ def export_feedback(
     output_path: str | Path = DEFAULT_OUTPUT_PATH,
     limit: int = DEFAULT_LIMIT,
     untranslatable_quota: int = UNTRANSLATABLE_QUOTA,
+    gate_floor: int = PER_GATE_FLOOR,
 ) -> dict[str, Any]:
     """一步导出（CLI 与测试共用）：返回写出载荷。"""
     processed = load_state(state_path)
@@ -354,6 +357,7 @@ def export_feedback(
         candidates,
         limit=limit,
         untranslatable_quota=untranslatable_quota,
+        gate_floor=gate_floor,
     )
     write_payload(payload, output_path)
     return payload
