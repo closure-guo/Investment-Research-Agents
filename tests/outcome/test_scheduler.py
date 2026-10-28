@@ -202,9 +202,9 @@ class TestCohortJobRegistration:
         mock_sched_cls.return_value = sched
         assert start_scheduler() is sched
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 29, (
+        assert len(ids) == 30, (
             ids
-        )  # 27 日批/月批 + 1 个一次性启动补跑 job（ops_catch_up_once，非 JOB_IDS 成员）
+        )  # 28 日批/月批 + 1 个一次性启动补跑 job（ops_catch_up_once，非 JOB_IDS 成员）
         # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
@@ -250,6 +250,7 @@ class TestCohortJobRegistration:
             "research_report_inbox_daily",
             "analyst_claim_settle_daily",
             "foreign_broker_news_daily",
+            "factor_diagnostics_daily",
         }
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
@@ -554,9 +555,9 @@ class TestMisfireHardening:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 29, (
+        assert len(ids) == 30, (
             ids
-        )  # 27 日批/月批 + 1 个一次性启动补跑 job（须同样带 misfire/coalesce）
+        )  # 28 日批/月批 + 1 个一次性启动补跑 job（须同样带 misfire/coalesce）
         # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；

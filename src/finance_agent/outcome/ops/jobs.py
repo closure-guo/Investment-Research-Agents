@@ -44,6 +44,7 @@ from finance_agent.data.snapshot_job import MARKET_SNAPSHOT_SCHEDULE, run_market
 from finance_agent.execution.brokers.paper import run_paper_settle_daily
 from finance_agent.execution.driver import run_execution_daily
 from finance_agent.factors.builtin import run_factor_builtin_register
+from finance_agent.factors.diagnostics import run_factor_diagnostics
 from finance_agent.factors.harvest import run_factor_harvest_until_drained
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
@@ -115,6 +116,11 @@ JOB_IDS: tuple[str, ...] = (
     "analyst_claim_settle_daily",
     # 外资二手快讯（add-foreign-broker-sentiment）：17:05——只读观测，无源为空态
     "foreign_broker_news_daily",
+    # 因子诊断读数日批（add-factor-diagnostics-batch）：17:15——日批窗口（15:30-17:10）
+    # 之后、cohort 之前；读数生产移出 HTTP 详情路径（生产实测请求内现算 500 日面板
+    # 把详情拖成数十分钟）。每天（含周末）跑：周末收割新准入的因子当日获得读数；
+    # 快照无新交易日时全部已新鲜 → 零面板构建近零成本。
+    "factor_diagnostics_daily",
     "cohort_batch",
     # 每日汇报（add-auto-pool-analysis-daily-brief）：20:30——cohort 之后，给自动分析
     # 留出完成时间；事实汇总 + LLM 生成，失败写降级摘要并记 failed
@@ -151,6 +157,7 @@ JOB_LABELS: dict[str, str] = {
     "research_report_inbox_daily": "研报投喂",
     "analyst_claim_settle_daily": "分析师事后检验",
     "foreign_broker_news_daily": "外资快讯",
+    "factor_diagnostics_daily": "因子诊断读数",
     "cohort_batch": "cohort 跑批",
     "daily_brief_daily": "每日汇报",
     "memory_extract_monthly": "记忆提炼",
@@ -183,6 +190,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "research_report_inbox_daily": ingest_inbox,
     "analyst_claim_settle_daily": run_analyst_claim_settle_daily,
     "foreign_broker_news_daily": run_foreign_broker_news_daily,
+    "factor_diagnostics_daily": run_factor_diagnostics,
     "cohort_batch": run_cohort_batch,
     "daily_brief_daily": run_daily_brief,
     "memory_extract_monthly": run_memory_extract_monthly,
@@ -366,6 +374,14 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 17,
         "minute": 5,
+        "timezone": "Asia/Shanghai",
+    },
+    # 因子诊断读数日批（add-factor-diagnostics-batch）：17:15——日批窗口之后、
+    # cohort 之前；收割过晚（实测 17:56 结束）可能并发，均为进程内 CPU 任务无正确性影响。
+    "factor_diagnostics_daily": {
+        "day_of_week": "*",
+        "hour": 17,
+        "minute": 15,
         "timezone": "Asia/Shanghai",
     },
     "cohort_batch": {

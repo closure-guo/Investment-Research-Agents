@@ -118,6 +118,13 @@ CREATE TABLE IF NOT EXISTS factor_admission_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_factor_ledger_created ON factor_admission_ledger (created_at);
 CREATE INDEX IF NOT EXISTS idx_factor_ledger_p ON factor_admission_ledger (p_value);
+CREATE TABLE IF NOT EXISTS factor_diagnostics (
+  factor_id      INTEGER PRIMARY KEY,
+  as_of          TEXT NOT NULL,
+  style_exposure TEXT,
+  monotonicity   TEXT,
+  computed_at    TEXT NOT NULL
+);
 """
 
 
@@ -562,8 +569,14 @@ def reset_factor_library(db_path: str | Path | None = None) -> dict[str, int]:
     conn = _connect(db_path)
     removed: dict[str, int] = {}
     try:
-        # 先子表后主表（无外键，仅语义顺序：事件/IC 属于因子）
-        for table in ("factor_admission_ledger", "factor_events", "factor_ic", "factors"):
+        # 先子表后主表（无外键，仅语义顺序：事件/IC/读数属于因子）
+        for table in (
+            "factor_diagnostics",
+            "factor_admission_ledger",
+            "factor_events",
+            "factor_ic",
+            "factors",
+        ):
             cursor = conn.execute(f"DELETE FROM {table}")  # noqa: S608 -- 表名来自模块常量
             removed[table] = int(cursor.rowcount)
         conn.commit()
@@ -787,3 +800,67 @@ def _quota_sort_key(row: sqlite3.Row) -> tuple[float, str, int]:
     increment = row["pool_increment"]
     rank_value = -float(increment) if increment is not None else math.inf
     return (rank_value, str(row["created_at"]), int(row["id"]))
+
+
+# ── 诊断读数存储（add-factor-diagnostics-batch）─────────────────────────────
+# 每因子一行；日批（factors.diagnostics）生产、详情接口只读消费。
+
+
+def set_factor_diagnostics(
+    factor_id: int,
+    as_of: str,
+    *,
+    style_exposure: dict[str, Any] | None,
+    monotonicity: dict[str, Any] | None,
+    db_path: str | Path | None = None,
+) -> None:
+    """Upsert 单因子诊断读数（日批幂等写：同因子覆盖）。
+
+    ``style_exposure`` / ``monotonicity`` 为 JSON 友好载荷（``style_exposure_payload``
+    输出 / ``check_monotonicity`` detail 扩展，非有限值由生产侧置 None）；
+    ``None`` 存 NULL。
+    """
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO factor_diagnostics (factor_id, as_of, style_exposure, monotonicity, computed_at)"
+            " VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(factor_id) DO UPDATE SET as_of=excluded.as_of,"
+            " style_exposure=excluded.style_exposure, monotonicity=excluded.monotonicity,"
+            " computed_at=excluded.computed_at",
+            (
+                int(factor_id),
+                str(as_of),
+                json.dumps(style_exposure, ensure_ascii=False)
+                if style_exposure is not None
+                else None,
+                json.dumps(monotonicity, ensure_ascii=False) if monotonicity is not None else None,
+                _now_iso(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_factor_diagnostics(
+    factor_id: int, db_path: str | Path | None = None
+) -> dict[str, Any] | None:
+    """读单因子诊断读数；无记录 → ``None``（详情接口据此置 null，不虚构）。"""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT as_of, style_exposure, monotonicity, computed_at"
+            " FROM factor_diagnostics WHERE factor_id = ?",
+            (int(factor_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {
+        "as_of": str(row["as_of"]),
+        "style_exposure": json.loads(row["style_exposure"]) if row["style_exposure"] else None,
+        "monotonicity": json.loads(row["monotonicity"]) if row["monotonicity"] else None,
+        "computed_at": str(row["computed_at"]),
+    }
