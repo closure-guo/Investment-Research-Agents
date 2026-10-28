@@ -299,7 +299,9 @@ class TestBatchAdmission:
         events = list_events(int(rows[0]["id"]), db_path=db)
         assert [event["event"] for event in events] == ["created", "status_change"]
         assert events[-1]["to_status"] == "active"
-        assert events[-1]["detail"] == {"reason": "ADMITTED"}
+        # ADMITTED detail 带 orientation（issue #514）；符号与因子行持久化值一致
+        assert events[-1]["detail"]["reason"] == "ADMITTED"
+        assert events[-1]["detail"]["orientation"] == rows[0]["orientation"]
 
     def test_prompt_carries_library_bucket_stats_and_operator_ic(self, db: str):
         """跨桶采样上下文来自真实因子库（分桶存量 + 算子历史入库 IC 均值）。"""
