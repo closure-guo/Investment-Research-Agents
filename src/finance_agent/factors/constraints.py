@@ -83,3 +83,8 @@ MIN_REDUNDANCY_SAMPLES: int = 5
 ADMISSION_PANEL_LOOKBACK_DAYS: int = 500
 # 入库后复核样本门槛（add-factor-post-admission-review）：入库后 IC 样本 ≥ 60 才判定
 POST_ADMISSION_MIN_SAMPLES: int = 60
+# 拒绝池复苏重评（add-rejected-factor-revival）：冷却期（自然日，自最近 created/
+# re_rejected 事件起算）与单次运行提交上限。静默线复用闸② ``MIN_ABS_ICIR``、
+# 窗口复用 ``tools.IC_WINDOW``——单一真相源，不另立阈值。
+REVIVAL_COOLDOWN_DAYS: int = 30
+REVIVAL_DAILY_CAP: int = 5
