@@ -1029,11 +1029,16 @@ def admit_candidates(
             alignment_score=item.alignment_score,
             db_path=db_path,
         )
-        set_status(factor_id, STATUS_ACTIVE, detail={"reason": "ADMITTED"}, db_path=db_path)
+        # ADMITTED 事件 detail 携带定向（issue #514）：核对新入库因子的方向
+        # 无需翻表——存量 NULL 行（incident 家族 #514）的教训落在事件流里
+        orientation = gate4.detail.get("orientation")
+        admitted_detail: dict[str, Any] = {"reason": "ADMITTED"}
+        if orientation in (-1, 0, 1):
+            admitted_detail["orientation"] = int(orientation)
+        set_status(factor_id, STATUS_ACTIVE, detail=admitted_detail, db_path=db_path)
         increment = gate4.detail.get("increment")
         if isinstance(increment, (int, float)) and not isinstance(increment, bool):
             set_pool_increment(factor_id, float(increment), db_path=db_path)
-        orientation = gate4.detail.get("orientation")
         if orientation in (-1, 0, 1):
             set_orientation(factor_id, int(orientation), db_path=db_path)
         retired = apply_bucket_quota(item.category, db_path=db_path)

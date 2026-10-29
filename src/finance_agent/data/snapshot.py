@@ -13,7 +13,9 @@
 - D2 停牌/缺行合成：spot 表（``stock_zh_a_spot_em``）不含停牌标的；「昨日有行、
   今日 spot 无、且非退市」的票合成为停牌行：``open=high=low=close_raw=昨行
   close_raw``、``volume=amount=0``、``is_suspended=1``、``close_qfq=昨行
-  close_qfq``、``pct_chg=0``；spot 中存在但最新价为 NaN 的票同规则。退市票
+  close_qfq``、``pct_chg=0``；spot 中存在但最新价为 NaN/0 的票同规则；spot 中
+  存在、最新价有效但 OHLC 全 0 且成交量为 0 的「有价无成交」形态（源回填昨收，
+  issue #511）同样合成停牌行。退市票
   （master 名单中不再出现）不做正向补行，历史行保持不动。
 - D3 状态位（只用 spot 单行信息）：``is_st = "ST" in name``（含 ``*ST``）；
   ``limit_up_sealed = 开=高=低=收 且 pct_chg >= 4.8``；``limit_down_sealed =
@@ -725,7 +727,9 @@ def build_snapshot_rows(
     """当日 spot + 昨日快照 + 证券主表 → 当日快照行列表（键与表列名逐字一致）。
 
     - spot 有效行 → 正常行（D3 状态位；D1 当日 close_qfq = close_raw）；
-    - spot 最新价 NaN 的行按 D2 合成停牌行（有昨行才合成，无价可承则跳过）；
+    - spot「无成交」的行按 D2 合成停牌行（有昨行才合成，无价可承则跳过）。
+      无成交有两种源形态，任一命中即合成：最新价 NaN/0（缺行同规）；
+      最新价有效但 OHLC 全 0 且成交量为 0（源回填昨收的停牌形态，issue #511）；
     - 昨日有行、今日 spot 无、且仍在 master 名单（master 为空视为名单未知，
       保守保留）的票合成停牌行；master 名单中已消失的票视为退市 → 不补行。
     """
@@ -736,7 +740,7 @@ def build_snapshot_rows(
         if not code:
             continue
         seen.add(code)
-        if _num(raw.get("最新价")) is None:
+        if _num(raw.get("最新价")) is None or _is_zero_trade_row(raw):
             row = _synthesize_suspended_row(trade_date, code, prev_rows.get(code), master)
         else:
             row = _spot_row(trade_date, code, raw, master)
@@ -782,6 +786,20 @@ def compute_rebase_factors(spot: pd.DataFrame, prev_rows: dict[str, dict]) -> di
         if abs(k - 1.0) > 1e-4:
             factors[code] = k
     return factors
+
+
+def _is_zero_trade_row(raw: Any) -> bool:
+    """spot「有价无成交」停牌形态判定（issue #511）。
+
+    东财/新浪对停牌标的的 spot 行可能回填昨收（最新价=昨收而非 NaN/0），此时
+    「今开=最高=最低=0 且 成交量为 0」是唯一可判信号；正常交易行 OHLC 有效，
+    不会命中。成交量缺失（None）与 0 同判——OHLC 全 0 本身已是无成交。
+    """
+    open_ = _num(raw.get("今开"))
+    high = _num(raw.get("最高"))
+    low = _num(raw.get("最低"))
+    volume = _num(raw.get("成交量"))
+    return open_ == 0.0 and high == 0.0 and low == 0.0 and volume in (None, 0.0)
 
 
 def _spot_row(trade_date: str, code: str, raw: Any, master: dict[str, dict]) -> dict[str, Any]:

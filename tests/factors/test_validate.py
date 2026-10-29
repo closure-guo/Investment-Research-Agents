@@ -1563,6 +1563,17 @@ def test_admitted_factor_persists_orientation(tmp_path):
     assert rows[result.factor_id]["orientation"] in (-1, 1)
 
 
+def test_admitted_event_detail_carries_orientation(tmp_path):
+    """ADMITTED 事件 detail 带 orientation（issue #514：核对新入库因子定向无需翻表）。"""
+    db = _empty_db(tmp_path)
+    result = admit_candidates([_candidate("volume")], _signal_panel(), seed=1, db_path=db)[0]
+    gate4 = next(gate for gate in result.gates if gate.gate == 4)
+    events = list_events(int(result.factor_id), db_path=db)
+    admitted = next(event for event in events if event["to_status"] == "active")
+    assert admitted["detail"]["reason"] == "ADMITTED"
+    assert admitted["detail"]["orientation"] == gate4.detail["orientation"]
+
+
 # ── 拒绝池持久化（add-rejected-factor-pool T2）──────────────────────────────
 
 

@@ -335,6 +335,149 @@ def test_build_rows_nan_price_treated_suspended():
     assert row["prev_close"] == 1700.0
 
 
+def test_build_rows_zero_ohlc_no_trade_treated_suspended():
+    """spot「最新价=昨收、OHLC 全 0、成交量 0」的无成交形态（issue #511）→ 停牌合成。
+
+    秦港股份 2026-10-21 实测形态：东财/新浪对停牌标的回填昨收（最新价非 NaN），
+    既有 D2 判据（最新价 NaN）漏判 → 写成 OHLC=0 的正常行，绕过 L1 停牌过滤。
+    """
+    spot = pd.DataFrame(
+        {
+            "代码": ["601326"],
+            "名称": ["秦港股份"],
+            "最新价": [3.57],
+            "涨跌幅": [0.0],
+            "成交量": [0.0],
+            "成交额": [0.0],
+            "今开": [0.0],
+            "最高": [0.0],
+            "最低": [0.0],
+            "昨收": [3.57],
+        }
+    )
+    prev_rows = {
+        "601326": {
+            "trade_date": "2026-10-20",
+            "code": "601326",
+            "name": "秦港股份",
+            "close_raw": 3.57,
+            "close_qfq": 3.57,
+            "list_date": "2017-08-15",
+        }
+    }
+
+    rows = build_snapshot_rows(trade_date="2026-10-21", spot=spot, prev_rows=prev_rows, master={})
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["code"] == "601326"
+    assert row["is_suspended"] == 1
+    assert row["open"] == row["high"] == row["low"] == row["close_raw"] == 3.57
+    assert row["close_qfq"] == 3.57
+    assert row["volume"] == 0
+    assert row["amount"] == 0
+    assert row["pct_chg"] == 0
+    assert row["prev_close"] == 3.57
+    assert row["limit_up_sealed"] == 0
+    assert row["limit_down_sealed"] == 0
+
+
+def test_build_rows_zero_price_zero_ohlc_treated_suspended():
+    """「最新价=0 且 OHLC=0」变体（0 不直通写库污染 qfq 序列）→ 停牌合成。"""
+    spot = pd.DataFrame(
+        {
+            "代码": ["601326"],
+            "名称": ["秦港股份"],
+            "最新价": [0.0],
+            "涨跌幅": [0.0],
+            "成交量": [0.0],
+            "成交额": [0.0],
+            "今开": [0.0],
+            "最高": [0.0],
+            "最低": [0.0],
+            "昨收": [3.57],
+        }
+    )
+    prev_rows = {
+        "601326": {
+            "trade_date": "2026-10-20",
+            "code": "601326",
+            "name": "秦港股份",
+            "close_raw": 3.57,
+            "close_qfq": 3.57,
+        }
+    }
+
+    rows = build_snapshot_rows(trade_date="2026-10-21", spot=spot, prev_rows=prev_rows, master={})
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["is_suspended"] == 1
+    assert row["close_raw"] == 3.57
+    assert row["close_qfq"] == 3.57
+    assert row["volume"] == 0
+
+
+def test_build_rows_zero_ohlc_without_prev_row_skipped():
+    """同形态但无昨行 → 跳过（无价可承，不编造 0 行）。"""
+    spot = pd.DataFrame(
+        {
+            "代码": ["601326"],
+            "名称": ["秦港股份"],
+            "最新价": [3.57],
+            "涨跌幅": [0.0],
+            "成交量": [0.0],
+            "成交额": [0.0],
+            "今开": [0.0],
+            "最高": [0.0],
+            "最低": [0.0],
+            "昨收": [3.57],
+        }
+    )
+
+    rows = build_snapshot_rows(trade_date="2026-10-21", spot=spot, prev_rows={}, master={})
+
+    assert rows == []
+
+
+def test_build_rows_zero_ohlc_mixed_batch_normal_rows_unaffected():
+    """同批混合零 OHLC 票与正常票：正常行 OHLC 原值、is_suspended=0 不受影响。"""
+    spot = pd.DataFrame(
+        {
+            "代码": ["601326", "600519"],
+            "名称": ["秦港股份", "贵州茅台"],
+            "最新价": [3.57, 1700.0],
+            "涨跌幅": [0.0, 1.2],
+            "成交量": [0.0, 10000.0],
+            "成交额": [0.0, 1.7e7],
+            "今开": [0.0, 1680.0],
+            "最高": [0.0, 1710.0],
+            "最低": [0.0, 1675.0],
+            "昨收": [3.57, 1679.84],
+        }
+    )
+    prev_rows = {
+        "601326": {
+            "trade_date": "2026-10-20",
+            "code": "601326",
+            "name": "秦港股份",
+            "close_raw": 3.57,
+            "close_qfq": 3.57,
+        }
+    }
+
+    rows = build_snapshot_rows(trade_date="2026-10-21", spot=spot, prev_rows=prev_rows, master={})
+
+    by_code = {row["code"]: row for row in rows}
+    assert len(rows) == 2
+    assert by_code["601326"]["is_suspended"] == 1
+    assert by_code["600519"]["is_suspended"] == 0
+    assert by_code["600519"]["open"] == 1680.0
+    assert by_code["600519"]["high"] == 1710.0
+    assert by_code["600519"]["low"] == 1675.0
+    assert by_code["600519"]["volume"] == 10000.0
+
+
 def test_status_flags_st_and_limit_sealed():
     """D3：ST 名标记；一字板 + pct>=4.8/<=-4.8 才算封板（0/3.2/非一字 → 0）。"""
     spot = pd.DataFrame(
