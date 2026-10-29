@@ -853,6 +853,8 @@ export interface ScreeningFactorContrib {
 
 export interface ScreeningPoolRow {
   symbol: string
+  /** 股票名称（add-pool-stock-name-display）：历史行为 null，快照缺名落空串 */
+  stock_name: string | null
   composite_score: number
   rank: number
   consecutive_days: number

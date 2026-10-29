@@ -304,6 +304,7 @@ export function ScreeningPage({
             <thead>
               <tr className="text-left" style={{ color: 'var(--text-tertiary)' }}>
                 <th className="py-2 pr-3 font-medium">标的</th>
+                <th className="py-2 pr-3 font-medium">股票名称</th>
                 <th className="py-2 pr-3 font-medium">{scoreHeader}</th>
                 <th className="py-2 pr-3 font-medium">连续在榜天数</th>
                 <th className="py-2 pr-3 font-medium">L3 判定</th>
@@ -332,6 +333,13 @@ export function ScreeningPage({
                           {QUEUE_STATE_LABEL[badge] ?? badge}
                         </span>
                       )}
+                    </td>
+                    <td
+                      data-testid={`screening-stock-name-${row.symbol}`}
+                      className="py-2 pr-3 align-top"
+                      style={{ color: 'var(--text-secondary)' }}
+                    >
+                      {row.stock_name || '—'}
                     </td>
                     <td
                       data-testid={`screening-score-${row.symbol}`}

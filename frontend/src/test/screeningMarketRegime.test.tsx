@@ -102,6 +102,7 @@ function poolBody(overrides: Partial<ScreeningPoolResponse> = {}): ScreeningPool
     pool: [
       {
         symbol: '600519',
+        stock_name: '贵州茅台',
         composite_score: 1.823,
         rank: 1,
         consecutive_days: 5,

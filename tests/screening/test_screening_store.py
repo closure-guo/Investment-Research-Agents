@@ -590,6 +590,142 @@ def test_record_and_read_back_pool_and_frontier_gate(tmp_path) -> None:
     assert main is not None and main["pool"] == "main" and main["frontier_gate"] is None
 
 
+def test_pool_row_roundtrip_carries_stock_name(tmp_path) -> None:
+    """池行 stock_name 写读往返；主档与小票通道同一落库契约（add-pool-stock-name-display）。"""
+    from finance_agent.screening.store import list_selection_pool, record_screening_batch
+
+    db = tmp_path / "screening.db"
+    row = {
+        "symbol": "600519",
+        "stock_name": "贵州茅台",
+        "composite_score": 1.5,
+        "rank": 1,
+        "consecutive_days": 3,
+        "l3_verdict": "keep",
+        "l3_reason": "无风险事件",
+        "factor_contribs": [],
+    }
+    record_screening_batch(
+        _D1, status="ok", started_at="t0", finished_at="t1", pool_rows=[row], db_path=db
+    )
+    record_screening_batch(
+        _D1,
+        status="ok",
+        started_at="t0",
+        finished_at="t1",
+        pool="microcap",
+        pool_rows=[
+            {
+                "symbol": "600150",
+                "stock_name": "中国船舶",
+                "composite_score": 0.9,
+                "rank": 1,
+                "consecutive_days": 3,
+                "l3_verdict": "keep",
+                "l3_reason": "无风险事件",
+                "factor_contribs": [],
+            }
+        ],
+        db_path=db,
+    )
+
+    main = list_selection_pool(_D1, db_path=db)
+    assert main[0]["stock_name"] == "贵州茅台"
+    micro = list_selection_pool(_D1, db_path=db, pool="microcap")
+    assert micro[0]["stock_name"] == "中国船舶"
+
+    # 幂等补跑自动补名：同 (trade_date, pool) 重跑 upsert 整体替换（spec 场景）
+    record_screening_batch(
+        _D1,
+        status="ok",
+        started_at="t2",
+        finished_at="t3",
+        pool_rows=[{**row, "stock_name": "贵州茅台（补跑）"}],
+        db_path=db,
+    )
+    assert list_selection_pool(_D1, db_path=db)[0]["stock_name"] == "贵州茅台（补跑）"
+
+
+def test_pool_row_stock_name_missing_normalizes_to_empty(tmp_path) -> None:
+    """池行缺 stock_name 键 → 落空串（写路径 normalize 为 str；批次不失败）。"""
+    from finance_agent.screening.store import list_selection_pool, record_screening_batch
+
+    db = tmp_path / "screening.db"
+    record_screening_batch(
+        _D1,
+        status="ok",
+        started_at="t0",
+        finished_at="t1",
+        pool_rows=[
+            {
+                "symbol": "000001",
+                "composite_score": 1.0,
+                "rank": 1,
+                "consecutive_days": 3,
+                "l3_verdict": "keep",
+                "l3_reason": "无风险事件",
+                "factor_contribs": [],
+            }
+        ],
+        db_path=db,
+    )
+    assert list_selection_pool(_D1, db_path=db)[0]["stock_name"] == ""
+
+
+def test_pool_row_stock_name_rejects_non_string(tmp_path) -> None:
+    """stock_name 非 str（且非 None）→ fail loud（决策字段纪律，坏值不入库）。"""
+    from finance_agent.screening.store import record_screening_batch
+
+    with pytest.raises(ValueError, match="stock_name"):
+        record_screening_batch(
+            _D1,
+            status="ok",
+            started_at="t0",
+            finished_at="t1",
+            pool_rows=[
+                {
+                    "symbol": "000001",
+                    "stock_name": 123,
+                    "composite_score": 1.0,
+                    "rank": 1,
+                    "consecutive_days": 3,
+                    "l3_verdict": "keep",
+                    "l3_reason": "无风险事件",
+                    "factor_contribs": [],
+                }
+            ],
+            db_path=tmp_path / "screening.db",
+        )
+
+
+def test_legacy_pool_schema_gets_stock_name_column(tmp_path) -> None:
+    """旧 schema 库 init → 幂等 ALTER 补列；历史行保留且 stock_name 为 NULL。"""
+    from finance_agent.screening.store import init_screening_db, list_selection_pool
+
+    db = tmp_path / "screening.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE selection_pool ("
+        "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', symbol TEXT NOT NULL, "
+        "composite_score REAL NOT NULL, rank INTEGER NOT NULL, consecutive_days INTEGER NOT NULL, "
+        "l3_verdict TEXT NOT NULL, l3_reason TEXT NOT NULL, factor_contribs_json TEXT NOT NULL, "
+        "PRIMARY KEY (trade_date, pool, symbol))"
+    )
+    conn.execute(
+        "INSERT INTO selection_pool VALUES "
+        "('2026-10-27','main','600519',1.5,1,3,'keep','无风险事件','[]')"
+    )
+    conn.commit()
+    conn.close()
+
+    init_screening_db(db)
+
+    rows = list_selection_pool("2026-10-27", db_path=db)
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "600519"
+    assert rows[0]["stock_name"] is None
+
+
 def test_record_screening_batch_rejects_unknown_pool(tmp_path) -> None:
     from finance_agent.screening.store import record_screening_batch
 
@@ -647,6 +783,10 @@ def test_pool_rows_are_namespaced_by_pool(tmp_path) -> None:
     assert [row["symbol"] for row in list_selection_pool(_D1, db_path=db, pool="microcap")] == [
         "300750"
     ]
+    # 池行缺 stock_name 键 → normalize 空串；主档/小票通道同一落库契约
+    # （add-pool-stock-name-display）
+    assert list_selection_pool(_D1, db_path=db)[0]["stock_name"] == ""
+    assert list_selection_pool(_D1, db_path=db, pool="microcap")[0]["stock_name"] == ""
 
 
 # ── 迁移原子性与中断恢复（评审 F3，add-microcap-lane-guardrails） ─────────────
@@ -879,7 +1019,10 @@ _NEW_SHAPE_BATCHES_DDL = (
     "selection_mode TEXT NOT NULL DEFAULT 'factor', frontier_gate TEXT, "
     "exec_constraints TEXT, PRIMARY KEY (trade_date, pool))"
 )
-_NEW_SHAPE_POOL_DDL = (
+# 复刻 add-pool-stock-name-display 之前（microcap 迁移后、加名前）的池表形状：
+# 中断恢复路径换入此形状的 migrate 表后，init ② 池列补齐必须兜住 stock_name
+# （MUST NOT 改成当前权威形状——那会让恢复路径的补列断言失去前提）
+_PRE_DELTA_POOL_DDL = (
     "CREATE TABLE {name} ("
     "trade_date TEXT NOT NULL, pool TEXT NOT NULL DEFAULT 'main', symbol TEXT NOT NULL, "
     "composite_score REAL NOT NULL, rank INTEGER NOT NULL, consecutive_days INTEGER NOT NULL, "
@@ -925,7 +1068,7 @@ def _create_empty_migrate_tables(db) -> None:
         conn.executescript(
             _NEW_SHAPE_BATCHES_DDL.format(name="screening_batches__migrate")
             + ";"
-            + _NEW_SHAPE_POOL_DDL.format(name="selection_pool__migrate")
+            + _PRE_DELTA_POOL_DDL.format(name="selection_pool__migrate")
         )
         conn.commit()
     finally:
@@ -985,7 +1128,7 @@ def test_recovery_guard_keeps_real_table_when_migrate_has_fewer_rows(tmp_path) -
         conn.executescript(
             _NEW_SHAPE_BATCHES_DDL.format(name="screening_batches__migrate")
             + ";"
-            + _NEW_SHAPE_POOL_DDL.format(name="selection_pool__migrate")
+            + _PRE_DELTA_POOL_DDL.format(name="selection_pool__migrate")
         )
         conn.execute(
             "INSERT INTO screening_batches__migrate (trade_date, pool, status, started_at, "

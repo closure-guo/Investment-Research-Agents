@@ -16,6 +16,7 @@ autouse fixture 钉死为不可用/空（任何测试不得触网）。
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -283,6 +284,40 @@ def test_batch_ok_writes_batch_l2_full_list_and_eligible_pool(ws: _Workspace) ->
     assert contribs and contribs[0]["factor_id"] == ws.factor_id
     # 贡献分解勾稽：Σ contribution == composite_score（1e-9）
     assert abs(sum(c["contribution"] for c in contribs) - pool[0]["composite_score"]) <= 1e-9
+
+
+def test_pool_rows_carry_snapshot_stock_name(ws: _Workspace) -> None:
+    """池行 stock_name = 同日快照 name（合成 fixture 每标的「合成{code}」）。"""
+    _seed_pool_days(ws)
+
+    result = _run(ws)
+
+    assert result["status"] == "ok"
+    pool = {row["symbol"]: row for row in list_selection_pool(_AS_OF, db_path=ws.screening_db)}
+    assert pool["600519"]["stock_name"] == "合成600519"
+    assert pool["000001"]["stock_name"] == "合成000001"
+
+
+def test_pool_row_missing_stock_name_degrades_with_warning(
+    ws: _Workspace, caplog: pytest.LogCaptureFixture
+) -> None:
+    """快照缺名 → 池行落空串 + warning，批次不失败（展示字段不阻断决策字段）。"""
+    conn = sqlite3.connect(ws.snapshot_db)
+    try:
+        conn.execute("UPDATE market_snapshot SET name = '' WHERE code = '600519'")
+        conn.commit()
+    finally:
+        conn.close()
+    _seed_pool_days(ws)
+
+    with caplog.at_level(logging.WARNING, logger="finance_agent.screening.pipeline"):
+        result = _run(ws)
+
+    assert result["status"] == "ok"
+    pool = {row["symbol"]: row for row in list_selection_pool(_AS_OF, db_path=ws.screening_db)}
+    assert pool["600519"]["stock_name"] == ""
+    assert pool["000001"]["stock_name"] == "合成000001"
+    assert "600519" in caplog.text
 
 
 def test_batch_drops_excluded_from_pool(ws: _Workspace) -> None:

@@ -358,6 +358,8 @@ def run_screening_batch(
             )
             for row in rows
         ]
+        # 股票名透传（add-pool-stock-name-display）：池行 stock_name 取同日快照 name
+        names_by_symbol = {record.code: record.name for record in records}
         passed = [
             decision.code
             for decision in filter_universe(records, thresholds=thresholds)
@@ -479,6 +481,13 @@ def run_screening_batch(
             ):
                 continue
             candidate = by_symbol[decision.symbol]
+            # stock_name 纯展示字段（add-pool-stock-name-display）：缺名落空串 +
+            # warning，不阻断批次（决策字段的 fail loud 语义不适用于此处）
+            stock_name = names_by_symbol.get(candidate.symbol, "")
+            if not stock_name:
+                _logger.warning(
+                    "选股日批（%s）池行缺股票名（快照 name 为空）：%s", trade_date, candidate.symbol
+                )
             pool_rows.append(
                 {
                     "symbol": candidate.symbol,
@@ -490,6 +499,7 @@ def run_screening_batch(
                     "l3_verdict": decision.verdict,
                     "l3_reason": decision.reason,
                     "factor_contribs": _candidate_contribs(candidate),
+                    "stock_name": stock_name,
                 }
             )
         # ⑥ 批次 ok + 池行（单事务：ok 与池同生共死）
