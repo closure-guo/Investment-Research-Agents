@@ -48,6 +48,7 @@ from finance_agent.factors.diagnostics import run_factor_diagnostics
 from finance_agent.factors.harvest import run_factor_harvest_until_drained
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
+from finance_agent.factors.revival import run_factor_revival
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.analyst_claims.job import run_analyst_claim_settle_daily
 from finance_agent.outcome.cohort.runner import run_cohort_batch
@@ -116,6 +117,9 @@ JOB_IDS: tuple[str, ...] = (
     "analyst_claim_settle_daily",
     # 外资二手快讯（add-foreign-broker-sentiment）：17:05——只读观测，无源为空态
     "foreign_broker_news_daily",
+    # 拒绝池复苏（add-rejected-factor-revival）：17:10——外资快讯之后、诊断之前；
+    # 零 LLM，仅存在可复苏候选时构建准入面板
+    "factor_revival_daily",
     # 因子诊断读数日批（add-factor-diagnostics-batch）：17:15——日批窗口（15:30-17:10）
     # 之后、cohort 之前；读数生产移出 HTTP 详情路径（生产实测请求内现算 500 日面板
     # 把详情拖成数十分钟）。每天（含周末）跑：周末收割新准入的因子当日获得读数；
@@ -157,6 +161,7 @@ JOB_LABELS: dict[str, str] = {
     "research_report_inbox_daily": "研报投喂",
     "analyst_claim_settle_daily": "分析师事后检验",
     "foreign_broker_news_daily": "外资快讯",
+    "factor_revival_daily": "拒绝池复苏",
     "factor_diagnostics_daily": "因子诊断读数",
     "cohort_batch": "cohort 跑批",
     "daily_brief_daily": "每日汇报",
@@ -190,6 +195,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "research_report_inbox_daily": ingest_inbox,
     "analyst_claim_settle_daily": run_analyst_claim_settle_daily,
     "foreign_broker_news_daily": run_foreign_broker_news_daily,
+    "factor_revival_daily": run_factor_revival,
     "factor_diagnostics_daily": run_factor_diagnostics,
     "cohort_batch": run_cohort_batch,
     "daily_brief_daily": run_daily_brief,
@@ -374,6 +380,15 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 17,
         "minute": 5,
+        "timezone": "Asia/Shanghai",
+    },
+    # 拒绝池复苏（add-rejected-factor-revival）：17:10——零 LLM；rejected 行滚动
+    # |ICIR| 越复苏静默线（=闸②同值）且冷却期外者，经外部导入路径重过五道闸。
+    # mon-fri：IC 只在交易日增长，周末跑无意义。
+    "factor_revival_daily": {
+        "day_of_week": "mon-fri",
+        "hour": 17,
+        "minute": 10,
         "timezone": "Asia/Shanghai",
     },
     # 因子诊断读数日批（add-factor-diagnostics-batch）：17:15——日批窗口之后、

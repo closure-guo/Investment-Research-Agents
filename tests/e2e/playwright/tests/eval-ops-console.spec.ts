@@ -44,7 +44,8 @@ test.describe.configure({ timeout: 120_000 })
 // add-auto-pool-analysis-daily-brief（24→26：自动选股分析 16:22 / 每日汇报 20:30）；
 // add-analyst-ex-post-verification（26→27：分析师事后检验 17:00）；
 // add-foreign-broker-sentiment（27→28：外资快讯 17:05）；
-// add-factor-diagnostics-batch（28→29：因子诊断读数 17:15，日批窗口后 cohort 前）。
+// add-factor-diagnostics-batch（28→29：因子诊断读数 17:15，日批窗口后 cohort 前）；
+// add-rejected-factor-revival（29→30：拒绝池复苏 17:10，插于外资快讯 17:05 与诊断 17:15 之间）。
 const JOB_IDS = [
   'market_snapshot_daily',
   'regime_daily',
@@ -70,6 +71,7 @@ const JOB_IDS = [
   'research_report_inbox_daily',
   'analyst_claim_settle_daily',
   'foreign_broker_news_daily',
+  'factor_revival_daily',
   'factor_diagnostics_daily',
   'cohort_batch',
   'daily_brief_daily',
@@ -142,7 +144,7 @@ async function cohortAuditCount(request: APIRequestContext): Promise<number> {
 }
 
 test.describe('评估运维分区（设置中心）', () => {
-  test('分区渲染任务卡片（当前 29 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
+  test('分区渲染任务卡片（当前 30 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
     await openEvalOps(page)
 
     // TESTING=1 → 调度器未启动：显式提示，不得空白、不得以空列表冒充「一切正常」
