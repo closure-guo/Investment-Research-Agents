@@ -1286,6 +1286,9 @@ describe('收割链路区块（add-factor-harvest-ui）', () => {
     expect(screen.getByTestId('factor-research-harvest-bar').style.width).toBe('54%')
     expect(screen.getByTestId('factor-research-harvest-step-candidates').textContent).toContain('820')
     expect(screen.getByTestId('factor-research-harvest-step-admitted').textContent).toContain('7')
+    // 占比保留 1 位小数：7/820=0.85% 取整会显示成 1%，把低于 1% 的量级抹平
+    expect(screen.getByTestId('factor-research-harvest-step-processed').textContent).toContain('53.7%')
+    expect(screen.getByTestId('factor-research-harvest-step-admitted').textContent).toContain('0.9%')
     expect(screen.getByTestId('factor-research-harvest-gates').textContent).toContain('ICIR 150')
     expect(screen.getByTestId('factor-research-harvest-admitted').textContent).toContain(
       'ts_corr(close,volume,10)'

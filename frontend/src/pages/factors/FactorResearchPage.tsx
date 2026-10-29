@@ -88,7 +88,7 @@ const PHASE_LABELS: Record<string, string> = {
 
 function pctText(part: number, whole: number): string {
   if (whole <= 0) return '—'
-  return `${Math.round((part / whole) * 100)}%`
+  return `${((part / whole) * 100).toFixed(1)}%`
 }
 
 function pct(part: number, whole: number): number {
