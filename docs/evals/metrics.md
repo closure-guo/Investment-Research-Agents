@@ -525,6 +525,8 @@ positioning/sentiment 取方向符号 × 置信度；`direction=neutral|unknown`
 
 **因子工具消融批次（2026-10-20，#326 主项闭环；n=10 配对）**：`--suite factor-tool`（tech_bare → tech_factor_tool，分析师层直出、单变量=技术分析师是否注入 `query_factor_library` 输出），10 标的 × 2 臂 × 1 重复 = 20 run；判分维按 #112 口径过滤为 report_relevance（K=3 均值）。**读数：Δ = +0.0331，95% CI [−0.167, 0.1998] → 无显著差异**（中位：4.667 → 5.0；CI 含 0 按纪律只写无显著差异，不得引申为对工具价值的否定）。健康检查：20/20 run 完整、judge 失败 0、**10/10 标的因子库注入口非空**（库内 4 active、as_of 2026-10-19、每标的 4/4 具值——此前「0 active → 两臂等价为空」的 NO-GO 前置已解除）、10/10 快照 digest 一致；1/20 run 技术分析师解析降级原始文本（5%，已披露）。原始读数 `reports/ablation/ablation-20261020-140540.json`（本地）；报告 [2026-10-20-add-analyst-factor-tools-n10消融报告.md](2026-10-20-add-analyst-factor-tools-n10消融报告.md)。边界：仅测分析师层上下文注入面（true ReAct 工具循环 owner 裁决暂不实施）；有效 n=10。
 
+**cohort 评估程序预登记（2026-10-29，delta `add-cohort-evaluation-program`；未出读数）**：run 名 `cohort-eval-20261029`；口径见 §1.22（四轨道 / 窗口 / r_e / 统计单位 / 归因闸，标注前锁定）。基线切点 = 首轮读数基于 universe-v1 全史（2026-09-25~读数日），跨窗不混报；本轮零 LLM 成本；判断质量（judge 四维）不在本轮（另立项）。首个预登记读数出齐前 §1.22 不得再改（改须走 §1 修订 + 新预登记版本 + 新切点行）。
+
 ## 2.1 round7 预登记分析计划（标注前锁定，防事后口径漂移）
 
 - 数据：`judge-sample-round7-blind.xlsx`（人工 human_score + confidence）× `judge-sample-round7-judge.jsonl`（judge 分，r3 运行时落库，已冻结）
@@ -619,3 +621,25 @@ positioning/sentiment 取方向符号 × 置信度；`direction=neutral|unknown`
 **回填口径（硬约束）**：IC 缺口 MUST 按**历史日重算**——每个历史日用其自身的截面因子值与远期收益（`rank_ic_series` 面板逐日）；**禁止以最新面板冒充历史窗**：最新面板的因子值只在最新交易日成立，回填历史窗 = 前视污染，会系统性抬高闸②/衰减读数。
 
 **两个样本数不得混写**：`MIN_IC_SAMPLES_FOR_SCORING = 10`（选股打分的最少 IC 采样天数，不足走流动性降级 fallback）≠ `MIN_IC_SAMPLES = 30`（`rank_ic_series` 单日截面最少有效票数，不足该日 NaN）。口径变更先改本节再动代码。
+
+### 1.22 cohort 评估程序口径（delta `add-cohort-evaluation-program`，2026-10-29 登记；数据基点 2026-10-29）
+
+cohort 日批（universe-v1，10 只，9-25 起）的四轨道评估口径。四轨道 SHALL 独立出读数，SHALL NOT 加权合成单一总分。口径变更先改本节再动代码；实现 = `scripts/cohort_eval_readout.py`（只读、零 LLM、参数 `--as-of` / `--universe-version`）。
+
+**轨道 A 供给成本**（每成功一份归一）：成功率复用 §1.9⑧ attempt success rate（`success/(success+failure)`，`skipped` 不进分母）；`tokens_per_success` = Σ`tokens_total` / Σsuccess（`job_runs` 汇总行口径）；预算占用 = cohort 当日 tokens_total / `COHORT_DAILY_TOKEN_BUDGET`（默认 3,000,000，env 可覆盖，以 `job_runs` summary 的 `daily_budget` 实值为披露值）；`opinions_persisted` 落库率复用 §1.9⑧。
+
+**轨道 B 过程质量**：citation 三项（§1.3 口径）从 Langfuse Scores 按 trace 拉取，报日均值时间序列 + 覆盖率（有分数成功 trace / 全部成功 trace）。归因纪律：分段变化先核对供给面切换时点，排除换模型解释前不得归因分析师。
+
+**轨道 C 方向能力**：① neutral 反事实 `r_e`（见下）；② short/long 结算胜负，挂**到期闸**——open 方向性观点到期数 ≥30 或 2026-11-15 前后到期潮完成后方可出正式读数，此前只许 `preliminary` 标注。与 §1.9② 结算侧回避判定的关系：结算侧 = ±2% 带内判定、随结算排期出、写 `avoidance_status`；评估侧 `r_e` = 连续分布、即时、只读自算、零写入——两者并列披露，不互替、不互相校准。
+
+**轨道 D 日频价值**（仅描述统计）：翻转率 = 每票相邻两分析日方向变动的周均值（池内均值）；保鲜期 = T 日方向符号与 T+k（k=1..20）实现超额符号一致率曲线（仅 long/short 进，neutral 不进）。
+
+**窗口切分（硬约束）**：`W1 = 2026-09-25~10-10`（分析 kimi）、`W2 = 2026-10-13~10-16`（分析 deepseek）、`W3 = 2026-10-17 起`（deepseek + judge@opencode；本轮无 judge 消费，W2/W3 分界服务未来 judge 批接入）。段内出结论；段间差异只作换模型影响专案记录。熔断整批失败日（10-09 / 10-16，success=0）剔除出轨道 A 成本均值并单列，成功率分母照计。后续新增供给面切换事件须增段。
+
+**neutral 反事实 r_e**：T = 决策归属日；个股腿 = `close_raw(T+20 交易日)/open(T+1 交易日) − 1`（`market_snapshot.db`，T+20 = 其后第 20 个交易日）；基准腿 = `index_closes` 000300 `close(T)/close(T+20) − 1`；`r_e` = 个股腿 − 基准腿。同票同日多条取 `created_at` 最晚一条（同 §1.9-v2 日主口径）。起止日任一缺行（个股或基准）→ 剔除并计 `missing_bars`，不插值。判读：池内 `r_e` 分布中心 >0 ⇒ 观望在系统性错过机会（进全观望锁定处置证据）；≤0 ⇒ 观望自洽。
+
+**统计单位与结论限级**：所有跨样本检验以交易日为统计单位（先每日横截面均值再跨日，n = 有效交易日数）；n<15 的段结论限级为量级描述（不得「显著优于/劣于」），报告强制附「未达显著 ≠ 无差异」声明。
+
+**confidence 归因闸**：confidence 进本程序任何下游使用（校准曲线、置信分组）前须完成归因——按（日期 × 方向）分桶定位堆积起止日与供给面/prompt 切点（衔接 §1.20：10-22 round15 已有一次先例，median 0.55、归因均衡带、三档示例 prompt 未移动分布）+ 抽 ≥5 条人工判读，三态结论 `prompt-anchor` / `default-fallback` / `genuine-mode` + 处置去向。
+
+**产物纪律**：脚本只读（运行前后 `predictions` / `cohort_runs` 等业务表零变化）；报告落 `docs/evals/cohort-eval-<日期>.md`；`runs.jsonl` 追加 `type: cohort-eval` 行。
