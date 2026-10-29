@@ -134,13 +134,9 @@ def test_re_rejection_persists_event_and_resets_clock(tmp_path) -> None:
     outside = _now_after_cooldown(db)  # 冷却外
     # 第一次：面板不可得 → external 路径 fail loud（可复苏候选 + panel=None + 空快照库）
     with pytest.raises(ValueError):  # external 路径对空快照库 fail loud
-        run_factor_revival(
-            db_path=db, snapshot_db_path=str(tmp_path / "empty-snap"), now=outside
-        )
+        run_factor_revival(db_path=db, snapshot_db_path=str(tmp_path / "empty-snap"), now=outside)
     # 第二次：真面板 + 会再拒的表达式 → re_rejected 落事件（冷却时钟锚点更新）
-    summary = run_factor_revival(
-        db_path=db, panel=_strong_panel(), seed=_STRONG_SEED, now=outside
-    )
+    summary = run_factor_revival(db_path=db, panel=_strong_panel(), seed=_STRONG_SEED, now=outside)
     assert summary["re_rejected"] == 1 and summary["admitted"] == 0
     events = library.list_events(db_path=db)
     assert any(e["event"] == "re_rejected" for e in events)

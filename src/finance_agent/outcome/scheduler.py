@@ -77,6 +77,7 @@ from finance_agent.factors.diagnostics import run_factor_diagnostics
 from finance_agent.factors.harvest import run_factor_harvest_until_drained
 from finance_agent.factors.monitor import run_factor_decay_monitor
 from finance_agent.factors.monthly import run_factor_proposal_monthly
+from finance_agent.factors.revival import run_factor_revival
 from finance_agent.memory.monthly import run_memory_extract_monthly
 from finance_agent.outcome.analyst_claims.job import run_analyst_claim_settle_daily
 from finance_agent.outcome.cohort.runner import run_cohort_batch
@@ -400,6 +401,17 @@ def _foreign_broker_news_job() -> None:
     )
 
 
+def _factor_revival_job() -> None:
+    """add-rejected-factor-revival：拒绝池复苏日批（17:10，外资快讯之后、诊断之前）。
+
+    零 LLM：rejected 行滚动 |ICIR| 越复苏静默线（=闸②同值 ``MIN_ABS_ICIR``）且
+    冷却期外者，经外部导入同一路径重过五道闸；过闸=新行入库（rejected 保持终态），
+    再拒=re_rejected 事件重置冷却。无候选零摘要零面板（job 记 ok）；面板不可得
+    上抛（run_job 记 failed）。
+    """
+    _with_retry("factor_revival_daily", "factor revival daily", run_factor_revival)
+
+
 def _daily_brief_job() -> None:
     """add-auto-pool-analysis-daily-brief：每日 LLM 运营汇报（20:30）。
 
@@ -699,6 +711,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         _foreign_broker_news_job,
         _cron_for("foreign_broker_news_daily"),
         id="foreign_broker_news_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-rejected-factor-revival：拒绝池复苏日批（17:10）——外资快讯（17:05）之后、
+    # 诊断（17:15）之前；零 LLM，仅存在可复苏候选时构建准入面板；无候选零摘要。
+    scheduler.add_job(
+        _factor_revival_job,
+        _cron_for("factor_revival_daily"),
+        id="factor_revival_daily",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
