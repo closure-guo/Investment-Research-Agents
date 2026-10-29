@@ -26,12 +26,16 @@ RD-Agent 的 feedback 只在**同一 trace**（会话）内传递（`trace.hist`
 - ``contract`` 块（复杂度上限 / 算子与字段白名单 / 表达规则）+ ``gate_rejections`` 聚合——
   生成侧表达契约回喂（feed-dsl-contract-to-factor-generator）：数值与白名单 import
   单一真相源（``dsl`` 复杂度常量、``qlib_translate`` 映射表），不复制字面量；
+- ``style_gap`` 风格缺口定向块（optimize-factor-supply-funnel B2）：active 池按类别
+  画像 + 拒绝池按类别 × 闸口聚合，数据驱动派生（单一真相源 = 因子库 ``factors`` 表），
+  库不可得或两族全空 → 整块省略（fail-safe），只披露不带指令；
 - 任何字段缺失如实留空，不编造。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -46,7 +50,10 @@ from finance_agent.factors.dsl import (
     parse,
     serialize,
 )
+from finance_agent.factors.library import list_events, list_factors
 from finance_agent.factors.qlib_translate import FIELD_MAPPINGS, OPERATOR_MAPPINGS
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_PATH = "data/factor_research/explored_factors.json"
 DEFAULT_LIMIT = 80
@@ -243,6 +250,56 @@ def _allocate_rejected(
     return selected, {str(gate): counts[gate] for gate in gates}
 
 
+def _style_gap_block(db_path: str | Path | None) -> dict[str, Any] | None:
+    """风格缺口定向块（数据驱动：单一真相源为因子库 ``factors`` 表）。
+
+    两族数据：``pool_by_category``（active 池按类别在册因子数）与
+    ``rejections_by_category`` / ``rejections_by_category_gate``（拒绝池按类别、
+    类别 × 闸口聚合的被拒结构数；闸口取该行 ``created`` 事件 ``detail["gate"]``，
+    缺失记 ``"unknown"``）。库读失败（缺失/损坏/锁）或两族全空 → ``None``
+    （fail-safe：整块省略，不冒充；spec「画像不可得时整块省略」）。只作披露。
+    """
+    try:
+        pool_rows = list_factors(status="active", db_path=db_path)
+        rejected_rows = list_factors(status="rejected", db_path=db_path)
+        gate_by_factor: dict[int, int] = {}
+        for event in list_events(db_path=db_path):
+            if str(event.get("event")) != "created":
+                continue
+            detail = event.get("detail")
+            gate = detail.get("gate") if isinstance(detail, dict) else None
+            if isinstance(gate, int) and not isinstance(gate, bool):
+                gate_by_factor[int(event["factor_id"])] = gate
+    except Exception:  # noqa: BLE001 - fail-safe：库不可得 → 整块省略
+        logger.warning("style gap block unavailable (factor library read failed)", exc_info=True)
+        return None
+    pool_by_category: dict[str, int] = {}
+    for row in pool_rows:
+        category = str(row.get("category") or "")
+        if category:
+            pool_by_category[category] = pool_by_category.get(category, 0) + 1
+    rejections_by_category: dict[str, int] = {}
+    rejections_by_category_gate: dict[str, dict[str, int]] = {}
+    for row in rejected_rows:
+        category = str(row.get("category") or "")
+        if not category:
+            continue
+        rejections_by_category[category] = rejections_by_category.get(category, 0) + 1
+        gate_key = str(gate_by_factor.get(int(row["id"]), "unknown"))
+        by_gate = rejections_by_category_gate.setdefault(category, {})
+        by_gate[gate_key] = by_gate.get(gate_key, 0) + 1
+    if not pool_by_category and not rejections_by_category:
+        return None
+    return {
+        "pool_by_category": dict(sorted(pool_by_category.items())),
+        "rejections_by_category": dict(sorted(rejections_by_category.items())),
+        "rejections_by_category_gate": {
+            category: dict(sorted(by_gate.items()))
+            for category, by_gate in sorted(rejections_by_category_gate.items())
+        },
+    }
+
+
 def build_payload(
     processed: Mapping[str, Any],
     candidates: Mapping[str, Mapping[str, Any]],
@@ -250,13 +307,15 @@ def build_payload(
     limit: int = DEFAULT_LIMIT,
     untranslatable_quota: int = UNTRANSLATABLE_QUOTA,
     gate_floor: int = PER_GATE_FLOOR,
+    style_gap: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """状态 + 候选表 → 生成侧清单载荷（按规范化表达式去重、分档配额、截断）。
 
     分档顺序：admitted（全部）→ untranslatable（最近 ``untranslatable_quota`` 条，
     档内按日轮转 × stage 交织）→ rejected（per-gate 保底 ``gate_floor`` 条 + 余量
     按占比）→ transcription_error。untranslatable 不足配额或 rejected 保底未用满时
-    空位归还使用；``limit`` 仍是总量上限。
+    空位归还使用；``limit`` 仍是总量上限。风格缺口定向块（``style_gap``，可省）
+    按数据可用性附加。
     """
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -317,7 +376,7 @@ def build_payload(
         elif entry["status"] == "untranslatable":
             stage = _entry_stage(entry)
             untranslatable_by_stage[stage] = untranslatable_by_stage.get(stage, 0) + 1
-    return {
+    payload: dict[str, Any] = {
         "generated_at": datetime.now().astimezone().isoformat(),
         "total_explored": len(entries),
         "returned": len(trimmed),
@@ -332,6 +391,9 @@ def build_payload(
         "contract": _contract_block(),
         "explored": trimmed,
     }
+    if style_gap:
+        payload["style_gap"] = dict(style_gap)
+    return payload
 
 
 def load_state(path: str | Path) -> dict[str, Any]:
@@ -367,8 +429,9 @@ def export_feedback(
     limit: int = DEFAULT_LIMIT,
     untranslatable_quota: int = UNTRANSLATABLE_QUOTA,
     gate_floor: int = PER_GATE_FLOOR,
+    library_db_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """一步导出（CLI 与测试共用）：返回写出载荷。"""
+    """一步导出（CLI 与测试共用）：返回写出载荷（含风格缺口定向块，库不可得时省略）。"""
     processed = load_state(state_path)
     candidates = load_candidates(candidates_path)
     payload = build_payload(
@@ -377,6 +440,7 @@ def export_feedback(
         limit=limit,
         untranslatable_quota=untranslatable_quota,
         gate_floor=gate_floor,
+        style_gap=_style_gap_block(library_db_path),
     )
     write_payload(payload, output_path)
     return payload
