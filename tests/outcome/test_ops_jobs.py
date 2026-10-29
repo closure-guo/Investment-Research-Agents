@@ -41,7 +41,7 @@ class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 29
+            len(JOB_IDS) == 30
         )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线，add-execution-chain-driver）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
@@ -53,6 +53,7 @@ class TestRegistry:
         # 19→20：+cb_daily（转债日批，add-convertible-bond-coverage，16:50）
         # （业绩预告事件线，add-event-driven-lane，按时刻序插入 16:05/16:15/16:25）
         # 28→29：+factor_diagnostics_daily（因子诊断读数日批，add-factor-diagnostics-batch，17:15）
+        # 29→30：+factor_revival_daily（拒绝池复苏日批，add-rejected-factor-revival，17:10）
         assert all(JOB_LABELS[jid] for jid in JOB_IDS)
 
 
@@ -65,7 +66,8 @@ class TestRegimeDailyRegistration:
         assert JOB_FUNCS["regime_daily"] is run_regime_daily
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 29
+            len(JOB_IDS)
+            == 30  # 29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
         )  # 14→15：+regime_daily；15→18：+事件线三件；18→19：+microcap_screening_daily（小票通道）；10→12：+月批；12→13：+内置注册；13→14：+因子收割；19→20：+cb_daily（转债日批）
         assert (
             JOB_IDS.index("market_snapshot_daily")
@@ -96,7 +98,8 @@ class TestPaperExecuteDailyRegistration:
         assert JOB_FUNCS["paper_execute_daily"] is run_execution_daily
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 29
+            len(JOB_IDS)
+            == 30  # 29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
         )  # 9→10：+paper_execute_daily；10→12：+月批两任务；12→13：+内置注册；
         # 13→14：+因子收割；14→15：+regime_daily（拥挤度）；15→18：+事件线三件；18→19：+小票通道；
         # 19→20：+cb_daily（转债日批，16:50）
@@ -135,7 +138,8 @@ class TestScreeningDailyRegistration:
         assert JOB_LABELS["screening_daily"] == "选股"
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 29
+            len(JOB_IDS)
+            == 30  # 29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
         )  # 8→9：+screening_daily；9→10：+paper_execute_daily；10→12：+月批；12→13：+内置注册；
         # 13→14：+收割；14→15：+regime_daily；15→18：+事件线三件；19→20：+cb_daily（转债日批）
         assert (
@@ -255,15 +259,18 @@ class TestMonthlyBatchRegistration:
         assert JOB_FUNCS["factor_proposal_monthly"] is run_factor_proposal_monthly
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 29
+            len(JOB_IDS)
+            == 30  # 29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
         )  # 12→13：+内置注册；13→14：+因子收割；18→19：+小票通道；28→29：+factor_diagnostics_daily（17:15）
+        # 29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
         # 19→20：+cb_daily（转债日批，16:50 插于小票通道与 cohort 之间）
         # 14→15：+regime_daily（拥挤度，15:35 日批链内插入）；15→18：+事件线三件
         # 月批附于末尾：月批两任务下标不动；cohort 因日批链内插入后移
         assert JOB_IDS[-2:] == ("memory_extract_monthly", "factor_proposal_monthly")
         assert (
-            JOB_IDS.index("cohort_batch") == 25
+            JOB_IDS.index("cohort_batch") == 26
         )  # 9→10：+内置注册；13→14：+因子收割（15:55 插入其前）；18→19：+小票通道（16:45 插入其前）；
+        # 26：+factor_revival_daily（17:10 插入诊断之前，add-rejected-factor-revival）
         # 29→30 段：+factor_diagnostics_daily（17:15 插入其前，add-factor-diagnostics-batch）
         # 14→15：+regime_daily（15:35 插入其前）；
         # 15→18：+事件线三件（16:05/16:15/16:25 插入其前）；
