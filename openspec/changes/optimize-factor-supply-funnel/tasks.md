@@ -4,7 +4,7 @@
 
 ## A. 已在飞（只跟踪，不新增代码）
 
-- [ ] A1 部署 #509/#510：后端镜像 `--build` + distro site-pages 补丁，生产容器验证契约段真实出现（部署门挂 add-feedback-quota-fairness / feed-dsl-contract-into-proposal-prompt 各自 tasks.md 第 1 项）
+- [x] A1 部署 #509/#510（+B2，2026-10-29）：实际机制与计划不同——后端为 src bind mount + `--reload --dir /app/src`（并发会话 10-29 08:07 已带新 compose 重启栈，合并代码经 reload 直接生效，**无须亦不可 `--build`**：主检出 docker-compose.yml 有未提交的 volume 迁移在飞）；distro 侧 explored_feedback.py 已替换（备份 .bak-20261029）并于 /opt/rdagent venv 内编译+渲染验证：契约段/风格缺口段/跨会话清单三段同屏、模板契约 846 字符；后端容器内确认 #509 `_allocate_rejected` 与 #482 契约块均在；生产 payload 手动刷新含 style_gap（pool=外部×10）。消费端新模块自下一个 RD-Agent 会话进程起生效（当晨会话 08:07 早于替换，旧模块安全忽略新键）
 - [ ] A2 判效读数归档（门：2026-10-31）：untranslatable 占比 / 进闸门量 / 入库数三方同屏；`stage=translator`（复杂度桶 618 条）占比应显著下降——若转译率降而入库仍为 0，即证实需 B 段跟上
 
 ## B. 行为变更（实施时补 specs/ delta 或另立 change-id）
