@@ -4,7 +4,7 @@
 
 ### Requirement: 关键事件取数链当日缓存
 
-`fetch_key_events` SHALL 在 WebSearch 路径成功产出结果时将结果写入当日缓存（键 `{code}:key_events`、TTL 1 天、经 `DataCache` 共享单例），并在后续同股同日调用命中缓存时直接返回缓存值，SHALL NOT 再次发起网络搜索或 LLM 提取。可缓存结果限定两类：① 提取到的事件列表；② 「验证过的空」——搜索请求成功完成、且 LLM 提取正常返回空数组。失败降级路径（搜索异常/无结果、LLM 调用异常、解析失败）落到 L3 兜底卡的调用 SHALL NOT 写缓存。`use_web_search=False` 的调用 SHALL NOT 读缓存也 SHALL NOT 写缓存。函数返回值形状 SHALL 保持不变。
+`fetch_key_events` SHALL 在 WebSearch 路径成功产出结果时将结果写入当日缓存（键 `{code}:key_events`、TTL 1 天、经 `DataCache` 共享单例），并在后续同股同日调用命中缓存时直接返回缓存值，SHALL NOT 再次发起网络搜索或 LLM 提取。可缓存结果限定两类：① 提取到的事件列表；② 「验证过的空」——搜索请求成功完成、且 LLM 提取正常返回空数组。失败降级路径（搜索异常/无结果、LLM 调用异常、解析失败）落到 L3 兜底卡的调用 SHALL NOT 写缓存。「验证过的空」SHALL 返回空列表（SHALL NOT 返回 L3 兜底卡）；L3 兜底卡 SHALL 仅在取数链失败时返回。`use_web_search=False` 的调用 SHALL NOT 读缓存也 SHALL NOT 写缓存。函数返回值形状（`list[dict]`）SHALL 保持不变。
 
 #### Scenario: 同日二次调用命中缓存零网络
 
@@ -12,17 +12,19 @@
 - WHEN 同日再次调用 `fetch_key_events(X)`
 - THEN SHALL 直接返回缓存值，且不触发 ddgs 搜索与 LLM 提取（可注入的搜索/提取桩记录零次调用）
 
-#### Scenario: 验证过的空被缓存
+#### Scenario: 验证过的空返回空列表并被缓存
 
-- GIVEN 股票 Y 当日 WebSearch 搜索成功但 LLM 提取返回空数组
-- WHEN 同日再次调用 `fetch_key_events(Y)`
-- THEN SHALL 返回缓存中的空列表，且不再次发起搜索与提取
+- GIVEN 股票 Y 当日 WebSearch 搜索成功但 LLM 提取返回空数组，且 Y 不在预构建库中
+- WHEN 调用 `fetch_key_events(Y)`
+- THEN 首次调用 SHALL 返回空列表（不返回 L3 兜底卡）并写入缓存
+- AND 同日再次调用 SHALL 返回缓存中的空列表，且不再次发起搜索与提取
 
-#### Scenario: 失败兜底不缓存
+#### Scenario: 失败兜底返回卡片且不缓存
 
-- GIVEN 股票 Z 当日 WebSearch 搜索异常（或 LLM 提取异常），函数降级返回 L3 兜底卡
-- WHEN 同日再次调用 `fetch_key_events(Z)`
-- THEN SHALL 重新走完整取数链（缓存中 SHALL NOT 存在 Z 的兜底卡）
+- GIVEN 股票 Z 当日 WebSearch 搜索异常（或 LLM 提取异常）
+- WHEN 调用 `fetch_key_events(Z)`
+- THEN SHALL 返回 L3 兜底卡（含「事件数据暂时不可用」）且 SHALL NOT 写缓存
+- AND 同日再次调用 SHALL 重新走完整取数链（瞬时故障不毒化全天）
 
 #### Scenario: 关闭 WebSearch 的调用不读不写缓存
 
