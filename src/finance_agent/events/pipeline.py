@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from typing import cast
 
 from finance_agent.data.cache import get_shared_cache
 from finance_agent.events.config import EVENT_CUTOFF_DAYS
@@ -40,7 +41,7 @@ def fetch_key_events(
     cache = get_shared_cache() if use_web_search else None
     key = _cache_key(stock_code)
     if cache is not None:
-        cached = cache.get(key)
+        cached = cast(list[dict], cache.get(key))
         if cached is not None:
             return cached
 
