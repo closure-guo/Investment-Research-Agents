@@ -43,9 +43,21 @@ def test_empty_pool_skips(tmp_path):
     assert out["started"] == 0
 
 
-def test_stale_pool_skips(tmp_path):
+def test_stale_pool_skips(tmp_path, monkeypatch):
+    """批次既非当日也非日历上的前一交易日 → skipped_stale_pool。
+
+    #533：原用例未注入日历、泄漏读到真实快照库，#456 放宽后真实日历含 10-19
+    时「前一交易日补跑池」已是应接受场景。改为显式日历（10-19 缺席、10-20 的
+    前一交易日为 10-16），钉死「不在日历前一位的旧批次仍被拦」；无历 fail-closed
+    的分支由 test_missing_calendar_keeps_strict_gate 覆盖。
+    """
     db = tmp_path / "screening.db"
     _seed(db, "2026-10-19", [_row("600519", 1)])
+    monkeypatch.setattr(
+        pool_analysis,
+        "read_snapshot_calendar",
+        _calendar(["2026-10-15", "2026-10-16", "2026-10-20"]),
+    )
     out = pool_analysis.prepare_pool_analysis_batch(
         as_of="2026-10-20", enqueue=lambda s, sid: True, db_path=db, screening_db_path=db
     )
