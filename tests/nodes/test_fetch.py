@@ -92,9 +92,7 @@ class TestFetchDataBasic:
         )
 
         mock_cache = MagicMock()
-        result = fetch_data(
-            {"stock_code": "600519"}, cache=mock_cache, client=_setup_client()
-        )
+        result = fetch_data({"stock_code": "600519"}, cache=mock_cache, client=_setup_client())
 
         assert result["key_events"] == card
         written_keys = [call[0][0] for call in mock_cache.set.call_args_list]

@@ -61,9 +61,9 @@ def test_cache_hit_short_circuits_web_and_llm(monkeypatch, cache):
     second = fetch_key_events("601952", "苏垦农发")
 
     assert len(first) == 1 and first == second
-    assert len(calls) == 1            # 搜索只跑一次
+    assert len(calls) == 1  # 搜索只跑一次
     assert cache.set_calls == 1
-    assert cache.get_calls == 2       # 每次调用先查缓存
+    assert cache.get_calls == 2  # 每次调用先查缓存
     # TTL 钉死 spec 规范值（1 天），防静默漂移
     assert cache.ttls["601952:key_events"] == 86_400
 
@@ -76,7 +76,7 @@ def test_verified_empty_returns_empty_list_and_is_cached(monkeypatch, cache):
     first = fetch_key_events("002385", "大北农")
     second = fetch_key_events("002385", "大北农")
 
-    assert first == [] and first != _CARD      # 验证过的空 ≠ 兜底卡
+    assert first == [] and first != _CARD  # 验证过的空 ≠ 兜底卡
     assert second == []
     assert len(calls) == 1
     assert cache.store["002385:key_events"] == []
@@ -84,14 +84,14 @@ def test_verified_empty_returns_empty_list_and_is_cached(monkeypatch, cache):
 
 def test_failure_returns_card_and_never_caches(monkeypatch, cache):
     """Req1-场景3：搜索失败 → 兜底卡、不写缓存、下次重走全链。"""
-    calls = _stub_web(monkeypatch, None)   # None = 失败（web_fetcher 既有约定）
+    calls = _stub_web(monkeypatch, None)  # None = 失败（web_fetcher 既有约定）
     _stub_preset(monkeypatch, None)
 
     first = fetch_key_events("300628", "亿联网络")
     second = fetch_key_events("300628", "亿联网络")
 
     assert first == _CARD and second == _CARD
-    assert len(calls) == 2             # 每次都重试（瞬时故障不毒化全天）
+    assert len(calls) == 2  # 每次都重试（瞬时故障不毒化全天）
     assert cache.set_calls == 0
 
 
@@ -102,8 +102,8 @@ def test_websearch_off_bypasses_cache_entirely(monkeypatch, cache):
 
     result = fetch_key_events("601952", "苏垦农发", use_web_search=False)
 
-    assert result == _CARD             # 走 L1（miss）→ L3 兜底，与既有语义一致
-    assert len(calls) == 0             # 不触搜索
+    assert result == _CARD  # 走 L1（miss）→ L3 兜底，与既有语义一致
+    assert len(calls) == 0  # 不触搜索
     assert cache.get_calls == 0 and cache.set_calls == 0
 
 
@@ -115,5 +115,5 @@ def test_preset_still_shadows_empty_extraction(monkeypatch, cache):
 
     result = fetch_key_events("600519", "贵州茅台")
 
-    assert result != []                # 库内事件经 3 年窗口过滤后非空
+    assert result != []  # 库内事件经 3 年窗口过滤后非空
     assert any(e["title"] == "提价" for e in result)

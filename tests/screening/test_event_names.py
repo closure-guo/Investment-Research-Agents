@@ -21,7 +21,7 @@ def test_assembly_passes_stock_name_to_fetch(monkeypatch):
     _assemble_events_by_symbol(candidates, names_by_symbol={"601952": "苏垦农发"})
 
     assert ("601952", "苏垦农发") in recorded
-    assert ("300628", "") in recorded          # 缺名退化纯代码查询
+    assert ("300628", "") in recorded  # 缺名退化纯代码查询
 
 
 def test_assembly_without_names_keeps_old_call_shape(monkeypatch):
@@ -56,14 +56,17 @@ def test_freshness_passes_names_from_snapshot_rows(monkeypatch, tmp_path):
         freshness,
         "read_universe",
         lambda day: [
-            {"code": "601952", "name": "苏垦农发", "is_suspended": 0,
-             "limit_up_sealed": 0, "limit_down_sealed": 0},
+            {
+                "code": "601952",
+                "name": "苏垦农发",
+                "is_suspended": 0,
+                "limit_up_sealed": 0,
+                "limit_down_sealed": 0,
+            },
         ],
     )
     # 真实返回形状：read_snapshot_calendar -> list[str] | None（规范日期升序）
-    monkeypatch.setattr(
-        freshness, "read_snapshot_calendar", lambda: ["2026-10-29", "2026-10-30"]
-    )
+    monkeypatch.setattr(freshness, "read_snapshot_calendar", lambda: ["2026-10-29", "2026-10-30"])
 
     pool_rows = [{"symbol": "601952"}]
     findings = screening_freshness_removals(pool_rows, "2026-10-30")
