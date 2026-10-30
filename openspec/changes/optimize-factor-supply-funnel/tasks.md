@@ -7,12 +7,13 @@
 - [x] A1 部署 #509/#510（+B2，2026-10-29）：实际机制与计划不同——后端为 src bind mount + `--reload --dir /app/src`（并发会话 10-29 08:07 已带新 compose 重启栈，合并代码经 reload 直接生效，**无须亦不可 `--build`**：主检出 docker-compose.yml 有未提交的 volume 迁移在飞）；distro 侧 explored_feedback.py 已替换（备份 .bak-20261029）并于 /opt/rdagent venv 内编译+渲染验证：契约段/风格缺口段/跨会话清单三段同屏、模板契约 846 字符；后端容器内确认 #509 `_allocate_rejected` 与 #482 契约块均在；生产 payload 手动刷新含 style_gap（pool=外部×10）。消费端新模块自下一个 RD-Agent 会话进程起生效（当晨会话 08:07 早于替换，旧模块安全忽略新键）
 - [x] A2 判效读数归档（门：2026-10-31）：untranslatable 占比 / 进闸门量 / 入库数三方同屏
       （metrics.md §2 时间线 2026-10-31 行 + runs.jsonl `a2-funnel-readout-20261031` +
-      tests/validation/2026-10-31-a2-funnel-readout.md）。判读：预登记判据
-      「stage=translator 占比显著下降」未满足——契约块经 #482 导出路径批后刷新进文件，
-      首个全程暴露窗口=10-30 批且 n=61，占比 80.3% 落基线带（73.7~93.5%）、translator
-      占比 100%、入库仍 0；证据不足终判，B1 必要性证据增强；#510 distro 部署 vs 降级留
-      owner 裁决。叠加批备忘：10-28 晚重建 #502/#509/#510（distro 消费端 explored_feedback
-      10-29 已替换生效，见 A1）
+      tests/validation/2026-10-31-a2-funnel-readout.md；10-31 distro 取证修正暴露线）。
+      判读：**全程暴露窗口=10-29+10-30 两批 n=329**（#510 模板补丁 10-29 00:01 已应用，
+      四重取证，此前「未跑」记录过时）；预登记判据「stage=translator 占比显著下降」
+      仍未满足（78%→100%，基线带 15~52%）、占比 70.5%/80.3% 落基线带、入库 0；
+      契约双路径齐活仍无信号 → B1 必要性进一步增强；任务 10 继续 3-5 批收集，
+      第 3 批后无信号按预登记降级 #510 立项 B1（owner 终裁）。叠加批备忘：10-28 晚
+      重建 #502/#509/#510 同批上生产（distro 消费端与模板补丁均 10-29 生效，见 A1）
 
 ## B. 行为变更（实施时补 specs/ delta 或另立 change-id）
 
