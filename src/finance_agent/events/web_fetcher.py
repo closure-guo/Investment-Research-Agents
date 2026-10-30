@@ -71,6 +71,11 @@ L2 类型：大额订单、产能扩张、客户认证、技术突破、战略�
 请直接返回 JSON 数组，不要任何额外文字。"""
 
 
+def _domain_allowed(url: str) -> bool:
+    """域名白名单子串匹配（纯函数化便于单测；语义与既有 any(d in url) 一致）。"""
+    return any(d in url for d in ALLOWED_DOMAINS)
+
+
 def _search_with_duckduckgo(query: str, max_results: int = 5) -> list[dict]:
     """使用 ddgs 库执行搜索。"""
     try:
@@ -81,7 +86,7 @@ def _search_with_duckduckgo(query: str, max_results: int = 5) -> list[dict]:
             for r in ddgs.text(query, max_results=max_results * 2):
                 # 过滤域名
                 url = r.get("href", "")
-                if any(d in url for d in ALLOWED_DOMAINS):
+                if _domain_allowed(url):
                     results.append(
                         {
                             "source": url,

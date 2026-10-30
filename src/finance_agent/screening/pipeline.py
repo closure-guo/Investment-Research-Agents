@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -215,15 +215,23 @@ def _amounts_by_code(
     }
 
 
-def _assemble_events_by_symbol(candidates: Sequence[Candidate]) -> dict[str, list[dict]]:
-    """生产缺省事件装配：逐候选经 events 模块取数（WebSearch → 预设库 → 兜底）。
+def _assemble_events_by_symbol(
+    candidates: Sequence[Candidate],
+    names_by_symbol: Mapping[str, str] | None = None,
+) -> dict[str, list[dict]]:
+    """生产缺省事件装配：逐候选经 events 模块取数（缓存 → WebSearch → 预设库 → 兜底）。
 
     显式注入 ``events_by_symbol`` 的调用方（测试/回放）不触发本路径（零网络）。
-    本函数是 events 模块与日批之间的唯一接线点，便于整体替换/钉死（测试）。
+    ``names_by_symbol`` 供检索查询携带股票名（带名召回显著优于纯代码查询，
+    10-30 实测 4 条 vs 1 条）；缺名退化为纯代码查询，不阻断。
     """
     from finance_agent.events.pipeline import fetch_key_events
 
-    return {candidate.symbol: fetch_key_events(candidate.symbol) for candidate in candidates}
+    names = names_by_symbol or {}
+    return {
+        candidate.symbol: fetch_key_events(candidate.symbol, names.get(candidate.symbol, ""))
+        for candidate in candidates
+    }
 
 
 def _candidate_contribs(candidate: Candidate) -> list[dict[str, Any]]:
@@ -446,7 +454,7 @@ def run_screening_batch(
         events = (
             events_by_symbol
             if events_by_symbol is not None
-            else _assemble_events_by_symbol(candidates)
+            else _assemble_events_by_symbol(candidates, names_by_symbol=names_by_symbol)
         )
         triage_result = run_triage(
             candidates,

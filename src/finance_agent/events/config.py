@@ -16,6 +16,13 @@ ALLOWED_DOMAINS: tuple[str, ...] = (
     "sohu.com",
     "163.com",
     "ifeng.com",
+    # 财联社/雪球/门户/海外/一财/每经（add-key-events-cache：10-30 实测被旧名单砍掉的高质量源）
+    "cls.cn",
+    "xueqiu.com",
+    "news.qq.com",
+    "investing.com",
+    "yicai.com",
+    "nbd.com.cn",
     # 证券/研报平台
     "10jqka.com",
     "stockstar.com",

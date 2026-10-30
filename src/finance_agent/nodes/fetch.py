@@ -384,9 +384,11 @@ def fetch_data(state: dict, cache=None, client=None, *, kline_days: int = 250) -
                 (result.get("industry_info") or {}).get("name", ""),
                 use_web_search=use_web,
             )
-            # TTL 1 天（2026-09-08 缓存层审计）：事件含 WebSearch 实时快照，
-            # 时效性最强，此前永久缓存依赖 quote 1 天 TTL 间接兜底刷新
-            c.set(f"{code}:key_events", events, ttl_seconds=86_400)
+            # 缓存写入由 events/pipeline.fetch_key_events 内部持有（add-key-events-cache）：
+            # provenance 门控——事件列表/「验证过的空」才写 {code}:key_events（TTL 1 天），
+            # 失败兜底卡永不缓存。本节点不再无条件 c.set——深析链可能拿到 L3 兜底卡，
+            # 若写进共享 key 会被选股链读走毒化全天（终审 C1）。读路径不变：
+            # fetch_key_events 内部 cache.get 命中的是 pipeline 写入的验证值。
             result["key_events"] = events
             if obs:
                 obs.update(output={"status": "success", "count": len(events)})
