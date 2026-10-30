@@ -10,4 +10,6 @@
 - [x] E2E spec 已覆盖核心交互场景（分区入口/保存/非法拦截/加载失败隔离；
       tests/e2e/playwright/tests/settings-screening-rules.spec.ts，4/4 通过）
 - [x] 人工验证报告已落 `tests/validation/2026-10-28-add-screening-rules-config-ui-validation.md`
-      （自动化证据齐备；生产视角 2 项抽查待用户完成后进 archive）
+      （自动化证据齐备；生产视角 2 项抽查已于 2026-10-31 闭环：观感依生产截图判定通过、
+      生效时机以容器内 resolve 探针替代批次日志观察——偏差与残余风险已在报告附录披露；
+      owner 授权 agent 决策）
