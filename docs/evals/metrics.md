@@ -527,6 +527,22 @@ positioning/sentiment 取方向符号 × 置信度；`direction=neutral|unknown`
 
 **cohort 评估程序预登记（2026-10-29，delta `add-cohort-evaluation-program`；未出读数）**：run 名 `cohort-eval-20261029`；口径见 §1.22（四轨道 / 窗口 / r_e / 统计单位 / 归因闸，标注前锁定）。基线切点 = 首轮读数基于 universe-v1 全史（2026-09-25~读数日），跨窗不混报；本轮零 LLM 成本；判断质量（judge 四维）不在本轮（另立项）。首个预登记读数出齐前 §1.22 不得再改（改须走 §1 修订 + 新预登记版本 + 新切点行）。
 
+**契约回喂 A2 判效读数（2026-10-31，delta `feed-dsl-contract-to-factor-generator` 判效门；零 LLM、只读已落库）**：三方同屏（口径：untranslatable 占比/进闸门量按 `harvest_state.json` processed 裁决日 `at` 分桶、进闸门量交叉 `factor_admission_ledger`、入库数=ledger `admitted`；factors 表 10-29/30 新增 32/8 行均 `status=rejected`（#504 拒绝池持久化），**不计入入库**）。
+
+| 裁决日 | 进闸门量(ledger) | 入库 | untranslatable 占比 | ut 内 stage=translator |
+|---|---|---|---|---|
+| 10-23 | 29 | 0 | 83.2% | 52% |
+| 10-24 | 31 | 0 | 86.3% | 27% |
+| 10-25 | 10 | 1 | 93.5% | 26% |
+| 10-26 | 28 | 0 | 88.7% | 22% |
+| 10-27 | 82 | 0 | 73.7% | 52% |
+| 10-28 | 22 | 0 | 87.9% | 15% |
+| **10-28 晚容器重建（叠加批：#502/#509/#510 合入生产；#510 distro 补丁未跑）** | | | | |
+| 10-29 | 83 | 0 | 70.5% | 78% |
+| 10-30 | 17 | 0 | 80.3% | 100% |
+
+**暴露时间线与判读**：契约块经 #482 导出路径只在**每批收割刷新后**进入 `explored_factors.json`——首个含契约文件写于 10-29 批后（~16:0x），**首个全程契约在生成上下文的窗口 = 10-30 批，且 n=61**（10-29 的 189 条 UT 其提议会话读的是旧文件，不算暴露）。预登记判据「stage=translator 占比显著下降」**未满足**（唯一暴露日 100%，反升）；untranslatable 占比 80.3% 落在基线带（73.7~93.5%）内；入库仍 0。**结论：证据不足以判「已达标」，亦不足以下「无效」终判（单日 n=61）；按 A2 自身裁决规则，B1（中间表示改造）的必要性证据增强。** #510 distro 部署（第二变量）vs 降级的裁决留 owner。归因备忘：10-28 晚重建为叠加批，且 #510 生成侧契约自始未激活——本窗口的唯一处理变量是 #482 导出路径契约。原始读数脚本输出见 `tests/validation/2026-10-31-a2-funnel-readout.md`。
+
 ## 2.1 round7 预登记分析计划（标注前锁定，防事后口径漂移）
 
 - 数据：`judge-sample-round7-blind.xlsx`（人工 human_score + confidence）× `judge-sample-round7-judge.jsonl`（judge 分，r3 运行时落库，已冻结）

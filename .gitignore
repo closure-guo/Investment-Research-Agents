@@ -384,3 +384,7 @@ data/test-e2e-stats-*
 
 # E2E 误落 nested data/ 的测试库（webServer cwd 变体产物）
 tests/e2e/playwright/data/
+
+# 宿主侧意外落地的 0 字节运行时库（生产库在容器卷/正式名 factor_library.db）
+data/factors.db*
+data/ops.db*
