@@ -72,7 +72,10 @@ test.describe('场景验收 · 刷新恢复 @live', () => {
 
     // 关键断言 3：assistant 回复气泡（承载思考/工具的容器）只有一条——
     // 刷新恢复后续传事件复用重建的同一 chat 消息，不新建第二条气泡。
-    // 通过「停止生成」按钮仍在（流式进行中）+ 思考横幅在单一容器内验证。
+    // 通过「停止生成」仍在（流式进行中）+ 思考横幅在单一容器内验证。
+    // remove-standalone-stop-button：停止入口唯一化为输入框 composer-stop，
+    // 页面级「停止生成」按钮已删除——流式进行中的观察代理随之改为 composer-stop 可见。
+    await expect(page.getByTestId('composer-stop')).toBeVisible({ timeout: 5_000 })
     // 修复前 bug：历史思考气泡 + 新思考气泡两条并列（本用例会捕获到 >1 个回复容器）。
     // 用页面级结构断言：含「思考」的 assistant 气泡容器数 == 1。
     const bubblesWithThinking = page.locator('div').filter({
