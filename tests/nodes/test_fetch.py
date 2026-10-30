@@ -72,6 +72,34 @@ class TestFetchDataBasic:
         assert "600519:income_statement" in cached_keys
         assert "600519:cash_flow_statement" in cached_keys
 
+    def test_key_events_fallback_card_never_written_to_shared_cache(self, monkeypatch):
+        """终审 C1 回归：fetch 节点对 {code}:key_events 不再有无条件 c.set。
+
+        fetch_key_events 返回 L3 兜底卡（取数链失败）时，节点不得把兜底卡写入
+        共享缓存 key——否则选股链读走毒化全天。缓存写入唯一持有方是
+        events/pipeline（provenance 门控）。缓存对象走本文件同款 MagicMock 注入
+        （同 test_writes_to_cache），且 fetch_key_events 一并打桩——生产
+        cache.db 全程零接触。
+        """
+        from finance_agent.events import pipeline as events_pipeline
+        from finance_agent.events.fallback import fallback_annotation
+
+        card = fallback_annotation()
+        monkeypatch.setattr(
+            events_pipeline,
+            "fetch_key_events",
+            lambda code, name="", use_web_search=True: card,
+        )
+
+        mock_cache = MagicMock()
+        result = fetch_data(
+            {"stock_code": "600519"}, cache=mock_cache, client=_setup_client()
+        )
+
+        assert result["key_events"] == card
+        written_keys = [call[0][0] for call in mock_cache.set.call_args_list]
+        assert "600519:key_events" not in written_keys  # 共享 key 无写入
+
 
 class TestFetchDataDegradation:
     def test_required_data_missing_raises(self):
