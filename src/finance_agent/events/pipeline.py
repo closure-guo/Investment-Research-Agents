@@ -43,7 +43,9 @@ def fetch_key_events(
     if cache is not None:
         cached = cast(list[dict], cache.get(key))
         if cached is not None:
+            logger.info("key events cache hit for %s", stock_code)
             return cached
+        logger.debug("key events cache miss for %s", stock_code)
 
     web_ran_ok = False
     if use_web_search:
@@ -56,6 +58,7 @@ def fetch_key_events(
             web_events = None
         web_ran_ok = web_events is not None
         if web_events:
+            logger.info("WebSearch returned %d events for %s", len(web_events), stock_code)
             events = _filter_events(web_events)
             if cache is not None:
                 cache.set(key, events, ttl_seconds=_CACHE_TTL_SECONDS)
@@ -64,6 +67,8 @@ def fetch_key_events(
     preset = load_preset_events(stock_code)
     if preset is not None:
         # 结构性空（[]）或有数据（list）
+        if preset:
+            logger.info("Preset events returned %d events for %s", len(preset), stock_code)
         events = _filter_events(preset)
         if cache is not None and web_ran_ok:
             # 仅当取数链完整走完才缓存（L1 事件或空）；失败降级不缓存

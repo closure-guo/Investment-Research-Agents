@@ -14,6 +14,7 @@ class _RecordingCache:
 
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
+        self.ttls: dict[str, int | None] = {}
         self.get_calls = 0
         self.set_calls = 0
 
@@ -23,6 +24,7 @@ class _RecordingCache:
 
     def set(self, key: str, data, ttl_seconds=None):
         self.set_calls += 1
+        self.ttls[key] = ttl_seconds
         self.store[key] = data
 
 
@@ -62,6 +64,8 @@ def test_cache_hit_short_circuits_web_and_llm(monkeypatch, cache):
     assert len(calls) == 1            # 搜索只跑一次
     assert cache.set_calls == 1
     assert cache.get_calls == 2       # 每次调用先查缓存
+    # TTL 钉死 spec 规范值（1 天），防静默漂移
+    assert cache.ttls["601952:key_events"] == 86_400
 
 
 def test_verified_empty_returns_empty_list_and_is_cached(monkeypatch, cache):
