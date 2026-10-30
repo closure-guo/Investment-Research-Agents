@@ -51,10 +51,16 @@ def screening_freshness_removals(
         return []
     symbols = [str(row.get("symbol") or "").strip() for row in pool_rows]
     symbols = [symbol for symbol in symbols if symbol]
+    names_by_symbol = {
+        str(row.get("code") or "").strip(): str(row.get("name") or "").strip() for row in rows
+    }
     findings = check_signal_freshness(
         symbols,
         snapshot_rows={str(row.get("code") or "").strip(): row for row in rows},
-        events_by_symbol={symbol: fetch_key_events(symbol) for symbol in symbols},
+        events_by_symbol={
+            symbol: fetch_key_events(symbol, names_by_symbol.get(symbol, ""))
+            for symbol in symbols
+        },
         as_of=snapshot_date,
         calendar=calendar,
     )
