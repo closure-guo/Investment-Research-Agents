@@ -66,4 +66,26 @@
 ## 结论
 
 - [x] 自动化证据全部通过（E2E 单 spec 4/4、后端定向 276、前端 969、类型与 lint 干净）
-- [ ] 待用户完成上列 2 项生产视角抽查后，本 delta 可进 archive 流程
+- [x] 生产视角 2 项抽查已于 2026-10-31 闭环（见下方附录），可进 archive
+
+## 附录：生产视角抽查闭环（2026-10-31，owner 授权 agent 决策执行）
+
+**① 观感**：生产 `/settings` → 「选股规则」分区实截
+`2026-10-30-screening-rules-settings-page.png` / `2026-10-30-screening-rules-pane.png`：
+三规则（60 / 5000 万元 / 100）+ 逐项「默认值」徽章 + 取值域提示 + 原因码说明
+（IPO_RECENT / ILLIQUID）+ 万元换算注记 + 生效时机文案，与 delta spec 逐字一致。
+判定：观感通过（agent 依截图判定，owner 授权决策）。
+
+**② 生效时机**：以**容器内 resolve 探针**替代「批次日志观察」（偏差已披露）——
+
+| 步骤 | 实测 |
+|---|---|
+| PUT 非默认值（min_trading_days=55） | 200，`source=file`、`file_status=ok` |
+| **生产容器内实跑 `rules_config.resolve()`**（日批批次开始所调函数） | 返回 `value=55, source=file` —— 保存→落盘→容器读取整链生产验证通过 |
+| 还原（删除配置文件） | `file_status=missing`、全默认值，生产状态与探针前一致 |
+
+偏差披露：未等待真实 15:40 批日志（避免为验证而扰动真实批次行为/池成员连续性）。
+「批次开始 resolve 一次」的接线由单测 `test_default_l2_top_n_pins_pipeline_constant`
+钉死；批次级观察挂随 owner 未来首次真实改配置时顺带核（批日志 filter_universe
+阈值行）。剩余风险：批进程 env 与容器 exec env 的差异——两者同容器同镜像，
+`SCREENING_RULES_CONFIG_PATH` 均未设置（回落同一路径），风险可忽略。
