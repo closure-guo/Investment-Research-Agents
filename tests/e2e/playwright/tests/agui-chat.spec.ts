@@ -18,7 +18,7 @@ import { test, expect } from '@playwright/test'
  *   answer    = "这是一段测试用的固定回复。用于验证流式渲染的增量累积。"
  */
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = process.env.E2E_API_BASE ?? 'http://localhost:8000'
 
 /** 配置测试 Key → 切快速模式 → 发送一条消息（走 AG-UI 通道） */
 async function openAndSendQuickMessage(page: import('@playwright/test').Page, message: string) {

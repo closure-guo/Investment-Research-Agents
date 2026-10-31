@@ -119,6 +119,32 @@ export default defineConfig({
 
 后端需要一个 `/health` 端点（没有就加一个，三行代码），Playwright 靠轮询它确认后端就绪。
 
+### 3.1 本地跑法 doctrine：默认推荐隔离 config（issue #499 裁决）
+
+本地跑 E2E **默认推荐隔离配置** `playwright.isolated.config.ts`（端口对 8001/5174，
+独立测试库 + `reuseExistingServer: false`）：
+
+```bash
+cd tests/e2e/playwright && npx playwright test --config=playwright.isolated.config.ts
+```
+
+理由：
+
+1. **与生产栈共存**：本机生产常驻 8000/5173（宿主 Docker 端口转发），默认 config
+   的 `reuseExistingServer: !CI` 会探活复用生产容器——incident 038/045 两次实证
+   打穿生产（真实 LLM 建会话/污染生产库）。
+2. **旧「停容器跑默认端口」doctrine 废弃**：它与交易日 15:30–17:10 / 17:55–20:45
+   的禁重建红线冲突（停栈会撞死运行中的分析与日批），且 Docker Desktop 停机时
+   连带全栈不可用。
+3. **env 键集守卫兜底**：默认与隔离两份 config 的后端 env 清单由
+   `npm run config:parity`（CI 套件前置步骤）强制一致——隔离跑不再依赖
+   「逐 spec 检查有没有写死端口」的人肉纪律；spec 侧写死 8000/5173 的存量
+   已改造为 `E2E_API_BASE` / `E2E_FRONTEND` 注入（隔离 config 加载期注入
+   5174，CI 默认行为不变）。
+
+注意：隔离跑前清掉 runner 侧的 `DEEPSEEK_API_KEY` / `LLM_API_KEY`（@live 用例
+会据此跳过；带 key 跑隔离栈只会得到 stub 后端上的假失败）。
+
 ---
 
 ## 4. 后端测试模式：`TESTING=1` 开关

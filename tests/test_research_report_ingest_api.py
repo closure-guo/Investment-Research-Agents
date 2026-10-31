@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib
+
+import pytest
 from fastapi.testclient import TestClient
 
 from finance_agent.api import app
@@ -13,6 +16,20 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("RESEARCH_REPORTS_DB_PATH", str(tmp_path / "rr.db"))
     monkeypatch.setenv("RESEARCH_REPORT_INBOX_DIR", str(tmp_path / "inbox"))
     monkeypatch.setenv("TESTING", "1")
+
+
+@pytest.fixture
+def testing_client(monkeypatch):
+    """TESTING=1 下 reload 出带 /api/test/seed 的客户端（仓库既有模式）。"""
+    monkeypatch.setenv("TESTING", "1")
+    import finance_agent.api as api_module
+
+    importlib.reload(api_module)
+    try:
+        yield TestClient(api_module.app)
+    finally:
+        monkeypatch.delenv("TESTING", raising=False)
+        importlib.reload(api_module)
 
 
 def test_upload_pdf_ingested(tmp_path, monkeypatch):
@@ -130,3 +147,46 @@ def test_documents_list_no_text_fields(tmp_path, monkeypatch):
     assert item["doc_key"] == "d1"
     empty = TestClient(app).get("/api/research/reports/documents")  # 同库非空，跳过空态断言
     assert empty.status_code == 200
+
+
+def test_seed_research_reset_clears_ingest_state(tmp_path, monkeypatch, testing_client):
+    """research_reset（issue #519）：seed 清空直投面三表，库回到「隔离库首启」等价态。
+
+    第二次跑 research-ingest.spec.ts 前提：上传行不残留（report_documents）、
+    抽取行不残留（report_extractions）、上传运行记录不残留（collection_runs）。
+    """
+    _isolate(tmp_path, monkeypatch)
+    db = tmp_path / "rr.db"
+    rr_store.upsert_document(
+        {
+            "doc_key": "d1",
+            "filename": "报告.txt",
+            "file_path": "x.txt",
+            "title": "报告",
+            "org": "某券商",
+            "publish_date": "2026-10-24",
+            "page_count": 1,
+            "char_count": 10,
+            "text": "正文",
+            "usage_policy": "personal_research",
+            "source_type": "manual_feed",
+        },
+        db_path=db,
+    )
+    rr_store.record_run("ingest_upload", None, None, "ok", 1, None, db_path=db)
+
+    resp = testing_client.post("/api/test/seed", json={"research_reset": True})
+    assert resp.status_code == 200
+
+    assert rr_store.list_documents(db_path=db) == []
+    assert rr_store.latest_run("ingest_upload", db_path=db) is None
+
+
+def test_seed_research_reset_alone_allowed_without_chat_history(
+    tmp_path, monkeypatch, testing_client
+):
+    """research_reset 不受 chat_history 前置约束（与 screening_reset 等造数动词同口径）。"""
+    _isolate(tmp_path, monkeypatch)
+    resp = testing_client.post("/api/test/seed", json={"research_reset": True})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
