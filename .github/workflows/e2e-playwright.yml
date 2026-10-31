@@ -18,10 +18,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
+  # runner 镜像钉 24.04（issue #522）：ubuntu-latest 已漂到 26.04，本 workflow 锁定的
+  # Playwright 版本不支持 chromium on ubuntu26.04-x64——缓存命中时 install 跳过下载
+  # 掩盖问题（PR CI 绿），缓存未命中即安装失败（10-28/10-30 两晚 @live nightly 实证）。
+  # 升级 Playwright 是长效解但涉及全套件行为面，另行立项；先钉镜像止血。
   # stub 套件：PR/push 触发，确定性，秒级-分钟级
   stub:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # stub suite ~1.5 分钟；timeline suite 拉起 6 个 webServer（3 端口对）+
     # STUB_NODE_DELAY=1.5s 的 5 层管线，实际运行 ~12 分钟，预留余量放宽到 25 分钟
     timeout-minutes: 25
@@ -175,7 +179,7 @@ jobs:
   # 亦触发（手动出报告 / 联调取证）。
   flaky-report:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -215,7 +219,7 @@ jobs:
   # @live 套件：nightly 触发，真 LLM，防 stub 漂移
   live:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
