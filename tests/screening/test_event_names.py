@@ -40,7 +40,7 @@ def test_assembly_without_names_keeps_old_call_shape(monkeypatch):
     assert recorded == [("601952", "")]
 
 
-def test_freshness_passes_names_from_snapshot_rows(monkeypatch, tmp_path):
+def test_freshness_passes_names_from_snapshot_rows(monkeypatch):
     """时效校验从快照行取 name 传入 fetch（快照行字段：code/name）。"""
     import finance_agent.screening.freshness as freshness
 
@@ -73,3 +73,26 @@ def test_freshness_passes_names_from_snapshot_rows(monkeypatch, tmp_path):
 
     assert findings == []
     assert recorded == [("601952", "苏垦农发")]
+
+
+def test_assembly_isolates_per_symbol_fetch_crash(monkeypatch):
+    """单只 fetch 崩溃不炸整批（issue #535-1）：崩的只回兜底卡，其余照常装配。
+
+    10-28 9p 故障实证：sqlite 连接全面失败时字典推导一次未捕获异常即整批
+    灭（incident 053 家族）——装配层兜单只异常，与 fetch 内部 web 双保险姿态一致。
+    """
+    import finance_agent.events.pipeline as events_pipeline
+
+    def fake_fetch(code, name="", use_web_search=True):
+        if code == "300628":
+            raise RuntimeError("simulated crash")
+        return [{"date": "2026-10-30", "title": "大单"}]
+
+    monkeypatch.setattr(events_pipeline, "fetch_key_events", fake_fetch)
+
+    candidates = [SimpleNamespace(symbol="601952"), SimpleNamespace(symbol="300628")]
+    result = _assemble_events_by_symbol(candidates, names_by_symbol={"601952": "苏垦农发"})
+
+    assert [e["title"] for e in result["601952"]] == ["大单"]  # 好的照常
+    card = result["300628"]
+    assert isinstance(card, list) and card  # 崩的回兜底卡（fetch 失败同语义）

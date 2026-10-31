@@ -224,14 +224,21 @@ def _assemble_events_by_symbol(
     显式注入 ``events_by_symbol`` 的调用方（测试/回放）不触发本路径（零网络）。
     ``names_by_symbol`` 供检索查询携带股票名（带名召回显著优于纯代码查询，
     10-30 实测 4 条 vs 1 条）；缺名退化为纯代码查询，不阻断。
+    单只 fetch 异常回该标的兜底卡、不炸整批（issue #535：10-28 9p 故障实证，
+    一次 sqlite 抖动经字典推导上抛即全批灭——incident 053 家族）。
     """
-    from finance_agent.events.pipeline import fetch_key_events
+    from finance_agent.events.pipeline import fallback_annotation, fetch_key_events
 
     names = names_by_symbol or {}
-    return {
-        candidate.symbol: fetch_key_events(candidate.symbol, names.get(candidate.symbol, ""))
-        for candidate in candidates
-    }
+    result: dict[str, list[dict]] = {}
+    for candidate in candidates:
+        symbol = candidate.symbol
+        try:
+            result[symbol] = fetch_key_events(symbol, names.get(symbol, ""))
+        except Exception as e:  # noqa: BLE001 -- 单只隔离：兜底卡语义与 fetch 内部失败路径一致
+            _logger.warning("事件装配单只失败 %s: %s", symbol, e)
+            result[symbol] = fallback_annotation()
+    return result
 
 
 def _candidate_contribs(candidate: Candidate) -> list[dict[str, Any]]:

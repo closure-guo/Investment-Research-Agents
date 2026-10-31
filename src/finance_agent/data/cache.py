@@ -18,6 +18,7 @@ execute 报 InterfaceError 且写入静默丢失（实测 400 并发写只成功
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -25,6 +26,8 @@ import time
 from typing import Any
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 class DataCache:
@@ -45,26 +48,32 @@ class DataCache:
         self._conn.commit()
 
     def get(self, key: str) -> Any:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT data_type, data, expire_at FROM cache WHERE key = ?", (key,)
-            ).fetchone()
-            if row is None:
-                return None
-
-            data_type, raw, expire_at = row
-            if expire_at is not None and time.time() > expire_at:
-                self.delete(key)
-                return None
-
-            if data_type == "json":
-                return json.loads(raw)
-            elif data_type == "dataframe":
-                from io import BytesIO
-
-                buf = BytesIO(raw)
-                return pd.read_parquet(buf)
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT data_type, data, expire_at FROM cache WHERE key = ?", (key,)
+                ).fetchone()
+        except sqlite3.Error as e:
+            # sqlite 抖动降级（issue #535）：cache 是优化层，miss 化让调用方
+            # 自然「降级直通取数」，故障不得上抛炸调用链（如事件装配批）
+            logger.warning("cache get 失败（降级为 miss）key=%s: %s", key, e)
             return None
+        if row is None:
+            return None
+
+        data_type, raw, expire_at = row
+        if expire_at is not None and time.time() > expire_at:
+            self.delete(key)
+            return None
+
+        if data_type == "json":
+            return json.loads(raw)
+        elif data_type == "dataframe":
+            from io import BytesIO
+
+            buf = BytesIO(raw)
+            return pd.read_parquet(buf)
+        return None
 
     def set(
         self,
@@ -88,19 +97,28 @@ class DataCache:
             data_type = "json"
 
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT OR REPLACE INTO cache (key, data_type, data, expire_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (key, data_type, raw, expire_at),
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute(
+                    """
+                    INSERT OR REPLACE INTO cache (key, data_type, data, expire_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (key, data_type, raw, expire_at),
+                )
+                self._conn.commit()
+            except sqlite3.Error as e:
+                # sqlite 抖动降级（issue #535）：写失败静默丢弃，下次调用自然重试；
+                # 序列化段在锁外（编程错误照常上抛），此处只兜 sqlite I/O
+                logger.warning("cache set 失败（静默丢弃）key=%s: %s", key, e)
 
     def delete(self, key: str) -> None:
         with self._lock:
-            self._conn.execute("DELETE FROM cache WHERE key = ?", (key,))
-            self._conn.commit()
+            try:
+                self._conn.execute("DELETE FROM cache WHERE key = ?", (key,))
+                self._conn.commit()
+            except sqlite3.Error as e:
+                # 同 set：抖动静默（get 的过期清理路径复用本方法，不降级会炸读链）
+                logger.warning("cache delete 失败（静默丢弃）key=%s: %s", key, e)
 
     def keys(self) -> list[str]:
         with self._lock:
