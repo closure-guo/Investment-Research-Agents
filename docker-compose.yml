@@ -43,7 +43,18 @@ services:
       TAVILY_API_KEY: ${TAVILY_API_KEY}
     volumes:
       - ./reports:/app/reports
-      - ./data:/app/data
+      # 热库迁 named volume（harden-sqlite-availability，issue #515）：
+      # data/ 位于 Windows bind mount（9p），跨挂载 WAL 并发已四次打穿
+      # （incident 043/044/046 + 053 的 136s 连接全灭，10-28 十池分析全灭）。
+      # SQLite 族整体入卷；宿主机不再直碰热库（备份/排障走 docker exec，
+      # BREAKING 部署路径）。迁移/回滚脚本：scripts/migrate_hot_db_to_volume.sh
+      # 与 scripts/rollback_hot_db_to_volume.sh；宿主 data/ 保留为回滚副本。
+      - data:/app/data
+      # JSON/文件子目录保留宿主 bind（无 SQLite，宿主工具链直读）：
+      # 因子研发文件桥 / 研报投喂收件箱 / cohort 评估产物
+      - ./data/factor_research:/app/data/factor_research
+      - ./data/research_report_inbox:/app/data/research_report_inbox
+      - ./data/cohort:/app/data/cohort
       # 运维脚本只读挂载（issue #344）：快照回填等 ops 脚本改在容器内执行——
       # 宿主机写 WAL 与容器读跨 bind mount 争用会令容器侧读库全不可用；容器内
       # 读写同侧（`docker compose exec -T backend python scripts/...`）。
@@ -186,6 +197,11 @@ services:
       - langfuse_postgres_data:/var/lib/postgresql/data
 
 volumes:
+  # 热库卷（harden-sqlite-availability，issue #515）：显式沿用 10-29 迁移时的
+  # 卷名 finance-agent_data（当时 compose 变更未入库，卷已存在且持有旧副本，
+  # 重迁移由 scripts/migrate_hot_db_to_volume.sh 以宿主新鲜数据覆写）。
+  data:
+    name: finance-agent_data
   # 固定到旧项目名前缀：Docker 命名卷默认带 compose 项目名前缀，改项目名会创建
   # 一套空卷，Langfuse 的 traces/prompts/scores 看似丢失。这里显式沿用旧卷名。
   langfuse_postgres_data:
