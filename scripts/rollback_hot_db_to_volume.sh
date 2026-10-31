@@ -8,6 +8,8 @@
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Docker Desktop -v 只认 Windows 形态路径（同迁移脚本坑）：pwd -W 输出 D:/...
+WD="$(pwd -W)"
 
 VOL="finance-agent_data"
 IMG="python:3-alpine"
@@ -25,10 +27,10 @@ docker compose stop backend
 
 phase "卷 → 宿主（$OUT）"
 mkdir -p "$OUT"
-docker run --rm -v "$VOL":/src:ro -v "$PWD/$OUT":/dst $IMG sh -c 'cp -a /src/. /dst/ && echo "回拷完成：$(ls /dst | wc -l) 项"'
+docker run --rm -v "$VOL":/src:ro -v "$WD/$OUT":/dst $IMG sh -c 'cp -a /src/. /dst/ && echo "回拷完成：$(ls /dst | wc -l) 项"'
 
 phase "对账（volume vs 回拷）"
-docker run --rm -v "$VOL":/src:ro -v "$PWD/$OUT":/dst $IMG python - <<'PYEOF'
+docker run --rm -v "$VOL":/src:ro -v "$WD/$OUT":/dst $IMG python - <<'PYEOF'
 import sqlite3, sys, os
 dbs = ["sessions.db", "screening.db", "execution.db", "events.db",
        "regime.db", "research_reports.db", "factor_library.db", "market_snapshot.db"]

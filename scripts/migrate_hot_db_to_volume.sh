@@ -16,6 +16,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Docker Desktop 的 -v 只认 Windows 形态路径：pwd -W 输出 D:/...（MSYS 的
+# /d/... 会让容器侧挂载出空目录——2026-11-01 首跑实证，拷贝静默落空）
+WD="$(pwd -W)"
 MODE="${1:-migrate}"
 VOL="finance-agent_data"
 HOT_DBS=(sessions.db screening.db execution.db events.db regime.db research_reports.db factor_library.db market_snapshot.db)
@@ -37,7 +40,7 @@ require_backend_down() {
 }
 
 verify_pair() { # $1=容器内 src 目录 $2=容器内 dst 目录
-  docker run --rm -v "$PWD/data":/src:ro -v "$VOL":/dst $IMG python - "$1" "$2" <<'PYEOF'
+  docker run --rm -v "$WD/data":/src:ro -v "$VOL":/dst $IMG python - "$1" "$2" <<'PYEOF'
 import sqlite3, sys, os
 src, dst = sys.argv[1], sys.argv[2]
 dbs = ["sessions.db", "screening.db", "execution.db", "events.db",
@@ -46,7 +49,7 @@ fail = 0
 for db in dbs:
     s, d = os.path.join(src, db), os.path.join(dst, db)
     if not os.path.exists(s):
-        print(f"  [SKIP] {db}: 源不存在"); continue
+        print(f"  [FAIL] {db}: 源缺失（挂载路径错误？宿主副本必须存在）"); fail = 1; continue
     if not os.path.exists(d):
         print(f"  [FAIL] {db}: 卷内缺失"); fail = 1; continue
     cs = sqlite3.connect(s); cd = sqlite3.connect(d)
@@ -95,14 +98,19 @@ phase "停后端"
 docker compose stop backend
 
 phase "整拷 data/ → volume（含校验，排除测试/备份残渣）"
-docker run --rm -v "$PWD/data":/src:ro -v "$VOL":/dst $IMG sh -c '
+docker run --rm -v "$WD/data":/src:ro -v "$VOL":/dst $IMG sh -c '
   cd /src && find . -maxdepth 1 \
     ! -name "." \
     ! -name "test-e2e-*" ! -name "*.bak-*" ! -name "*-bak*" \
     ! -name "*.corrupt-*" ! -name "repro-stub.db" \
     ! -name "*.db-wal" ! -name "*.db-shm" \
     -exec cp -a {} /dst/ \;
-  echo "拷贝完成：$(ls /dst | wc -l) 项"
+  n=$(ls /dst | wc -l)
+  echo "拷贝完成：$n 项"
+  for db in sessions.db screening.db market_snapshot.db; do
+    [ -f "/dst/$db" ] || { echo "致命：$db 未出现在卷内"; exit 1; }
+  done
+  echo "关键库在卷校验通过"
 '
 
 phase "对账（quick_check + 全表行数 + 尺寸）"
