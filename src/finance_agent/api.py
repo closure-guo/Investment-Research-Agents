@@ -904,6 +904,11 @@ if TESTING:
         source/summary/error + started_at/finished_at 回拨））与 ops_runs_reset
         （bool：清 job_runs 全表）造日批运维页漏跑/失败/未到点确定性状态；库路径
         于调用期读 SESSIONS_DB_PATH（ops model env 口径，E2E 指向独立测试库）。
+        顶层 research_reset（bool：清研报直投面三表 report_documents/
+        report_extractions/collection_runs，issue #519）：research-ingest.spec.ts
+        的「空态（隔离库首启）」断言在第二次本地重跑时因上传行持久化必失败——
+        spec beforeEach 经本动词复位；库路径于调用期读 RESEARCH_REPORTS_DB_PATH
+        （E2E 指向独立测试库 data/test-e2e-research-reports.db）。
         """
         # 旧版 smoke 断言（{symbol}）保持占位响应，避免破坏既有契约；
         # track_record / snapshot / screening / memory / factors / broker / regime
@@ -929,6 +934,7 @@ if TESTING:
             and not isinstance(req.get("daily_brief"), dict)
             and not isinstance(req.get("ops"), dict)
             and not req.get("ops_runs_reset")
+            and not req.get("research_reset")
         ):
             return {"status": "ok", "mode": "testing"}
         # add-paper-broker：战绩造数复位（清 equity_curve + paper_equity 两表）。双曲线
@@ -1143,6 +1149,15 @@ if TESTING:
             from finance_agent.outcome.ops.model import clear_job_runs as _seed_clear_runs
 
             _seed_clear_runs()
+        # 研报直投复位（issue #519）：清直投面三表，research-ingest.spec.ts 的
+        # 「空态（隔离库首启）」断言在第二次本地重跑也成立。库路径调用期读
+        # RESEARCH_REPORTS_DB_PATH（store env 口径，E2E 指向独立测试库）。
+        if req.get("research_reset"):
+            from finance_agent.data.research_reports_store import (
+                delete_all_ingest_state as _seed_clear_research,
+            )
+
+            _seed_clear_research()
         ops_seed = req.get("ops")
         if isinstance(ops_seed, dict):
             from finance_agent import ops_api as _seed_ops_api

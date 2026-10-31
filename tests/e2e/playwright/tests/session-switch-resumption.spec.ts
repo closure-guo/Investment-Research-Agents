@@ -16,8 +16,8 @@ import { test, expect } from '@playwright/test'
  * 状态驱动断言（输入框就绪/深度占位符/后端状态轮询/内容增长轮询）。
  * 禁止 mock 数据，必须通过前端模拟用户真实点击操作。
  */
-const API_BASE = 'http://localhost:8000'
-const FRONTEND = 'http://localhost:5173'
+const API_BASE = process.env.E2E_API_BASE ?? 'http://localhost:8000'
+const FRONTEND = process.env.E2E_FRONTEND ?? 'http://localhost:5173'
 const LLM_KEY = process.env.LLM_API_KEY || 'stub-key-for-testing'
 // StubLLMClient 默认（无 STUB_SCENARIO）固定回复——deep 首问澄清轮的确定性产物
 const STUB_ANSWER = '这是一段测试用的固定回复。用于验证流式渲染的增量累积。'

@@ -6,6 +6,10 @@ import './test-env'
 // 是生产栈端口（本隔离配置起的栈在 5174/8001），不注入时这些 spec 会打穿生产
 // （incident 038 家族；2026-10-27 实证：E2E 请求打到生产后端创建了真实会话）。
 process.env.E2E_API_BASE ??= 'http://127.0.0.1:5174'
+// SSE 直连族 spec（concurrent-streaming-integrity / session-switch-resumption）用
+// `E2E_FRONTEND ?? 'http://localhost:5173'` 作为页面入口——同款注入，否则 goto 打到
+// 生产前端（issue #499 同族）。
+process.env.E2E_FRONTEND ??= 'http://127.0.0.1:5174'
 
 /**
  * 隔离配置：避免占用用户已在运行的 8000/5173 服务。
@@ -87,6 +91,10 @@ export default defineConfig({
         // 并发设置文件（delta add-analysis-concurrency-setting：隔离配置同样不得读写
         // 生产 data/settings/analysis_concurrency.json）
         ANALYSIS_CONCURRENCY_PATH: 'data/test-e2e-analysis-concurrency.json',
+        // 选股规则配置文件（issue #519：默认 config 有、隔离 config 曾漏——隔离后端
+        // cwd=仓库根时回退真实路径 data/settings/screening_rules.json，settings-
+        // screening-rules.spec.ts 会读写仓库真实设置文件）
+        SCREENING_RULES_CONFIG_PATH: 'data/test-e2e-screening-rules.json',
         // 隔离报告落盘目录，避免 E2E 副作用污染 reports/
         REPORTS_DIR: 'tmp/e2e-reports-8001',
       },

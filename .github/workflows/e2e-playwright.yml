@@ -75,6 +75,13 @@ jobs:
           npx playwright install chromium --with-deps
         working-directory: tests/e2e/playwright
 
+      # env 键集一致性守卫（issue #499/#519）：默认与隔离两份 config 的后端 env
+      # 清单是手工维护的，漏项使隔离跑打穿生产/真实文件（收割三 env、
+      # SCREENING_RULES_CONFIG_PATH 两次实证）——零浏览器成本，套件前先卡
+      - name: Config env parity guard
+        run: node scripts/check-config-env-parity.mjs
+        working-directory: tests/e2e/playwright
+
       # 套件顺序 = 耗时升序（update-ci-pipeline R2）：eval-ops → 战绩页 → 收割链路 →
       # 快速模式操作 → 默认 → 时间轴，最快失败最快反馈；~12 分钟的时间轴殿后，
       # 不遮挡快套件失败。

@@ -25,6 +25,10 @@ const MSG_A1 = '会话A首问-苹果'
 const MSG_C1 = '会话C独立问题-香蕉'
 const MSG_A2 = '会话A追问-樱桃'
 
+// 落库核验基址：硬编码 8000 会在隔离跑（8001/5174）下把核验请求打到生产后端
+// （incident 038 家族，issue #499）——与 agui-chat/session-switch-resumption 同款注入
+const API_BASE = process.env.E2E_API_BASE ?? 'http://localhost:8000'
+
 /** 配置测试 Key → 显式切快速模式（本地/CI 模式记忆态不定）→ 等输入框就绪 */
 async function openFresh(page: import('@playwright/test').Page) {
   await page.goto('/')
@@ -104,17 +108,17 @@ test.describe('快速模式会话切换内容隔离（issue #30 验收）', () =
 
     // 6. 落库核验（真实 API 复核，非 mock）：A 与 C 的 chat_history 互不含对方消息
     const sessions = (await (
-      await page.request.get('http://localhost:8000/api/sessions')
+      await page.request.get(`${API_BASE}/api/sessions`)
     ).json()).sessions as Array<{ session_id: string; display_name: string }>
     const sidA = sessions.find(s => s.display_name?.includes(MSG_A1))?.session_id
     const sidC = sessions.find(s => s.display_name?.includes(MSG_C1))?.session_id
     expect(sidA).toBeTruthy()
     expect(sidC).toBeTruthy()
     const apiHistA = (await (
-      await page.request.get(`http://localhost:8000/api/sessions/${sidA}`)
+      await page.request.get(`${API_BASE}/api/sessions/${sidA}`)
     ).json()).chat_history as Array<{ role: string; content: string }>
     const apiHistC = (await (
-      await page.request.get(`http://localhost:8000/api/sessions/${sidC}`)
+      await page.request.get(`${API_BASE}/api/sessions/${sidC}`)
     ).json()).chat_history as Array<{ role: string; content: string }>
     const textA = JSON.stringify(apiHistA)
     const textC = JSON.stringify(apiHistC)

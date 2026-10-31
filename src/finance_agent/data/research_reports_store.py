@@ -658,6 +658,24 @@ def list_documents(limit: int = 50, db_path: str | Path | None = None) -> list[d
     return [dict(row) for row in rows]
 
 
+def delete_all_ingest_state(db_path: str | Path | None = None) -> None:
+    """清空直投面三表，库回到「隔离库首启」等价态（issue #519 research_reset）。
+
+    只清直投上传路径写入的 report_documents / report_extractions / collection_runs；
+    research_reports / rating_changes / analysts / foreign_* 等目录扫描与外部
+    数据面表不在此列——它们由各自的 seed 动词或测试自行管理。
+    """
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute("DELETE FROM report_documents")
+        conn.execute("DELETE FROM report_extractions")
+        conn.execute("DELETE FROM collection_runs")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def update_document_metadata(
     doc_key: str,
     *,

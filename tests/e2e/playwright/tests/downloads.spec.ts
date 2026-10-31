@@ -16,7 +16,7 @@ import { test, expect } from '@playwright/test'
  * 红线约束：不 mock /api/files 等业务接口（E2E 禁止 route.fulfill 被测系统）；
  * 删除回滚、筛选等副作用路径由组件测试（frontend/src/test/downloads/）覆盖。
  */
-const API_BASE = 'http://localhost:8000'
+const API_BASE = process.env.E2E_API_BASE ?? 'http://localhost:8000'
 
 /** 经业务 DELETE 接口清空共享导出目录（本地测试隔离；CI 下通常已是空目录）。 */
 async function clearReports(page: import('@playwright/test').Page): Promise<void> {

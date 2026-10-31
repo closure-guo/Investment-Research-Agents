@@ -6,7 +6,8 @@
   "scripts": {
     "test": "playwright test",
     "test:headed": "playwright test --headed",
-    "report": "playwright show-report"
+    "report": "playwright show-report",
+    "config:parity": "node scripts/check-config-env-parity.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0"
