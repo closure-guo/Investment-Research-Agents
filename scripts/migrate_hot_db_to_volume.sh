@@ -25,7 +25,9 @@ phase() { echo; echo "════════ $1 ════════"; }
 
 api_running_count() {
   local url="$1"
-  curl -sf --max-time 10 "$url" | grep -o '"status":"running"' | wc -l
+  # grep 零命中（=0 个 running，正是期望态）在 pipefail 下返回 1——用 || true
+  # 吸收，避免调用方 `|| echo 0` 兜底拼出 "00"；tr：Git Bash 的 wc -l 带前导空格
+  curl -sf --max-time 10 "$url" | { grep -o '"status":"running"' || true; } | wc -l | tr -d '[:space:]'
 }
 
 require_backend_down() {
@@ -75,8 +77,8 @@ PYEOF
 
 phase "前置检查（running 会话/作业 = 0）"
 if curl -sf --max-time 3 http://localhost:8000/api/health >/dev/null 2>&1; then
-  s_cnt=$(api_running_count "http://localhost:8000/api/sessions" || echo 0)
-  j_cnt=$(api_running_count "http://localhost:8000/api/v1/ops/jobs" || echo 0)
+  s_cnt=$(api_running_count "http://localhost:8000/api/sessions")
+  j_cnt=$(api_running_count "http://localhost:8000/api/v1/ops/jobs")
   echo "running 会话=$s_cnt running 作业=$j_cnt"
   [ "$s_cnt" = "0" ] && [ "$j_cnt" = "0" ] || { echo "存在 running，中止（等分析完成或经用户确认）"; exit 1; }
 else

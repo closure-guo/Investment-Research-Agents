@@ -17,7 +17,8 @@ phase() { echo; echo "════════ $1 ════════"; }
 
 phase "前置检查"
 if curl -sf --max-time 3 http://localhost:8000/api/health >/dev/null 2>&1; then
-  n=$(curl -sf http://localhost:8000/api/sessions | grep -o '"status":"running"' | wc -l)
+  # grep 零命中在 pipefail 下返回 1——|| true 吸收（与迁移脚本同坑）
+  n=$(curl -sf http://localhost:8000/api/sessions | { grep -o '"status":"running"' || true; } | wc -l | tr -d '[:space:]')
   [ "$n" = "0" ] || { echo "有 $n 个 running 会话，先等完成或确认"; exit 1; }
 fi
 docker compose stop backend
