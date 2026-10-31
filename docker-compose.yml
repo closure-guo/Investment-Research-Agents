@@ -49,7 +49,7 @@ services:
       # SQLite 族整体入卷；宿主机不再直碰热库（备份/排障走 docker exec，
       # BREAKING 部署路径）。迁移/回滚脚本：scripts/migrate_hot_db_to_volume.sh
       # 与 scripts/rollback_hot_db_to_volume.sh；宿主 data/ 保留为回滚副本。
-      - finance-agent_data:/app/data
+      - data:/app/data
       # JSON/文件子目录保留宿主 bind（无 SQLite，宿主工具链直读）：
       # 因子研发文件桥 / 研报投喂收件箱 / cohort 评估产物
       - ./data/factor_research:/app/data/factor_research
