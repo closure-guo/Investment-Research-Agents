@@ -388,3 +388,6 @@ tests/e2e/playwright/data/
 # 宿主侧意外落地的 0 字节运行时库（生产库在容器卷/正式名 factor_library.db）
 data/factors.db*
 data/ops.db*
+
+# pytest 临时库残留（tmp\w+ 随机名，tests 跑在仓库根时产生；2026-10-31 四例入库清理）
+tmp*/
