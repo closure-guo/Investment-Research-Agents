@@ -332,10 +332,17 @@ def prepare_pool_analysis_batch(
             continue
         session_id = str(existing.get("session_id") or "") if existing else ""
         if not session_id:
+            # 会话标题带股票名（消费 selection_pool.stock_name，PR #520 的展示字段）；
+            # 缺名回退纯代码，与池行缺名的 warning 口径一致（pipeline.py 同款兜底）。
+            stock_name = str(row.get("stock_name") or "").strip()
+            if stock_name:
+                display_name = f"{stock_name}({symbol}) {AUTO_POOL_DISPLAY_SUFFIX}"
+            else:
+                display_name = f"{symbol} {AUTO_POOL_DISPLAY_SUFFIX}"
             try:
                 session_id = create_analysis_session(
                     symbol,
-                    display_name=f"{symbol} {AUTO_POOL_DISPLAY_SUFFIX}",
+                    display_name=display_name,
                     source="auto_pool",
                 )
             except Exception as exc:  # noqa: BLE001 -- 单标的会话失败不阻断整批

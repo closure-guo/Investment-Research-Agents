@@ -7,7 +7,7 @@ from finance_agent.screening import pool_analysis
 from finance_agent.screening.store import record_screening_batch
 
 
-def _row(symbol: str, rank: int) -> dict:
+def _row(symbol: str, rank: int, stock_name: str = "") -> dict:
     return {
         "symbol": symbol,
         "composite_score": 100.0 - rank,
@@ -16,6 +16,7 @@ def _row(symbol: str, rank: int) -> dict:
         "l3_verdict": "keep",
         "l3_reason": "测试",
         "factor_contribs": [],
+        "stock_name": stock_name,
     }
 
 
@@ -143,7 +144,24 @@ def test_dispatch_failure_reuses_session_on_retry(tmp_path):
 
 def test_session_created_with_display_name(tmp_path):
     db = tmp_path / "screening.db"
-    _seed(db, "2026-10-20", [_row("600519", 1)])
+    _seed(db, "2026-10-20", [_row("600519", 1, stock_name="贵州茅台")])
+    out = pool_analysis.prepare_pool_analysis_batch(
+        as_of="2026-10-20",
+        enqueue=lambda s, sid: True,
+        db_path=db,
+        screening_db_path=db,
+    )
+    assert out["started"] == 1
+    row = pool_analysis.get_pool_analysis_run("2026-10-20", "600519", db_path=db)
+    session = session_store.get_session(row["session_id"])
+    assert session is not None
+    assert session["display_name"] == "贵州茅台(600519) 自动选股分析"
+    assert session["status"] == "running"
+
+
+def test_session_display_name_falls_back_to_symbol(tmp_path):
+    db = tmp_path / "screening.db"
+    _seed(db, "2026-10-20", [_row("600519", 1, stock_name="")])
     out = pool_analysis.prepare_pool_analysis_batch(
         as_of="2026-10-20",
         enqueue=lambda s, sid: True,
@@ -155,7 +173,6 @@ def test_session_created_with_display_name(tmp_path):
     session = session_store.get_session(row["session_id"])
     assert session is not None
     assert session["display_name"] == "600519 自动选股分析"
-    assert session["status"] == "running"
 
 
 def test_run_daily_disabled_skips(monkeypatch):
