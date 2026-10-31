@@ -44,7 +44,10 @@ load_dotenv()  # 加载 .env，须在 finance_agent 模块导入前执行（llm.
 # 与 /api/llm-config 占位保持一致；实际管线默认在 agent_factory，后续如需统一另行裁决。
 DEFAULT_LLM_MODEL = "deepseek/deepseek-v4-pro"
 
-from finance_agent import analysis_concurrency  # noqa: E402
+from finance_agent import (  # noqa: E402
+    analysis_concurrency,  # noqa: E402
+    pipeline_watchdog,  # noqa: E402
+)
 from finance_agent.data.cache import get_shared_cache  # noqa: E402
 from finance_agent.data.monitoring import get_monitor  # noqa: E402
 from finance_agent.data.snapshot import (  # noqa: E402
@@ -1877,6 +1880,10 @@ def _run_graph_streaming(
                 # add-citation-display：结构化引用随报告下发 + 正文注入引用标记 + 落库
                 citations = _citations_payload(accumulated.get("citation_report"))
                 report_md = inject_citation_marks(report_md, citations)
+                # 停滞看门狗迟到完成守卫（update-pipeline-stall-watchdog）：停滞终态
+                # 已发布（看门狗判死）后管线线程才解除阻塞完成 → 终态以先到者为准，
+                # 状态保持 failed（等值回写，MUST NOT 改 completed）；报告内容照常落库
+                _completion_status = pipeline_watchdog.completion_status_or_skip(session_id)
                 update_session_report(
                     session_id,
                     report_markdown=report_md,
@@ -1886,7 +1893,7 @@ def _run_graph_streaming(
                     analyst_summaries=analyst_summaries,
                     duration_ms=duration_ms,
                     file_paths=file_paths,
-                    status="completed",
+                    status=_completion_status or "failed",
                     citations=citations,
                     # add-report-revision-view：终稿决策随报告落库，供同标的下份报告
                     # 「距上次报告」增量摘要回溯；无终稿（门禁阻断）时落 NULL
