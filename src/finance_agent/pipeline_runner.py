@@ -21,7 +21,7 @@ import time
 from collections.abc import Callable, Generator
 from typing import Any
 
-from finance_agent import session_store
+from finance_agent import pipeline_watchdog, session_store
 from finance_agent.failure_text import failure_reason_text
 from finance_agent.stream_registry import registry as stream_registry
 from finance_agent.timeline_builder import (
@@ -274,13 +274,21 @@ def trim_pending_overflow(
 
 
 class _RunState:
-    def __init__(self, thread: threading.Thread):
+    def __init__(self, thread: threading.Thread | None = None):
         self.thread = thread
         self.events: list[str] = []
         self.lock = threading.Lock()
         self.done = False
         # 取消标志：cancel() 置位后 _run 在下一次事件迭代前检测并终止
         self.cancel_event = threading.Event()
+        # 停滞看门狗（update-pipeline-stall-watchdog）：loop 桥接（终态发布）、
+        # liveness（最后事件形态/节点，_run 事件循环刷新）、停滞标志
+        self.loop: Any | None = None
+        self.last_event_type = "管线启动"
+        self.last_node = ""
+        self.stalled = False
+        # liveness：事件源最近一次产出时刻（含心跳注释）；看门狗轮询依据
+        self.last_event_ts = time.time()
 
 
 class PipelineRunner:
@@ -312,13 +320,24 @@ class PipelineRunner:
         with cls._guard:
             if session_id in cls._running and not cls._running[session_id].done:
                 return
+            state = _RunState()
+            state.loop = loop
+            # 重跑清除停滞标记：同会话再次分析不受上次停滞终态影响
+            pipeline_watchdog.clear_stalled(session_id)
+            cls._running[session_id] = state
             thread = threading.Thread(
                 target=cls._run,
                 args=(session_id, event_source, initial_snapshot, loop),
                 daemon=True,
             )
-            cls._running[session_id] = _RunState(thread)
+            state.thread = thread
             thread.start()
+            # 停滞看门狗线程（独立于消费者——阻塞读期间循环内检查不可达，
+            # 这是 10-28 opencode 宕机 16 管线吊死的直接根因）
+            watchdog = threading.Thread(
+                target=cls._watch_stall, args=(session_id, state), daemon=True
+            )
+            watchdog.start()
 
     @classmethod
     def cancel(cls, session_id: str) -> bool:
@@ -328,8 +347,57 @@ class PipelineRunner:
             if not state or state.done:
                 return False
             state.cancel_event.set()
-        state.thread.join(timeout=5)
+        if state.thread is not None:
+            state.thread.join(timeout=5)
         return True
+
+    @classmethod
+    def _watch_stall(cls, session_id: str, state: _RunState) -> None:
+        """停滞看门狗线程（update-pipeline-stall-watchdog，issue #521）。
+
+        独立于消费者线程：fast path 的 event_source 生成器就是图执行本身
+        （懒驱动、同一线程），provider 断流后 SSL 读永久阻塞时消费者循环内
+        的检查不可达——10-28 opencode 宕机 16 管线吊死即此形态。本线程轮询
+        liveness，零事件超停滞阈值即按失败路径处置：
+        状态 failed（reason 带停滞时长与最后事件）→ error 终态（终态 CAS
+        去重，迟到完成不重复发布）→ 置取消/停滞标志 + done（is_running 立即
+        归 False）。消费者线程此后若解除阻塞，其终态发布被 CAS 拒绝，状态
+        回写被 pipeline_watchdog.completion_status_or_skip 守卫拦截。
+        """
+        stall_timeout = pipeline_watchdog.stall_timeout_seconds()
+        # 轮询间隔：阈值的 1/5，钳在 [20ms, 1s]——测试用小阈值也不失灵敏度
+        poll = max(0.02, min(1.0, stall_timeout / 5))
+        stalled_for = 0.0
+        while True:
+            if state.done or state.cancel_event.is_set():
+                return
+            time.sleep(poll)
+            if state.done or state.cancel_event.is_set():
+                return
+            stalled_for = time.time() - state.last_event_ts
+            if stalled_for >= stall_timeout:
+                break
+        # ── 停滞处置 ──
+        state.stalled = True
+        reason = pipeline_watchdog.stall_failure_reason(
+            stalled_for, state.last_event_type, state.last_node
+        )
+        pipeline_watchdog.mark_stalled(session_id)
+        session_store.update_session_status(session_id, "failed", failure_reason=reason)
+        logger.warning("管线停滞判死 session=%s %s", session_id, reason)
+        if state.loop is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    stream_registry.publish_terminal(
+                        session_id,
+                        {"type": "error", "session_id": session_id, "message": reason},
+                    ),
+                    state.loop,
+                ).result(timeout=90)
+            except Exception:  # noqa: BLE001 -- 终态发布失败不阻断状态置位（日志兜底）
+                logger.exception("停滞终态发布失败 session=%s", session_id)
+        state.cancel_event.set()
+        state.done = True
 
     @classmethod
     def get_events(cls, session_id: str) -> list[str]:
@@ -434,6 +502,10 @@ class PipelineRunner:
         lastTimelinePersist = 0.0
         try:
             for sse_str in event_source():
+                # liveness：事件源产出任何内容（含 SSE 心跳注释）都刷新停滞看门狗
+                # 输入（update-pipeline-stall-watchdog）；形态/节点供 failure_reason
+                if state is not None:
+                    state.last_event_ts = time.time()
                 # 取消检查：cancel() 置位后在下一次事件迭代前终止
                 if state is not None and state.cancel_event.is_set():
                     if loop is not None:
@@ -441,7 +513,8 @@ class PipelineRunner:
                         _publish_terminal({"type": "interrupted", "session_id": session_id})
                         terminalPublished = True
                     break
-                # 超时检查：事件间检测，长时间无事件时标记 failed
+                # 总墙钟检查（总预算语义不变；停滞由独立看门狗线程 _watch_stall 负责
+                # ——阻塞读期间本循环不可达，循环内检查只能覆盖「有事件流动」场景）
                 if time.time() - start_time > pipeline_timeout:
                     session_store.update_session_status(
                         session_id, "failed", failure_reason="管线执行超时"
@@ -493,6 +566,10 @@ class PipelineRunner:
                 if event is None:
                     continue
                 eventType = event.get("type")
+                # liveness 形态记账（停滞 failure_reason 输入）
+                if state is not None:
+                    state.last_event_type = str(eventType)
+                    state.last_node = str(event.get("node") or event.get("node_id") or "")
                 # 管线模式 thinking_token：node 字段缺失/空串归入 '' 键（与前端一致）
                 if eventType == "thinking_token":
                     timelineAcc.add_thinking_token(event.get("node") or "", event.get("token", ""))

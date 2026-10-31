@@ -27,6 +27,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from finance_agent import pipeline_watchdog
 from finance_agent.failure_text import failure_reason_text
 from finance_agent.harness import Agent, PermissionMode
 from finance_agent.harness.context import ContextBudget
@@ -667,6 +668,8 @@ def _make_run_deep_analysis(
         pipeline_timeout = float(
             os.environ.get("PIPELINE_TIMEOUT_SECONDS", str(PIPELINE_TIMEOUT_DEFAULT_SECONDS))
         )
+        # 停滞看门狗阈值（update-pipeline-stall-watchdog）：调用期读 env（E2E 注入纪律）
+        stall_timeout = pipeline_watchdog.stall_timeout_seconds()
         _tree: list[dict] = build_layer_tree() if _track_snapshot else []
         # 管线节点时序（persist-full-session-timeline）：thinking chunk 按 node 分组
         # 持久化到 sessions.pipeline_timelines。
@@ -806,6 +809,9 @@ def _make_run_deep_analysis(
 
         async def _background_consume():
             nonlocal _tree
+            # liveness 记账初值（停滞 failure_reason 输入）：未见任何事件
+            _last_event_type = "管线启动"
+            _last_event_node = ""
             # 节点真实生命周期时间戳（custom 流的 node_start/node_end），
             # 用于给 updates 流的 node_complete 附加 server_*（修复快速节点计时恒 0）。
             node_lifecycle: dict[str, dict] = {}
@@ -838,18 +844,42 @@ def _make_run_deep_analysis(
 
             try:
                 while True:
-                    # 墙钟超时（spec pipeline-events「管线超时与中断检测」MODIFIED：
+                    # 墙钟超时 + 停滞看门狗（update-pipeline-stall-watchdog，issue #521）：
                     # 预算耗尽须先核对图完成信号——图已完成时排空延迟不构成超时，
-                    # 2026-10-04 拓荆案例）。图未完成时维持自管线启动起算的全局
-                    # 预算硬约束：原单次空闲超时在 thinking token 持续流动时永不
-                    # 触发（601700 复盘：线上深研管线跑了 71 分钟无人拦截），剩余
-                    # 预算耗尽即抛 TimeoutError，走下方既有 failed + failure_reason
-                    # 分支。
+                    # 2026-10-04 拓荆案例。图未完成时双预算并行：
+                    # - 总预算（PIPELINE_TIMEOUT_SECONDS，默认 2400s）：自管线启动起算，
+                    #   含消费端处理耗时——抓「有事件进度但超总时长」（601700 runaway，
+                    #   语义不变）；
+                    # - 停滞预算（PIPELINE_STALL_TIMEOUT_SECONDS，默认 600s）：仅计量
+                    #   「队列空等」窗（wait_for 超时即队列停滞 stall_timeout 时长）——
+                    #   消费端处理耗时（如慢 SQLite 写）不计入停滞，只烧总预算。
+                    #   抓「零事件挂死」（10-28 opencode 宕机 16 管线吊死形态——
+                    #   provider 断流后 SSL 读永久阻塞，仅靠总墙钟要空转 40min）。
+                    # 先到期者生效，failure_reason 双文案可区分（spec 停滞看门狗）。
                     if not graph_done.is_set():
-                        _remaining = pipeline_timeout - (_time_module.time() - _pipeline_start_time)
-                        if _remaining <= 0:
+                        _total_remaining = pipeline_timeout - (
+                            _time_module.time() - _pipeline_start_time
+                        )
+                        if _total_remaining <= 0:
                             raise TimeoutError(f"管线执行超过 {pipeline_timeout}s 全局预算")
-                        item = await asyncio.wait_for(chunk_queue.get(), timeout=_remaining)
+                        # 停滞等待与总预算取小；_wait 内先到期者决定超时语义
+                        # （等前分类：wait_for 超时时总预算是否已先耗尽）
+                        _wait = min(stall_timeout, _total_remaining)
+                        _expiring = "total" if _total_remaining < stall_timeout else "stall"
+                        try:
+                            item = await asyncio.wait_for(chunk_queue.get(), timeout=_wait)
+                        except TimeoutError as _wait_exc:
+                            if _expiring == "stall":
+                                raise pipeline_watchdog.PipelineStalledError(
+                                    pipeline_watchdog.stall_failure_reason(
+                                        stall_timeout, _last_event_type, _last_event_node
+                                    )
+                                ) from None
+                            # 总预算先到期：重抛为既有「全局预算」文案（链路语义与
+                            # 改造前一致，_wait_exc 即 wait_for 的原始超时）
+                            raise TimeoutError(
+                                f"管线执行超过 {pipeline_timeout}s 全局预算"
+                            ) from _wait_exc
                     else:
                         # 图已完成：排空剩余缓冲。thinking 明细在下方压缩丢弃，
                         # 纯 CPU 速度排空（无逐条写库/入队等待），终态有界送达
@@ -860,6 +890,11 @@ def _make_run_deep_analysis(
                         raise item
 
                     mode, chunk = item
+                    # liveness 记账（停滞 failure_reason 输入）：最后事件形态/节点
+                    _last_event_type = str(mode)
+                    if mode == "custom" and isinstance(chunk, dict):
+                        _last_event_type = str(chunk.get("type") or "custom")
+                        _last_event_node = str(chunk.get("node") or "")
 
                     # Custom mode: forward thinking tokens + 节点生命周期时间戳
                     # 局限说明（persist-full-session-timeline）：管线节点的 search/tool
@@ -1073,6 +1108,38 @@ def _make_run_deep_analysis(
                                 },
                             )
                         )
+            except pipeline_watchdog.PipelineStalledError as _stall_exc:
+                # 管线停滞（零事件超停滞阈值，update-pipeline-stall-watchdog）：
+                # 与总预算超时同构处置，failure_reason 双文案可区分（"管线停滞" vs
+                # "管线执行超时"），机器可读标志 pipeline_stalled 供摘要 LLM 区分。
+                graph_cancel.set()
+                if _track_snapshot and session_id:
+                    _session_store.update_session_status(
+                        session_id, "failed", failure_reason=str(_stall_exc)
+                    )
+                await _put_event(
+                    StreamEvent.progress(
+                        content=f"分析失败：{_stall_exc}",
+                    )
+                )
+                # 与超时同因：停滞也必须给 Agent 主循环一个 TOOL_RESULT（601700 复盘）。
+                _stall_note = (
+                    f"深度分析管线停滞：{_stall_exc} 管线已终止且会话标记为失败。"
+                    "如需继续请检查 LLM provider 可用性后重新发起分析。"
+                )
+                await _put_event(
+                    StreamEvent(
+                        event_type=ActionType.TOOL_RESULT,
+                        content=_stall_note,
+                        tool_result=ToolResult(
+                            tool_call_id="",
+                            name=TOOL_RUN_DEEP_ANALYSIS,
+                            output=_stall_note,
+                            is_error=True,
+                            metadata={"pipeline_stalled": True},
+                        ),
+                    )
+                )
             except TimeoutError:
                 # 管线全局超时：置 failed + failure_reason，并协作式终止生产端线程
                 graph_cancel.set()
