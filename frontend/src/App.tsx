@@ -1105,26 +1105,6 @@ export default function App() {
               </div>
             )}
 
-            {/* 停止按钮（流式输出时显示；quick AG-UI 通道由 quickRunning 驱动） */}
-            {(appState === 'analyzing' || messages.some(m => m.streaming) || quickRunning) && (
-              <div
-                className="fixed right-0 z-40 flex flex-col items-center gap-2 px-4 transition-[left] duration-200 ease-out"
-                style={{ left: leftInset, bottom: '90px' }}
-              >
-                {(appState === 'analyzing' || quickRunning) && (
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={stopGeneration}
-                    className="rounded-lg"
-                  >
-                    <i className="fas fa-stop text-[10px]"></i>
-                    停止生成
-                  </Button>
-                )}
-              </div>
-            )}
-
             {/* Fixed input at bottom（Composer 插槽：assistant-ui 输入区，须在 Provider 内） */}
             <ChatInputBar
               onSend={handleSendFromChat}

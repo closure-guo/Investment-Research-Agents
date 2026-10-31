@@ -23,9 +23,10 @@ async function startDeepAnalysis(page: import('@playwright/test').Page, query: s
   await expect(
     page.getByRole('heading', { name: '贵州茅台（600519）' }).first(),
   ).toBeVisible({ timeout: 150_000 })
-  // 整个 run 结束:顶部「停止生成」按钮消失(appState 退出 analyzing 且无 streaming
-  // 消息)——报告卡出现后 agent 的最终摘要轮仍在流式,isRunning 仍 true 会隐藏重试按钮
-  await expect(page.getByRole('button', { name: /停止生成/ })).toHaveCount(0, { timeout: 60_000 })
+  // 整个 run 结束:输入框停止按钮消失(isRunning 退出——appState 退出 analyzing 且无
+  // streaming 消息)——报告卡出现后 agent 的最终摘要轮仍在流式,isRunning 仍 true 会隐藏重试按钮
+  // remove-standalone-stop-button:停止入口唯一化为 composer-stop,原页面级「停止生成」按钮已删
+  await expect(page.getByTestId('composer-stop')).toHaveCount(0, { timeout: 60_000 })
 }
 
 test.describe('消息操作条（复制/重试/点赞/点踩）', () => {
