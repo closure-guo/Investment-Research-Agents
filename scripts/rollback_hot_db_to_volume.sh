@@ -8,6 +8,8 @@
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Docker Desktop -v 只认 Windows 形态路径（同迁移脚本坑）：pwd -W 输出 D:/...
+WD="$(pwd -W)"
 
 VOL="finance-agent_data"
 IMG="python:3-alpine"
@@ -17,17 +19,18 @@ phase() { echo; echo "════════ $1 ════════"; }
 
 phase "前置检查"
 if curl -sf --max-time 3 http://localhost:8000/api/health >/dev/null 2>&1; then
-  n=$(curl -sf http://localhost:8000/api/sessions | grep -o '"status":"running"' | wc -l)
+  # grep 零命中在 pipefail 下返回 1——|| true 吸收（与迁移脚本同坑）
+  n=$(curl -sf http://localhost:8000/api/sessions | { grep -o '"status":"running"' || true; } | wc -l | tr -d '[:space:]')
   [ "$n" = "0" ] || { echo "有 $n 个 running 会话，先等完成或确认"; exit 1; }
 fi
 docker compose stop backend
 
 phase "卷 → 宿主（$OUT）"
 mkdir -p "$OUT"
-docker run --rm -v "$VOL":/src:ro -v "$PWD/$OUT":/dst $IMG sh -c 'cp -a /src/. /dst/ && echo "回拷完成：$(ls /dst | wc -l) 项"'
+docker run --rm -v "$VOL":/src:ro -v "$WD/$OUT":/dst $IMG sh -c 'cp -a /src/. /dst/ && echo "回拷完成：$(ls /dst | wc -l) 项"'
 
 phase "对账（volume vs 回拷）"
-docker run --rm -v "$VOL":/src:ro -v "$PWD/$OUT":/dst $IMG python - <<'PYEOF'
+docker run --rm -v "$VOL":/src:ro -v "$WD/$OUT":/dst $IMG python - <<'PYEOF'
 import sqlite3, sys, os
 dbs = ["sessions.db", "screening.db", "execution.db", "events.db",
        "regime.db", "research_reports.db", "factor_library.db", "market_snapshot.db"]

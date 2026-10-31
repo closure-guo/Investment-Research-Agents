@@ -16,6 +16,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Docker Desktop 的 -v 只认 Windows 形态路径：pwd -W 输出 D:/...（MSYS 的
+# /d/... 会让容器侧挂载出空目录——2026-11-01 首跑实证，拷贝静默落空）
+WD="$(pwd -W)"
 MODE="${1:-migrate}"
 VOL="finance-agent_data"
 HOT_DBS=(sessions.db screening.db execution.db events.db regime.db research_reports.db factor_library.db market_snapshot.db)
@@ -25,7 +28,9 @@ phase() { echo; echo "════════ $1 ════════"; }
 
 api_running_count() {
   local url="$1"
-  curl -sf --max-time 10 "$url" | grep -o '"status":"running"' | wc -l
+  # grep 零命中（=0 个 running，正是期望态）在 pipefail 下返回 1——用 || true
+  # 吸收，避免调用方 `|| echo 0` 兜底拼出 "00"；tr：Git Bash 的 wc -l 带前导空格
+  curl -sf --max-time 10 "$url" | { grep -o '"status":"running"' || true; } | wc -l | tr -d '[:space:]'
 }
 
 require_backend_down() {
@@ -34,17 +39,27 @@ require_backend_down() {
   fi
 }
 
-verify_pair() { # $1=容器内 src 目录 $2=容器内 dst 目录
-  docker run --rm -v "$PWD/data":/src:ro -v "$VOL":/dst $IMG python - "$1" "$2" <<'PYEOF'
-import sqlite3, sys, os
-src, dst = sys.argv[1], sys.argv[2]
+verify_pair() {
+  # -i：heredoc 经 stdin 喂 python，缺 -i 时容器 stdin 非 TTY 直接空转——
+  # 首跑实证对账整段静默跳过（exit 0 放行），验证必须带 -i。
+  # src/dst 在 heredoc 内硬编码：MSYS 会把 POSIX 形态的命令行参数转换成
+  # Git 安装路径（/src → C:\Program Files\Git\src），传参形态下挂载明明
+  # 正常、python 却找不到目录（三坑叠加的最终真相，2026-11-01 实证）
+  docker run --rm -i -v "$WD/data":/src:ro -v "$VOL":/dst $IMG python - <<'PYEOF' 
+import sqlite3, os
+src, dst = "/src", "/dst"
 dbs = ["sessions.db", "screening.db", "execution.db", "events.db",
        "regime.db", "research_reports.db", "factor_library.db", "market_snapshot.db"]
 fail = 0
 for db in dbs:
     s, d = os.path.join(src, db), os.path.join(dst, db)
+    # 源侧连 -wal/-shm 拷进可写 /tmp 再开（9p 只读 + WAL 恢复要建 shm，直开必炸）
+    import glob, shutil
+    for f in glob.glob(f"{s}*"):
+        shutil.copy(f, "/tmp/" + os.path.basename(f))
+    s = "/tmp/" + db
     if not os.path.exists(s):
-        print(f"  [SKIP] {db}: 源不存在"); continue
+        print(f"  [FAIL] {db}: 源缺失（挂载路径错误？宿主副本必须存在）"); fail = 1; continue
     if not os.path.exists(d):
         print(f"  [FAIL] {db}: 卷内缺失"); fail = 1; continue
     cs = sqlite3.connect(s); cd = sqlite3.connect(d)
@@ -69,14 +84,14 @@ for db in dbs:
     else:
         print(f"  [OK] {db}: quick_check ok，{len(tables)} 表行数逐一致（src {size_s//1024//1024}MB）")
     cs.close(); cd.close()
-sys.exit(fail)
+exit(fail)
 PYEOF
 }
 
 phase "前置检查（running 会话/作业 = 0）"
 if curl -sf --max-time 3 http://localhost:8000/api/health >/dev/null 2>&1; then
-  s_cnt=$(api_running_count "http://localhost:8000/api/sessions" || echo 0)
-  j_cnt=$(api_running_count "http://localhost:8000/api/v1/ops/jobs" || echo 0)
+  s_cnt=$(api_running_count "http://localhost:8000/api/sessions")
+  j_cnt=$(api_running_count "http://localhost:8000/api/v1/ops/jobs")
   echo "running 会话=$s_cnt running 作业=$j_cnt"
   [ "$s_cnt" = "0" ] && [ "$j_cnt" = "0" ] || { echo "存在 running，中止（等分析完成或经用户确认）"; exit 1; }
 else
@@ -93,14 +108,19 @@ phase "停后端"
 docker compose stop backend
 
 phase "整拷 data/ → volume（含校验，排除测试/备份残渣）"
-docker run --rm -v "$PWD/data":/src:ro -v "$VOL":/dst $IMG sh -c '
+docker run --rm -v "$WD/data":/src:ro -v "$VOL":/dst $IMG sh -c '
   cd /src && find . -maxdepth 1 \
     ! -name "." \
     ! -name "test-e2e-*" ! -name "*.bak-*" ! -name "*-bak*" \
     ! -name "*.corrupt-*" ! -name "repro-stub.db" \
     ! -name "*.db-wal" ! -name "*.db-shm" \
     -exec cp -a {} /dst/ \;
-  echo "拷贝完成：$(ls /dst | wc -l) 项"
+  n=$(ls /dst | wc -l)
+  echo "拷贝完成：$n 项"
+  for db in sessions.db screening.db market_snapshot.db; do
+    [ -f "/dst/$db" ] || { echo "致命：$db 未出现在卷内"; exit 1; }
+  done
+  echo "关键库在卷校验通过"
 '
 
 phase "对账（quick_check + 全表行数 + 尺寸）"
