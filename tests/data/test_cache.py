@@ -9,6 +9,8 @@ TTL 策略（ADR-0004）：
 接口：get(key) → data | None, set(key, data, ttl_seconds), delete(key)
 """
 
+import logging
+import sqlite3
 import time
 
 import pandas as pd
@@ -254,3 +256,49 @@ def test_delete_by_type_uses_key_suffix(cache: DataCache):
     cache.set("benchmark_kline", {"b": 1})
     assert cache.delete_by_type("kline") == 1  # 只清 600519:kline，不动 benchmark_kline
     assert sorted(cache.keys()) == ["000001:stock_quote", "benchmark_kline"]
+
+
+class _BrokenConn:
+    """故障注入代理：execute 一律抛 sqlite 抖动（Connection.execute 只读不可 patch）。"""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def execute(self, *args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    def commit(self):
+        self._inner.commit()
+
+
+class TestSqliteFailureDegrade:
+    """sqlite 抖动降级（issue #535）：cache 是优化层，故障不得上抛炸调用方。
+
+    fetch_key_events（events/pipeline.py）的取数链以 cache.get 返回 None 自然
+    「降级直通取数」、cache.set 失败静默下次重试；本组测试钉死该退化语义。
+    """
+
+    def test_get_returns_none_on_sqlite_error(self, cache, monkeypatch, caplog):
+        cache.set("k", {"v": 1})
+        monkeypatch.setattr(cache, "_conn", _BrokenConn(cache._conn))
+        with caplog.at_level(logging.WARNING):
+            assert cache.get("k") is None  # 降级为 miss，调用方直通取数
+        assert "cache get 失败" in caplog.text
+
+    def test_set_swallows_sqlite_error(self, cache, monkeypatch, caplog):
+        monkeypatch.setattr(cache, "_conn", _BrokenConn(cache._conn))
+        with caplog.at_level(logging.WARNING):
+            cache.set("k", {"v": 1}, ttl_seconds=60)  # 不上抛
+        assert "cache set 失败" in caplog.text
+
+    def test_delete_swallows_sqlite_error(self, cache, monkeypatch):
+        monkeypatch.setattr(cache, "_conn", _BrokenConn(cache._conn))
+        cache.delete("k")  # 不上抛（get 内部过期清理路径同样安全）
+
+    def test_recovers_after_transient_error(self, cache, monkeypatch):
+        cache.set("k", {"v": 1})
+        original = cache._conn
+        monkeypatch.setattr(cache, "_conn", _BrokenConn(original))
+        assert cache.get("k") is None
+        monkeypatch.setattr(cache, "_conn", original)
+        assert cache.get("k") == {"v": 1}  # 瞬时故障后自愈

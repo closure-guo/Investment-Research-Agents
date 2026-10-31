@@ -117,3 +117,37 @@ def test_preset_still_shadows_empty_extraction(monkeypatch, cache):
 
     assert result != []  # 库内事件经 3 年窗口过滤后非空
     assert any(e["title"] == "提价" for e in result)
+
+
+def test_web_failure_with_preset_hit_returns_preset_and_never_caches(monkeypatch, cache):
+    """边界组合①（issue #535-2）：web 失败 + 预设库命中 → 返回库内事件且不缓存。
+
+    失败降级链不得把「partial 结果」毒化成当日确定答案——不写缓存，
+    下次调用重走全链（与 test_failure_returns_card_and_never_caches 同保守姿态）。
+    """
+    calls = _stub_web(monkeypatch, None)
+    preset_events = [{"date": "2024-01-01", "title": "提价", "ongoing": False}]
+    _stub_preset(monkeypatch, preset_events)
+
+    result = fetch_key_events("600519", "贵州茅台")
+
+    assert any(e["title"] == "提价" for e in result)
+    assert len(calls) == 1
+    assert cache.set_calls == 0  # web 没跑完整 → 不缓存
+    assert cache.store == {}
+
+
+def test_websearch_off_with_preset_hit_returns_preset_and_never_caches(monkeypatch, cache):
+    """边界组合②（issue #535-2）：use_web_search=False + 预设库命中 → 返回库内事件且不缓存。
+
+    确定性零网络路径（回放/复现形态）不得产生缓存副作用。
+    """
+    _stub_web(monkeypatch, [{"date": "2026-10-30", "title": "不该被触达"}])
+    preset_events = [{"date": "2024-01-01", "title": "提价", "ongoing": False}]
+    _stub_preset(monkeypatch, preset_events)
+
+    result = fetch_key_events("600519", "贵州茅台", use_web_search=False)
+
+    assert any(e["title"] == "提价" for e in result)
+    assert cache.get_calls == 0 and cache.set_calls == 0
+    assert cache.store == {}
