@@ -6,7 +6,8 @@ rating 在后——先推理后结论）、评级前置拼装、解析失败降�
 
 from unittest.mock import patch
 
-from finance_agent.nodes.research_manager import research_manager
+from finance_agent.models import DebateMessage
+from finance_agent.nodes.research_manager import _build_research_context, research_manager
 
 
 class TestResearchManager:
@@ -65,3 +66,31 @@ class TestStructuredRating:
         assert result["research_manager_rating"] is None
         assert result["research_manager_confidence"] is None
         assert result.get("parse_degraded") is True
+
+
+class TestContextNumbering:
+    """spec：RM 上下文复用「R{n} 论点: ①…」编号行；无 key_arguments 退化基础格式。"""
+
+    def test_numbered_arguments_enter_context(self):
+        msg = DebateMessage(
+            role="bull",
+            round=1,
+            content="看多正文",
+            key_arguments=[
+                {"text": "份额 35% 创新高", "kind": "data", "anchors": ["x.y"]},
+                {"text": "回购提振", "kind": "event", "anchors": ["回购公告"]},
+            ],
+        )
+        ctx = _build_research_context({"analyst_reports": {}, "debate_history": [msg]})
+        assert "R1 论点: ①.份额 35% 创新高 ②.回购提振" in ctx
+        assert "bull(R1): 看多正文" in ctx
+
+    def test_missing_key_arguments_degrades(self):
+        ctx = _build_research_context(
+            {
+                "analyst_reports": {},
+                "debate_history": [{"role": "bear", "round": 1, "content": "空方正文"}],
+            }
+        )
+        assert "bear(R1): 空方正文" in ctx
+        assert "论点:" not in ctx

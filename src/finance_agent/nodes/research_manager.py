@@ -9,6 +9,7 @@ from finance_agent.nodes._llm_utils import (
     focus_hint,
     parse_json_response,
 )
+from finance_agent.nodes.debate import debate_message_fields, format_debate_message
 from finance_agent.prompts.loader import load_prompt_with_meta
 
 logger = logging.getLogger("finance_agent.research_manager")
@@ -83,15 +84,16 @@ def _build_research_context(state: dict) -> str:
         elif isinstance(report, dict):
             sections.append(f"[{name}] {report.get('summary', '')}")
 
-    # 辩论历史
+    # 辩论历史：编号行渲染与辩论层共用（add-rm-assumption-table）——
+    # 假设表证据按「角色+轮次+论点序号」稳定引用；无 key_arguments 退化基础格式
     history = state.get("debate_history") or []
     if history:
         history_lines = []
         for msg in history:
-            if hasattr(msg, "content"):
-                history_lines.append(f"{msg.role}: {msg.content}")
-            elif isinstance(msg, dict):
-                history_lines.append(f"{msg.get('role', '?')}: {msg.get('content', '')}")
+            fields = debate_message_fields(msg)
+            if fields is None:
+                continue
+            history_lines.append(format_debate_message(*fields))
         sections.append("辩论记录:\n" + "\n".join(history_lines))
 
     return "\n\n".join(sections) if sections else "无可用数据"
