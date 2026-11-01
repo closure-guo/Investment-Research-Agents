@@ -12,9 +12,11 @@
 - [x] `GET /api/v1/ops/daily-brief`（date/latest）与 `/ops` 每日汇报区（空态/失败态/正常态）
 - [x] 单元/集成测试：池分析编排、幂等、上限、时效性、日报成功/失败/幂等、resolver、注册表 26
 - [x] 前端 Vitest + Playwright 日批页用例更新（26 job + 汇报区）
-- [ ] `uv run pytest` / `ruff` / `mypy` / 前端测试通过（定向 338 项 + 前端 887 项 + E2E 6 项已过；
-      全量 pytest 无失败跑到 53% 后卡在依赖 Langfuse/网络的长测试，已停止；ruff 全过；
-      mypy 新模块全过，仓库存量 api.py/evals 有既有报错）
+- [x] `uv run pytest` / `ruff` / `mypy` / 前端测试通过（2026-10-21 实施：定向 338 项 + 前端 887 项 +
+      E2E 6 项已过；ruff 全过；mypy 新模块全过，仓库存量 api.py/evals 有既有报错。
+      2026-11-01 归档前复验：定向 328 项（池分析/日报/触发/resolver/scheduler/ops/API）全过，
+      `ruff check` + `ruff format --check` 全过，mypy 98 = 既有基线（#544）无新增——
+      功能已在生产运行 10 天（16:22 池分析批 + 20:30 日报））
 - [x] 人工验证报告落 `tests/validation/`（交互类变更）
 - [x] issue #456 修复（2026-10-23）：池新鲜度门槛放宽为「当日或前一交易日」（快照交易日历判定，
       无历退回仅当日）+ `pool_analysis_runs` 会话终态对账回写（queued/dispatch_failed →
