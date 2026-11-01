@@ -31,11 +31,16 @@ import bisect
 import json
 import os
 import sqlite3
+import sys
 import urllib.request
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from finance_agent.data.hotdb_guard import host_write_guard
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # ---------------------------------------------------------------- 口径常量（§1.22）
 
@@ -581,7 +586,26 @@ def main() -> int:
     parser.add_argument("--universe-version", default="v1")
     parser.add_argument("--offline", action="store_true", help="不拉取 Langfuse Scores")
     parser.add_argument("--md-out", default=None, help="同时写 Markdown 骨架到该路径")
+    parser.add_argument(
+        "--allow-host-write",
+        action="store_true",
+        help="显式绕过宿主直跑护栏（#515 迁卷后：确知在读过期回滚副本时使用）",
+    )
     args = parser.parse_args()
+
+    # 只读脚本同样过护栏（双热库逐一）：读回滚副本 = 读数全错，只是不落痕迹
+    for label, db in (("会话库", args.sessions_db), ("快照库", args.snapshot_db)):
+        reason = host_write_guard(
+            db_path=db,
+            allow_host_write=args.allow_host_write,
+            dry_run=False,
+            repo_root=_REPO_ROOT,
+            script_name="scripts/cohort_eval_readout.py",
+            argv=sys.argv[1:],
+        )
+        if reason:
+            print(f"[{label}] {reason}", file=sys.stderr)
+            return 2
 
     fetch = None if args.offline else _make_langfuse_fetch()
     out = build_readout(

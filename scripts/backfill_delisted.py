@@ -85,6 +85,7 @@ logger = logging.getLogger(__name__)
 
 # 本脚本自身的相对路径（护栏提示命令指向本脚本，不误报既有全量回填脚本）
 _SCRIPT_PATH = "scripts/backfill_delisted.py"
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # 缺失/覆盖明细的 snapshot_meta 键（持久留痕；规格：key 名固定供运维既有巡检复用）
 _MISSING_META_KEY = "delist_backfill_missing"
@@ -413,11 +414,12 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    # 宿主机直跑护栏（issue #344）：先于一切库操作（含只读打开）
+    # 宿主机直跑护栏（issue #344 → #515 迁卷语义）：先于一切库操作（含只读打开）
     guard_reason = _host_write_guard(
-        db_path=args.db,
+        db_path=args.db or _default_db_path(),
         allow_host_write=args.allow_host_write,
         dry_run=args.dry_run,
+        repo_root=_REPO_ROOT,
         argv=sys.argv[1:] if argv is None else list(argv),
         script_name=_SCRIPT_PATH,
     )

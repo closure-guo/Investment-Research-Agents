@@ -9,8 +9,9 @@ incident 043 同族；2026-10-15 实证：宿主机 16 进程回填期间容器�
         --start 2024-01-01 --end 2025-12-31 --symbols 600519,000001
 
 容器内读写同侧（``scripts/`` 经 compose 只读挂载），容器内日批写读并发已验证正常。
-宿主机直跑会被护栏拒绝（库落在主检出 ``data/`` 且 backend 容器运行中）——
-``--allow-host-write`` 可显式绕过，仅限确认无容器读的时段（如栈已停）。
+宿主机直跑会被护栏拒绝（hotdb_guard：#515 迁卷后热库在 named volume，宿主
+``data/`` 只是回滚副本——直读写都是过期数据面）——``--allow-host-write`` 可显式
+绕过，仅限确知在操作回滚副本的场景。
 
 用法::
 
@@ -43,18 +44,16 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
-import shlex
 import sqlite3
-import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from finance_agent.data import hotdb_guard
 from finance_agent.data.akshare_client import AKShareClient, _norm_date_iso
 from finance_agent.data.snapshot import (
     SnapshotError,
@@ -77,83 +76,12 @@ _BACKFILL_CAVEAT = (
     "正式日频数据以 market_snapshot_daily 日批为准。"
 )
 
-# ── 宿主机直跑护栏（issue #344：跨 bind mount WAL 争用） ──
+# ── 宿主机直跑护栏：共享实现（harden-sqlite-availability task 1，issue #515）──
+# #515 迁卷后语义升级：宿主 data/ 只是回滚副本，宿主机进程解析到主检出 data/ 下
+# 的库即拒绝（与容器是否在跑无关）。模块 docstring 见
+# src/finance_agent/data/hotdb_guard.py；保留本别名供 backfill_delisted 等沿用。
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_DOCKERENV = Path("/.dockerenv")
-
-
-def _running_in_container() -> bool:
-    """容器内检测：Docker 建 ``/.dockerenv``；``BACKFILL_IN_CONTAINER=1`` 兜底。"""
-    return _DOCKERENV.exists() or os.getenv("BACKFILL_IN_CONTAINER") == "1"
-
-
-def _backend_container_running() -> bool:
-    """标准栈（含 dev override）backend 服务是否运行中。
-
-    best-effort：docker 不可用 / compose 解析失败 → False（按「无容器读方」放行，
-    此时跨侧风险面不存在——护栏宁可漏拦不误拦）。
-    """
-    try:
-        result = subprocess.run(  # noqa: S603 - 固定 docker 参数,无外部输入
-            ["docker", "compose", "ps", "--services", "--status", "running"],  # noqa: S607
-            cwd=_REPO_ROOT,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0 and "backend" in result.stdout.split()
-
-
-def _host_write_guard(
-    *,
-    db_path: str | Path | None,
-    allow_host_write: bool = False,
-    dry_run: bool = False,
-    in_container: bool | None = None,
-    container_running: Callable[[], bool] | None = None,
-    repo_root: Path | None = None,
-    argv: Sequence[str] = (),
-    script_name: str = "scripts/backfill_market_snapshot.py",
-) -> str | None:
-    """宿主机直跑护栏：返回拒绝原因；None = 放行（issue #344）。
-
-    风险面三条件同时成立才拒绝：①非容器内直跑；②目标库落在主检出 ``data/``
-    （bind mount 面）；③容器读方在跑（backend 服务）。``--dry-run`` 零写入、
-    ``--allow-host-write`` 显式绕过、库在别处、无容器读方 → 一律放行。
-    ``script_name`` = 提示命令里的脚本路径（复用本护栏的脚本——如
-    ``backfill_delisted.py``——传入自身路径，命令可直接复制，默认不变）。
-    """
-    if dry_run or allow_host_write:
-        return None
-    if in_container is None:
-        in_container = _running_in_container()
-    if in_container:
-        return None
-    resolved = Path(db_path).resolve() if db_path else Path(_default_db_path()).resolve()
-    root = repo_root if repo_root is not None else _REPO_ROOT
-    try:
-        resolved.relative_to((root / "data").resolve())
-    except ValueError:
-        return None  # 库不在主检出 data/（非 bind mount 面）→ 无跨侧争用
-    check = container_running if container_running is not None else _backend_container_running
-    if not check():
-        return None
-    in_cmd = (
-        f"docker compose exec -T backend python {script_name} "
-        + " ".join(shlex.quote(str(a)) for a in argv)
-    ).strip()
-    return (
-        "错误：拒绝在宿主机直跑回填——目标库经 bind mount 同时被容器读"
-        f"（{resolved}；跨挂载 WAL 争用会令容器侧读库全不可用，issue #344）。\n"
-        "请改用容器内执行（读写同侧）：\n"
-        f"    {in_cmd}\n"
-        "如确认栈已停/无容器读的时段，可加 --allow-host-write 显式绕过。"
-    )
+_host_write_guard = hotdb_guard.host_write_guard
 
 
 def verify_snapshot_integrity(db_path: str | Path | None = None) -> dict[str, Any]:
@@ -432,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--allow-host-write",
         action="store_true",
-        help="显式绕过宿主机直跑护栏（仅限确认无容器读方的时段；见 issue #344）",
+        help="显式绕过宿主机直跑护栏（#515 迁卷后：确认在操作过期回滚副本时使用；见 hotdb_guard）",
     )
     parser.add_argument(
         "--verify-only",
@@ -443,12 +371,14 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    # 宿主机直跑护栏（issue #344）：先于一切库操作（含只读打开）；
+    # 宿主机直跑护栏（issue #344 → #515 迁卷语义）：先于一切库操作（含只读打开）；
     # --verify-only 只读、零写入 → 与 --dry-run 同档豁免
     guard_reason = _host_write_guard(
-        db_path=args.db,
+        db_path=args.db or _default_db_path(),
         allow_host_write=args.allow_host_write,
         dry_run=args.dry_run or args.verify_only,
+        repo_root=_REPO_ROOT,
+        script_name="scripts/backfill_market_snapshot.py",
         argv=sys.argv[1:] if argv is None else list(argv),
     )
     if guard_reason:

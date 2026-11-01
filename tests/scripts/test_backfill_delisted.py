@@ -467,7 +467,6 @@ class TestHostGuardScriptName:
         reason = backfill_module._host_write_guard(
             db_path=bind_db,
             repo_root=root,
-            container_running=lambda: True,
             in_container=False,
             argv=["--db", str(bind_db)],
             script_name="scripts/backfill_delisted.py",
@@ -477,7 +476,9 @@ class TestHostGuardScriptName:
         assert "scripts/backfill_delisted.py" in reason
         assert "scripts/backfill_market_snapshot.py" not in reason
 
-    def test_guard_default_script_name_unchanged(self, tmp_path):
+    def test_guard_default_script_name_is_placeholder(self, tmp_path):
+        """共享护栏不知道调用方是谁：缺省 script_name 是占位符——接线脚本必须传
+        自身路径（快照脚本调用点已显式传）。"""
         root = tmp_path / "repo"
         (root / "data").mkdir(parents=True)
         bind_db = root / "data" / "market_snapshot.db"
@@ -485,10 +486,9 @@ class TestHostGuardScriptName:
         reason = backfill_module._host_write_guard(
             db_path=bind_db,
             repo_root=root,
-            container_running=lambda: True,
             in_container=False,
             argv=["--start", "2024-01-01"],
         )
 
         assert reason is not None
-        assert "scripts/backfill_market_snapshot.py" in reason
+        assert "scripts/<script>.py" in reason

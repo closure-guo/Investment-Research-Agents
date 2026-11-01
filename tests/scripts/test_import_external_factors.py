@@ -25,7 +25,19 @@ def test_valid_file_passes_candidates_and_prints_summary(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(import_module, "run_factor_external_import", fake_import)
 
-    assert main(["--file", str(path), "--db", str(tmp_path / "lib.db")]) == 0
+    assert (
+        main(
+            [
+                "--file",
+                str(path),
+                "--db",
+                str(tmp_path / "lib.db"),
+                "--snapshot-db",
+                str(tmp_path / "snap.db"),
+            ]
+        )
+        == 0
+    )
 
     assert seen["candidates"] == payload
     assert seen["db"] == str(tmp_path / "lib.db")
@@ -34,12 +46,15 @@ def test_valid_file_passes_candidates_and_prints_summary(tmp_path, monkeypatch, 
 
 
 def test_missing_file_exits_2(tmp_path, capsys):
-    assert main(["--file", str(tmp_path / "nope.json")]) == 2
+    # #515 迁卷后宿主 data/ 默认库会被护栏拦——测试传 tmp 路径走「库在别处」放行
+    db_args = ["--db", str(tmp_path / "lib.db"), "--snapshot-db", str(tmp_path / "snap.db")]
+    assert main(["--file", str(tmp_path / "nope.json"), *db_args]) == 2
     assert "候选文件读取失败" in capsys.readouterr().err
 
 
 def test_non_list_payload_exits_2(tmp_path, capsys):
     path = tmp_path / "bad.json"
     path.write_text('{"expression": "x"}', encoding="utf-8")
-    assert main(["--file", str(path)]) == 2
+    db_args = ["--db", str(tmp_path / "lib.db"), "--snapshot-db", str(tmp_path / "snap.db")]
+    assert main(["--file", str(path), *db_args]) == 2
     assert "JSON 数组" in capsys.readouterr().err

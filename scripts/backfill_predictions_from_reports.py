@@ -24,9 +24,11 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from finance_agent.data.hotdb_guard import host_write_guard
 from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS
 
 DEFAULT_DB = os.getenv("SESSIONS_DB_PATH", "data/sessions.db")
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _DIRECTION_MAP = {"buy": "long", "sell": "short", "hold": "neutral", "watch": "neutral"}
 
@@ -141,7 +143,23 @@ def main() -> int:
     p = argparse.ArgumentParser(description="历史分析回填 predictions")
     p.add_argument("--db", default=DEFAULT_DB)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--allow-host-write",
+        action="store_true",
+        help="显式绕过宿主直跑护栏（#515 迁卷后：确知在操作过期回滚副本时使用）",
+    )
     args = p.parse_args()
+    guard_reason = host_write_guard(
+        db_path=args.db,
+        allow_host_write=args.allow_host_write,
+        dry_run=args.dry_run,
+        repo_root=_REPO_ROOT,
+        script_name="scripts/backfill_predictions_from_reports.py",
+        argv=sys.argv[1:],
+    )
+    if guard_reason:
+        print(guard_reason, file=sys.stderr)
+        return 2
     if not Path(args.db).exists():
         print(f"[ERROR] DB 不存在: {args.db}", file=sys.stderr)
         return 1

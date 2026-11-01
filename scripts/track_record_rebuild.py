@@ -21,7 +21,9 @@ import shutil
 import sqlite3
 import sys
 from datetime import datetime
+from pathlib import Path
 
+from finance_agent.data.hotdb_guard import host_write_guard
 from finance_agent.outcome.track_record.marking import run_daily_marking
 from finance_agent.outcome.track_record.model import (
     get_latest_metrics,
@@ -30,6 +32,7 @@ from finance_agent.outcome.track_record.model import (
 )
 
 _DERIVED_TABLES = ("daily_marks", "equity_curve", "agent_metrics_daily")
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _resolve_db(args_db: str | None) -> str:
@@ -47,7 +50,23 @@ def main() -> None:
     )
     ap.add_argument("--kline-days", type=int, default=280)
     ap.add_argument("--yes", action="store_true", help="确认清空三张 derived 表并重建")
+    ap.add_argument(
+        "--allow-host-write",
+        action="store_true",
+        help="显式绕过宿主直跑护栏（#515 迁卷后：确知在操作过期回滚副本时使用）",
+    )
     args = ap.parse_args()
+    guard_reason = host_write_guard(
+        db_path=_resolve_db(args.db_path),
+        allow_host_write=args.allow_host_write,
+        dry_run=False,
+        repo_root=_REPO_ROOT,
+        script_name="scripts/track_record_rebuild.py",
+        argv=sys.argv[1:],
+    )
+    if guard_reason:
+        print(guard_reason, file=sys.stderr)
+        raise SystemExit(2)
     if not args.yes:
         sys.exit(
             "拒绝执行：将清空 daily_marks/equity_curve/agent_metrics_daily，需 --yes 确认（建议先拷贝库演练）"

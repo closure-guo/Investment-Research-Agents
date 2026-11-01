@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
 import scripts.backfill_market_snapshot as backfill_module
@@ -22,6 +21,7 @@ from scripts.backfill_market_snapshot import (
     run_backfill,
 )
 
+from finance_agent.data import hotdb_guard
 from finance_agent.data.snapshot import upsert_security_master, write_snapshot_rows
 
 _START = "2026-10-01"
@@ -463,22 +463,23 @@ def test_main_symbols_file_limit_and_exit_0(tmp_path, monkeypatch, capsys):
 
 
 def test_host_guard_decisions_matrix(tmp_path):
-    """纯判定矩阵：容器内/放行旗标/dry-run/库不在 data/ 面/无容器读方 → 放行；风险面 → 拒绝。"""
+    """纯判定矩阵（#515 迁卷语义）：宿主 + 库在主检出 data/ → 拒绝（与容器状态无关）；
+    容器内/放行旗标/dry-run/库不在 data/ 面 → 放行。"""
     root = tmp_path / "repo"
     (root / "data").mkdir(parents=True)
     bind_db = root / "data" / "market_snapshot.db"
     outside_db = tmp_path / "elsewhere.db"
     common = {
         "repo_root": root,
-        "container_running": lambda: True,
         "in_container": False,
         "argv": ["--start", _START, "--end", _END],
     }
 
-    # 风险面 = 宿主机 + 库在 data/ bind mount 面 + 容器读方在跑
+    # 风险面 = 宿主机 + 库在主检出 data/（回滚副本面）；容器读方条件已删除
     reason = backfill_module._host_write_guard(db_path=bind_db, **common)
     assert reason is not None
     assert "docker compose exec" in reason and "--allow-host-write" in reason
+    assert "named volume" in reason
 
     # 各放行分支
     assert (
@@ -491,22 +492,14 @@ def test_host_guard_decisions_matrix(tmp_path):
     )
     assert backfill_module._host_write_guard(db_path=bind_db, **{**common, "dry_run": True}) is None
     assert backfill_module._host_write_guard(db_path=outside_db, **common) is None
-    assert (
-        backfill_module._host_write_guard(
-            db_path=bind_db, **{**common, "container_running": lambda: False}
-        )
-        is None
-    )
 
 
 def test_host_guard_refuses_in_main_and_writes_nothing(tmp_path, capsys, monkeypatch):
-    """main 全链：宿主机 + 容器读方在跑 + 库落 data/ → 退 2、给容器内命令、零写入。"""
+    """main 全链（#515 语义）：宿主机 + 库落主检出 data/ → 退 2、给容器内命令、零写入。"""
     root = tmp_path / "repo"
     db = root / "data" / "market_snapshot.db"
     db.parent.mkdir(parents=True)
     monkeypatch.setattr(backfill_module, "_REPO_ROOT", root)
-    monkeypatch.setattr(backfill_module, "_running_in_container", lambda: False)
-    monkeypatch.setattr(backfill_module, "_backend_container_running", lambda: True)
 
     code = main(["--start", _START, "--end", _END, "--db", str(db), "--sleep", "0"])
 
@@ -517,16 +510,17 @@ def test_host_guard_refuses_in_main_and_writes_nothing(tmp_path, capsys, monkeyp
     assert not db.exists()  # 护栏先于一切库操作
 
 
-def test_host_guard_passes_through_when_no_reader(tmp_path, capsys, monkeypatch):
-    """无容器读方 → 放行到正常路径（此处以「证券主表为空」报错为放行信号）。"""
-    root = tmp_path / "repo"
-    db = root / "data" / "market_snapshot.db"
-    db.parent.mkdir(parents=True)
-    monkeypatch.setattr(backfill_module, "_REPO_ROOT", root)
-    monkeypatch.setattr(backfill_module, "_running_in_container", lambda: False)
-    monkeypatch.setattr(backfill_module, "_backend_container_running", lambda: False)
+def test_host_guard_passes_through_for_outside_db(tmp_path, capsys, monkeypatch):
+    """库不在主检出 data/ 面 → 放行到正常路径（此处以「证券主表为空」报错为放行信号）。
 
-    code = main(["--start", _START, "--end", _END, "--db", str(db), "--sleep", "0"])
+    #515 迁卷后宿主 + 主检出 data/ 一律拒绝——「无容器读方放行」的旧分支已删除，
+    放行信号只能来自库路径在别处（测试 tmp / 显式 env 覆写）。
+    """
+    outside_db = tmp_path / "elsewhere" / "market_snapshot.db"
+    outside_db.parent.mkdir(parents=True)
+    monkeypatch.setattr(backfill_module, "_REPO_ROOT", tmp_path / "repo")
+
+    code = main(["--start", _START, "--end", _END, "--db", str(outside_db), "--sleep", "0"])
 
     assert code == 2
     err = capsys.readouterr().err
@@ -535,13 +529,11 @@ def test_host_guard_passes_through_when_no_reader(tmp_path, capsys, monkeypatch)
 
 
 def test_host_guard_allow_flag_and_dry_run_bypass(tmp_path, capsys, monkeypatch):
-    """--allow-host-write 与 --dry-run 均绕过护栏（dry-run 零写入无争用面）。"""
+    """--allow-host-write 与 --dry-run 均绕过护栏（前者=确知在操作回滚副本）。"""
     root = tmp_path / "repo"
     db = root / "data" / "market_snapshot.db"
     db.parent.mkdir(parents=True)
     monkeypatch.setattr(backfill_module, "_REPO_ROOT", root)
-    monkeypatch.setattr(backfill_module, "_running_in_container", lambda: False)
-    monkeypatch.setattr(backfill_module, "_backend_container_running", lambda: True)
 
     code = main(
         [
@@ -563,12 +555,9 @@ def test_host_guard_allow_flag_and_dry_run_bypass(tmp_path, capsys, monkeypatch)
 
 
 def test_host_guard_detects_container_env(monkeypatch):
-    """容器内检测：/.dockerenv 存在或 BACKFILL_IN_CONTAINER=1 均判容器内。"""
+    """容器内检测（共享模块）：/.dockerenv 存在或 BACKFILL_IN_CONTAINER=1 均判容器内。"""
     monkeypatch.setenv("BACKFILL_IN_CONTAINER", "1")
-    assert backfill_module._running_in_container() is True
-    monkeypatch.delenv("BACKFILL_IN_CONTAINER")
-    monkeypatch.setattr(backfill_module, "_DOCKERENV", Path("__missing__.dockerenv"))
-    assert backfill_module._running_in_container() is False
+    assert hotdb_guard.running_in_container() is True
 
 
 # ── 回填收尾自检（incident 043 防护：quick_check + 重复键扫描，fail loud） ──
