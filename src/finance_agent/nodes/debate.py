@@ -69,6 +69,40 @@ def bear_debater(state: dict) -> dict:
     return {"debate_history": [msg], "debate_anchor_checks": checks}
 
 
+_ARG_MARKS = "①②③④⑤⑥⑦⑧⑨⑩"
+
+
+def debate_message_fields(msg: object) -> tuple[str, int, str, list] | None:
+    """DebateMessage / dict → (role, round, content, key_arguments)；非法消息返回 None。"""
+    if hasattr(msg, "role"):
+        return msg.role, msg.round, msg.content, list(msg.key_arguments or [])
+    if isinstance(msg, dict):
+        return (
+            msg.get("role", "?"),
+            msg.get("round", 1),
+            msg.get("content", ""),
+            msg.get("key_arguments") or [],
+        )
+    return None
+
+
+def format_debate_message(role: str, rnd: int, content: str, args: list | None) -> str:
+    """单条辩论消息标准渲染：「R{n} 论点: ①…②…」编号行 + 「role(R{n}): content」。
+
+    交锋结构化引用（1.10）与 add-rm-assumption-table 共用——论点获得稳定身份，
+    辩论者按编号回应（rebuttal_to）、RM 假设表证据按「角色+轮次+论点序号」转引。
+    args 为空时退化为无编号行的基础格式。
+    """
+    arg_line = ""
+    if args:
+        numbered = " ".join(
+            f"{_ARG_MARKS[i] if i < 10 else i + 1}.{a.text if hasattr(a, 'text') else a}"
+            for i, a in enumerate(args)
+        )
+        arg_line = f"R{rnd} 论点: {numbered}\n"
+    return f"{arg_line}{role}(R{rnd}): {content}"
+
+
 def _build_debate_context(state: dict) -> str:
     """构建辩论的 LLM context。"""
     sections = []
@@ -93,22 +127,10 @@ def _build_debate_context(state: dict) -> str:
     if history:
         history_lines = []
         for msg in history:
-            if hasattr(msg, "role"):
-                role, rnd = msg.role, msg.round
-                content, args = msg.content, msg.key_arguments
-            elif isinstance(msg, dict):
-                role, rnd = msg.get("role", "?"), msg.get("round", 1)
-                content, args = msg.get("content", ""), msg.get("key_arguments") or []
-            else:
+            fields = debate_message_fields(msg)
+            if fields is None:
                 continue
-            arg_line = ""
-            if args:
-                numbered = " ".join(
-                    f"{'①②③④⑤⑥⑦⑧⑨⑩'[i] if i < 10 else i + 1}.{a.text if hasattr(a, 'text') else a}"
-                    for i, a in enumerate(args)
-                )
-                arg_line = f"R{rnd} 论点: {numbered}\n"
-            history_lines.append(f"{arg_line}{role}(R{rnd}): {content}")
+            history_lines.append(format_debate_message(*fields))
         sections.append("辩论历史:\n" + "\n".join(history_lines))
 
     return "\n\n".join(sections) if sections else "无可用数据"
