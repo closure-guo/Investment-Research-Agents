@@ -159,14 +159,30 @@ class AdmissionResult:
 # ── 闸① 可计算性 ───────────────────────────────────────────────────────────
 
 
-def check_computability(factor_values: pd.DataFrame) -> GateResult:
+def check_computability(
+    factor_values: pd.DataFrame, *, data_mask: pd.DataFrame | None = None
+) -> GateResult:
     """闸①：全样本面板缺失率 ≤ ``MAX_MISSING_RATE``（E3；含算子不足窗口的 NaN）。
 
-    缺失率 = NaN cell 数 / 全体 cell 数；空面板（0 cell）视为不可计算（缺失率
-    记 1.0，fail-closed，不做 0/0 除法）。
+    分母口径（#512 拍板 A，2026-11-01）：``data_mask`` 给定时 = 「当日有行」cell 数
+    （``rows_present``，停牌合成行与缺行同待遇）——快照缺数空洞既不进分母也不计
+    缺失（缺数 ≠ 因子不可算；BSE 断档曾把分母污染出 20.0025% 边界误杀）；
+    有行但因子值 NaN（热身窗）照常计缺失。``data_mask=None``（旧调用方/测试直构
+    面板）回退全面板分母。``detail.denominator`` 记录口径供 ledger 审计（旧判定
+    记录无此键，不重算）。空面板（0 cell）视为不可计算（缺失率记 1.0，fail-closed，
+    不做 0/0 除法）。
     """
-    total = int(factor_values.size)
-    missing = int(factor_values.isna().to_numpy().sum())
+    if data_mask is not None:
+        aligned = data_mask.reindex(
+            index=factor_values.index, columns=factor_values.columns, fill_value=False
+        )
+        total = int(aligned.to_numpy().sum())
+        missing = int((factor_values.isna() & aligned).to_numpy().sum())
+        denominator = "rows_present"
+    else:
+        total = int(factor_values.size)
+        missing = int(factor_values.isna().to_numpy().sum())
+        denominator = "full_panel"
     missing_rate = missing / total if total else 1.0
     passed = missing_rate <= MAX_MISSING_RATE
     return GateResult(
@@ -178,6 +194,7 @@ def check_computability(factor_values: pd.DataFrame) -> GateResult:
             "missing_cells": missing,
             "total_cells": total,
             "threshold": MAX_MISSING_RATE,
+            "denominator": denominator,
         },
     )
 
@@ -927,7 +944,8 @@ def admit_candidates(
             outcomes[position] = AdmissionResult(None, STATUS_REJECTED, (dedup,), GATE_DEDUP)
             continue
         values = evaluate(node, panel)
-        gate1 = check_computability(values)
+        # 分母口径「当日有行」（#512 拍板 A）；面板未带 presence（测试直构）时回退全面板
+        gate1 = check_computability(values, data_mask=panel.rows_present)
         if not gate1.passed:
             _persist_rejection(candidate, gate1, ast_json=ast_json, db_path=db_path)
             outcomes[position] = AdmissionResult(

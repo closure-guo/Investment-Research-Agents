@@ -477,6 +477,28 @@ positioning/sentiment 取方向符号 × 置信度；`direction=neutral|unknown`
 `<0.4` 0%；action 9/9 watch。三档 prompt 校准**未移动分布**（假设证伪），机制归因为决策策略
 均衡带 + 样本构成，下一轮候选见 `tests/validation/2026-10-22-calibrate-decision-confidence-validation.md`。
 
+### 1.23 因子准入数据口径（2026-11-01 登记；owner 拍板 issue #512/#513）
+
+**闸①缺失率分母 = 「当日有行」cell（拍板 A）**：缺失率 = 因子值 NaN cell / 当日有非停牌快照行的
+date×code 格。快照缺数空洞（BSE 断档、退市缺行、次新股上市前）不进分母也不计缺失——缺数 ≠
+因子不可算（BSE 断档曾把分母污染出 20.0025% 边界误杀，issue #512）；有行但因子值 NaN（热身窗、
+缺字段）照常计缺失，「含算子不足窗口的 NaN」语义不变。闸① `detail.denominator` = `rows_present`
+记口径供 ledger 审计；旧判定记录无此键（= 旧口径 `full_panel`），不重算。无 mask 的调用方
+（测试直构面板）回退全面板口径。代码位置：`factors/validate.py::check_computability`、
+`factors/eval_engine.py::MarketPanel.rows_present`。
+
+**停牌语义统一（#513 缺口 2，消费端）**：live 区 `is_suspended=1` 停牌合成行在面板构建输入侧
+六字段置 NaN 且不算「当日有行」——与回填区「停牌=缺行」一致，时序算子（`min_periods=window`
+族）跨段行为一致。代码位置：`factors/eval_engine.py::build_panel_from_rows`。
+
+**回填区状态位（#513 缺口 1，消费端标注）**：2024-09-02..2026-10-14 回填行 `is_st` /
+`is_suspended` / 涨跌停位显式 0、`prev_close` / 涨跌幅 NULL（源不可得，推断补齐=伪造状态），
+消费端按「回填区无状态位」读；live 区（2026-10-15 起）状态位真实。
+
+**复权精度（#513 缺口 3，已知噪声）**：回填区 `close_qfq` 源头两位小数，<1 元股伪日收益
+>0.5% 的交易日占比 17.7%、1–2 元 2.6%（实测对 IC 影响 −0.00005~−0.00018，可忽略；L1 流动性
+门槛挡掉绝大多数 B 股）——不回溯重填；未来回填若源可得改存 adj_factor 或四位小数。
+
 ---
 
 ## 2. 时间线（每轮一行，收口时追加）
