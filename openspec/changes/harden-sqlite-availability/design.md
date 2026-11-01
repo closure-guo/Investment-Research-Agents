@@ -18,10 +18,14 @@
 ### 2. DB 可用性探针
 
 - 在 `session_store`（或独立 `db_health` 模块）提供 `probe_databases(timeout_s)`：对每个热库打开连接、
-  执行 `SELECT 1` 与 `PRAGMA journal_mode`，捕获异常并返回 `{name, status, error_class}`。
+  执行 `SELECT count(*) FROM sqlite_master`（实现期修订：`SELECT 1` 是连接级语句不触库文件，
+  目录冒充库文件/垃圾文件在 Windows 上 connect 都能成功、探针会假绿——读 sqlite_master 只碰页 1，
+  大库同样廉价），捕获异常并返回 `{name, status, error_class}`。
 - `/api/health` 调用探针；全部 ok → 200 `{status: ok, databases: {...}}`；任一失败 → 503
   `{status: degraded, databases: {...}}`，并在响应中给出失败库名。
 - 探针整体超时（默认 2s）由 `asyncio.wait_for` 或线程 join 控制，避免 I/O 卡死拖住健康检查。
+  实现为双层：线程侧 monotonic deadline（逐库 result(remaining)，慢库不叠加拖长总时长）+
+  端点侧 `asyncio.wait_for` 总闸；卡死探针线程 `shutdown(wait=False)` 留存不阻断响应。
 
 ### 3. 页级完整性校验
 

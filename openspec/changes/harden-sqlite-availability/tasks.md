@@ -17,9 +17,21 @@
       exit 0 放行（#550 同款坑漏修本文件）；②只读挂载直开带 WAL 的库必炸
       `unable to open database file`——对账侧先把源拷进容器可写 /tmp 再开（与迁移
       脚本 verify_pair 同配方）
-- [ ] `/api/health` 增加 DB 探针（含超时），补单测：全 ok / 单库不可用 / 探针超时
-- [ ] `integrity_check` 增加热库页级校验，补单测：全 ok / 单库损坏 → job failed
-- [ ] `pool_analysis_runs` 终态回写，补单测：completed / failed / interrupted / 无匹配行
-- [ ] E2E 或集成验证：库不可用时健康端点返回 503 且给出库名；恢复后回到 200
-- [ ] 人工验证报告落 `tests/validation/`（含迁移前后数据行数对照）
-- [ ] `openspec validate harden-sqlite-availability --strict` 通过
+- [x] `/api/health` 增加 DB 探针（含超时），补单测：全 ok / 单库不可用 / 探针超时
+      （2026-11-01：`finance_agent/data/db_health.py::probe_databases`——读 sqlite_master
+      页 1 而非 SELECT 1（连接级语句不触库文件，目录/垃圾文件假绿，design §2 已记修订）；
+      整体超时闸 2s = 线程 monotonic deadline + 端点 asyncio.wait_for 双层；
+      tests/test_db_health.py 10 例）
+- [x] `integrity_check` 增加热库页级校验，补单测：全 ok / 单库损坏 → job failed
+      （`_hotdb_page_integrity`：quick_check 先行、失败跑完整 integrity_check 取截断
+      detail；任一库非 ok 抛 RuntimeError → run_job 落 failed；tests/outcome/
+      test_integrity_check_hotdbs.py 3 例含哈希行为保留）
+- [x] `pool_analysis_runs` 终态回写，补单测：completed / failed / interrupted / 无匹配行
+      （#456 已实现；补 interrupted→failed 与会话消失行保持两例）
+- [x] E2E 或集成验证：库不可用时健康端点返回 503 且给出库名；恢复后回到 200
+      （tests/test_health_endpoint.py 集成层 TestClient 直连真实应用，env 注入 tmp 库
+      路径不 mock 被测系统：200 全 ok / 503 库名+错误类 / 修复后回 200）
+- [x] 人工验证报告落 `tests/validation/`（含迁移前后数据行数对照）
+      （2026-11-01-db-health-probe-validation.md；行数对照由迁移环节承担——
+      2026-11-01-hot-db-named-volume-migration.md 八库对账 ALL-OK，报告引用不重复）
+- [x] `openspec validate harden-sqlite-availability --strict` 通过（2026-11-01）

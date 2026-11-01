@@ -376,3 +376,43 @@ def test_reconcile_without_date_heals_all_dates(tmp_path):
     assert pool_analysis.get_pool_analysis_run("2026-10-21", "000001", db_path=db)["status"] == (
         "completed"
     )
+
+
+# ── issue #515 task 7：对账映射补例（interrupted → failed；会话消失 → 行保持） ──
+
+
+def test_reconcile_maps_interrupted_to_failed(tmp_path):
+    """interrupted ∈ 终态映射 → 行 failed（error 取 failure_reason）。"""
+    db = tmp_path / "screening.db"
+    _seed(db, "2026-10-20", [_row("600519", 1)])
+    pool_analysis.prepare_pool_analysis_batch(
+        as_of="2026-10-20", enqueue=lambda s, sid: True, db_path=db, screening_db_path=db
+    )
+    row = pool_analysis.get_pool_analysis_run("2026-10-20", "600519", db_path=db)
+    session_store.update_session_status(row["session_id"], "interrupted", "重建撞上运行中分析")
+
+    reconciled = pool_analysis.reconcile_pool_analysis_runs("2026-10-20", db_path=db)
+
+    assert reconciled == 1
+    healed = pool_analysis.get_pool_analysis_run("2026-10-20", "600519", db_path=db)
+    assert healed["status"] == "failed"
+    assert "重建撞上运行中分析" in str(healed["error"])
+
+
+def test_reconcile_skips_row_when_session_gone(tmp_path):
+    """会话已删除（get_session None）→ 行保持原状、不误回写（不自愈成 failed）。"""
+    db = tmp_path / "screening.db"
+    _seed(db, "2026-10-20", [_row("600519", 1)])
+    pool_analysis.prepare_pool_analysis_batch(
+        as_of="2026-10-20", enqueue=lambda s, sid: True, db_path=db, screening_db_path=db
+    )
+    row = pool_analysis.get_pool_analysis_run("2026-10-20", "600519", db_path=db)
+    # 行照带 session_id，但会话已不存在（模拟库被清/重建后孤儿行）
+    session_store.delete_session(row["session_id"])
+
+    reconciled = pool_analysis.reconcile_pool_analysis_runs("2026-10-20", db_path=db)
+
+    assert reconciled == 0
+    assert pool_analysis.get_pool_analysis_run("2026-10-20", "600519", db_path=db)["status"] == (
+        "queued"
+    )
