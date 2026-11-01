@@ -74,7 +74,7 @@ _ARG_MARKS = "①②③④⑤⑥⑦⑧⑨⑩"
 
 def debate_message_fields(msg: object) -> tuple[str, int, str, list] | None:
     """DebateMessage / dict → (role, round, content, key_arguments)；非法消息返回 None。"""
-    if hasattr(msg, "role"):
+    if isinstance(msg, DebateMessage):
         return msg.role, msg.round, msg.content, list(msg.key_arguments or [])
     if isinstance(msg, dict):
         return (
