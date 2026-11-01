@@ -10,9 +10,12 @@
   交易日历判定；无历不猜，退回仅当日）。只认当日会把深夜补跑出的池永久挡在门外
   （issue #456 缺陷 B：10-21~23 连续三天池分析空转）；更旧的池仍 ``skipped_stale_pool``
   ——选股连续失败多日时不得拿过期池冒充当日结果。
-- **幂等键 = (trade_date, symbol)**：同一天重复跑（手动补跑/重试）不重复建会话；若上次只
-  是入队失败，复用原 ``session_id`` 重新入队，而不是再建一个会话；已 ``completed`` 的
-  组合不重复烧分析。
+- **幂等键 = (trade_date, symbol)**：同一天重复跑（手动补跑/重试）对 ``queued`` /
+  ``completed`` 组合不重复建会话、不重复入队、不重复烧分析；失败行
+  （``failed`` / ``dispatch_failed`` / ``session_failed``）重派是唯一例外——一律创建
+  **全新会话**重新入队，旧 ``session_id`` 不復用（终态会话不被快路径重置为 running，
+  复用入队即被队列终态轮询判死，issue #546；10-28 恢复实操 9 只秒灭实证），旧会话
+  原样保留作审计，运行行 ``session_id`` 由幂等 upsert 更新为新会话。
 - **失败留痕**：建会话失败 / 入队失败分别记 ``session_failed`` / ``dispatch_failed``，不静默
   吞掉；当日汇报会读到这些行。``reconcile_pool_analysis_runs`` 在每次编排前把已终结
   会话的终态回写到运行行（issue #456 缺陷 A：会话完成而行停 ``queued``，运维侧无法
@@ -265,7 +268,8 @@ def prepare_pool_analysis_batch(
     """读取当日池并准备自动分析批次；返回可审计摘要。
 
     ``enqueue(symbol, session_id)`` 返回 True 表示已交给队列；False/异常记
-    ``dispatch_failed`` 并保留 ``session_id`` 供手动补跑复用。
+    ``dispatch_failed`` 留痕，补跑重派一律创建全新会话（issue #546：终态会话
+    MUST NOT 被复用入队——快路径不重置会话终态，复用即被队列终态轮询判死）。
     """
     day = as_of or datetime.now().strftime("%Y-%m-%d")
     cap = _resolve_max_symbols(max_symbols)
@@ -330,7 +334,12 @@ def prepare_pool_analysis_batch(
             # 两者都不重复建会话、不重复烧分析（issue #456）。
             result["skipped_existing"] += 1
             continue
-        session_id = str(existing.get("session_id") or "") if existing else ""
+        # 重派（failed/dispatch_failed/session_failed 行）一律创建全新会话：终态会话
+        # 从不被快路径重置为 running，复用入队即被队列终态轮询（TERMINAL_STATES）
+        # 判死——10-28 opencode 宕机恢复实操 9 只复用会话秒灭（issue #546）。旧会话
+        # 原样保留作审计；下方 record_pool_analysis_run 的 upsert 把运行行
+        # session_id 更新为新会话。
+        session_id = ""
         if not session_id:
             # 会话标题带股票名（消费 selection_pool.stock_name，PR #520 的展示字段）；
             # 缺名回退纯代码，与池行缺名的 warning 口径一致（pipeline.py 同款兜底）。
@@ -367,7 +376,7 @@ def prepare_pool_analysis_batch(
             continue
         try:
             dispatched = bool(enqueue(symbol, session_id))
-        except Exception as exc:  # noqa: BLE001 -- 入队失败留痕，可手动补跑复用 session
+        except Exception as exc:  # noqa: BLE001 -- 入队失败留痕，补跑重派走全新会话
             logger.exception("自动选股分析入队失败 %s", symbol)
             record_pool_analysis_run(
                 day, symbol, session_id, "dispatch_failed", str(exc), db_path=db_path

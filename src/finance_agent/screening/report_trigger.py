@@ -379,13 +379,14 @@ def prepare_report_analysis_batch(
                 skipped["per_report_cap"] += 1
                 continue
             existing = get_run(doc_key, symbol, db_path=screening_db_path)
+            if existing is not None and existing.get("status") != "dispatch_failed":
+                skipped["duplicate"] += 1
+                continue
+            # dispatch_failed 重派一律创建全新会话：终态会话不被快路径重置为 running，
+            # 复用入队即被队列终态轮询判死（issue #546）；旧会话保留作审计，下方
+            # record_run 的 upsert 把触发行 session_id 更新为新会话并回写 queued
+            # （顺带修复旧复用路径成功派发后不回写、行被无限重派的缺陷）。
             session_id = ""
-            if existing is not None:
-                if existing.get("status") == "dispatch_failed" and existing.get("session_id"):
-                    session_id = str(existing["session_id"])
-                else:
-                    skipped["duplicate"] += 1
-                    continue
             if _already_today(symbol, day, doc_key, screening_db_path):
                 skipped["already_analyzed_today"] += 1
                 continue

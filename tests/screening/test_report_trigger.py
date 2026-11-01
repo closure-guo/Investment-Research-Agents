@@ -156,6 +156,48 @@ class TestCapsAndIdempotency:
         run = rt.get_run("d1", "600519", db_path=tmp_path / "screening.db")
         assert run["status"] == "dispatch_failed"
 
+    def test_dispatch_failed_retry_creates_fresh_session(self, tmp_path):
+        """重派走全新会话（issue #546）：终态会话 MUST NOT 被复用入队——快路径不重置
+        会话终态，复用入队即被队列终态轮询判死。旧会话保留作审计，触发行 session_id
+        由 upsert 更新为新会话并回写 queued（修复复用路径成功派发不回写的附带缺陷）。"""
+        from finance_agent import session_store
+
+        db = tmp_path / "rr.db"
+        _doc(db, "d1", [_stock("600519")])
+        screening_db = tmp_path / "screening.db"
+        first = _prepare(
+            tmp_path,
+            doc_keys=["d1"],
+            scope_symbols={"600519"},
+            enqueue=lambda symbol, sid: False,
+        )
+        assert first["failed"] == 1
+        run1 = rt.get_run("d1", "600519", db_path=screening_db)
+        assert run1 is not None and run1["status"] == "dispatch_failed"
+        old_session = str(run1["session_id"] or "")
+        assert old_session
+        # 旧会话置为终态（复用死路的前置态）
+        session_store.update_session_status(old_session, "failed", "LLM 超时")
+
+        enqueued: list[str] = []
+        second = _prepare(
+            tmp_path,
+            doc_keys=["d1"],
+            scope_symbols={"600519"},
+            enqueue=lambda symbol, sid: enqueued.append(sid) or True,
+        )
+        assert second["triggered"] == 1
+        run2 = rt.get_run("d1", "600519", db_path=screening_db)
+        assert run2 is not None
+        assert run2["status"] == "queued"
+        assert run2["session_id"] != old_session
+        assert enqueued == [run2["session_id"]]
+        # 新会话是全新 running 会话；旧会话终态原样保留、未被触碰
+        new_session = session_store.get_session(run2["session_id"])
+        assert new_session is not None and new_session["status"] == "running"
+        old = session_store.get_session(old_session)
+        assert old is not None and old["status"] == "failed"
+
 
 class TestDisabled:
     def test_disabled_is_noop(self, tmp_path, monkeypatch):

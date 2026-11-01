@@ -113,7 +113,10 @@ def test_freshness_removal(tmp_path, monkeypatch):
     assert started == ["000001"]
 
 
-def test_dispatch_failure_reuses_session_on_retry(tmp_path):
+def test_dispatch_failure_creates_fresh_session_on_retry(tmp_path):
+    """重派走全新会话（issue #546）：终态会话 MUST NOT 被复用入队——快路径不重置
+    会话终态，复用入队即被队列终态轮询判死（10-28 恢复实操 9 只秒灭）。旧会话
+    原样保留作审计，运行行 session_id 由 upsert 更新为新会话。"""
     db = tmp_path / "screening.db"
     _seed(db, "2026-10-20", [_row("600519", 1)])
 
@@ -126,20 +129,29 @@ def test_dispatch_failure_reuses_session_on_retry(tmp_path):
     assert out1["dispatch_failed"] == 1
     row1 = pool_analysis.get_pool_analysis_run("2026-10-20", "600519", db_path=db)
     assert row1 is not None and row1["status"] == "dispatch_failed"
-    first_session = row1["session_id"]
-    assert first_session
+    old_session = row1["session_id"]
+    assert old_session
+    # 旧会话置为终态（复用死路的前置态）
+    session_store.update_session_status(old_session, "failed", "LLM 超时")
 
+    enqueued: list[str] = []
     out2 = pool_analysis.prepare_pool_analysis_batch(
         as_of="2026-10-20",
-        enqueue=lambda s, sid: True,
+        enqueue=lambda s, sid: enqueued.append(sid) or True,
         db_path=db,
         screening_db_path=db,
     )
     assert out2["started"] == 1
     row2 = pool_analysis.get_pool_analysis_run("2026-10-20", "600519", db_path=db)
     assert row2 is not None
-    assert row2["session_id"] == first_session
     assert row2["status"] == "queued"
+    assert row2["session_id"] != old_session
+    assert enqueued == [row2["session_id"]]
+    # 新会话是全新 running 会话；旧会话终态原样保留、未被触碰
+    new_session = session_store.get_session(row2["session_id"])
+    assert new_session is not None and new_session["status"] == "running"
+    old = session_store.get_session(old_session)
+    assert old is not None and old["status"] == "failed"
 
 
 def test_session_created_with_display_name(tmp_path):
