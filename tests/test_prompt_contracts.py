@@ -125,6 +125,31 @@ class TestResearchManagerStance:
         assert "中性" in text
 
 
+class TestResearchManagerAssumptionTable:
+    """add-rm-assumption-table：固定 4 行假设表契约。"""
+
+    def test_fixed_four_dimensions_and_json_example(self):
+        text = _load("research_manager.md")
+        assert "assumption_table" in text
+        for dim in ("H1 竞争格局", "H2 成长驱动", "H3 盈利质量", "H4 估值与预期"):
+            assert dim in text
+
+    def test_evidence_cites_debate_argument_numbers(self):
+        text = _load("research_manager.md")
+        assert "角色+轮次+论点序号" in text
+        assert "禁止引入辩论记录中不存在的论据" in text
+
+    def test_inflection_signal_status_coupling(self):
+        text = _load("research_manager.md")
+        assert "可观察" in text
+        assert "MUST NOT 为「成立」" in text
+
+    def test_insufficient_evidence_degrades_honestly(self):
+        text = _load("research_manager.md")
+        assert "如实降级该行 status" in text
+        assert "禁止编造证据或空话填充" in text
+
+
 class TestDeepModeOutputConstraint:
     def test_has_output_constraint_section(self):
         assert "## 输出约束" in _load("deep_mode.md")
