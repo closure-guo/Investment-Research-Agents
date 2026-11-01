@@ -18,11 +18,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
+from finance_agent.data.hotdb_guard import host_write_guard
 from finance_agent.factors.external import run_factor_external_import
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_candidates(path: Path) -> list[dict[str, Any]]:
@@ -38,7 +42,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--file", required=True, help="候选 JSON 文件路径")
     parser.add_argument("--db", default=None, help="因子库路径（缺省 FACTOR_DB_PATH/默认）")
     parser.add_argument("--snapshot-db", default=None, help="快照库路径（缺省 env/默认）")
+    parser.add_argument(
+        "--allow-host-write",
+        action="store_true",
+        help="显式绕过宿主直跑护栏（#515 迁卷后：确知在操作过期回滚副本时使用）",
+    )
     args = parser.parse_args(argv)
+
+    # 双热库（因子库 + 快照库）逐一过护栏：宿主 data/ 是回滚副本，导入落旧库 = 白导
+    for label, db in (
+        ("因子库", args.db or os.getenv("FACTOR_LIBRARY_DB_PATH", "data/factor_library.db")),
+        (
+            "快照库",
+            args.snapshot_db or os.getenv("SNAPSHOT_DB_PATH", "data/market_snapshot.db"),
+        ),
+    ):
+        reason = host_write_guard(
+            db_path=db,
+            allow_host_write=args.allow_host_write,
+            dry_run=False,
+            repo_root=_REPO_ROOT,
+            script_name="scripts/import_external_factors.py",
+            argv=argv if argv is not None else sys.argv[1:],
+        )
+        if reason:
+            print(f"[{label}] {reason}", file=sys.stderr)
+            return 2
 
     path = Path(args.file)
     try:
