@@ -383,7 +383,10 @@ MUST NOT 因此失败——`stock_name` 为纯展示字段，不参与精选池�
 - 单次自动分析标的数 SHALL 受 `AUTO_POOL_ANALYSIS_MAX_SYMBOLS` 约束（默认 10，正整数）；按池内
   `rank` 升序取前 N。
 - 每条 `(trade_date, symbol)` SHALL 至多创建一次自动分析会话（幂等）；人工补跑同一日 MUST NOT
-  重复建会话或重复入队；已 `completed` 的组合 MUST NOT 重复消费分析。
+  重复建会话或重复入队；已 `completed` 的组合 MUST NOT 重复消费分析；失败重派是唯一例外——
+  行状态为 `failed` / `dispatch_failed` / `session_failed` 时 SHALL 走**全新会话**重新入队
+  （终态会话 MUST NOT 被复用重新入队：快路径不重置会话终态，复用入队即被队列终态轮询判死，
+  issue #546），旧会话保留作审计，运行行 `session_id` 由幂等 upsert 更新为新会话。
 - 自动分析前 SHALL 执行既有「信号时效性校验」；不通过者移除并落 `screening_removals` 审计，
   其余标的继续。
 - 自动分析 SHALL 复用 `AnalyzeQueue` 与 `SCREENING_ANALYZE_CONCURRENCY` 并发上限，并复用既有
@@ -394,6 +397,12 @@ MUST NOT 因此失败——`stock_name` 为纯展示字段，不参与精选池�
   会话已终结（`completed`/`failed`/`interrupted`）的行回写为 `completed` / `failed`（error 取
   会话 `failure_reason`），在跑会话保持原状；对账失败 SHALL 只记日志、不阻断编排。运维侧
   MUST NOT 只能看到永不离开 `queued` 的运行行（issue #456 缺陷 A）。
+
+(Previously: 每条 `(trade_date, symbol)` SHALL 至多创建一次自动分析会话（幂等）；人工补跑同一日
+MUST NOT 重复建会话或重复入队；已 `completed` 的组合 MUST NOT 重复消费分析——失败行重派时实现层
+复用旧 `session_id` 重新入队，但终态会话从不被快路径重置为 `running`，入队即被队列终态轮询判死
+（10-28 恢复实操 9 只复用会话秒灭，issue #546）；旧会话事件流与新会话混写还会破坏 SSE `after_seq`
+重放契约。)
 
 #### Scenario: 当日池自动出票并分析
 
@@ -436,6 +445,13 @@ MUST NOT 因此失败——`stock_name` 为纯展示字段，不参与精选池�
   `completed`
 - **WHEN** 任务被手动补跑
 - **THEN** 该标的计入 `skipped_existing`，不重复建会话、不重复入队、不重复消费分析
+
+#### Scenario: 失败行重派走全新会话
+
+- **GIVEN** 某标的的运行行状态为 `failed`（或 `dispatch_failed`）且带旧 `session_id`
+- **WHEN** 任务被手动补跑
+- **THEN** 系统创建全新会话并入队，运行行 `session_id` 更新为新会话且状态为 `queued`
+- **AND** 旧会话保留原状（终态与历史事件不变），MUST NOT 被复用入队
 
 #### Scenario: 会话终态回写运行行
 

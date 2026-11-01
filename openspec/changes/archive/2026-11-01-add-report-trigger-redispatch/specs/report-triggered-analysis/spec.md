@@ -1,6 +1,6 @@
 # Delta for report-triggered-analysis
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: 触发幂等与当日去重
 
