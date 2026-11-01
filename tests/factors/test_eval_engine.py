@@ -419,6 +419,78 @@ def test_build_panel_from_rows_zero_raw_price_gives_nan_prices():
     _assert_frame(panel.fields["amount"], _frame({"600000": [0.0]}, dates))
 
 
+# ── rows_present 与停牌行（#512 闸①分母 + #513 缺口 2 停牌语义统一） ────────
+
+
+def test_build_panel_from_rows_presence_pivot():
+    """rows_present：有快照行的 (date, code) 格 True，缺格 False。"""
+    rows = pd.DataFrame(
+        [
+            {
+                "trade_date": "2026-01-05",
+                "code": "600000",
+                "open": 9.0,
+                "high": 9.6,
+                "low": 8.8,
+                "close_raw": 9.6,
+                "close_qfq": 9.6,
+                "volume": 90.0,
+                "amount": 900.0,
+            },
+            {
+                "trade_date": "2026-01-06",
+                "code": "600000",
+                "open": 10.5,
+                "high": 11.0,
+                "low": 9.5,
+                "close_raw": 10.0,
+                "close_qfq": 8.0,
+                "volume": 100.0,
+                "amount": 1000.0,
+            },
+        ]
+    )
+    panel = build_panel_from_rows(rows)
+    assert panel.rows_present is not None
+    assert bool(panel.rows_present.loc["2026-01-05", "600000"]) is True
+    assert bool(panel.rows_present.loc["2026-01-06", "600000"]) is True
+    # 全窗无行的代码不出现为列（闸①侧 reindex fill=False 同效：整列视为无行）
+    assert "000001" not in panel.rows_present.columns
+
+
+def test_build_panel_from_rows_suspended_row_masked_and_not_present():
+    """#513 缺口 2：live 区停牌合成行（is_suspended=1）六字段置 NaN（时序算子输入侧
+    与回填区「停牌=缺行」语义统一），且不算「当日有行」（闸①分母同步排除）。"""
+    base = {
+        "open": 10.0,
+        "high": 11.0,
+        "low": 9.0,
+        "close_raw": 10.0,
+        "close_qfq": 10.0,
+        "volume": 100.0,
+        "amount": 1000.0,
+    }
+    rows = pd.DataFrame(
+        [
+            {"trade_date": "2026-01-05", "code": "600000", **base},
+            {"trade_date": "2026-01-06", "code": "600000", **base, "is_suspended": 1},
+            {"trade_date": "2026-01-06", "code": "000001", **base},
+        ]
+    )
+    panel = build_panel_from_rows(rows)
+    dates = ["2026-01-05", "2026-01-06"]
+    # 停牌行：close 等字段 NaN（volume/amount 一并置 NaN——合成平盘行不得进时序算子）
+    expected_close = _frame({"000001": [_NAN, 10.0], "600000": [10.0, _NAN]}, dates)
+    _assert_frame(panel.fields["close"], expected_close)
+    expected_volume = _frame({"000001": [_NAN, 100.0], "600000": [100.0, _NAN]}, dates)
+    _assert_frame(panel.fields["volume"], expected_volume)
+    # presence：停牌格 False（不算有行）
+    assert panel.rows_present is not None
+    assert bool(panel.rows_present.loc["2026-01-06", "600000"]) is False
+    assert bool(panel.rows_present.loc["2026-01-06", "000001"]) is True
+    assert bool(panel.rows_present.loc["2026-01-05", "600000"]) is True
+
+
 # ── forward_returns / rank_ic_series（E2） ──────────────────────────────────
 
 

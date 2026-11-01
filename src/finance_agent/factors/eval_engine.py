@@ -78,9 +78,14 @@ class MarketPanel:
 
     各帧须共享同一 index（规范日期字符串，升序）与 columns（code）；缺失格为
     NaN（例如某日某票无快照行、停牌缺格），算子对 NaN 的语义见模块 docstring。
+
+    ``rows_present``（可选）：date×code 布尔帧，True = 该格有**非停牌**快照行
+    （#512 闸①分母口径「当日有行」；停牌合成行与缺行同待遇）。``None`` = 未提供
+    （直接构造的测试面板），消费方回退全面板口径。
     """
 
     fields: dict[str, pd.DataFrame]
+    rows_present: pd.DataFrame | None = None
 
 
 # ── 求值引擎 ────────────────────────────────────────────────────────────────
@@ -303,6 +308,10 @@ def build_panel_from_rows(rows: pd.DataFrame) -> MarketPanel:
     ``close`` 取 ``close_qfq``；``volume``/``amount`` 原样。行按
     ``(trade_date, code)`` 透视，缺格 NaN；(trade_date, code) 重复 → ``ValueError``
     （``pivot`` 拒绝重复，fail loud——快照主键保证不会发生）。
+
+    ``is_suspended`` 列可选（live 日批有、回填区显式 0；列缺失视为无停牌行）：
+    停牌合成行（=1）六字段在输入侧置 NaN 且不计入 ``rows_present``——时序算子
+    与闸①分母对停牌的语义与回填区「停牌=缺行」统一（issue #513 缺口 2 拍板）。
     """
     missing = [column for column in _PANEL_ROW_COLUMNS if column not in rows.columns]
     if missing:
@@ -310,10 +319,18 @@ def build_panel_from_rows(rows: pd.DataFrame) -> MarketPanel:
     frame = rows.copy()
     for column in _PANEL_ROW_NUMERIC:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    if "is_suspended" in frame.columns:
+        suspended = pd.to_numeric(frame["is_suspended"], errors="coerce").fillna(0) == 1
+    else:
+        suspended = pd.Series(False, index=frame.index)
+    present = ~suspended
     dates = frame["trade_date"].astype(str)
     codes = frame["code"].astype(str)
-    # close_raw 为 0 时把因子置 NaN（0 作分母非法），NaN 天然传播
+    # 停牌合成行六字段置 NaN（先取 presence 再抹值；close_raw 为 0 时把因子置
+    # NaN（0 作分母非法），NaN 天然传播）
+    frame.loc[suspended, list(_PANEL_ROW_NUMERIC)] = np.nan
     factor = frame["close_qfq"] / frame["close_raw"].where(frame["close_raw"] != 0)
+    rows_present = _pivot(dates, codes, present.astype(float)).fillna(0.0).astype(bool)
     return MarketPanel(
         fields={
             "open": _pivot(dates, codes, frame["open"] * factor),
@@ -322,7 +339,8 @@ def build_panel_from_rows(rows: pd.DataFrame) -> MarketPanel:
             "close": _pivot(dates, codes, frame["close_qfq"]),
             "volume": _pivot(dates, codes, frame["volume"]),
             "amount": _pivot(dates, codes, frame["amount"]),
-        }
+        },
+        rows_present=rows_present,
     )
 
 
