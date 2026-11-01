@@ -30,13 +30,19 @@ mkdir -p "$OUT"
 docker run --rm -v "$VOL":/src:ro -v "$WD/$OUT":/dst $IMG sh -c 'cp -a /src/. /dst/ && echo "回拷完成：$(ls /dst | wc -l) 项"'
 
 phase "对账（volume vs 回拷）"
-docker run --rm -v "$VOL":/src:ro -v "$WD/$OUT":/dst $IMG python - <<'PYEOF'
-import sqlite3, sys, os
+# -i：heredoc 经 stdin 喂 python，缺 -i 时容器 stdin 非 TTY 直接空转（exit 0 放行）
+# ——2026-11-01 空跑演练实证：对账整段静默跳过（与迁移脚本同坑，#550 漏修本文件）
+docker run --rm -i -v "$VOL":/src:ro -v "$WD/$OUT":/dst $IMG python - <<'PYEOF'
+import sqlite3, sys, os, glob, shutil
 dbs = ["sessions.db", "screening.db", "execution.db", "events.db",
        "regime.db", "research_reports.db", "factor_library.db", "market_snapshot.db"]
 fail = 0
 for db in dbs:
-    s, d = f"/src/{db}", os.path.join("/dst", db)
+    # 源侧连 -wal/-shm 拷进容器可写 /tmp 再开：只读挂载上开带 WAL 的库要建 shm
+    # 必炸 unable to open database file（与迁移脚本 verify_pair 同坑同修）
+    for f in glob.glob(f"/src/{db}*"):
+        shutil.copy(f, "/tmp/" + os.path.basename(f))
+    s, d = f"/tmp/{db}", os.path.join("/dst", db)
     if not os.path.exists(s) or not os.path.exists(d):
         print(f"  [SKIP] {db}（缺失）"); continue
     cs, cd = sqlite3.connect(s), sqlite3.connect(d)
