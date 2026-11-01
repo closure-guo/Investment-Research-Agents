@@ -283,7 +283,9 @@ def _load_panel(snapshot_db_path: str | Path | None, *, dates: list[str]) -> Mar
         fields={
             name: pd.concat([chunk.fields[name] for chunk in chunks]).sort_index()
             for name in PANEL_FIELDS
-        }
+        },
+        # 逐日 presence 帧纵向拼接（#512 闸①分母「当日有行」的数据面）
+        rows_present=pd.concat([chunk.rows_present for chunk in chunks]).sort_index(),
     )
 
 

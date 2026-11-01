@@ -200,6 +200,59 @@ def test_check_computability_empty_frame_fails_closed():
     assert result.detail["total_cells"] == 0
 
 
+# ── 闸①分母口径（#512 拍板 A：分母 = 当日有行 cell，缺数空洞不进分母） ──────
+
+
+def _values_and_mask() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """10 日 × 2 票：A 全程有行有值；B 仅 d5 有行有值，其余日无快照行。"""
+    dates = [f"2026-01-{d:02d}" for d in range(5, 15)]
+    values = pd.DataFrame(np.nan, index=dates, columns=["000001", "600519"])
+    values["000001"] = 1.0
+    values.loc["2026-01-10", "600519"] = 2.0
+    mask = pd.DataFrame(False, index=dates, columns=["000001", "600519"])
+    mask["000001"] = True
+    mask.loc["2026-01-10", "600519"] = True
+    return values, mask
+
+
+def test_check_computability_rows_present_denominator_excludes_data_holes():
+    """分母 = 当日有行 cell：B 票无行的 9 日不进分母也不计缺失（旧口径 90% 拒收 → 0%）。"""
+    values, mask = _values_and_mask()
+    result = check_computability(values, data_mask=mask)
+    assert result.passed is True
+    assert result.detail["denominator"] == "rows_present"
+    assert result.detail["total_cells"] == 11  # A 10 日 + B 1 日
+    assert result.detail["missing_cells"] == 0
+    assert result.detail["missing_rate"] == pytest.approx(0.0)
+
+
+def test_check_computability_rows_present_counts_nan_on_rows():
+    """有行但因子值 NaN（热身窗）仍计缺失：B 的 d5 值置 NaN → 1/11。"""
+    values, mask = _values_and_mask()
+    values.loc["2026-01-10", "600519"] = np.nan
+    result = check_computability(values, data_mask=mask)
+    assert result.passed is True
+    assert result.detail["missing_cells"] == 1
+    assert result.detail["missing_rate"] == pytest.approx(1 / 11)
+
+
+def test_check_computability_rows_present_excludes_masked_out_nan():
+    """mask=False 的格即便因子值 NaN 也不计缺失（缺数空洞 ≠ 因子不可算）。"""
+    values, mask = _values_and_mask()
+    values.loc["2026-01-06", "600519"] = np.nan  # 无行格额外丢一个 NaN，不影响读数
+    result = check_computability(values, data_mask=mask)
+    assert result.detail["missing_cells"] == 0
+    assert result.detail["total_cells"] == 11
+
+
+def test_check_computability_without_mask_keeps_full_panel_denominator():
+    """不传 mask → 旧全面板分母（回归钉死；detail 带口径标记 full_panel）。"""
+    result = check_computability(_frame_with_missing(201))
+    assert result.passed is False
+    assert result.detail["denominator"] == "full_panel"
+    assert result.detail["total_cells"] == 1000
+
+
 # ── 闸② 单因子检验（E3） ───────────────────────────────────────────────────
 
 

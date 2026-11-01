@@ -74,6 +74,8 @@ _BACKFILL_CAVEAT = (
     "⚠ 回填行不含状态位/前收盘（is_suspended 等显式 0，prev_close/涨跌幅为 NULL）："
     "不得把回填区间接入 compute_rebase_factors 链（停牌合成需要状态链）；"
     "正式日频数据以 market_snapshot_daily 日批为准。"
+    "⚠ close_qfq 源头两位小数：<1 元股伪日收益噪声已量化（metrics.md §1.23，"
+    "issue #513 缺口 3）；未来回填若源可得改存 adj_factor 或四位小数。"
 )
 
 # ── 宿主机直跑护栏：共享实现（harden-sqlite-availability task 1，issue #515）──
