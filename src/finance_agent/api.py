@@ -786,7 +786,28 @@ def _stream_report_chunks(markdown: str, chunk_size: int = 200) -> list[str]:
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    """服务存活 + 热库可用性（harden-sqlite-availability task 5，issue #515）。
+
+    全部库可读 → 200 ``{status: ok, databases: {每库 ok}}``；任一库打不开 →
+    503 ``{status: degraded, databases: {库名: {status: unavailable, error: 短错误类}}}``
+    （进程不被探针终止/重启）。探针自身受 ``PROBE_TIMEOUT_S`` 约束（线程级），
+    此处再套 ``asyncio.wait_for`` 总闸，双层保证健康检查不被 I/O 卡死拖住。
+    """
+    from finance_agent.data import db_health
+
+    try:
+        databases = await asyncio.wait_for(
+            asyncio.to_thread(db_health.probe_databases),
+            timeout=db_health.PROBE_TIMEOUT_S + 1.0,
+        )
+    except TimeoutError:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "databases": {}, "error": "probe timeout"},
+        )
+    if any(v.get("status") != "ok" for v in databases.values()):
+        return JSONResponse(status_code=503, content={"status": "degraded", "databases": databases})
+    return {"status": "ok", "databases": databases}
 
 
 # ── 测试专用端点（仅 TESTING=1 下可用）──

@@ -404,11 +404,44 @@ def list_audit(prediction_id: str, db_path: str | Path | None = None) -> list[di
         conn.close()
 
 
-def integrity_check(db_path: str | Path | None = None) -> dict[str, Any]:
-    """快照哈希完整性校验：逐条重算 rationale_snapshot 哈希比对 snapshot_hash。
+def _hotdb_page_integrity() -> dict[str, str]:
+    """热库页级校验（harden-sqlite-availability task 6，issue #515）。
 
-    篡改（hash 不一致）不自动修复，写审计日志（action='integrity_mismatch'）并
-    返回 mismatches 清单供告警。幂等：重复执行仅追加审计，不改数据。
+    逐库 ``PRAGMA quick_check``（比 integrity_check 便宜一个量级）先行，非 ok
+    再跑完整 ``integrity_check`` 取截断 detail；打开/查询异常同样按失败归类。
+    返回 ``{库名: "ok" | 截断 detail}``。
+    """
+    from finance_agent.data import db_health
+
+    results: dict[str, str] = {}
+    for name, path in db_health.hot_db_paths().items():
+        try:
+            conn = sqlite3.connect(path, timeout=5.0)
+            try:
+                outcome = conn.execute("PRAGMA quick_check").fetchone()
+                verdict = str(outcome[0]) if outcome else "no-result"
+                if verdict != "ok":
+                    full = conn.execute("PRAGMA integrity_check").fetchall()
+                    verdict = "; ".join(str(row[0]) for row in full)[:200]
+            finally:
+                conn.close()
+            results[name] = "ok" if verdict == "ok" else verdict
+        except Exception as exc:  # noqa: BLE001 - 打不开/非库文件同为页级失败，归类留痕
+            results[name] = str(exc)[:200]
+    return results
+
+
+def integrity_check(db_path: str | Path | None = None) -> dict[str, Any]:
+    """快照哈希完整性校验 + 热库页级校验（issue #515）。
+
+    哈希侧：逐条重算 rationale_snapshot 哈希比对 snapshot_hash；篡改（hash 不一致）
+    不自动修复，写审计日志（action='integrity_mismatch'）并返回 mismatches 清单供
+    告警。幂等：重复执行仅追加审计，不改数据。
+
+    页级侧：对全部热库 ``PRAGMA quick_check``（design §3：先便宜的 quick_check，
+    失败再跑完整 integrity_check 取截断 detail）。任一库非 ok → **抛 ``RuntimeError``
+    （job 落 failed，错误串含库名与截断 detail）**；全 ok 时 summary 带
+    ``databases: {库名: "ok"}``。
     """
     conn = _connect(db_path)
     try:
@@ -438,7 +471,19 @@ def integrity_check(db_path: str | Path | None = None) -> dict[str, Any]:
                 source="integrity-check",
                 db_path=db_path,
             )
-    return {"checked": len(rows), "mismatches": mismatches, "mismatch_count": len(mismatches)}
+    databases = _hotdb_page_integrity()
+    bad = {name: detail for name, detail in databases.items() if detail != "ok"}
+    if bad:
+        raise RuntimeError(
+            "integrity_check failed: "
+            + "; ".join(f"{name}: {detail}" for name, detail in bad.items())
+        )
+    return {
+        "checked": len(rows),
+        "mismatches": mismatches,
+        "mismatch_count": len(mismatches),
+        "databases": databases,
+    }
 
 
 # ── daily_marks：盯市（upsert 幂等；同一 (prediction_id, mark_date) 覆盖重写）──
