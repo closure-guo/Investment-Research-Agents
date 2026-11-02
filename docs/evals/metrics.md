@@ -3,6 +3,32 @@
 唯一查询入口：口径定义看这里，历史看时间线表，机器可读摘要看 [`metrics/runs.jsonl`](runs.jsonl)。
 分工：Langfuse Scores = 逐 trace 明细真源；`reports/evals/*.json` = 单次实验全量产物（本地）；本文件 = 跨 run 台账。每次实验收口时更新一行，并注明当时的 git HEAD。
 
+## 怎么读这份文档
+
+- **§1 口径定义**——每个指标「是什么、怎么算」的契约。口径要改必须先改这里再动代码；实验读数附在各节末尾，每条记录的**首句「一句话」用人话说结论**，其下才是口径细节与原始读数。
+- **§2 时间线**——历轮实验与切点记录（切点 = 口径在某天起改了算法，切点两侧数字不可直接比较）。
+- **§2.1–2.5 预登记**——跑批前锁定的分析计划（防事后挑口径/挑数字），按轮排列。
+- **§3 待终裁 / 待决策**——挂账清单。已闭合条目保留删除线与结论，不删历史。
+
+**高频词速查**（只在本文档语境下成立）：
+
+| 词 | 意思 |
+|---|---|
+| 切点 | 某口径自某日起改了算法；切点两侧数字**不可直接比较**。所有「跨切点不可直接比较」均此意 |
+| 读数 | 一次实验跑出来的具体数字 |
+| void | 主指标没法算（典型：分母为 0），判「未测出」，不硬读 |
+| MDE | 最小可检测差异——本实验能分辨的最小效应量；写进结论句防「没测出」被误读成「没差异」 |
+| 归因 | 读数异常先分桶找原因、人工逐条终裁，才允许处置（incident 026 纪律） |
+| 终裁 | 人工逐条拍板，位于机器分桶/判定之上的最终裁决 |
+| 预登记 | 跑批前冻结的判据（主指标 / 阈值 / 停止规则），防事后挑数字 |
+| provisional | 未过校准门控的暂定读数，不得当正式结论引用 |
+| 配对单元 / 有效 n | 统计比较的单位是**标的**而非 run 数（3 标的 × 10 重复 → 有效 n=3） |
+| K 均值 | judge 判分同一材料跑 K 次（默认 3）取均值，压调用级抽样噪声 |
+
+**写作规矩（2026-10-31 起）**：新增条目首句必须用人话说清「测了什么、结果是什么、数字怎么读」，口径细节放首句之后；冷读测试 = 项目主人不带上下文能读懂首句。
+
+**2026-10-31 可读性重构注记**：本次仅重组表述与版式（实验记录增「一句话」导语、长段落条目化、§1.21–1.22 移入 §1、§2 表 r8–r15 行归位主表），未改动任何数字、口径定义与结论。
+
 **基线切点**：incident 026（`docs/incidents/026-citation-gate-misattribution-20260911.md`）之前，`citation_pass` 把校验器误报算在分析师头上（r2 终裁：FAIL 桶 100% 误报），不可与 r4 起的拆报指标直接比较。
 
 ---
@@ -75,23 +101,73 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 | ③ 指标三栏（2026-09-16 owner 裁决②，`traffic_columns`） | **拦截率（主）** = 开态被拦 / 开态到达机制面前（机制只对「它见到的」负责）；**暴露率（辅）** = 开态到达产物 / 全部注入单元（void 的去向在此交代）；**关态穿透率（对照）** = 关态到达 / 注入（阳性对照）；**跑批口径降附录**（关态逃逸 / 注入，混合暴露与拦截，SHALL NOT 当主指标）。输入侧面型（A7）不进任一栏。旧口径（逃逸 = 污染值原样出现在终态产物**且未被告警**、且经人工终裁确认为真逃逸；**分母 = 已终裁单元数**；未终裁单列 `pending`；无终裁时 `rate = None`，**不得报 0%**）保留为「逃逸终裁」纪律，用于附录栏与四桶拆报。校验器误报走四桶拆报（blocked / analyst_true_fail / surgical_repaired / verifier_normalized，桶名以 `escape.py::VERIFIER_BUCKETS` 为准；§1.3 为 citation 四桶同族拆报），**不进逃逸率分母**；四桶拆报进消融聚合，`citation_pass` 标量退出层增量比较路径（只留产出、不作层增量裁决，见 §2 切点段） |
 | ④ 结论句式与注册表 | 合法结论仅两句式：**真阴性**（CI 整体低于成本阈值 →「在本实验分辨率（MDE=X）下…建议降级/裁剪」）｜**分辨率不足**（须写出 MDE 与 CI 并给扩样方向）。**裸「未获统计支持」非法**——结论句必带 MDE（`conclusion.py`）；阳性对照测不出显著差异 → 本轮全部阴性作废（灵敏度未证实不得进注册表）。报告头部须带生命周期字段（`status`：`active` 或 `superseded-by: <路径>`，字面格式与校验见 `evals/causal_ablation/report_status.py`，取代者指针须真实存在）；索引 [`README.md`](README.md) 渲染状态与「未标注生命周期」清单，引用纪律见 §1.6 |
 
-**P1 正式批（2026-09-16，离线四型 20 标的 × 4 实例，零 LLM）——结论封口**：**拦截率（主）= 1.000**（316/316），簇 bootstrap（按标的重抽样 B=10,000）95% CI **[1.000, 1.000]**——20 簇**无一例外**（簇间零方差，区间塌为点）；单型同样各 1.000（簇 19–20）→ 按预登记判据（拦截率 <50% 判薄防线）**四机制均在阈值之上，机制必要性成立**（合法结论句：阳性成立，非「真阴性」亦非「分辨率不足」；两式仅适用于裁剪方向的阴性结论）。**合计不一致比 = 0.880**（b=278, c=0）95% CI [0.869, 0.894]；阳性对照 b=156 c=0 p=2.2e-47 显著。辅栏：暴露率 316/320 = 0.988（4 单元无注入靶点，601012 方向型）；关态穿透率 0.988；逃逸终裁（附录）= **278/278 真逃逸**（78 案例：40 由 round-3 继承 + 39 本轮人工终裁，pending=0）。stale_macro 走输入侧面（80/80 有告警）；成本：材料生成 10 新标的 ≈200 次调用，离线腿 0 次。口径注：合计不一致比人口 = 可终裁人口（排除输入侧面型）——此前 0.702 的差异是把 stale_macro 80 个无拦截语义单元算进了分母。统计口径（`diff_mean` 点估计 / 标的配对 / 维度适用性 / 快照 digest / 报告状态头契约）见 §1.5，本小节不重复；judge 材料口径切点（`debate_history` 锚点骨架行）见 §2，跨该切点的 debate_quality 不可直接比较。
+**P1 正式批（2026-09-16，离线四型 20 标的 × 4 实例，零 LLM）——结论封口**
 
-**族 A 补测批（2026-09-17）**：
-- **A5（illegal_price）实测**：拦截率 **1.000**（16/16，4 可执行标的；b=16 c=0）——A5 是价位幻觉的唯一防线（关态即全放行）。前置修复：材料快照漏存 `price_levels`（sanity 消费面）→ 4 个「ok」实为「没测到」，已判 void 并重跑（commit aa17358）。
-- **A4（单点修复回路）实测**（新建正文一致的稀疏 value_mismatch 单元，20 标的注入腿 + 2 自然命中单元，实耗 22 次调用）：**读数须并列三栏**——① 终稿留错 **0/20**（改写值经单条校验 20/20 改对）；② 流水线记账（`value_mismatch_repaired` 口径，即登记主指标「修复前后真 FAIL 率差」）**4/22**，delta 0.182，**低于预登记 80% 阈值**；③ 全库范围仲裁 **0/22**（观测装置缺陷，生产口径是按分析师，`run_citation_chain(claim_agents=…)`）。差额 16/22 的归因 =「同分析师另有其它 FAIL → `all_passed=False` → 不记账」→ **incident 029**（记账口径与收益脱钩；处置候选待 owner）。自然腿 2/2 定位落空（正文值型 ≠ 申报值型）→ 待人工终裁（`tests/validation/2026-09-17-a4-natural-cases.csv`）。**据此「A4 数值改对 20/20」与「流水线记账 4/22」是两件事，不得混读。**
+> **一句话**：往材料里注入四类已知缺陷、共 316 个注入单元，四个防线机制**全部拦下**（拦截率 1.000），按预登记判据「机制必要性成立」。
 
-- **A1（确定性指标注入）实测（2026-09-17，10 标的 × 2 态，102 次调用）**：主指标（计算型 claim 数值错误率差）**不可测**——OFF 态可重算根 claim 塌缩到 4 条（ON 319 条）、10 标的中 6 个分母为 0 判 void，触发预登记停止规则②（先归因后读数）。**归因结果**：塌缩成因是「LLM 不自算派生指标」（改回落原始报表路径）→ 登记主张的「自算算错」本批无样本（未被证伪，是没发生）。**机制价值改读产出面**：compute 根 claim 占比 **58.6% vs 2.3%**、claim 总量 **606 vs 388（-36%）**、路径不可解析率 **0.2% vs 13.4%**（缺席时数字失去可核对锚，47/52 条为 `financial_indicators.<年>.<指标名>` 形态解析不出）。前置修复：材料快照缺 compute 输出键 115 个（**incident 030**，白名单漂移第二次）→ 排除式 + 完整性守卫 + 零 LLM 回填。族 A 至此 **A1–A7 全部有实测读数**。
+- **测了什么**：离线批——四类注入缺陷 × 20 标的 × 4 实例，判定全走代码、零 LLM。
+- **主读数**：拦截率（主）= **1.000**（316/316），簇 bootstrap（按标的重抽样 B=10,000）95% CI **[1.000, 1.000]**——20 簇**无一例外**（簇间零方差，区间塌为点）；单型同样各 1.000（簇 19–20）。按预登记判据（拦截率 <50% 判薄防线）**四机制均在阈值之上，机制必要性成立**（合法结论句：阳性成立，非「真阴性」亦非「分辨率不足」；两式仅适用于裁剪方向的阴性结论）。
+- **辅助读数**：合计不一致比 = **0.880**（b=278, c=0）95% CI [0.869, 0.894]；阳性对照 b=156 c=0 p=2.2e-47 显著。
+- **辅栏**：暴露率 316/320 = 0.988（4 单元无注入靶点，601012 方向型）；关态穿透率 0.988；逃逸终裁（附录）= **278/278 真逃逸**（78 案例：40 由 round-3 继承 + 39 本轮人工终裁，pending=0）。stale_macro 走输入侧面（80/80 有告警）。
+- **成本**：材料生成 10 新标的 ≈200 次调用，离线腿 0 次。
+- **口径注**：合计不一致比人口 = 可终裁人口（排除输入侧面型）——此前 0.702 的差异是把 stale_macro 80 个无拦截语义单元算进了分母。
+- **关联口径**：统计口径（`diff_mean` 点估计 / 标的配对 / 维度适用性 / 快照 digest / 报告状态头契约）见 §1.5，本小节不重复；judge 材料口径切点（`debate_history` 锚点骨架行）见 §2，跨该切点的 debate_quality 不可直接比较。
 
-**P2 族 B 首批读数（2026-09-17；§19/§19.1）**：材料腿 = full × 20 标的（19 次调用/标的，累计 380 次）+ analysts 对照臂；**B3 风控数字出处率 0.952（20/21）**、**B4 sanity 首判打回 1/7**（000333 target 越参考带）——两腿 n=7 属**无分辨率**，只作描述性读数（owner 裁决 2026-09-18：维持描述性、不扩样，读数永久带 n=7 脚注）。**结构发现**：消融变体图不含 sanity 节点 → B4 读数由生产同一实现补算（单次校验、不含打回回路）。判定腿（**均 provisional，未过校准门控**）：**B1 吸收率 0.786**（196 行）、**B2 修正率 0.198**（111 行）、**B5 盲评 full 20 : analysts 0**——B5 按「整齐得可疑先解释」判定为**同义反复口径**（analysts 臂无决策章节而判据是「更有助于决策」），不得读作层价值，两臂须都含决策层（plus_debate vs full）。校准材料 `tests/validation/2026-09-17-p2-calibration-{b1,b2,b5}.csv` 待人工标注（≥0.80）。
+**族 A 补测批（2026-09-17）**
 
-**修复记账口径切点（2026-09-18，delta eval-driven-contract-fixes 任务 3，incident 029 处置）**：
-`value_mismatch_repaired_claims`（按 claim：重校验后目标 claim PASS 即计）上线并接管
-`citation_analyst_true_fail`；旧 `value_mismatch_repaired`（all_passed 口径）保留一轮作
-跨口径对照、标 deprecated。**A4 主指标「修复前后真 FAIL 率差」跨此切点不可直接比较**——
-此前实测 4/22（all_passed 漏计），新口径下同批应为 ≈20/22。消融 A4 读数引用旧批次时须带此脚注。
+**A5（illegal_price）实测**
 
-**P2 校准收口（2026-09-18，§19.2）**：B1 一致率 **0.875**（40/40=预填稿全文照录，≥0.80）→ **有条件转正**（owner = 口径共建 + 8 行逐条裁决 + 终版全量照预填，非独立标注，一致率含机器-机器成分；下腿按采样协议 v2 补独立抽查）；B2 **0.906**（32/32，判词 v3）→ **转正**：owner 就全部 4 条分歧行逐条裁决（3 站预填、1 站机器），其余照预填；终读修正率 **0.22** vs 机器 0.125（机器口径偏严经裁决确认）。**B1 字面新增阈值判死**（全区间最佳 0.05 仅 0.65 一致率，预测新增 10 vs 人工 22）→ **「是否新增」并入判定腿，B1 主指标 = 判定腿双问（新增 + 吸收）**，上表「B1 风险点增量率（nli）」自此失效；字面相似度仅留排序/采样辅助。人工终裁（终版=预填稿照录）：新增率 **0.45**（owner 首轮独立判读 0.55——报区间 0.45–0.55）、**新增点吸收率 0.61 vs 回收点 0.91**（决策层偏接旧内容）。judge prompt v2 已试并**阴性收口**（§19.3，160 次调用）：双问+通道分账+顶撞判例一次全上未过门（0.825/0.750/0.690），单变量探针 v2a 证明**新增维度封顶 ~0.75**（边界行固有模糊，人工亦翻案）→ 新增率以人工区间 0.45–0.55 为准，机器新增判定仅作辅助观测（0.75 披露）；吸收/修正继续用 v1（0.875/0.906）。无源增量首证：000858「机构资金持续撤离」= 推断冒充 `kind=data` 且无锚、与上游唯一资金流发现方向相反（grounding 扫描已收口：bg-v1 校准一致率 **1.000**（14/14 终裁），无源断言率 **8/64 = 0.125 转正**——r1 kind=data 论点中每 8 条有 1 条含无源断言，共性为推断冒充数据；8 条清单 owner 终裁确认，bear prompt 处置候选已登记，§19.5）。
+> **一句话**：注入 16 个违规价位样本，A5 全部拦下（16/16）——它是价位幻觉的唯一防线，关掉即全放行。
+
+- 拦截率 **1.000**（16/16，4 可执行标的；b=16 c=0）——A5 是价位幻觉的唯一防线（关态即全放行）。
+- 前置修复：材料快照漏存 `price_levels`（sanity 消费面）→ 4 个「ok」实为「没测到」，已判 void 并重跑（commit aa17358）。
+
+**A4（单点修复回路）实测**（新建正文一致的稀疏 value_mismatch 单元，20 标的注入腿 + 2 自然命中单元，实耗 22 次调用）
+
+> **一句话**：改写值确实被改对（终稿 0/20 留错），但流水线只记了 4/22 的账——漏记原因是「同分析师另有其它 FAIL 就不记账」（incident 029）。两个数字是两件事，不得混读。
+
+- **读数须并列三栏**——① 终稿留错 **0/20**（改写值经单条校验 20/20 改对）；② 流水线记账（`value_mismatch_repaired` 口径，即登记主指标「修复前后真 FAIL 率差」）**4/22**，delta 0.182，**低于预登记 80% 阈值**；③ 全库范围仲裁 **0/22**（观测装置缺陷，生产口径是按分析师，`run_citation_chain(claim_agents=…)`）。
+- 差额 16/22 的归因 =「同分析师另有其它 FAIL → `all_passed=False` → 不记账」→ **incident 029**（记账口径与收益脱钩；处置候选待 owner）。
+- 自然腿 2/2 定位落空（正文值型 ≠ 申报值型）→ 待人工终裁（`tests/validation/2026-09-17-a4-natural-cases.csv`）。
+- **据此「A4 数值改对 20/20」与「流水线记账 4/22」是两件事，不得混读。**
+
+**A1（确定性指标注入）实测**（2026-09-17，10 标的 × 2 态，102 次调用）
+
+> **一句话**：想比「递不递算好的指标，AI 谁算错得多」，但不递时 AI 根本不自己算、可复算样本几乎为零，主指标分母不足判 void；机制价值改看产出构成——可复算论断占比 **2.3% → 58.6%**。
+
+- **主指标（计算型 claim 数值错误率差）不可测**——OFF 态可重算根 claim 塌缩到 4 条（ON 319 条）、10 标的中 6 个分母为 0 判 void，触发预登记停止规则②（先归因后读数）。
+- **归因结果**：塌缩成因是「LLM 不自算派生指标」（改回落原始报表路径）→ 登记主张的「自算算错」本批无样本（未被证伪，是没发生）。
+- **机制价值改读产出面**（ON vs OFF）：compute 根 claim 占比 **58.6% vs 2.3%**、claim 总量 **606 vs 388（-36%）**、路径不可解析率 **0.2% vs 13.4%**（缺席时数字失去可核对锚，47/52 条为 `financial_indicators.<年>.<指标名>` 形态解析不出）。
+- 前置修复：材料快照缺 compute 输出键 115 个（**incident 030**，白名单漂移第二次）→ 排除式 + 完整性守卫 + 零 LLM 回填。
+- 族 A 至此 **A1–A7 全部有实测读数**。
+
+**P2 族 B 首批读数（2026-09-17；§19/§19.1）**
+
+> **一句话**：编排层五指标的首批读数——B3/B4 样本太少只作描述；B1/B2 未过校准门只算暂定；B5 问了「无法回答的问题」（analysts 臂没有决策章节却拿「更有助于决策」去比），不能当层价值结论。
+
+- 材料腿 = full × 20 标的（19 次调用/标的，累计 380 次）+ analysts 对照臂。
+- 描述性读数：**B3 风控数字出处率 0.952（20/21）**、**B4 sanity 首判打回 1/7**（000333 target 越参考带）——两腿 n=7 属**无分辨率**，只作描述性读数（owner 裁决 2026-09-18：维持描述性、不扩样，读数永久带 n=7 脚注）。
+- **结构发现**：消融变体图不含 sanity 节点 → B4 读数由生产同一实现补算（单次校验、不含打回回路）。
+- 判定腿（**均 provisional，未过校准门控**）：**B1 吸收率 0.786**（196 行）、**B2 修正率 0.198**（111 行）、**B5 盲评 full 20 : analysts 0**——B5 按「整齐得可疑先解释」判定为**同义反复口径**（analysts 臂无决策章节而判据是「更有助于决策」），不得读作层价值，两臂须都含决策层（plus_debate vs full）。
+- 校准材料 `tests/validation/2026-09-17-p2-calibration-{b1,b2,b5}.csv` 待人工标注（≥0.80）。
+
+**修复记账口径切点（2026-09-18，delta eval-driven-contract-fixes 任务 3，incident 029 处置）**
+
+> **一句话**：修复记账从「按分析师」改成「按 claim 记账」；A4 旧读数 4/22 在新口径下应为 ≈20/22，跨此切点不可直接比较。
+
+- `value_mismatch_repaired_claims`（按 claim：重校验后目标 claim PASS 即计）上线并接管 `citation_analyst_true_fail`；旧 `value_mismatch_repaired`（all_passed 口径）保留一轮作跨口径对照、标 deprecated。
+- **A4 主指标「修复前后真 FAIL 率差」跨此切点不可直接比较**——此前实测 4/22（all_passed 漏计），新口径下同批应为 ≈20/22。消融 A4 读数引用旧批次时须带此脚注。
+
+**P2 校准收口（2026-09-18，§19.2）**
+
+> **一句话**：B1/B2 人工对照过线转正（0.875 / 0.906）；「机器猜是否新增风险点」这条路被证死（最好一致率只有 0.65），改为人工判读（0.45–0.55）+ 机器只作辅助；judge prompt v2 尝试未过校准门，阴性收口。
+
+- **B1 一致率 0.875**（40/40=预填稿全文照录，≥0.80）→ **有条件转正**（owner = 口径共建 + 8 行逐条裁决 + 终版全量照预填，非独立标注，一致率含机器-机器成分；下腿按采样协议 v2 补独立抽查）。
+- **B2 0.906**（32/32，判词 v3）→ **转正**：owner 就全部 4 条分歧行逐条裁决（3 站预填、1 站机器），其余照预填；终读修正率 **0.22** vs 机器 0.125（机器口径偏严经裁决确认）。
+- **B1 字面新增阈值判死**（全区间最佳 0.05 仅 0.65 一致率，预测新增 10 vs 人工 22）→ **「是否新增」并入判定腿，B1 主指标 = 判定腿双问（新增 + 吸收）**，上表「B1 风险点增量率（nli）」自此失效；字面相似度仅留排序/采样辅助。
+- 人工终裁（终版=预填稿照录）：新增率 **0.45**（owner 首轮独立判读 0.55——报区间 0.45–0.55）、**新增点吸收率 0.61 vs 回收点 0.91**（决策层偏接旧内容）。
+- **judge prompt v2 已试并阴性收口**（§19.3，160 次调用）：双问+通道分账+顶撞判例一次全上未过门（0.825/0.750/0.690），单变量探针 v2a 证明**新增维度封顶 ~0.75**（边界行固有模糊，人工亦翻案）→ 新增率以人工区间 0.45–0.55 为准，机器新增判定仅作辅助观测（0.75 披露）；吸收/修正继续用 v1（0.875/0.906）。
+- **无源增量首证**：000858「机构资金持续撤离」= 推断冒充 `kind=data` 且无锚、与上游唯一资金流发现方向相反（grounding 扫描已收口：bg-v1 校准一致率 **1.000**（14/14 终裁），无源断言率 **8/64 = 0.125 转正**——r1 kind=data 论点中每 8 条有 1 条含无源断言，共性为推断冒充数据；8 条清单 owner 终裁确认，bear prompt 处置候选已登记，§19.5）。
 
 ### 1.8 常规观测电池（delta `add-causal-observation-battery`，2026-09-22 起）
 
@@ -105,7 +181,14 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 | 触发约定 | 生产 prompt（`deploy_prompts.py` 发布）或模型栈变更后运行；收口时 runs.jsonl 追加一行（llm_calls 分材料腿/判定腿申报）+ 本文件时间线登记 |
 | 基线轮 | 2026-09-20 观测轮（p2-batch-20260920：grounding 0/79 / B1 0.833 / B2 0.138）为第 0 轮对照基线 |
 
-**观测电池第 1 轮（2026-09-22，delta `add-causal-observation-battery` 首跑，HEAD ec3122b）**：固定 P1 快照 × v28 生产栈（20 标的全量材料重跑 + 三判定）。读数：**grounding 无源率 0.049（4/82）**、**B1 吸收率 0.848（212/250）**、**B2 修正率 0.082（122/1,487，全量口径首读）**；判定调用 **1,820 次**（B2 全量占 1,487），材料腿 usage meter 未接线（导入修复已随 ec3122b 落地，本轮如实记 unknown）。对照第 0 轮（09-20）：B1 0.833→0.848（同口径 +1.5pp）；**grounding 0/79→4/82 初判「回退」经归因撤回**（2026-09-23：Fisher 双侧 p≈0.12 不显著，合并率 4/161≈2.5%，属小样本波动非事件；bear prompt 两轮间未变更）——4 条逐行归因全落「推断冒充数据·定性升格」桶（定价判断/趋势性/强度升格三型），初判判定成立，处置候选 A/B 待 owner 终裁，对照表 `tests/validation/2026-09-23-observation-grounding-归因对照表.md`；B2 跨口径不可比（0.138 为 80 行闸门口径）。产物 `reports/ablation/observation/observation-20260922-225708.json`（本地）+ `snapshot-digests.json`（下轮核验基准）。
+**观测电池第 1 轮（2026-09-22，delta `add-causal-observation-battery` 首跑，HEAD ec3122b）**
+
+> **一句话**：同一批冻结快照 × 当时生产栈重跑三个观测指标——B1 吸收率微升；grounding 出现 4 条无源断言、初判「回退」后经归因撤回（小样本波动，非事件）；B2 换了全量口径、与上轮不可比。
+
+- 固定 P1 快照 × v28 生产栈（20 标的全量材料重跑 + 三判定）。
+- 读数：**grounding 无源率 0.049（4/82）**、**B1 吸收率 0.848（212/250）**、**B2 修正率 0.082（122/1,487，全量口径首读）**；判定调用 **1,820 次**（B2 全量占 1,487），材料腿 usage meter 未接线（导入修复已随 ec3122b 落地，本轮如实记 unknown）。
+- 对照第 0 轮（09-20）：B1 0.833→0.848（同口径 +1.5pp）；**grounding 0/79→4/82 初判「回退」经归因撤回**（2026-09-23：Fisher 双侧 p≈0.12 不显著，合并率 4/161≈2.5%，属小样本波动非事件；bear prompt 两轮间未变更）——4 条逐行归因全落「推断冒充数据·定性升格」桶（定价判断/趋势性/强度升格三型），初判判定成立，处置候选 A/B 待 owner 终裁，对照表 `tests/validation/2026-09-23-observation-grounding-归因对照表.md`；B2 跨口径不可比（0.138 为 80 行闸门口径）。
+- 产物 `reports/ablation/observation/observation-20260922-225708.json`（本地）+ `snapshot-digests.json`（下轮核验基准）。
 ### 1.9 Outcome 收益指标（delta `add-outcome-profitability-protocol`，2026-09-23 登记；启用切点见 §2）
 
 「赚钱能力」（outcome 收益）的评估口径。口径变更 SHALL 先改本节再动代码；本节不复制读数，读数在收口报告与 `runs.jsonl`。
@@ -151,6 +234,8 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 
 ### 1.10 健康度/红黄绿灯行业口径（delta `update-financial-freshness-and-valuation`，2026-09-29 登记）
 
+> **这节管什么**：健康度评分给半导体设备行业加了专属阈值（不同行业的及格线本就不同）；生效后灯色与旧口径不可直接对照。
+
 | 项 | 口径 |
 |---|---|
 | 定义 | 红黄绿灯/健康度评分新增行业阈值覆盖机制的行业实例：半导体设备（存货周转率 (1.2, 0.5) / 速动比率 (1.5, 0.6) / 应付账款周转率 (4.5, 1.5)，higher_is_better），校准依据 = 5 家代表公司（北方华创/中微/拓荆/芯源微/华海清科）FY2025 指标分布（design.md 附表） |
@@ -166,6 +251,8 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 
 ### 1.12 战绩组合盯市/净值口径（delta `update-track-record-data-integrity`，2026-09-29 登记）
 
+> **这节管什么**：战绩页那套组合数字（净值曲线/年化/波动/夏普/回撤）怎么算的契约——看懂页面上的数字先读这里。
+
 历史战绩页组合指标（净值曲线/年化/波动/夏普/回撤/风险分）的口径。口径变更 SHALL 先改本节再动代码。落地时 derived 表（daily_marks/equity_curve/agent_metrics_daily）全量重建，重建前读数以 incident 032 归因为准，SHALL NOT 作为基线引用。
 
 | 项 | 口径 |
@@ -179,6 +266,8 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 | ⑦ as_of | 总览 `portfolio.as_of` = equity_curve 最新数据日期，SHALL NOT 用快照写入日期（metric_date）冒充数据日期 |
 
 ### 1.13 策略族 scorecard 口径（2026-10-19 登记；裁决自 2026-10-18 调研 §4.2 P0；实施 delta `add-strategy-family-scorecards`）
+
+> **这节管什么**：把「一族策略」当整体记账的四槽成绩单（净成本期望 / 最大回撤 / 容量 / 极端样本）；胜率只展示，不进任何自动决策。
 
 **先口径后代码**：本节为口径登记——指标定义在此钉死后才实施；实施 delta `add-strategy-family-scorecards`
 落地后，四槽读数见下方实现口径，战绩页其余口径（§1.9/§1.12）不受影响。度量对象 = **策略族**
@@ -218,6 +307,8 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 
 ### 1.14 市场拥挤度与总仓位系数（delta `add-crowding-regime-positioning`，2026-10-18 登记）
 
+> **这节管什么**：市场过热（小票成交占比/成交额过热）时自动压低新开仓的系数；只停新开仓、不卖存量。
+
 **指标**：小市值组成交额占比（按流通市值升序前 30%，停牌/零成交剔除；流通市值取数链 = 快照同源 spot（EM 原始列）
 优先 → 腾讯行情批量兜底（真实市值字段；采用兜底源时指标行 `cap_source=tencent` 留痕），两源皆无/覆盖不全即当日不产行 + `cap_data_missing`）/
 涨跌家数（pct_chg 符号）/ 涨停跌停家数（limit_up_sealed / limit_down_sealed）/
@@ -229,6 +320,8 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 系数 ≠ 1.0 逐票 `REGIME_SCALE`，摘要记状态与系数；缺失/陈旧 → 1.0 + `no_regime_data`。
 
 ### 1.15 业绩预告事件线（delta `add-event-driven-lane`，2026-10-18 登记）
+
+> **这节管什么**：业绩预告这条独立事件线——从东财抓预告、LLM 分诊、公告次日开盘入场、T+5 收盘结算；纯观察通道，不产生订单。
 
 **数据源与字段口径**：akshare `stock_yjyg_em`（东方财富业绩预告，按报告期拉取；本机实测 1.18.94 可用，列名见实现映射表）；
 取数口径 = `预测指标` 为「归属于上市公司股东的净利润」的行（归母口径，与全库报表口径一致；源多指标行只取净利润行）。
@@ -274,6 +367,8 @@ horizon 默认 T+5 独立于观点线 T+20，MUST NOT 混入观点统计（predi
 事件线 v1 为纯观察/研究通道：不接 regime 系数、不进执行链目标（避免与 paper 台账双重记账）。
 
 ### 1.16 含退市股池与小票通道（delta `add-microcap-lane-guardrails`，2026-10-18 登记）
+
+> **这节管什么**：把退市股补进股票池防「幸存者偏差」（回测只看见活下来的公司会虚高），并开一个小市值观察通道（只记账、不下单）。
 
 **退市清单口径（来源与字段映射）**：两所清单合并 —— 沪 `ak.stock_info_sh_delist()`
 （实测列 `公司代码 / 公司简称 / 上市日期 / 暂停上市日期`，2026-10-18 本机 159 行）+
@@ -324,6 +419,8 @@ MUST NOT 谎报覆盖。缺失/覆盖明细随非 dry-run 运行落 `snapshot_me
 **消费接线说明**：`data/universe.py` 的可见性能力 + 回归在案属**能力层交付**；主档/通道的池构建消费接线（以「含退市宇宙」驱动回测/统计）属后续立项——勿读作已接线。
 
 ### 1.17 可转债覆盖与条款事件（delta `add-convertible-bond-coverage`，2026-10-18 登记）
+
+> **这节管什么**：可转债主表/行情与强赎、下修条款事件的数据源与状态推导；转债观察清单零 LLM、纯观察通道。
 
 **数据源与字段口径**（2026-10-18 本机 akshare 1.18.94 实探；docs 口径以本小节 + 实现映射表为准）：
 
@@ -407,6 +504,8 @@ null + 「日历不可用」文案冒充刷新，评审 F2）；两种情形均*
 
 ### 1.18 分析师事后检验（delta `add-analyst-ex-post-verification`，2026-10-20 登记）
 
+> **这节管什么**：把外部研报的评级调整 / EPS 修正 / 目标价变动当成可检验主张，事后按真实超额收益给机构记分；只读、不进任何决策路径。
+
 **事件定义**：只检验变动。评级序数 买入=5 / 增持=4 / 中性=3 / 减持=2 / 卖出=1；当前评级
 与前次比较 → 上调 / 下调 / 维持（维持作为对照组）；前次缺失或 `is_first_rating=1` → 首次评级；
 评级词未识别不生成主张，MUST NOT 依赖巨潮 `rating_change` 文本（实测只有「维持/未知」）。
@@ -428,6 +527,8 @@ v1 只读、MUST NOT 进入分析师/辩论/交易/风控/执行任何决策路�
 job `analyst_claim_settle_daily`（17:00，零 LLM）生成主张 → 结算 → 落当日快照。
 
 ### 1.19 内外资分开打分（delta `add-region-split-broker-scoring`，2026-10-20 登记）
+
+> **这节管什么**：内资研报（事件研究法）与外资观点（情绪分）两套分数分开算、不合并横比；都是只读观测。
 
 **口径隔离**：内资 `analyst_claims.region='domestic'` / 记分卡 `score_family='event_study'`；
 外资 `foreign_broker_events.region='foreign'` / 记分卡 `score_family='sentiment'`。
@@ -458,6 +559,8 @@ positioning/sentiment 取方向符号 × 置信度；`direction=neutral|unknown`
 
 ### 1.20 决策 confidence 分布（delta `calibrate-decision-confidence`，2026-10-22 登记）
 
+> **这节管什么**：每次实验记录决策 confidence 的分布形状（中位数/高低置信尾部占比），用作校准观测；不是 judge 维度，不比较单条数值。
+
 **口径**：每次 hosted 实验从 `final_trade_decision` 取 `action` 与 `confidence`（缺失不计入），
 在产物 JSON 的 `means` 中登记：
 
@@ -476,6 +579,40 @@ positioning/sentiment 取方向符号 × 置信度；`direction=neutral|unknown`
 **首轮读数（2026-10-22，round15 单变量）**：n=9，median 0.55，`hist={0.5: 9}`，`≥0.7` 0%、
 `<0.4` 0%；action 9/9 watch。三档 prompt 校准**未移动分布**（假设证伪），机制归因为决策策略
 均衡带 + 样本构成，下一轮候选见 `tests/validation/2026-10-22-calibrate-decision-confidence-validation.md`。
+
+### 1.21 因子 IC 回填与衰减监控口径（2026-10-27 登记；owner 裁决 issue #454）
+
+> **一句话**：因子 IC 缺口回填只补最近 90 个交易日（衰减判定够用），且必须按历史日逐日重算——禁止拿最新面板冒充历史窗；两个「最少样本数」常量含义不同，不得混写。
+
+**回填边界**：`factor_decay_monitor` 的 IC 缺口回填窗口 = **90 交易日**（`DECAY_WINDOW 60 + 30`，`_PANEL_LOOKBACK_DAYS`）。依据：衰减判定只消费最近 **79** 个 IC 点（`DECAY_WINDOW + DECAY_NEGATIVE_DAYS − 1`），窗口外更早缺口诚实留洞；不得为衰减判定扩深面板（准入面板 250/500 日是独立口径，见 `constraints.py`），更长 IC 历史需求走独立回填工具、不挂日监控。
+
+**回填口径（硬约束）**：IC 缺口 MUST 按**历史日重算**——每个历史日用其自身的截面因子值与远期收益（`rank_ic_series` 面板逐日）；**禁止以最新面板冒充历史窗**：最新面板的因子值只在最新交易日成立，回填历史窗 = 前视污染，会系统性抬高闸②/衰减读数。
+
+**两个样本数不得混写**：`MIN_IC_SAMPLES_FOR_SCORING = 10`（选股打分的最少 IC 采样天数，不足走流动性降级 fallback）≠ `MIN_IC_SAMPLES = 30`（`rank_ic_series` 单日截面最少有效票数，不足该日 NaN）。口径变更先改本节再动代码。
+
+### 1.22 cohort 评估程序口径（delta `add-cohort-evaluation-program`，2026-10-29 登记；数据基点 2026-10-29）
+
+> **一句话**：cohort 日批（10 只池、每日自动分析）的四轨道评估口径——供给成本 / 过程质量 / 方向能力 / 日频价值，四轨独立出数、不合成总分；`r_e` 反事实用来判断「观望是否在系统性错过机会」。
+
+cohort 日批（universe-v1，10 只，9-25 起）的四轨道评估口径。四轨道 SHALL 独立出读数，SHALL NOT 加权合成单一总分。口径变更先改本节再动代码；实现 = `scripts/cohort_eval_readout.py`（只读、零 LLM、参数 `--as-of` / `--universe-version`）。
+
+**轨道 A 供给成本**（每成功一份归一）：成功率复用 §1.9⑧ attempt success rate（`success/(success+failure)`，`skipped` 不进分母）；`tokens_per_success` = Σ`tokens_total` / Σsuccess（`job_runs` 汇总行口径）；预算占用 = cohort 当日 tokens_total / `COHORT_DAILY_TOKEN_BUDGET`（默认 3,000,000，env 可覆盖，以 `job_runs` summary 的 `daily_budget` 实值为披露值）；`opinions_persisted` 落库率复用 §1.9⑧。
+
+**轨道 B 过程质量**：citation 三项（§1.3 口径）从 Langfuse Scores 按 trace 拉取，报日均值时间序列 + 覆盖率（有分数成功 trace / 全部成功 trace）。归因纪律：分段变化先核对供给面切换时点，排除换模型解释前不得归因分析师。
+
+**轨道 C 方向能力**：① neutral 反事实 `r_e`（见下）；② short/long 结算胜负，挂**到期闸**——open 方向性观点到期数 ≥30 或 2026-11-15 前后到期潮完成后方可出正式读数，此前只许 `preliminary` 标注。与 §1.9② 结算侧回避判定的关系：结算侧 = ±2% 带内判定、随结算排期出、写 `avoidance_status`；评估侧 `r_e` = 连续分布、即时、只读自算、零写入——两者并列披露，不互替、不互相校准。
+
+**轨道 D 日频价值**（仅描述统计）：翻转率 = 每票相邻两分析日方向变动的周均值（池内均值）；保鲜期 = T 日方向符号与 T+k（k=1..20）实现超额符号一致率曲线（仅 long/short 进，neutral 不进）。
+
+**窗口切分（硬约束）**：`W1 = 2026-09-25~10-10`（分析 kimi）、`W2 = 2026-10-13~10-16`（分析 deepseek）、`W3 = 2026-10-17 起`（deepseek + judge@opencode；本轮无 judge 消费，W2/W3 分界服务未来 judge 批接入）。段内出结论；段间差异只作换模型影响专案记录。熔断整批失败日（10-09 / 10-16，success=0）剔除出轨道 A 成本均值并单列，成功率分母照计。后续新增供给面切换事件须增段。
+
+**neutral 反事实 r_e**：T = 决策归属日；个股腿 = `close_raw(T+20 交易日)/open(T+1 交易日) − 1`（`market_snapshot.db`，T+20 = 其后第 20 个交易日）；基准腿 = `index_closes` 000300 `close(T)/close(T+20) − 1`；`r_e` = 个股腿 − 基准腿。同票同日多条取 `created_at` 最晚一条（同 §1.9-v2 日主口径）。起止日任一缺行（个股或基准）→ 剔除并计 `missing_bars`，不插值。判读：池内 `r_e` 分布中心 >0 ⇒ 观望在系统性错过机会（进全观望锁定处置证据）；≤0 ⇒ 观望自洽。
+
+**统计单位与结论限级**：所有跨样本检验以交易日为统计单位（先每日横截面均值再跨日，n = 有效交易日数）；n<15 的段结论限级为量级描述（不得「显著优于/劣于」），报告强制附「未达显著 ≠ 无差异」声明。
+
+**confidence 归因闸**：confidence 进本程序任何下游使用（校准曲线、置信分组）前须完成归因——按（日期 × 方向）分桶定位堆积起止日与供给面/prompt 切点（衔接 §1.20：10-22 round15 已有一次先例，median 0.55、归因均衡带、三档示例 prompt 未移动分布）+ 抽 ≥5 条人工判读，三态结论 `prompt-anchor` / `default-fallback` / `genuine-mode` + 处置去向。
+
+**产物纪律**：脚本只读（运行前后 `predictions` / `cohort_runs` 等业务表零变化）；报告落 `docs/evals/cohort-eval-<日期>.md`；`runs.jsonl` 追加 `type: cohort-eval` 行。
 
 ### 1.23 因子准入数据口径（2026-11-01 登记；owner 拍板 issue #512/#513）
 
@@ -510,6 +647,13 @@ date×code 格。快照缺数空洞（BSE 断档、退市缺行、次新股上�
 | r3 09-11 02:08Z | 4f0db3f | 覆盖率并行语义+预算放宽+evidence 逐条 | 5.0 | 5.0 | 4.22 | 4.78 | 0.111 | 0.918 | 未拆报 | 0 |
 | r4 09-11 07:36Z | 322ce18+容忍补丁 | 阶段 0–5 全量：重试停用+校验器归一+分型回声+auto-claim+三层拆报 | 4.93 | 5.0 | 4.0 | 4.89 | 0.333（blocked 6/9） | 0.837¹ | 6/9｜1.89/条｜5.22/条 | 0 |
 | r5 09-12 03:17Z | fa9f72b | 6.2 重评全量重跑（fa9f72b 渲染修复生效：辩论预算 24000）；东财数据源当日大面积不可用（百度+腾讯回退），对比含环境混淆 | 5.0 | 5.0 | 4.22 | 5.0 | 0.556（blocked 4/9） | 0.879 | 4/9｜0.78/条｜8.0/条 | 0 |
+| r8 09-13 21:32Z | cdca5b1+027+v7 | 基线重建轮（三变量：v7 rubric / 派生指标喂回 / 027 价位校验回路激活）；dg 3.56 系 v7 归属+解读失当扣分生效（契约抽验 4 条低分全中 v7 规则）；blocked 4/9 | 5.0 | 4.22 | 3.56 | 4.89 | 0.556（blocked 4/9） | 0.835 | 4/9｜1.22/条｜5.33/条 | 0 |
+| r9 09-14 00:37Z | afd9d1f+v8 | 混合变量轮（材料升级：consistency 补 Trader 方案节 + debate 收敛骨架行；rubric v8 三版本两判例）；审计：dg 归属扣分全为真错安（判例无误放）、Trader→RJ 静默推翻核对首次可判、debate 5 分档仍漏判 ≥3 行（v9 候选：强制枚举）；blocked 6/9 | 5.0 | 4.67 | 3.44 | 4.67 | 0.333（blocked 6/9） | 0.843 | 6/9｜1.44/条｜6.33/条 | 0 |
+| r13 09-23 02:02Z | 356feb4（三 delta 合入后） | **新口径首轮**：K=3 均值 + quick 停评 + relevance v4（跨 09-22 两切点，绝对分不与 r1–r9 直接比较）；生产栈含 bear 锚点 prompt/v28 契约/赔率自检；**blocked 9/9 + 真错 4.0/条为系列新高，待分桶归因不处置** | 5.0 | 4.0 | 3.52 | 4.78 | 0.0（blocked 9/9） | 0.786 | 9/9｜4.0/条｜7.44/条 | 0 |
+| r14 10-22 07:34Z | 124102c3+工作区（trader prompt v34） | **跨版本轮（非单变量）**：trader prompt 由未合并分支 v33 切回 main v34（incident 048）+ 东财封禁/AKShare 全程连接失败（数据链降级）+ 新增 provider fallback 未触发；relevance 首次跌破 5（4.556）、dg 回升 4.37、citation 真错与归一同步 ×3（12.0/条、22.2/条）**待分桶归因不处置** | 4.556 | 4.111 | 4.370 | 4.815 | 0.0（blocked 9/9） | 0.911 | 9/9｜12.0/条｜22.2/条 | 0 |
+| r15 10-22 09:36Z | 124102c3+工作区（confidence 三档） | **单变量轮**：三决策节点 confidence 段改三档判据+示例（trader/risk_judge v35、FM v32）；**阴性**：confidence 仍 9/9 落 0.5–0.58（≥0.7 0%、<0.4 0%、9/9 watch），judge 四维同量级；机制归因均衡带+样本构成，不再叠加 prompt 补丁 | 4.778 | 4.185 | 4.296 | 4.741 | 0.0（blocked 9/9） | 0.901 | 9/9｜17.1/条｜23.3/条 | 0 |
+
+（r10–r12 为离线重判轮，不产管线 run，无表行；见 §2.4/§2.5。）
 
 ¹ r1–r3 的 `citation_pass` 是旧口径（FAIL=0，含校验器误报），与 r4 起 `citation_blocked` 不可直接比较。
 ² 拆报四项自 r4 起记录：verifier_normalized 5.22/条（echo 34+percent 13，校验器解析债）、unverifiable text 3.11 + unregistered 4.0（每条 deep）。r4 收口详见 [2026-09-11-citation门禁整改r4收口报告.md](2026-09-11-citation门禁整改r4收口报告.md)。
@@ -517,39 +661,182 @@ date×code 格。快照缺数空洞（BSE 断档、退市缺行、次新股上�
 
 人工校准：round5（53 行）全线未达标（整体 Spearman -0.36 / MAE 1.81 / 方向一致率 32%）→ 材料与 rubric 修复多轮 → **round7（41 对终裁后终值，r3）全维度达标：整体 MAE 0.342 / 方向一致率 97.6%，judge 自 round7 起可用**（终裁：4 行 judge 的 source 归属扣分成立改 4、1 行 judge 误判维持人工 5、1 行灰区维持 5；详见 [2026-09-13-round7-judge校准报告.md](2026-09-13-round7-judge校准报告.md)。rubric v7 四项改动已定稿待 bump：debate 5 分收紧 / source 归属三层判法 / 组合 claim 归属规则 / 解读失当强化）。
 
-**消融口径切点（2026-09-15，delta `update-ablation-driver-parity-and-report-status`，未跑批）**：① `aggregate_results` 点估计字段 `diff_median` → `diff_mean`（口径本就为均值差，见 §1.5），历史产物 JSON 复算须按新名读；② 跑批驱动 `ablation_pilot.py` 的维度过滤改调库侧 `_applicable_dims`（此前自带硬编码分支 → plus_debate 的 grounding/consistency 照评，即 n10 批次 #112 伪影的来源），并在每条 run 前核验快照 digest；③ `evals/ablation/results/pilot.md` 标 `superseded-by` 指向 n10 报告并就地撤回简历素材段结论；④ n10 报告（09-03）补四处适用口径披露——**该批次 judge 未校准**（早于 round7 达标 10 天）、#112 伪影存活（其 full−plus_debate 的 grounding/consistency 两条 Δ 标为无效比较）、有效 n=3、citation_pass 不作层增量解读。**据此，n10 批次的可成立结论收缩为「未获统计支持」，其成本数字（辩论层 +7.9% / 决策+风控层 +30.1% / 裁到 analysts 省 28.7%）仍有效但不足以支撑裁剪决策。**
-**judge 材料口径切点（2026-09-16，delta `add-debate-argument-anchors`，未跑批）**：debate_quality 的 `debate_history` 材料在收敛骨架行后新增「【锚点覆盖】bull a/b｜bear c/d｜风控 e/f（含拆项）」骨架行，每条论点行加 `[kind 状态]` 前缀（状态取自 `debate_anchor_checks`）。**跨此切点的 debate_quality 分数不可直接比较**；rubric 版本不变（v6），`points` 契约不变。确定性指标 `argument_anchor_coverage`（§1.2）进评估器/实验报告/消融 run 记录（value + 拆项）。首轮真实链路实测（600519 ×2）：覆盖 16.3% / 22.2%，`unresolved`（申报了锚但不可解析）占 51%/44%，`unspecified` 0、`missing_required` 0–1；逐条归因为**路径格式/引导问题**（自造 `fundamental./macro./technical.` 前缀、描述混入锚点、event 整句改写），**无编造**——prompt 迭代候选已登记（见 `tests/validation/2026-09-16-add-debate-argument-anchors-validation.md`）。
-**消融 v2 口径切点（2026-09-16，delta `revamp-ablation-v2-causal-claims`，未跑批）**：① 消融聚合的 citation 腿接入四桶拆报，`citation_pass` 标量退出层增量比较路径（标量仍产出、不再进层增量裁决）；② 驱动薄壳化——`ablation_pilot.py` 的 judge 判分与 `judge_vars` 材料落盘移入库侧，驱动只留续跑/记账/coverage 包装；③ 口径先行登记（§1.7）：因果下游指标准入 + 判定方式 code｜nli｜judge、校准门控 0.80 覆盖全部 nli/judge 指标、逃逸率分母=已终裁单元（未终裁 `rate=None` 不报 0%）、结论两句式 + MDE 强制；④ 结论注册表落地——报告头部生命周期字段 + `docs/evals` 索引（[`README.md`](README.md)）渲染状态；首批注册对象：`evals/ablation/results/pilot.md` 标 `superseded-by` 指向 n10 报告、n10 报告标 `active`，其余存量文档列入索引「未标注生命周期」（未标注 ≠ 作废）。**跨此切点的消融层增量结论须按新口径读**：v1 的 judge 四维层增量与 `citation_pass` 标量读法不再作为层增量裁决依据。
-**决策契约口径切点（2026-09-21，delta `require-watch-hold-rationale`，未跑批）**：watch/hold 决策新增结构化 `inaction_reason`（不行动原因）与 `reeval_triggers`（可观察再评估触发条件）——两侧一次打回回路（trader 侧 `validate_trade_prices` / 终稿侧 `risk_judge`，同价位必填语义）+ 报告结构化渲染（缺失如实标注「未申报」）。prompt 契约同步（trader/risk_judge **v28**，2026-09-21 发布）。**judge 材料经 `_serialize_decision` 自动携带新字段 → B5 可执行性维度（rubric 原句「'观望等待好转' = 差」，`family_b_judge.py:227`）与 consistency 的打分基线可能移动，跨此切点的 B5 pairwise 分数不可直接比较**；action 语义与动作分布不变（契约不改决策倾向，真实产出分布待下轮读数核）。取证背景与真实链路实证（600519 一次产出合格字段、risk_judge 改写非照抄）见 `docs/evals/2026-09-21-决策层全watch取证.md` 与 `tests/validation/2026-09-21-require-watch-hold-rationale-validation.md`。
-**hosted 判分口径切点（2026-09-22，delta `switch-hosted-judge-to-k-mean`，未跑批）**：`python -m evals.run` 的 judge 判分从单次调用改为 **K 次均值**（`run_judge_mean`，K 经 `--judge-repeats` 声明、默认 3；scores/spread/部分失败计数随 Scores.comment 落库，产物 JSON 记 `judge_repeats`）。round11 实测单次调用在 4/5 边界双峰翻转（同材料 n=13：4 分 7 次/5 分 6 次）、K=3 中极差>0 行 5/8——单次噪声与 hosted 待测回归效应同阶，故与消融路径（2026-09-14 起 K 均值）统一协议。**跨此切点的 judge 绝对分不可与 r1–r9（单次口径）直接比较**；切点前「跨实验比较按同噪声下的相对差异解读」的临时纪律随之退役。非 debate 维度结果形状不变；debate 封顶/枚举遥测取最低分调用（与消融同口径）；judge 维度均值在时间线表中的含义不变（仍为各 item 点估计的均值）。
-**report_relevance 口径切点（2026-09-22，delta `resolve-report-relevance-zero-variance`，未跑批）**：quick 条目停评全部 judge 维（该维 quick 段自 r3 起零方差全 5、Spearman 不可算，失败面由 ticker_match/section_coverage/citation 系确定性指标覆盖）；deep 条目保留并 rubric **v3→v4**（5 分档锚点判例：查询显式子问题逐一回答方可给 5，任一被回避/泛泛带过降 4 且 reason 指明被回避的子问题）。**跨此切点 report_relevance 均值不可直接比较（quick 行退出分母 + v4 收紧）**。离线校准（round7 同批 14 行、K=3 均值）：MAE **0.143** / 方向一致率 **1.000**，过门（≤1.0 / ≥0.80）——如实记录：**14 行 v4 全部仍 5（含人工打 4 的两行），锚点判例在本样本未产生降分行**（样本查询多为单一焦点），判例实际区分力待含多焦点查询的下轮样本验证（产物 `evals/judge_calibration/data/judge-sample-round12-relevance-v4.jsonl`，脚本 `tests/scripts/rejudge_relevance_v4.py`）。
-**Outcome 收益口径切点（2026-09-23，delta `add-outcome-profitability-protocol`，未跑批）**：outcome 收益指标口径登记 §1.9（主指标 T+20 超额 / 回避辅助 / settled<10 红线 / 收口纪律 / 泄漏控制），首个 outcome 预登记落 `evals/ablation/preregister/2026-09-23-outcome-forward-and-backtest.md`。**本切点只登记口径与纪律，不改任何结算行为**——T+20 结算窗口、回避判定、标准化入场价的落地在 delta `update-decision-settlement-contract`（其切点另行登记）；读数腿（forward cohort / walk-forward 回测）开跑前置 = 两 delta 均已落地，且首个读数之前 §1.9 与预登记不得再改（改须走 §1 修订 + 新预登记版本 + 新切点行）。（同日实施期修订注记：实施收口前对 §1.9 做了**预数据口径澄清**——① 明确均值人口为 long/short 全部已判定观点（三态）与标的簇 bootstrap CI、胜率为描述性指标、BENCHMARK_CODE 环境覆盖即失效；⑤ 将「行情缺失率」正名为不可判定率（与结算成功率同分母互补）。修订发生于**未跑批、无任何读数、无数据依赖选择**之前；预登记文档同步措辞对齐，门禁字段无实质变更。）
-**结算契约切点（2026-09-23，delta `update-decision-settlement-contract`，未跑批；口径见 §1.9（Outcome 收益指标））**：默认判定窗口 252→20（配置项 `OUTCOME_DEFAULT_HORIZON_DAYS`）；判定入场基准改为派生 `settle_entry_price`（归属日收盘 / 收盘后次一交易日 / 非交易日顺延），参考价仅展示与盯市；neutral 观点改回避判定（`avoidance_status`，不进胜率，不走 superseded；判定后 `status` 落终态 `avoidance`）；track-record 判定链路补齐 long/short 的 decision_* Score 上报。**存量已结算行不重算、存量 open 按原 horizon 判定；跨此切点的胜率读数不可直接比较**（头条口径按 `caliber_horizon=20` 过滤，`legacy_settled` 字段披露存量计数）。真实链路 LLM 端到端（deep 分析 → 落库 → 判定）留待 owner 有预算时补跑。`agent_metrics_daily` 日批快照同按 `horizon_days=DEFAULT_HORIZON_DAYS` 过滤（跨切点不混算）。（同日实施期修订注记：§1.9⑤ 健康检查分母明确为「已判定（含回避判定）= `resolved_*` 三态 + `status='avoidance'` 且 `avoidance_status` 非空」+ `unresolvable` 的互补两率——把回避终态从「两侧都不计」修正为计入已判定，防止 §1.9⑤ 门禁对大量 neutral 流量假 FAIL；修订发生于**未跑批、无任何读数、无数据依赖选择**之前，属实施期口径澄清，不触发新预登记版本。）
-**cohort 启用切点（2026-09-23，delta `add-forward-paper-trading-cohort`，未跑批）**：标的池 `universe-v1`（10 只，seed 42，池快照可离线重建）；开关 `COHORT_ENABLED` 默认关；开启前须 owner 批预算（≈1.7M tokens/日）；读数口径见 §1.9⑧。
-**复权口径切点（2026-09-23，delta `add-backtest-leakage-controls`，未跑批）**：结算与回测取数统一**后复权（hfq）**，分析输入保持前复权；跨切点的结算数值（分红除权样本）不可直接比较，存量已结算行不重算。
-**泄漏控制启用切点（2026-09-23，delta `add-backtest-leakage-controls`，未跑批）**：回测**正式批（`--batch-kind formal`）**绑定预登记（门禁字段 `OUTCOME_REQUIRED_FIELDS`，无效预登记拒绝正式批身份）+ 干净窗口判定（决策日距跑批日 ≥ 20 个**交易日**，基准不可得 / 空样本保守判不通过）+ 泄漏探针披露（裸问三层题，方向命中率阈值 0.60，超阈 → 结论降级为「泄漏污染下的上界证据（真实 skill ≤ 读数）」；探针不可测 → 按通路验证处理）。`--batch-kind pathway`（默认）结论恒标「通路验证定位」，不产 skill / 赚钱能力结论句——**深历史批次永久定位通路验证**（记忆泄漏不可根除，只可披露与降级）。报告 md 落 `evals/backtest/results/*.md`（含生命周期 status 头，已纳入 `docs/evals/README.md` 结论注册表索引扫描范围）；`evals/backtest/results/pilot-2023-shock.md` 就地补 status 头 + 「通路验证 + 泄漏风险」标注（原文与数字保留）。**本切点不产生任何 skill 读数**：首个正式批的窗口与样本量由预登记 MDE 反算后 owner 批预算，探针降级阈值（0.60）为预登记可调项。
+**消融口径切点（2026-09-15，delta `update-ablation-driver-parity-and-report-status`，未跑批）**
 
-**决策完整性 anomaly 信号启用切点（2026-09-30，delta `update-decision-integrity-gates`，未跑批）**：决策层新增三类确定性可观测信号——①决策文本价位交叉校验 anomaly（偏差形态：触发价 vs 已验证指标偏差 >2% 且不在参考带；空洞形态：上破/下破触发价已被现价满足），②buy/sell 终稿再评估触发条件打回标注（final_reeval_check note），③FM 置信度漂移（|FM−终稿|>0.15 时报告标注）。**全部只观测不进处置**（incident 026 纪律：聚合指标进入处置前须分桶归因逐条人工终裁），信号经 anomalies 通道与报告标注呈现，供后续轮次 judge 材料与标注人使用。本切点不产生任何读数，§2 时间线不加行。
+> **一句话**：把消融统计量的名字与实现改对齐（`diff_median`→`diff_mean`）、维度过滤改调库侧实现、旧 pilot 报告标废弃指向 n10；n10 报告补披露后，它当初「裁层省钱」的结论收缩为「未获统计支持」。
 
-**运维控制台启用切点（2026-09-24，delta `add-eval-ops-console`，未跑批）**：设置中心新增「评估运维」分区（六页签），把日批五任务（判定 / 盯市 / 指标快照 / 完整性 / cohort）的状态与运行历史、手动补跑、cohort 开关与跑批时刻、回测批与泄漏探针触发、outcome 收口健康检查、回测报告注册表、预登记版本化与口径旋钮全部纳入界面（只读 + 触发；烧钱动作一律前端确认 + 后端沿用既有门禁，**预算熔断 / 串行 / usage 真值记账一行不改**）。**cohort 开关与跑批时刻的运行期唯一真相源由环境变量改为持久化 `ops_config` 表**（`cohort_enabled` / `cohort_hour` / `cohort_minute`；env 仅作进程启动引导默认值、已有表值不被覆盖，重启保持）——**跨此切点，「改 env 重启生效」的运维时代结束：旧的「env-only」运维期与切点后的界面期不可直接比较**（同一开关在两期的取值来源不同；切点后归因不得再把环境变量改动当作生效手段，须查 `ops_config` 现值与 `job_runs` 审计行）。调度器未启动（TESTING=1 或显式禁用）时状态接口显式返回「未运行」而非 500 或空列表。口径旋钮（判定窗口 / 中性带 / 探针阈值 / 最小已结算样本）的界面修改**只生成 `docs/evals/caliber-drafts/ops-caliber-draft-*` 草稿**，不写本文件、不改 `evals/outcome/caliber.py` 常量——生效仍须走 §1 口径修订 + delta 流程（草稿落在 `openspec/changes/` **之外**：骨架草稿未成 change，放进 changes/ 会让仓库级 `openspec validate --all --strict` 报错，见 `tests/validation/2026-09-24-add-eval-ops-console-validation.md` 残留风险）。**本切点不产生任何读数**：无 cohort 跑批、无回测正式批、无探针 LLM 调用，故 §2 时间线不加行。
+- ① `aggregate_results` 点估计字段 `diff_median` → `diff_mean`（口径本就为均值差，见 §1.5），历史产物 JSON 复算须按新名读；
+- ② 跑批驱动 `ablation_pilot.py` 的维度过滤改调库侧 `_applicable_dims`（此前自带硬编码分支 → plus_debate 的 grounding/consistency 照评，即 n10 批次 #112 伪影的来源），并在每条 run 前核验快照 digest；
+- ③ `evals/ablation/results/pilot.md` 标 `superseded-by` 指向 n10 报告并就地撤回简历素材段结论；
+- ④ n10 报告（09-03）补四处适用口径披露——**该批次 judge 未校准**（早于 round7 达标 10 天）、#112 伪影存活（其 full−plus_debate 的 grounding/consistency 两条 Δ 标为无效比较）、有效 n=3、citation_pass 不作层增量解读。
+- **据此，n10 批次的可成立结论收缩为「未获统计支持」，其成本数字（辩论层 +7.9% / 决策+风控层 +30.1% / 裁到 analysts 省 28.7%）仍有效但不足以支撑裁剪决策。**
+**judge 材料口径切点（2026-09-16，delta `add-debate-argument-anchors`，未跑批）**
 
-**judge 端点切换切点（2026-10-04，delta `add-kimi-reasoning-effort`（#218/#219）；未跑批）**：judge LLM 从 deepseek-v4-flash@方舟（temperature=0.0）切至 **kimi-for-coding@Kimi Code**（`JUDGE_REASONING_EFFORT=none` 关思考，路由无思考 K2.8；切换动机=方舟套餐到期 + 裁判与被评模型解耦）。**采样口径变化：Kimi Code 端点采样温度锁死（实证：思考档仅接受 temperature=1、无思考档仅接受 0.6，其他值一律 400），kimi 请求 temperature 一律不发送（adapter→gateway `suppress_temperature` 契约），judge 实际采样=端点固定值 0.6**——采样确定性较 T=0.0 弱化，单次判分噪声边界相应变化（K 次均值协议不变、rubric 版本不变、材料口径不变）。**跨此切点的 judge 绝对分不可直接比较**（judge 模型与采样双变），跨轮结论以同切点内比较为准。同日管线主 LLM env 回退链切 bigmodel glm-5.3（config-only，请求级配置不受影响；bigmodel 端点对 glm-5.3 接受 temperature=0.3，管线口径无变化）。
+> **一句话**：judge 评辩论时拿到的材料里加了「锚点覆盖」统计行（论点是否挂着数据出处），debate_quality 分数自此跨切点不可比；首轮实测锚点覆盖率偏低，归因是格式/引导问题、无编造。
 
-**judge 端点切换切点（2026-10-11，config-only 双向对换；未跑批）**：judge LLM 从 kimi-for-coding@Kimi Code 切至 **glm-5.3-flash@bigmodel coding**（`JUDGE_REASONING_EFFORT` none→**low**：glm 族无 none 档（`ArkGLMOptions` 仅 max/high/low，thinking 强制开启），low 为最接近原「关思考」口径的最轻档，探针实证 low 档思考显著缩短）。**采样口径：temperature=0.0 保留（探针实证 glm-5.3-flash 接受 T=0.0 与 effort=low 含组合），judge 实际采样=T=0.0**——较上一切点的「端点固定 0.6」确定性增强。（2026-10-17 勘误：实测 adapter 对含 glm 的模型名按 `capability_for_model` 启发命中 ark-glm preset（`reasoning_forced=True`）在发送前剔除 temperature——含 glm 名模型两代端点均从不携带 temperature（2026-10-17 A/B 72/72 次调用同款剔除告警），实际采样跟随模型/端点默认；「judge 实际采样=T=0.0」不成立，成立的仅为「端点接受 T=0.0」。K 均值协议、rubric 版本与读数口径均不受影响，此处仅更正事实描述。）**跨此切点的 judge 绝对分不可直接比较**（judge 模型与采样双变），跨轮结论以同切点内比较为准；round 系列校准数据若需跨切点复用，仅方向性结论可参考。同日管线主 LLM env 回退链从 bigmodel glm-5.3 切 **k3-256k@Kimi Code**（被评对象模型变更，config-only；采样口径变化：① Kimi 端点温度锁死仅接受 1，harness 路径 temperature=0.7 走 adapter 温度拒绝自动降级（spec「temperature 拒绝自动降级」，每次调用多一次 400 往返，trace 记 `degradation=temperature_dropped_endpoint_rejected`），单发管线调用不携带 temperature 跟随端点固定值；② effort 不携带（kimi env 分支无 effort 出口）跟随端点默认 k3 族=high，**较 glm 期的 LLM_REASONING_EFFORT=low 思考量上升**；③ 输出预算：env-kimi capability max_output=8192（glm 期 ark-glm 为 65536），reasoning 与正文共享，长输出节点截断风险上升（OutputTruncated→续写 1 次→report 降级链兜底），若实跑截断率显著需立项 kimi capability preset）。同日 `LLM_MAX_CONTEXT=256000` 启用（k3-256k 真实窗口兑现，ContextBudget/压缩阈值随动，react 预算 128k→256k）。
+- debate_quality 的 `debate_history` 材料在收敛骨架行后新增「【锚点覆盖】bull a/b｜bear c/d｜风控 e/f（含拆项）」骨架行，每条论点行加 `[kind 状态]` 前缀（状态取自 `debate_anchor_checks`）。
+- **跨此切点的 debate_quality 分数不可直接比较**；rubric 版本不变（v6），`points` 契约不变。
+- 确定性指标 `argument_anchor_coverage`（§1.2）进评估器/实验报告/消融 run 记录（value + 拆项）。
+- 首轮真实链路实测（600519 ×2）：覆盖 16.3% / 22.2%，`unresolved`（申报了锚但不可解析）占 51%/44%，`unspecified` 0、`missing_required` 0–1；逐条归因为**路径格式/引导问题**（自造 `fundamental./macro./technical.` 前缀、描述混入锚点、event 整句改写），**无编造**——prompt 迭代候选已登记（见 `tests/validation/2026-09-16-add-debate-argument-anchors-validation.md`）。
+**消融 v2 口径切点（2026-09-16，delta `revamp-ablation-v2-causal-claims`，未跑批）**
 
-**管线主 LLM 切换切点（2026-10-13，config-only；未跑批）**：分析 LLM 从 k3-256k@Kimi Code 切至 **deepseek-v4.1-flash@opencode zen/go**（被评对象模型变更；judge 保持 glm-5.3-flash@bigmodel 不变）。实测探针（五项 capability probe，离线脚本与 `/api/llm-config/test` 双通道）：non_stream / stream / tool_call / tool_followup 四过；json_output 不支持（`response_format=json_object` 被端点拒绝，管线无消费方，仅能力矩阵记录）。（**2026-10-23 勘误**：该「不支持」系 probe 缺陷——探测请求 prompt 为「说你好」却强制 `response_format=json_object`，DeepSeek 系端点要求 prompt 含 `json` 字样否则 400；修正探测 prompt 后同一端点实测 `json_output=true`。管线仍无消费方，仅能力矩阵记录更正，不构成采样/评分口径变化。）**采样口径变化：① 温度恢复发送**——端点接受 T=0.3（节点调用）与 T=0.7（ReAct harness），kimi 期「端点锁死 + 每次调用一次 400 降级往返」的强约束消失，单发节点实际采样=T=0.3；**② effort 不携带**（env 分支 openai/ 前缀无 effort 出口，`LLM_REASONING_EFFORT` 不消费）跟随端点/模型默认，deepseek-v4.1-flash 为思考模型（reasoning 与正文共享 max_tokens 预算）——思考量基线待实跑观测；**③ 输出预算不变**（节点显式 65536 / harness 显式 16384，显式请求优先于 capability 静态 8192）；**④ `LLM_MAX_CONTEXT=256000` 不变**（模型原生窗口约 1M，models.dev opencode-go 目录：context 1000000 / output 384000；启用更大预算是独立决策）。opencode 网关强制 `x-opencode-session` 头——同日修复 probe 路径 `base_url` 别名漏注入（此前探针形态必 400；pipeline 走 `api_base` 不受影响）。**跨此切点的分数不可直接比较**（被评模型变更）；同一切点内比较不受影响。
+> **一句话**：消融的裁决依据整体换装——层增量不再看 judge 四维和 citation 标量，改看「因果下游指标 + 校准门控 + 两句式结论」；v1 的读法自此作废。
 
-**judge 端点切换切点（2026-10-17，config-only；未跑批）**：judge LLM 从 glm-5.3-flash@bigmodel coding plan 迁至 **glm-5.3-flash@opencode Go**（同模型换服务栈；`JUDGE_MODEL` / `JUDGE_REASONING_EFFORT=low` / rubric 版本 / K 均值协议均不变，仅 `JUDGE_BASE_URL` / `JUDGE_API_KEY` 换为 opencode 账号；备份 `.env.bak-judge-bigmodel-20261017`）。动机：① 解耦 bigmodel 5h 窗口熔断家族（10-16 分析侧实证三败）；② 与分析的 deepseek-v4.1-flash 额度独立（opencode Go 逐模型月额度：GLM-5.3-Flash $60 / DeepSeek V4.1 Flash $80）；③ 主管线与裁判同账号单网关。**采样口径：两代端点 temperature 均从未发送**（adapter 按模型名启发剔除，见同日对 10-11 条目的勘误；effort=low 经 extra_body 透传保留）——**本切点不引入采样变化**。**A/B 实测（同日、非跑批：2026-09-22 variant=full 冻结状态 3 标的（000001/300750/600887）× 4 维 × K=3 双端点同材料对跑，共 72 次调用；原始读数落 `log/judge_ab_result.json`，Langfuse 标记 `judge-endpoint-swap-ab`）**：解析失败 0/0；12 对配对单元 8 对完全一致、4 对 |Δ|≤1.0（其中 3 对为 K=3 内单次翻转=调用级噪声级；000001/decision_grounding 为 1 分系统差 4.0 vs 5.0），无 |Δ|>1——同模型跨栈总分分布一致度高，**但 1 分级差异不承诺跨切点可解读**（沿用「同噪声下相对差异」口径）。**跨此切点**：judge 模型与采样均未变、仅服务栈变更，绝对分可比性显著强于此前三次 judge 切点；保守起见跨轮结论仍以同切点内比较为准。运维注记：后端容器不消费 judge purpose（判分只走宿主机 evals 路径），容器 env 未重建、无一致性影响。
+- ① 消融聚合的 citation 腿接入四桶拆报，`citation_pass` 标量退出层增量比较路径（标量仍产出、不再进层增量裁决）；
+- ② 驱动薄壳化——`ablation_pilot.py` 的 judge 判分与 `judge_vars` 材料落盘移入库侧，驱动只留续跑/记账/coverage 包装；
+- ③ 口径先行登记（§1.7）：因果下游指标准入 + 判定方式 code｜nli｜judge、校准门控 0.80 覆盖全部 nli/judge 指标、逃逸率分母=已终裁单元（未终裁 `rate=None` 不报 0%）、结论两句式 + MDE 强制；
+- ④ 结论注册表落地——报告头部生命周期字段 + `docs/evals` 索引（[`README.md`](README.md)）渲染状态；首批注册对象：`evals/ablation/results/pilot.md` 标 `superseded-by` 指向 n10 报告、n10 报告标 `active`，其余存量文档列入索引「未标注生命周期」（未标注 ≠ 作废）。
+- **跨此切点的消融层增量结论须按新口径读**：v1 的 judge 四维层增量与 `citation_pass` 标量读法不再作为层增量裁决依据。
+**决策契约口径切点（2026-09-21，delta `require-watch-hold-rationale`，未跑批）**
+
+> **一句话**：watch/hold 决策新增必填的「不行动原因 + 再评估触发条件」（缺失打回）；judge 材料随之多出新字段，B5 与 consistency 的打分基线可能移动，跨此切点不可比。
+
+- watch/hold 决策新增结构化 `inaction_reason`（不行动原因）与 `reeval_triggers`（可观察再评估触发条件）——两侧一次打回回路（trader 侧 `validate_trade_prices` / 终稿侧 `risk_judge`，同价位必填语义）+ 报告结构化渲染（缺失如实标注「未申报」）。prompt 契约同步（trader/risk_judge **v28**，2026-09-21 发布）。
+- **judge 材料经 `_serialize_decision` 自动携带新字段 → B5 可执行性维度（rubric 原句「'观望等待好转' = 差」，`family_b_judge.py:227`）与 consistency 的打分基线可能移动，跨此切点的 B5 pairwise 分数不可直接比较**；action 语义与动作分布不变（契约不改决策倾向，真实产出分布待下轮读数核）。
+- 取证背景与真实链路实证（600519 一次产出合格字段、risk_judge 改写非照抄）见 `docs/evals/2026-09-21-决策层全watch取证.md` 与 `tests/validation/2026-09-21-require-watch-hold-rationale-validation.md`。
+**hosted 判分口径切点（2026-09-22，delta `switch-hosted-judge-to-k-mean`，未跑批）**
+
+> **一句话**：hosted 实验（`python -m evals.run`）的 judge 判分从单次调用改为 K 次均值——实测单次判分在 4/5 分边界翻得厉害（同材料 13 次：7 次 4 分、6 次 5 分），噪声与待测效应同阶；跨此切点的 judge 绝对分不可比。
+
+- `python -m evals.run` 的 judge 判分从单次调用改为 **K 次均值**（`run_judge_mean`，K 经 `--judge-repeats` 声明、默认 3；scores/spread/部分失败计数随 Scores.comment 落库，产物 JSON 记 `judge_repeats`）。
+- round11 实测单次调用在 4/5 边界双峰翻转（同材料 n=13：4 分 7 次/5 分 6 次）、K=3 中极差>0 行 5/8——单次噪声与 hosted 待测回归效应同阶，故与消融路径（2026-09-14 起 K 均值）统一协议。
+- **跨此切点的 judge 绝对分不可与 r1–r9（单次口径）直接比较**；切点前「跨实验比较按同噪声下的相对差异解读」的临时纪律随之退役。
+- 非 debate 维度结果形状不变；debate 封顶/枚举遥测取最低分调用（与消融同口径）；judge 维度均值在时间线表中的含义不变（仍为各 item 点估计的均值）。
+**report_relevance 口径切点（2026-09-22，delta `resolve-report-relevance-zero-variance`，未跑批）**
+
+> **一句话**：quick 条目停评 judge 维（它从 r3 起全 5 分、毫无区分度），deep 条目 rubric 收紧到 v4；离线校准过门，但收紧判例在样本里没实际降过任何分，区分力待验证。
+
+- quick 条目停评全部 judge 维（该维 quick 段自 r3 起零方差全 5、Spearman 不可算，失败面由 ticker_match/section_coverage/citation 系确定性指标覆盖）；deep 条目保留并 rubric **v3→v4**（5 分档锚点判例：查询显式子问题逐一回答方可给 5，任一被回避/泛泛带过降 4 且 reason 指明被回避的子问题）。
+- **跨此切点 report_relevance 均值不可直接比较（quick 行退出分母 + v4 收紧）**。
+- 离线校准（round7 同批 14 行、K=3 均值）：MAE **0.143** / 方向一致率 **1.000**，过门（≤1.0 / ≥0.80）——如实记录：**14 行 v4 全部仍 5（含人工打 4 的两行），锚点判例在本样本未产生降分行**（样本查询多为单一焦点），判例实际区分力待含多焦点查询的下轮样本验证（产物 `evals/judge_calibration/data/judge-sample-round12-relevance-v4.jsonl`，脚本 `tests/scripts/rejudge_relevance_v4.py`）。
+**Outcome 收益口径切点（2026-09-23，delta `add-outcome-profitability-protocol`，未跑批）**
+
+> **一句话**：「赚钱能力」指标（T+20 超额收益）的口径与预登记落档；本切点只登记规则、不改任何结算行为，读数腿开跑还差结算契约 delta 落地。
+
+- outcome 收益指标口径登记 §1.9（主指标 T+20 超额 / 回避辅助 / settled<10 红线 / 收口纪律 / 泄漏控制），首个 outcome 预登记落 `evals/ablation/preregister/2026-09-23-outcome-forward-and-backtest.md`。
+- **本切点只登记口径与纪律，不改任何结算行为**——T+20 结算窗口、回避判定、标准化入场价的落地在 delta `update-decision-settlement-contract`（其切点另行登记）；读数腿（forward cohort / walk-forward 回测）开跑前置 = 两 delta 均已落地，且首个读数之前 §1.9 与预登记不得再改（改须走 §1 修订 + 新预登记版本 + 新切点行）。
+- （同日实施期修订注记：实施收口前对 §1.9 做了**预数据口径澄清**——① 明确均值人口为 long/short 全部已判定观点（三态）与标的簇 bootstrap CI、胜率为描述性指标、BENCHMARK_CODE 环境覆盖即失效；⑤ 将「行情缺失率」正名为不可判定率（与结算成功率同分母互补）。修订发生于**未跑批、无任何读数、无数据依赖选择**之前；预登记文档同步措辞对齐，门禁字段无实质变更。）
+**结算契约切点（2026-09-23，delta `update-decision-settlement-contract`，未跑批；口径见 §1.9（Outcome 收益指标））**
+
+> **一句话**：结算规则换装——判定窗口 252 天改 20 天、neutral 改按「回避是否正确」单独判定；存量已结算行不重算，跨此切点胜率不可比。
+
+- 默认判定窗口 252→20（配置项 `OUTCOME_DEFAULT_HORIZON_DAYS`）；判定入场基准改为派生 `settle_entry_price`（归属日收盘 / 收盘后次一交易日 / 非交易日顺延），参考价仅展示与盯市；neutral 观点改回避判定（`avoidance_status`，不进胜率，不走 superseded；判定后 `status` 落终态 `avoidance`）；track-record 判定链路补齐 long/short 的 decision_* Score 上报。
+- **存量已结算行不重算、存量 open 按原 horizon 判定；跨此切点的胜率读数不可直接比较**（头条口径按 `caliber_horizon=20` 过滤，`legacy_settled` 字段披露存量计数）。
+- 真实链路 LLM 端到端（deep 分析 → 落库 → 判定）留待 owner 有预算时补跑。`agent_metrics_daily` 日批快照同按 `horizon_days=DEFAULT_HORIZON_DAYS` 过滤（跨切点不混算）。
+- （同日实施期修订注记：§1.9⑤ 健康检查分母明确为「已判定（含回避判定）= `resolved_*` 三态 + `status='avoidance'` 且 `avoidance_status` 非空」+ `unresolvable` 的互补两率——把回避终态从「两侧都不计」修正为计入已判定，防止 §1.9⑤ 门禁对大量 neutral 流量假 FAIL；修订发生于**未跑批、无任何读数、无数据依赖选择**之前，属实施期口径澄清，不触发新预登记版本。）
+**cohort 启用切点（2026-09-23，delta `add-forward-paper-trading-cohort`，未跑批）**
+
+> **一句话**：每日自动对 10 只固定池标的跑一遍分析的 cohort 通道立项（开关默认关，开前须批预算 ≈1.7M tokens/日）。
+
+- 标的池 `universe-v1`（10 只，seed 42，池快照可离线重建）；开关 `COHORT_ENABLED` 默认关；开启前须 owner 批预算（≈1.7M tokens/日）；读数口径见 §1.9⑧。
+
+**复权口径切点（2026-09-23，delta `add-backtest-leakage-controls`，未跑批）**
+
+> **一句话**：结算与回测取数统一改后复权（hfq），分红除权样本的结算数值跨此切点不可比。
+
+- 结算与回测取数统一**后复权（hfq）**，分析输入保持前复权；跨切点的结算数值（分红除权样本）不可直接比较，存量已结算行不重算。
+**泄漏控制启用切点（2026-09-23，delta `add-backtest-leakage-controls`，未跑批）**
+
+> **一句话**：回测「正式批」上新三道门——预登记绑定、干净窗口判定、泄漏探针；用历史数据跑的批次永久只算「通路验证」，不产赚钱能力结论（模型见过这段历史，测不出真本事）。
+
+- 回测**正式批（`--batch-kind formal`）**绑定预登记（门禁字段 `OUTCOME_REQUIRED_FIELDS`，无效预登记拒绝正式批身份）+ 干净窗口判定（决策日距跑批日 ≥ 20 个**交易日**，基准不可得 / 空样本保守判不通过）+ 泄漏探针披露（裸问三层题，方向命中率阈值 0.60，超阈 → 结论降级为「泄漏污染下的上界证据（真实 skill ≤ 读数）」；探针不可测 → 按通路验证处理）。
+- `--batch-kind pathway`（默认）结论恒标「通路验证定位」，不产 skill / 赚钱能力结论句——**深历史批次永久定位通路验证**（记忆泄漏不可根除，只可披露与降级）。
+- 报告 md 落 `evals/backtest/results/*.md`（含生命周期 status 头，已纳入 `docs/evals/README.md` 结论注册表索引扫描范围）；`evals/backtest/results/pilot-2023-shock.md` 就地补 status 头 + 「通路验证 + 泄漏风险」标注（原文与数字保留）。
+- **本切点不产生任何 skill 读数**：首个正式批的窗口与样本量由预登记 MDE 反算后 owner 批预算，探针降级阈值（0.60）为预登记可调项。
+
+**决策完整性 anomaly 信号启用切点（2026-09-30，delta `update-decision-integrity-gates`，未跑批）**
+
+> **一句话**：决策层新上三个纯代码的可疑信号探测（价位对不上、再评估条件空洞、FM 与终稿置信度漂移）——只挂出来看，不自动处置。
+
+- 决策层新增三类确定性可观测信号——①决策文本价位交叉校验 anomaly（偏差形态：触发价 vs 已验证指标偏差 >2% 且不在参考带；空洞形态：上破/下破触发价已被现价满足），②buy/sell 终稿再评估触发条件打回标注（final_reeval_check note），③FM 置信度漂移（|FM−终稿|>0.15 时报告标注）。
+- **全部只观测不进处置**（incident 026 纪律：聚合指标进入处置前须分桶归因逐条人工终裁），信号经 anomalies 通道与报告标注呈现，供后续轮次 judge 材料与标注人使用。
+- 本切点不产生任何读数，§2 时间线不加行。
+
+**运维控制台启用切点（2026-09-24，delta `add-eval-ops-console`，未跑批）**
+
+> **一句话**：评估运维搬进界面（六页签：日批状态/补跑/cohort 开关/回测/收口检查/注册表）；cohort 开关的真相源从环境变量换成数据库表——「改 env 重启生效」的时代结束，排查须查 `ops_config`。
+
+- 设置中心新增「评估运维」分区（六页签），把日批五任务（判定 / 盯市 / 指标快照 / 完整性 / cohort）的状态与运行历史、手动补跑、cohort 开关与跑批时刻、回测批与泄漏探针触发、outcome 收口健康检查、回测报告注册表、预登记版本化与口径旋钮全部纳入界面（只读 + 触发；烧钱动作一律前端确认 + 后端沿用既有门禁，**预算熔断 / 串行 / usage 真值记账一行不改**）。
+- **cohort 开关与跑批时刻的运行期唯一真相源由环境变量改为持久化 `ops_config` 表**（`cohort_enabled` / `cohort_hour` / `cohort_minute`；env 仅作进程启动引导默认值、已有表值不被覆盖，重启保持）——**跨此切点，「改 env 重启生效」的运维时代结束：旧的「env-only」运维期与切点后的界面期不可直接比较**（同一开关在两期的取值来源不同；切点后归因不得再把环境变量改动当作生效手段，须查 `ops_config` 现值与 `job_runs` 审计行）。
+- 调度器未启动（TESTING=1 或显式禁用）时状态接口显式返回「未运行」而非 500 或空列表。
+- 口径旋钮（判定窗口 / 中性带 / 探针阈值 / 最小已结算样本）的界面修改**只生成 `docs/evals/caliber-drafts/ops-caliber-draft-*` 草稿**，不写本文件、不改 `evals/outcome/caliber.py` 常量——生效仍须走 §1 口径修订 + delta 流程（草稿落在 `openspec/changes/` **之外**：骨架草稿未成 change，放进 changes/ 会让仓库级 `openspec validate --all --strict` 报错，见 `tests/validation/2026-09-24-add-eval-ops-console-validation.md` 残留风险）。
+- **本切点不产生任何读数**：无 cohort 跑批、无回测正式批、无探针 LLM 调用，故 §2 时间线不加行。
+
+**judge 端点切换切点（2026-10-04，delta `add-kimi-reasoning-effort`（#218/#219）；未跑批）**
+
+> **一句话**：裁判模型从 deepseek 换成 kimi——动机是方舟套餐到期 + 裁判与被评模型解耦；kimi 端点把采样温度锁死，判分噪声边界随之变化，跨切点绝对分不可比。
+
+- judge LLM 从 deepseek-v4-flash@方舟（temperature=0.0）切至 **kimi-for-coding@Kimi Code**（`JUDGE_REASONING_EFFORT=none` 关思考，路由无思考 K2.8；切换动机=方舟套餐到期 + 裁判与被评模型解耦）。
+- **采样口径变化：Kimi Code 端点采样温度锁死（实证：思考档仅接受 temperature=1、无思考档仅接受 0.6，其他值一律 400），kimi 请求 temperature 一律不发送（adapter→gateway `suppress_temperature` 契约），judge 实际采样=端点固定值 0.6**——采样确定性较 T=0.0 弱化，单次判分噪声边界相应变化（K 次均值协议不变、rubric 版本不变、材料口径不变）。
+- **跨此切点的 judge 绝对分不可直接比较**（judge 模型与采样双变），跨轮结论以同切点内比较为准。
+- 同日管线主 LLM env 回退链切 bigmodel glm-5.3（config-only，请求级配置不受影响；bigmodel 端点对 glm-5.3 接受 temperature=0.3，管线口径无变化）。
+
+**judge 端点切换切点（2026-10-11，config-only 双向对换；未跑批）**
+
+> **一句话**：裁判换回 glm（bigmodel）、被评管线换 kimi（k3-256k）——两侧采样温度都受端点锁死约束；此后勘误确认 glm 名模型实际从不发送 temperature。跨切点绝对分不可比。
+
+- judge LLM 从 kimi-for-coding@Kimi Code 切至 **glm-5.3-flash@bigmodel coding**（`JUDGE_REASONING_EFFORT` none→**low**：glm 族无 none 档（`ArkGLMOptions` 仅 max/high/low，thinking 强制开启），low 为最接近原「关思考」口径的最轻档，探针实证 low 档思考显著缩短）。
+- **采样口径：temperature=0.0 保留（探针实证 glm-5.3-flash 接受 T=0.0 与 effort=low 含组合），judge 实际采样=T=0.0**——较上一切点的「端点固定 0.6」确定性增强。（2026-10-17 勘误：实测 adapter 对含 glm 的模型名按 `capability_for_model` 启发命中 ark-glm preset（`reasoning_forced=True`）在发送前剔除 temperature——含 glm 名模型两代端点均从不携带 temperature（2026-10-17 A/B 72/72 次调用同款剔除告警），实际采样跟随模型/端点默认；「judge 实际采样=T=0.0」不成立，成立的仅为「端点接受 T=0.0」。K 均值协议、rubric 版本与读数口径均不受影响，此处仅更正事实描述。）
+- **跨此切点的 judge 绝对分不可直接比较**（judge 模型与采样双变），跨轮结论以同切点内比较为准；round 系列校准数据若需跨切点复用，仅方向性结论可参考。
+- 同日管线主 LLM env 回退链从 bigmodel glm-5.3 切 **k3-256k@Kimi Code**（被评对象模型变更，config-only；采样口径变化：① Kimi 端点温度锁死仅接受 1，harness 路径 temperature=0.7 走 adapter 温度拒绝自动降级（spec「temperature 拒绝自动降级」，每次调用多一次 400 往返，trace 记 `degradation=temperature_dropped_endpoint_rejected`），单发管线调用不携带 temperature 跟随端点固定值；② effort 不携带（kimi env 分支无 effort 出口）跟随端点默认 k3 族=high，**较 glm 期的 LLM_REASONING_EFFORT=low 思考量上升**；③ 输出预算：env-kimi capability max_output=8192（glm 期 ark-glm 为 65536），reasoning 与正文共享，长输出节点截断风险上升（OutputTruncated→续写 1 次→report 降级链兜底），若实跑截断率显著需立项 kimi capability preset）。
+- 同日 `LLM_MAX_CONTEXT=256000` 启用（k3-256k 真实窗口兑现，ContextBudget/压缩阈值随动，react 预算 128k→256k）。
+
+**管线主 LLM 切换切点（2026-10-13，config-only；未跑批）**
+
+> **一句话**：被评的分析模型换成 deepseek-v4.1-flash@opencode（裁判不变）；温度恢复发送、思考量与输出预算各有变化——跨此切点的分数不可直接比较。
+
+- 分析 LLM 从 k3-256k@Kimi Code 切至 **deepseek-v4.1-flash@opencode zen/go**（被评对象模型变更；judge 保持 glm-5.3-flash@bigmodel 不变）。
+- 实测探针（五项 capability probe，离线脚本与 `/api/llm-config/test` 双通道）：non_stream / stream / tool_call / tool_followup 四过；json_output 不支持（`response_format=json_object` 被端点拒绝，管线无消费方，仅能力矩阵记录）。（**2026-10-23 勘误**：该「不支持」系 probe 缺陷——探测请求 prompt 为「说你好」却强制 `response_format=json_object`，DeepSeek 系端点要求 prompt 含 `json` 字样否则 400；修正探测 prompt 后同一端点实测 `json_output=true`。管线仍无消费方，仅能力矩阵记录更正，不构成采样/评分口径变化。）
+- **采样口径变化：① 温度恢复发送**——端点接受 T=0.3（节点调用）与 T=0.7（ReAct harness），kimi 期「端点锁死 + 每次调用一次 400 降级往返」的强约束消失，单发节点实际采样=T=0.3；**② effort 不携带**（env 分支 openai/ 前缀无 effort 出口，`LLM_REASONING_EFFORT` 不消费）跟随端点/模型默认，deepseek-v4.1-flash 为思考模型（reasoning 与正文共享 max_tokens 预算）——思考量基线待实跑观测；**③ 输出预算不变**（节点显式 65536 / harness 显式 16384，显式请求优先于 capability 静态 8192）；**④ `LLM_MAX_CONTEXT=256000` 不变**（模型原生窗口约 1M，models.dev opencode-go 目录：context 1000000 / output 384000；启用更大预算是独立决策）。
+- opencode 网关强制 `x-opencode-session` 头——同日修复 probe 路径 `base_url` 别名漏注入（此前探针形态必 400；pipeline 走 `api_base` 不受影响）。
+- **跨此切点的分数不可直接比较**（被评模型变更）；同一切点内比较不受影响。
+
+**judge 端点切换切点（2026-10-17，config-only；未跑批）**
+
+> **一句话**：裁判同模型换服务商（bigmodel → opencode，动机=熔断解耦 + 额度独立）；模型与采样都没变，72 次对跑显示分分布高度一致——可比性显著强于此前三次 judge 切点，但保守起见跨轮仍按同切点内比较。
+
+- judge LLM 从 glm-5.3-flash@bigmodel coding plan 迁至 **glm-5.3-flash@opencode Go**（同模型换服务栈；`JUDGE_MODEL` / `JUDGE_REASONING_EFFORT=low` / rubric 版本 / K 均值协议均不变，仅 `JUDGE_BASE_URL` / `JUDGE_API_KEY` 换为 opencode 账号；备份 `.env.bak-judge-bigmodel-20261017`）。
+- 动机：① 解耦 bigmodel 5h 窗口熔断家族（10-16 分析侧实证三败）；② 与分析的 deepseek-v4.1-flash 额度独立（opencode Go 逐模型月额度：GLM-5.3-Flash $60 / DeepSeek V4.1 Flash $80）；③ 主管线与裁判同账号单网关。
+- **采样口径：两代端点 temperature 均从未发送**（adapter 按模型名启发剔除，见同日对 10-11 条目的勘误；effort=low 经 extra_body 透传保留）——**本切点不引入采样变化**。
+- **A/B 实测（同日、非跑批：2026-09-22 variant=full 冻结状态 3 标的（000001/300750/600887）× 4 维 × K=3 双端点同材料对跑，共 72 次调用；原始读数落 `log/judge_ab_result.json`，Langfuse 标记 `judge-endpoint-swap-ab`）**：解析失败 0/0；12 对配对单元 8 对完全一致、4 对 |Δ|≤1.0（其中 3 对为 K=3 内单次翻转=调用级噪声级；000001/decision_grounding 为 1 分系统差 4.0 vs 5.0），无 |Δ|>1——同模型跨栈总分分布一致度高，**但 1 分级差异不承诺跨切点可解读**（沿用「同噪声下相对差异」口径）。
+- **跨此切点**：judge 模型与采样均未变、仅服务栈变更，绝对分可比性显著强于此前三次 judge 切点；保守起见跨轮结论仍以同切点内比较为准。
+- 运维注记：后端容器不消费 judge purpose（判分只走宿主机 evals 路径），容器 env 未重建、无一致性影响。
 
 ---
 
-**记忆注入消融批次（2026-10-18，delta `add-decision-memory` 闭环；n=10 配对）**：`--suite memory`（tech_no_memory → tech_memory，分析师层直出、单变量=analysts_entry 是否召回），10 标的 × 2 臂 × 1 重复 = 20 run；判分维按 #112 口径过滤为 report_relevance（K=3 均值）。**读数：Δ = −0.0333，95% CI [−0.2333, 0.1665] → 无显著差异**（配对单元=ticker bootstrap；CI 含 0 按纪律只写无显著差异，不得引申为对记忆价值的否定）。健康检查：20/20 run 完整、judge 失败 0、**10/10 标的记忆臂召回非空**（1–3 条已结算情景记忆；语义条款 0——该通路未被本批检验）。原始读数 `reports/ablation/ablation-20261018-142257.json`（本地）；报告 [2026-10-18-add-decision-memory-n10消融报告.md](2026-10-18-add-decision-memory-n10消融报告.md)。边界：仅测分析师层上下文注入面（该 delta 变体设计），不测辩论/决策层消费；有效 n=10。
+**记忆注入消融批次（2026-10-18，delta `add-decision-memory` 闭环；n=10 配对）**
 
-**因子工具消融批次（2026-10-20，#326 主项闭环；n=10 配对）**：`--suite factor-tool`（tech_bare → tech_factor_tool，分析师层直出、单变量=技术分析师是否注入 `query_factor_library` 输出），10 标的 × 2 臂 × 1 重复 = 20 run；判分维按 #112 口径过滤为 report_relevance（K=3 均值）。**读数：Δ = +0.0331，95% CI [−0.167, 0.1998] → 无显著差异**（中位：4.667 → 5.0；CI 含 0 按纪律只写无显著差异，不得引申为对工具价值的否定）。健康检查：20/20 run 完整、judge 失败 0、**10/10 标的因子库注入口非空**（库内 4 active、as_of 2026-10-19、每标的 4/4 具值——此前「0 active → 两臂等价为空」的 NO-GO 前置已解除）、10/10 快照 digest 一致；1/20 run 技术分析师解析降级原始文本（5%，已披露）。原始读数 `reports/ablation/ablation-20261020-140540.json`（本地）；报告 [2026-10-20-add-analyst-factor-tools-n10消融报告.md](2026-10-20-add-analyst-factor-tools-n10消融报告.md)。边界：仅测分析师层上下文注入面（true ReAct 工具循环 owner 裁决暂不实施）；有效 n=10。
+> **一句话**：给分析师接入「历史情景记忆」能否改善报告——n=10 配对消融，Δ=-0.03，CI 含 0，无显著差异；按纪律不得引申为「记忆没用」，只是本分辨率下没测出。
 
-**cohort 评估程序预登记（2026-10-29，delta `add-cohort-evaluation-program`；未出读数）**：run 名 `cohort-eval-20261029`；口径见 §1.22（四轨道 / 窗口 / r_e / 统计单位 / 归因闸，标注前锁定）。基线切点 = 首轮读数基于 universe-v1 全史（2026-09-25~读数日），跨窗不混报；本轮零 LLM 成本；判断质量（judge 四维）不在本轮（另立项）。首个预登记读数出齐前 §1.22 不得再改（改须走 §1 修订 + 新预登记版本 + 新切点行）。
+- `--suite memory`（tech_no_memory → tech_memory，分析师层直出、单变量=analysts_entry 是否召回），10 标的 × 2 臂 × 1 重复 = 20 run；判分维按 #112 口径过滤为 report_relevance（K=3 均值）。
+- **读数：Δ = −0.0333，95% CI [−0.2333, 0.1665] → 无显著差异**（配对单元=ticker bootstrap；CI 含 0 按纪律只写无显著差异，不得引申为对记忆价值的否定）。
+- 健康检查：20/20 run 完整、judge 失败 0、**10/10 标的记忆臂召回非空**（1–3 条已结算情景记忆；语义条款 0——该通路未被本批检验）。
+- 原始读数 `reports/ablation/ablation-20261018-142257.json`（本地）；报告 [2026-10-18-add-decision-memory-n10消融报告.md](2026-10-18-add-decision-memory-n10消融报告.md)。
+- 边界：仅测分析师层上下文注入面（该 delta 变体设计），不测辩论/决策层消费；有效 n=10。
 
-**契约回喂 A2 判效读数（2026-10-31，delta `feed-dsl-contract-to-factor-generator` 判效门；零 LLM、只读已落库）**：三方同屏（口径：untranslatable 占比/进闸门量按 `harvest_state.json` processed 裁决日 `at` 分桶、进闸门量交叉 `factor_admission_ledger`、入库数=ledger `admitted`；factors 表 10-29/30 新增 32/8 行均 `status=rejected`（#504 拒绝池持久化），**不计入入库**）。
+**因子工具消融批次（2026-10-20，#326 主项闭环；n=10 配对）**
+
+> **一句话**：给技术分析师注入因子库查询结果能否改善报告——n=10 配对消融，Δ=+0.03，CI 含 0，无显著差异；同样不得引申为「因子工具没用」。
+
+- `--suite factor-tool`（tech_bare → tech_factor_tool，分析师层直出、单变量=技术分析师是否注入 `query_factor_library` 输出），10 标的 × 2 臂 × 1 重复 = 20 run；判分维按 #112 口径过滤为 report_relevance（K=3 均值）。
+- **读数：Δ = +0.0331，95% CI [−0.167, 0.1998] → 无显著差异**（中位：4.667 → 5.0；CI 含 0 按纪律只写无显著差异，不得引申为对工具价值的否定）。
+- 健康检查：20/20 run 完整、judge 失败 0、**10/10 标的因子库注入口非空**（库内 4 active、as_of 2026-10-19、每标的 4/4 具值——此前「0 active → 两臂等价为空」的 NO-GO 前置已解除）、10/10 快照 digest 一致；1/20 run 技术分析师解析降级原始文本（5%，已披露）。
+- 原始读数 `reports/ablation/ablation-20261020-140540.json`（本地）；报告 [2026-10-20-add-analyst-factor-tools-n10消融报告.md](2026-10-20-add-analyst-factor-tools-n10消融报告.md)。
+- 边界：仅测分析师层上下文注入面（true ReAct 工具循环 owner 裁决暂不实施）；有效 n=10。
+
+**cohort 评估程序预登记（2026-10-29，delta `add-cohort-evaluation-program`；未出读数）**
+
+> **一句话**：cohort 四轨道评估的预登记落档（口径见 §1.22）；本轮零 LLM 成本、未出读数，首个读数出齐前 §1.22 冻结。
+
+- run 名 `cohort-eval-20261029`；口径见 §1.22（四轨道 / 窗口 / r_e / 统计单位 / 归因闸，标注前锁定）。
+- 基线切点 = 首轮读数基于 universe-v1 全史（2026-09-25~读数日），跨窗不混报；本轮零 LLM 成本；判断质量（judge 四维）不在本轮（另立项）。
+- 首个预登记读数出齐前 §1.22 不得再改（改须走 §1 修订 + 新预登记版本 + 新切点行）。
+
+**契约回喂 A2 判效读数（2026-10-31，delta `feed-dsl-contract-to-factor-generator` 判效门；零 LLM、只读已落库）**
+
+> **一句话**：把 DSL 契约塞进因子生成器的上下文（模板 + 记忆桥，10-29 起全程生效）后，翻译失败（untranslatable）占比没有下降、入库数仍为 0——契约进上下文尚未解锁 translator 桶，中间表示改造（B1）必要性增强；样本尚不足以判「无效」，继续收集。
+
+- 三方同屏（口径：untranslatable 占比/进闸门量按 `harvest_state.json` processed 裁决日 `at` 分桶、进闸门量交叉 `factor_admission_ledger`、入库数=ledger `admitted`；factors 表 10-29/30 新增 32/8 行均 `status=rejected`（#504 拒绝池持久化），**不计入入库**）。
 
 | 裁决日 | 进闸门量(ledger) | 入库 | untranslatable 占比 | ut 内 stage=translator |
 |---|---|---|---|---|
@@ -563,7 +850,15 @@ date×code 格。快照缺数空洞（BSE 断档、退市缺行、次新股上�
 | 10-29 | 83 | 0 | 70.5% | 78% |
 | 10-30 | 17 | 0 | 80.3% | 100% |
 
-**暴露时间线与判读**（2026-10-31 distro 取证修正）：契约**双路径自 10-29 00:01 起全部生效**——#510 模板补丁于 10-29 00:01 应用（distro `factor_proposal.py` mtime + `.bak-20261028-contract` 备份 + 幂等脚本复跑 "already patched" + 渲染探针 846 字符非空，四重取证；此前「#510 未跑」系任务记录过时），#482 导出路径 10-29 批后进文件。**全程暴露窗口 = 10-29 + 10-30 两批，n=329**（268+61）。预登记判据「stage=translator 占比显著下降」**在两天全程暴露下仍未满足**（78%→100%，基线带 15~52%）；untranslatable 占比 70.5%/80.3% 落基线带（73.7~93.5%）内；入库仍 0。**结论：契约进上下文（模板+记忆桥双路径）尚无解锁 translator 桶的信号，B1（中间表示改造）必要性进一步增强；样本仍不足「无效」终判**——任务 10（3-5 批读数）继续收集，若第 3 批后仍无信号按预登记降级 #510 并立项 B1（owner 终裁）。归因备忘：10-28 晚重建为叠加批（#502/#509/#510 同时上生产），本窗口处理变量=契约双路径齐活。原始读数与取证见 `tests/validation/2026-10-31-a2-funnel-readout.md`。
+**暴露时间线与判读**（2026-10-31 distro 取证修正）：
+
+- 契约**双路径自 10-29 00:01 起全部生效**——#510 模板补丁于 10-29 00:01 应用（distro `factor_proposal.py` mtime + `.bak-20261028-contract` 备份 + 幂等脚本复跑 "already patched" + 渲染探针 846 字符非空，四重取证；此前「#510 未跑」系任务记录过时），#482 导出路径 10-29 批后进文件。
+- **全程暴露窗口 = 10-29 + 10-30 两批，n=329**（268+61）。
+- 预登记判据「stage=translator 占比显著下降」**在两天全程暴露下仍未满足**（78%→100%，基线带 15~52%）；untranslatable 占比 70.5%/80.3% 落基线带（73.7~93.5%）内；入库仍 0。
+- **结论：契约进上下文（模板+记忆桥双路径）尚无解锁 translator 桶的信号，B1（中间表示改造）必要性进一步增强；样本仍不足「无效」终判**——任务 10（3-5 批读数）继续收集，若第 3 批后仍无信号按预登记降级 #510 并立项 B1（owner 终裁）。
+- 归因备忘：10-28 晚重建为叠加批（#502/#509/#510 同时上生产），本窗口处理变量=契约双路径齐活。
+- 原始读数与取证见 `tests/validation/2026-10-31-a2-funnel-readout.md`。
+- **第 3 批（11-02）void，判据停摆转 owner 终裁（2026-11-03 补记）**：预登记的「第 3 批」收割三连跑（10-31/11-01/11-02）均零候选——研究开关 10-29 23:00 被主动关闭（结合 chat 模型 403 待续费）、10-30 排干队列尾巴后断供，**第 3 批是「无数据」不是「无信号」**；按词表判 void 不硬读，预登记降级触发条件无预定义出口，#510 降级 vs 补批由 owner 终裁。两批既有证据不受影响（复杂度桶双升、横截面桶塌缩、入库 0，B1 必要性论证仍成立）。取证见判效报告 §9（`docs/evals/2026-10-31-因子供给判效读数.md`）。
 
 ## 2.1 round7 预登记分析计划（标注前锁定，防事后口径漂移）
 
@@ -573,11 +868,7 @@ date×code 格。快照缺数空洞（BSE 断档、退市缺行、次新股上�
 - 附加：人工 confidence 与 judge confidence 的相关；人工低置信行单独列出复核
 - 与 round5 对照：只比方向（是否从「judge 系统性高 1–2.6 分」收敛），不比绝对值（材料/rubric 不同口径）
 
-| r8 09-13 21:32Z | cdca5b1+027+v7 | 基线重建轮（三变量：v7 rubric / 派生指标喂回 / 027 价位校验回路激活）；dg 3.56 系 v7 归属+解读失当扣分生效（契约抽验 4 条低分全中 v7 规则）；blocked 4/9 | 5.0 | 4.22 | 3.56 | 4.89 | 0.556（blocked 4/9） | 0.835 | 4/9｜1.22/条｜5.33/条 | 0 |
-| r9 09-14 00:37Z | afd9d1f+v8 | 混合变量轮（材料升级：consistency 补 Trader 方案节 + debate 收敛骨架行；rubric v8 三版本两判例）；审计：dg 归属扣分全为真错安（判例无误放）、Trader→RJ 静默推翻核对首次可判、debate 5 分档仍漏判 ≥3 行（v9 候选：强制枚举）；blocked 6/9 | 5.0 | 4.67 | 3.44 | 4.67 | 0.333（blocked 6/9） | 0.843 | 6/9｜1.44/条｜6.33/条 | 0 |
-| r13 09-23 02:02Z | 356feb4（三 delta 合入后） | **新口径首轮**：K=3 均值 + quick 停评 + relevance v4（跨 09-22 两切点，绝对分不与 r1–r9 直接比较）；生产栈含 bear 锚点 prompt/v28 契约/赔率自检；**blocked 9/9 + 真错 4.0/条为系列新高，待分桶归因不处置** | 5.0 | 4.0 | 3.52 | 4.78 | 0.0（blocked 9/9） | 0.786 | 9/9｜4.0/条｜7.44/条 | 0 |
-| r14 10-22 07:34Z | 124102c3+工作区（trader prompt v34） | **跨版本轮（非单变量）**：trader prompt 由未合并分支 v33 切回 main v34（incident 048）+ 东财封禁/AKShare 全程连接失败（数据链降级）+ 新增 provider fallback 未触发；relevance 首次跌破 5（4.556）、dg 回升 4.37、citation 真错与归一同步 ×3（12.0/条、22.2/条）**待分桶归因不处置** | 4.556 | 4.111 | 4.370 | 4.815 | 0.0（blocked 9/9） | 0.911 | 9/9｜12.0/条｜22.2/条 | 0 |
-| r15 10-22 09:36Z | 124102c3+工作区（confidence 三档） | **单变量轮**：三决策节点 confidence 段改三档判据+示例（trader/risk_judge v35、FM v32）；**阴性**：confidence 仍 9/9 落 0.5–0.58（≥0.7 0%、<0.4 0%、9/9 watch），judge 四维同量级；机制归因均衡带+样本构成，不再叠加 prompt 补丁 | 4.778 | 4.185 | 4.296 | 4.741 | 0.0（blocked 9/9） | 0.901 | 9/9｜17.1/条｜23.3/条 | 0 |
+（r8–r15 的 run 表行已归位 §2 主表。）
 
 人工校准：round8 盲标环节改为**维护者代裁**（owner 拒绝再投入标注时间；非盲审计口径，不能当独立 MAE）——41 行逐条核对：36 行一致、5 行分歧全部 ±1 档且方向均为 judge 偏严/规则执行不一致、无虚高，维护者口径 MAE 0.122 / 方向一致率 100%。**judge 自 round7 起可用结论维持**；两条 v8 候选改动见下方待决策。详见 [2026-09-13-round8-维护者代裁报告.md](2026-09-13-round8-维护者代裁报告.md)。
 ## 2.2 round8 预登记（基线重建轮，2026-09-13 启动）
@@ -620,6 +911,8 @@ date×code 格。快照缺数空洞（BSE 断档、退市缺行、次新股上�
 
 ## 3. 待终裁 / 待决策
 
+> 本节是挂账清单：**未决条目**正常列出等 owner 处置；**已闭合条目**保留删除线与结论原文，不删历史——要查「当时怎么裁的」就在这里翻。
+
 **r2 非 PASS 137 条归因**：~~待终裁~~ **已闭合（2026-09-13，维护者代裁，证据链齐备）**。对照表 `tests/validation/citation-r2-nonpass-归因对照表.md` 机器分桶：81 结构不可验→分型 + 34 校验器误报 + 22 待终裁；22 条决策单 `tests/validation/citation-22条待终裁决策单.md`（✅ 终裁完成）：**全部「非幻觉」**——13 行 r4 同族全 PASS（新规则吸收）、8 行混合族残余全落已知结构不可验形态（比较/解读句 + quarterly_trend 期段路径）、2 条列名单位后缀缺口已修复（metric_vocab 补「加权每股收益(元)」别名）。owner 如需可对决策单抽查；副产品 follow-up 两条见下段。
 
 **待 owner 终裁（round7 校准，2026-09-13）**：~~已完成~~——4 行 judge source 归属扣分成立（人工改 4）、1 行 judge 误判（维持人工 5）、1 行灰区（维持 5）、1caf1f7b 单向解读成立（维持 3）、7e6bc8bc 改 4、5f41a49a 补填 5。终值：整体 MAE 0.342 / 方向一致率 97.6%。rubric v7 四项改动清单已定稿（见校准报告）。
@@ -651,33 +944,3 @@ date×code 格。快照缺数空洞（BSE 断档、退市缺行、次新股上�
 - ~~**hosted 实验路径仍是单次判分**：`python -m evals.run`（`reports/evals/*.json` 与跨实验对比的数据源）的 judge 仍单次调用，带 ±1 调用级噪声（本轮只把**消融**路径改成 K 次均值）。口径一致性候选：也给该路径加 K（成本 ×K、且会改变与历史报告的绝对分可比性）——需 owner 定；在此之前跨实验比较请按「同噪声下的相对差异」解读~~ **已落地（2026-09-22，delta `switch-hosted-judge-to-k-mean`）**：hosted 判分切换 `run_judge_mean`（K 经 `--judge-repeats` 声明默认 3，产物 config 记 `judge_repeats`），切点登记见 §1.1/§2——跨切点绝对分不可直接比较，owner 决策成本 ×K 换取噪声下限披露
 - **观测电池判定行不落盘**（2026-09-23 grounding 归因时暴露）：`run_battery` 只持久化汇总读数，grounding/B1/B2 行级明细须从 Langfuse 反解（Langfuse 不可达时归因材料不可得）。候选：三腿 judged rows 落盘（unit_id/argument/anchors/judge_label/reason）+ 产物路径写进 result——小改动，随下一次观测电池相关 delta 一并落地
 - mypy 全仓 75 个既有错误（本次触碰文件为 0），是否立清理任务
-
-### 1.21 因子 IC 回填与衰减监控口径（2026-10-27 登记；owner 裁决 issue #454）
-
-**回填边界**：`factor_decay_monitor` 的 IC 缺口回填窗口 = **90 交易日**（`DECAY_WINDOW 60 + 30`，`_PANEL_LOOKBACK_DAYS`）。依据：衰减判定只消费最近 **79** 个 IC 点（`DECAY_WINDOW + DECAY_NEGATIVE_DAYS − 1`），窗口外更早缺口诚实留洞；不得为衰减判定扩深面板（准入面板 250/500 日是独立口径，见 `constraints.py`），更长 IC 历史需求走独立回填工具、不挂日监控。
-
-**回填口径（硬约束）**：IC 缺口 MUST 按**历史日重算**——每个历史日用其自身的截面因子值与远期收益（`rank_ic_series` 面板逐日）；**禁止以最新面板冒充历史窗**：最新面板的因子值只在最新交易日成立，回填历史窗 = 前视污染，会系统性抬高闸②/衰减读数。
-
-**两个样本数不得混写**：`MIN_IC_SAMPLES_FOR_SCORING = 10`（选股打分的最少 IC 采样天数，不足走流动性降级 fallback）≠ `MIN_IC_SAMPLES = 30`（`rank_ic_series` 单日截面最少有效票数，不足该日 NaN）。口径变更先改本节再动代码。
-
-### 1.22 cohort 评估程序口径（delta `add-cohort-evaluation-program`，2026-10-29 登记；数据基点 2026-10-29）
-
-cohort 日批（universe-v1，10 只，9-25 起）的四轨道评估口径。四轨道 SHALL 独立出读数，SHALL NOT 加权合成单一总分。口径变更先改本节再动代码；实现 = `scripts/cohort_eval_readout.py`（只读、零 LLM、参数 `--as-of` / `--universe-version`）。
-
-**轨道 A 供给成本**（每成功一份归一）：成功率复用 §1.9⑧ attempt success rate（`success/(success+failure)`，`skipped` 不进分母）；`tokens_per_success` = Σ`tokens_total` / Σsuccess（`job_runs` 汇总行口径）；预算占用 = cohort 当日 tokens_total / `COHORT_DAILY_TOKEN_BUDGET`（默认 3,000,000，env 可覆盖，以 `job_runs` summary 的 `daily_budget` 实值为披露值）；`opinions_persisted` 落库率复用 §1.9⑧。
-
-**轨道 B 过程质量**：citation 三项（§1.3 口径）从 Langfuse Scores 按 trace 拉取，报日均值时间序列 + 覆盖率（有分数成功 trace / 全部成功 trace）。归因纪律：分段变化先核对供给面切换时点，排除换模型解释前不得归因分析师。
-
-**轨道 C 方向能力**：① neutral 反事实 `r_e`（见下）；② short/long 结算胜负，挂**到期闸**——open 方向性观点到期数 ≥30 或 2026-11-15 前后到期潮完成后方可出正式读数，此前只许 `preliminary` 标注。与 §1.9② 结算侧回避判定的关系：结算侧 = ±2% 带内判定、随结算排期出、写 `avoidance_status`；评估侧 `r_e` = 连续分布、即时、只读自算、零写入——两者并列披露，不互替、不互相校准。
-
-**轨道 D 日频价值**（仅描述统计）：翻转率 = 每票相邻两分析日方向变动的周均值（池内均值）；保鲜期 = T 日方向符号与 T+k（k=1..20）实现超额符号一致率曲线（仅 long/short 进，neutral 不进）。
-
-**窗口切分（硬约束）**：`W1 = 2026-09-25~10-10`（分析 kimi）、`W2 = 2026-10-13~10-16`（分析 deepseek）、`W3 = 2026-10-17 起`（deepseek + judge@opencode；本轮无 judge 消费，W2/W3 分界服务未来 judge 批接入）。段内出结论；段间差异只作换模型影响专案记录。熔断整批失败日（10-09 / 10-16，success=0）剔除出轨道 A 成本均值并单列，成功率分母照计。后续新增供给面切换事件须增段。
-
-**neutral 反事实 r_e**：T = 决策归属日；个股腿 = `close_raw(T+20 交易日)/open(T+1 交易日) − 1`（`market_snapshot.db`，T+20 = 其后第 20 个交易日）；基准腿 = `index_closes` 000300 `close(T)/close(T+20) − 1`；`r_e` = 个股腿 − 基准腿。同票同日多条取 `created_at` 最晚一条（同 §1.9-v2 日主口径）。起止日任一缺行（个股或基准）→ 剔除并计 `missing_bars`，不插值。判读：池内 `r_e` 分布中心 >0 ⇒ 观望在系统性错过机会（进全观望锁定处置证据）；≤0 ⇒ 观望自洽。
-
-**统计单位与结论限级**：所有跨样本检验以交易日为统计单位（先每日横截面均值再跨日，n = 有效交易日数）；n<15 的段结论限级为量级描述（不得「显著优于/劣于」），报告强制附「未达显著 ≠ 无差异」声明。
-
-**confidence 归因闸**：confidence 进本程序任何下游使用（校准曲线、置信分组）前须完成归因——按（日期 × 方向）分桶定位堆积起止日与供给面/prompt 切点（衔接 §1.20：10-22 round15 已有一次先例，median 0.55、归因均衡带、三档示例 prompt 未移动分布）+ 抽 ≥5 条人工判读，三态结论 `prompt-anchor` / `default-fallback` / `genuine-mode` + 处置去向。
-
-**产物纪律**：脚本只读（运行前后 `predictions` / `cohort_runs` 等业务表零变化）；报告落 `docs/evals/cohort-eval-<日期>.md`；`runs.jsonl` 追加 `type: cohort-eval` 行。
