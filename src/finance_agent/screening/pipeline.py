@@ -726,16 +726,22 @@ def run_microcap_lane() -> dict[str, Any]:
     return result
 
 
-def latest_successful_pool(*, db_path: str | Path | None = None) -> dict[str, Any] | None:
+def latest_successful_pool(
+    *, db_path: str | Path | None = None, pool: str = POOL_MAIN
+) -> dict[str, Any] | None:
     """最近成功批次 + 其当日精选池；无成功批次 → None（前端回退空态/旧日期标注）。
 
     返回 ``{"batch": {...}, "pool": [池行...]}``；池行含解析后的 ``factor_contribs``。
-    主档口径（``pool='main'``，既有页面/接口不变）。
+    ``pool`` 缺省 ``'main'``（既有页面/接口不变）；小票通道读侧显式传
+    ``pool='microcap'``（add-microcap-pool-ui）。
     """
-    batch = latest_successful_batch(db_path)
+    batch = latest_successful_batch(db_path, pool=pool)
     if batch is None:
         return None
-    return {"batch": batch, "pool": list_selection_pool(batch["trade_date"], db_path=db_path)}
+    return {
+        "batch": batch,
+        "pool": list_selection_pool(batch["trade_date"], db_path=db_path, pool=pool),
+    }
 
 
 # ── 信号时效性校验（T2 / S2） ───────────────────────────────────────────────

@@ -16,7 +16,7 @@ import uuid
 from collections.abc import AsyncGenerator, Callable, Generator
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -102,6 +102,7 @@ from finance_agent.screening.ranker import (  # noqa: E402
 from finance_agent.screening.store import (  # noqa: E402
     DEFAULT_BATCH_HISTORY_LIMIT,
     MAX_BATCH_HISTORY_LIMIT,
+    POOL_MAIN,
     latest_screening_batch,
     latest_successful_batch,
     list_batches,
@@ -3783,25 +3784,37 @@ def _factor_signal_block(selection_mode: str | None) -> dict[str, Any]:
         }
 
 
-def _screening_pool_payload(queue_snapshot: list[dict]) -> dict[str, Any]:
+# 池档位（add-microcap-pool-ui）：Literal 违例由 FastAPI 自动 422（非法值不静默回退）
+ScreeningPoolTier = Literal["main", "microcap"]
+
+
+def _screening_pool_payload(
+    queue_snapshot: list[dict], pool: str = POOL_MAIN
+) -> dict[str, Any]:
     """池端点载荷（同步体，供 to_thread 包裹）：最近成功池 + 最近尝试状态 + 队列。
 
     披露（add-screening-empty-library-fallback）：``selection_mode`` 取自最近成功
     批次；``fallback`` 时附 ``notice``（明示非因子信号），``factor`` 时为 ``None``。
+    add-microcap-pool-ui：``pool`` 缺省 ``'main'``（既有契约零漂移）；批次记录字段
+    ``frontier_gate`` / ``exec_constraints`` 随最近成功批次透传（main 档批次该两
+    字段落库即 ``None``）；microcap 档不挂分析队列（v1 不触发池分析，队列属主档）。
     """
-    latest = latest_screening_batch()
-    successful = latest_successful_pool()
-    selection_mode = successful["batch"].get("selection_mode") if successful else None
+    latest = latest_screening_batch(pool=pool)
+    successful = latest_successful_pool(pool=pool)
+    batch = successful["batch"] if successful else None
+    selection_mode = batch.get("selection_mode") if batch else None
     return {
-        "batch_date": successful["batch"]["trade_date"] if successful else None,
+        "batch_date": batch["trade_date"] if batch else None,
         "batch_status": latest["status"] if latest else None,
         # 最近一次尝试非 ok（含失败）→ stale：页面横幅可见，池仍展示最近成功批次
         "stale": bool(latest is not None and latest["status"] != "ok"),
         "selection_mode": selection_mode,
         "notice": _SCREENING_FALLBACK_NOTICE if selection_mode == "fallback" else None,
         "factor_signal": _factor_signal_block(selection_mode),
+        "frontier_gate": batch.get("frontier_gate") if batch else None,
+        "exec_constraints": batch.get("exec_constraints") if batch else None,
         "pool": successful["pool"] if successful else [],
-        "queue": queue_snapshot,
+        "queue": queue_snapshot if pool == POOL_MAIN else [],
     }
 
 
@@ -3825,14 +3838,15 @@ def _screening_event_source(
 
 
 @app.get("/api/screening/pool")
-async def screening_pool() -> dict[str, Any]:
+async def screening_pool(pool: ScreeningPoolTier = "main") -> dict[str, Any]:
     """选股页取数（S4）：最近成功批次池（含贡献分解）+ 批次状态 + 队列快照。
 
     无成功批次 → ``batch_date=None`` + 空池；最近一次尝试失败 → ``stale=True``，
-    池仍为最近成功批次（spec：页面标注其日期）。
+    池仍为最近成功批次（spec：页面标注其日期）。``pool`` 缺省 ``'main'``——既有
+    消费者零变化；``pool=microcap`` 返回小票通道池（add-microcap-pool-ui）。
     """
     queue_snapshot = _get_analyze_queue().snapshot()
-    return await asyncio.to_thread(_screening_pool_payload, queue_snapshot)
+    return await asyncio.to_thread(_screening_pool_payload, queue_snapshot, pool)
 
 
 @app.get("/api/screening/status")
@@ -3869,17 +3883,20 @@ async def screening_status() -> dict[str, Any]:
 
 
 @app.get("/api/screening/batches")
-async def screening_batches(limit: int = DEFAULT_BATCH_HISTORY_LIMIT) -> list[dict[str, Any]]:
+async def screening_batches(
+    limit: int = DEFAULT_BATCH_HISTORY_LIMIT, pool: ScreeningPoolTier = "main"
+) -> list[dict[str, Any]]:
     """选股批次历史（delta add-daily-ops-page T1；spec「批次历史查询」）。
 
     按交易日期倒序返回近 ``limit`` 批次（默认 20），字段 = 日期 / 状态（ok/failed）/
     错误 / 起止时间 / 各层计数（l1_passed/l2_top/l3_keep）/ 池数（pool_size）。
     空库 → 200 + 空列表（不以错误冒充「无历史」）；``limit`` 钳制到
     ``[1, MAX_BATCH_HISTORY_LIMIT]``（越界不 422——越界值只影响窗口大小，
-    钳制后再交给 store 的严格校验）。只读端点：无任何写操作暴露。
+    钳制后再交给 store 的严格校验）。``pool`` 缺省 ``'main'``，``pool=microcap`` 返回小票
+    通道批次历史（add-microcap-pool-ui）。只读端点：无任何写操作暴露。
     """
     clamped = max(1, min(limit, MAX_BATCH_HISTORY_LIMIT))
-    return await asyncio.to_thread(list_batches, clamped)
+    return await asyncio.to_thread(list_batches, clamped, None, pool=pool)
 
 
 def _screening_freshness_removals(
