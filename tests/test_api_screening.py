@@ -922,6 +922,7 @@ def test_pool_microcap_tier(pool_seed, _screening_db) -> None:
     assert body["frontier_gate"] == _MICROCAP_GATE
     assert body["exec_constraints"] == _MICROCAP_CONSTRAINTS
     assert len(body["pool"]) == 2
+    assert body["queue"] == []  # microcap 档不挂分析队列（add-microcap-pool-ui）
     assert all(row["symbol"].startswith("60000") for row in body["pool"])
 
 

@@ -443,4 +443,16 @@ describe('池档位切换与小市值披露（add-microcap-pool-ui）', () => {
     expect(screen.getByTestId('screening-analyze-btn')).toBeInTheDocument()
     expect(screen.queryByTestId('screening-microcap-gate-observation')).not.toBeInTheDocument()
   })
+
+  it('未知缺失要点码原样列出（不静默丢弃）', async () => {
+    mockFetch({
+      microPool: [microcapBody({ frontier_gate: 'observation_only:missing=whatever' })],
+    })
+    window.history.pushState({}, '', '/screening')
+    render(<ScreeningPage onBack={() => {}} />)
+    fireEvent.click(await screen.findByTestId('screening-tier-microcap'))
+
+    const banner = await screen.findByTestId('screening-microcap-gate-observation')
+    expect(banner).toHaveTextContent('whatever')
+  })
 })

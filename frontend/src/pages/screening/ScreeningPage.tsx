@@ -107,29 +107,6 @@ export function ScreeningPage({
     }
   }, [])
 
-  const load = useCallback(async (tier: PoolTier) => {
-    const seq = ++loadSeqRef.current
-    setError(false)
-    setData(null)
-    try {
-      // 主档不带参数（缺省即 main，与既有请求零漂移）；小市值档显式带档位。
-      // init 显式传 undefined：测试以 toHaveBeenCalledWith(url, undefined) 钉住双参形态
-      const resp = await fetch(
-        tier === 'main' ? '/api/screening/pool' : `/api/screening/pool?pool=${tier}`,
-        undefined
-      )
-      if (!resp.ok) throw new Error(String(resp.status))
-      const body = (await resp.json()) as ScreeningPoolResponse
-      if (seq !== loadSeqRef.current) return // 迟到的旧档响应丢弃
-      setData(body)
-      setQueue(body.queue ?? [])
-    } catch {
-      if (seq !== loadSeqRef.current) return
-      setError(true)
-      toast.error('选股池加载失败')
-    }
-  }, [])
-
   // 轮询只刷新队列徽标态（池表格以首屏/手动重试为准，避免高频整表重绘）
   const poll = useCallback(async () => {
     try {
@@ -154,6 +131,38 @@ export function ScreeningPage({
       void poll()
     }, pollIntervalMs)
   }, [poll, pollIntervalMs])
+
+  const load = useCallback(
+    async (tier: PoolTier) => {
+      const seq = ++loadSeqRef.current
+      setError(false)
+      setData(null)
+      try {
+        // 主档不带参数（缺省即 main，与既有请求零漂移）；小市值档显式带档位。
+        // init 显式传 undefined：测试以 toHaveBeenCalledWith(url, undefined) 钉住双参形态
+        const resp = await fetch(
+          tier === 'main' ? '/api/screening/pool' : `/api/screening/pool?pool=${tier}`,
+          undefined
+        )
+        if (!resp.ok) throw new Error(String(resp.status))
+        const body = (await resp.json()) as ScreeningPoolResponse
+        if (seq !== loadSeqRef.current) return // 迟到的旧档响应丢弃
+        setData(body)
+        setQueue(body.queue ?? [])
+        // 切档回主档恢复轮询（终审修正）：switchTier 切档即停，load 切回主档若不
+        // 重启 → 「主→小市值→主」后徽标冻结到下次分析/刷新。队列仍有 queued/running
+        // 时重启（startPolling 自带 timer 去重，重复调用安全）；无活动条目则不轮询。
+        if (tier === 'main' && (body.queue ?? []).some(item => ACTIVE_QUEUE_STATES.has(item.state))) {
+          startPolling()
+        }
+      } catch {
+        if (seq !== loadSeqRef.current) return
+        setError(true)
+        toast.error('选股池加载失败')
+      }
+    },
+    [startPolling]
+  )
 
   // 档位切换即重取；切回重取保证数据与对应档位严格对应
   useEffect(() => {
@@ -400,7 +409,7 @@ export function ScreeningPage({
           </div>
         )}
 
-        {removedGroups.length > 0 && (
+        {!isMicrocap && removedGroups.length > 0 && (
           <div
             data-testid="screening-removed-list"
             className="rounded-lg border px-3 py-2 text-xs space-y-1"
