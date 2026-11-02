@@ -254,3 +254,23 @@ cohort 开关（on/off）与跑批时刻（时/分）SHALL 可在界面修改并
 - **WHEN** owner 发起正式批
 - **THEN** 界面 SHALL 展示拒绝原因（而非静默失败或转圈）
 
+### Requirement: Page-Level SQLite Integrity Check
+
+The `integrity_check` job SHALL verify SQLite page integrity of hot databases in addition to the existing
+prediction snapshot hash check.
+
+#### Scenario: All hot databases are healthy
+
+- GIVEN every hot database is readable
+- WHEN the `integrity_check` job runs
+- THEN the job summary includes a per-database `integrity` entry with value `ok`
+- AND the job status is `ok`
+
+#### Scenario: A database reports corruption
+
+- GIVEN at least one hot database returns anything other than `ok` from `PRAGMA integrity_check`
+- WHEN the `integrity_check` job runs
+- THEN the job status is `failed`
+- AND the summary names the failing database and records a truncated `integrity_check` detail
+- AND the existing snapshot hash mismatch audit behavior is unchanged
+
