@@ -18,9 +18,7 @@ def _no_live_freshness(monkeypatch):
     该校验降级跳过（确定绿）；本机有库时网络结果污染 removed_symbols，
     per_report_cap 期望 3 实得 2（2026-11-03 归因）。本文件测的是触发/上限/幂等
     逻辑，freshness 行为归 check_signal_freshness 专项测试。"""
-    monkeypatch.setattr(
-        rt, "screening_freshness_removals", lambda pool_rows, batch_date: []
-    )
+    monkeypatch.setattr(rt, "screening_freshness_removals", lambda pool_rows, batch_date: [])
 
 
 def _doc(db, key, stocks, *, report_date="2026-10-20", report_type="个股研报"):
