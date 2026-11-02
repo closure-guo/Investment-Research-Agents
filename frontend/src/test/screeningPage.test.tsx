@@ -59,6 +59,9 @@ function poolBody(overrides: Partial<ScreeningPoolResponse> = {}): ScreeningPool
         factor_contribs: [{ factor_id: 5, zscore: 0.2, weight: 0.3, contribution: 0.2 }],
       },
     ],
+    // 小票通道门禁与建议执行约束（add-microcap-pool-ui）：main 档为 null
+    frontier_gate: null,
+    exec_constraints: null,
     queue: [],
     ...overrides,
   }
@@ -68,9 +71,34 @@ function queueEntry(symbol: string, state: string): ScreeningQueueEntry {
   return { symbol, session_id: `${symbol}-s`, state }
 }
 
+// 小市值档响应体（add-microcap-pool-ui）：观察态门禁 + 建议执行约束
+function microcapBody(overrides: Partial<ScreeningPoolResponse> = {}): ScreeningPoolResponse {
+  return {
+    ...poolBody(),
+    batch_date: '2026-10-16',
+    pool: [
+      {
+        symbol: '300001',
+        stock_name: '特锐德',
+        composite_score: 0.98,
+        rank: 1,
+        consecutive_days: 4,
+        l3_verdict: 'keep',
+        l3_reason: '无风险事件',
+        factor_contribs: [],
+      },
+    ],
+    frontier_gate: 'observation_only:missing=regime_data',
+    exec_constraints: { suggested_single_cap: 0.05, slippage_tier_bump: 1 },
+    queue: [],
+    ...overrides,
+  }
+}
+
 function mockFetch(
   opts: {
     pool?: ScreeningPoolResponse[]
+    microPool?: ScreeningPoolResponse[]
     analyze?: unknown
     analyzeStatus?: number
   } = {}
@@ -83,10 +111,17 @@ function mockFetch(
       })
     )
   const poolBodies = opts.pool ?? [poolBody()]
+  const microPoolBodies = opts.microPool ?? []
   let poolCalls = 0
+  let microCalls = 0
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString()
-    if (url === '/api/screening/pool' && (!init || !init.method || init.method === 'GET')) {
+    if (url.startsWith('/api/screening/pool') && (!init || !init.method || init.method === 'GET')) {
+      if (url.includes('pool=microcap')) {
+        const body = microPoolBodies[Math.min(microCalls, Math.max(microPoolBodies.length - 1, 0))]
+        microCalls += 1
+        return respond(body ?? { ...poolBody(), batch_date: null, pool: [], frontier_gate: null, exec_constraints: null })
+      }
       const body = poolBodies[Math.min(poolCalls, poolBodies.length - 1)]
       poolCalls += 1
       return respond(body)
@@ -327,5 +362,85 @@ describe('选股页（add-screening-pipeline T4）', () => {
 
     expect(await screen.findByTestId('screening-page')).toBeTruthy()
     expect(window.location.pathname).toBe('/screening')
+  })
+})
+
+describe('池档位切换与小市值披露（add-microcap-pool-ui）', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    window.history.pushState({}, '', '/')
+  })
+
+  it('缺省主档；切到小市值 → 观察横幅（缺失要点映射）+ 约束 + 声明 + 无分析按钮', async () => {
+    const fetchMock = mockFetch({ microPool: [microcapBody()] })
+    window.history.pushState({}, '', '/screening')
+    render(<ScreeningPage onBack={() => {}} />)
+
+    // 缺省主档：既有行 testid 与分析按钮在
+    await waitFor(() => expect(screen.getByTestId('screening-row-600519')).toBeInTheDocument())
+    expect(screen.getByTestId('screening-analyze-btn')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledWith('/api/screening/pool', undefined)
+
+    fireEvent.click(screen.getByTestId('screening-tier-microcap'))
+
+    const row = await waitFor(() => screen.findByTestId('screening-microcap-row-300001'))
+    expect(row).toHaveTextContent('300001')
+    expect(row).toHaveTextContent('特锐德')
+    // 门禁观察横幅：缺失要点映射可读文案（regime_data → 拥挤度数据），两态不混淆
+    expect(screen.getByTestId('screening-microcap-gate-observation')).toHaveTextContent('拥挤度数据')
+    expect(screen.queryByTestId('screening-microcap-gate-ready')).not.toBeInTheDocument()
+    // 约束（建议口径）+ 观察声明
+    expect(screen.getByTestId('screening-microcap-constraints')).toHaveTextContent('单票上限 5%')
+    expect(screen.getByTestId('screening-microcap-constraints')).toHaveTextContent('滑点档位提升 1 档')
+    expect(screen.getByTestId('screening-microcap-observation-note')).toHaveTextContent('不向执行链产生订单')
+    // v1 不提供深度分析触发
+    expect(screen.queryByTestId('screening-analyze-btn')).not.toBeInTheDocument()
+    // 切档请求带档位参数
+    expect(fetchMock).toHaveBeenCalledWith('/api/screening/pool?pool=microcap', undefined)
+  })
+
+  it('门禁 ready → 「可执行候选」横幅，非观察态', async () => {
+    mockFetch({
+      microPool: [microcapBody({ frontier_gate: 'ready' })],
+    })
+    window.history.pushState({}, '', '/screening')
+    render(<ScreeningPage onBack={() => {}} />)
+    fireEvent.click(await screen.findByTestId('screening-tier-microcap'))
+
+    const banner = await screen.findByTestId('screening-microcap-gate-ready')
+    expect(banner).toHaveTextContent('可执行候选')
+    expect(banner).toHaveTextContent('不自动产生订单')
+    expect(screen.queryByTestId('screening-microcap-gate-observation')).not.toBeInTheDocument()
+  })
+
+  it('小市值空态（batch_date null）→ 专用空态，非报错', async () => {
+    mockFetch({ microPool: [] })
+    window.history.pushState({}, '', '/screening')
+    render(<ScreeningPage onBack={() => {}} />)
+    fireEvent.click(await screen.findByTestId('screening-tier-microcap'))
+
+    const empty = await screen.findByTestId('screening-microcap-empty')
+    expect(empty).toHaveTextContent('尚无小市值批次')
+    expect(screen.queryByTestId('screening-error')).not.toBeInTheDocument()
+  })
+
+  it('切回主档：既有行 testid 与内容恢复', async () => {
+    mockFetch({ microPool: [microcapBody()] })
+    window.history.pushState({}, '', '/screening')
+    render(<ScreeningPage onBack={() => {}} />)
+
+    fireEvent.click(await screen.findByTestId('screening-tier-microcap'))
+    await screen.findByTestId('screening-microcap-row-300001')
+    fireEvent.click(screen.getByTestId('screening-tier-main'))
+
+    const row = await screen.findByTestId('screening-row-600519')
+    expect(row).toHaveTextContent('600519')
+    expect(screen.getByTestId('screening-analyze-btn')).toBeInTheDocument()
+    expect(screen.queryByTestId('screening-microcap-gate-observation')).not.toBeInTheDocument()
   })
 })

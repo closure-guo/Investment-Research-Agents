@@ -38,6 +38,33 @@ const QUEUE_STATE_LABEL: Record<string, string> = {
 // 徽标可见态：仅排队/运行中（S5：终态不占位）
 const ACTIVE_QUEUE_STATES = new Set(['queued', 'running'])
 
+// 池档位（add-microcap-pool-ui）：主档缺省；小市值档 v1 只展示（不触发深度分析）
+type PoolTier = 'main' | 'microcap'
+
+// 门禁缺失要点码 → 可读文案（口径 pipeline.FRONTIER_MISSING_*；未知码原样列出）
+const FRONTIER_MISSING_LABEL: Record<string, string> = {
+  delist_pool: '退市股池未就绪',
+  regime_data: '拥挤度数据未就绪',
+}
+// pipeline.FRONTIER_GATE_OBSERVATION_PREFIX 逐字前缀（记录字段自由串，只做前缀分流；
+// 漂移由 E2E 门禁用例钉住）
+const FRONTIER_GATE_OBSERVATION_PREFIX = 'observation_only:missing='
+
+function parseFrontierGate(gate: string | null): { ready: boolean; missing: string[] } | null {
+  if (!gate) return null
+  if (gate === 'ready') return { ready: true, missing: [] }
+  if (gate.startsWith(FRONTIER_GATE_OBSERVATION_PREFIX)) {
+    const missing = gate
+      .slice(FRONTIER_GATE_OBSERVATION_PREFIX.length)
+      .split(',')
+      .map(code => code.trim())
+      .filter(Boolean)
+    return { ready: false, missing }
+  }
+  // 未知取值：保守按观察态处理并原样列出（spec：未知要点码原样列出）
+  return { ready: false, missing: [gate] }
+}
+
 const DEFAULT_POLL_INTERVAL_MS = 2000
 
 function sortedContribs(contribs: ScreeningFactorContrib[]): ScreeningFactorContrib[] {
@@ -62,6 +89,7 @@ export function ScreeningPage({
   pollIntervalMs?: number
 }) {
   // null = 加载中；error = 接口失败（与「无成功批次」空态严格区分）
+  const [poolTier, setPoolTier] = useState<PoolTier>('main')
   const [data, setData] = useState<ScreeningPoolResponse | null>(null)
   const [error, setError] = useState(false)
   const [hoverSymbol, setHoverSymbol] = useState<string | null>(null)
@@ -70,6 +98,7 @@ export function ScreeningPage({
   const [analyzing, setAnalyzing] = useState(false)
   const [analyzeMessage, setAnalyzeMessage] = useState<string | null>(null)
   const timerRef = useRef<number | null>(null)
+  const loadSeqRef = useRef(0)
 
   const stopPolling = useCallback(() => {
     if (timerRef.current !== null) {
@@ -78,15 +107,24 @@ export function ScreeningPage({
     }
   }, [])
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (tier: PoolTier) => {
+    const seq = ++loadSeqRef.current
     setError(false)
+    setData(null)
     try {
-      const resp = await fetch('/api/screening/pool')
+      // 主档不带参数（缺省即 main，与既有请求零漂移）；小市值档显式带档位。
+      // init 显式传 undefined：测试以 toHaveBeenCalledWith(url, undefined) 钉住双参形态
+      const resp = await fetch(
+        tier === 'main' ? '/api/screening/pool' : `/api/screening/pool?pool=${tier}`,
+        undefined
+      )
       if (!resp.ok) throw new Error(String(resp.status))
       const body = (await resp.json()) as ScreeningPoolResponse
+      if (seq !== loadSeqRef.current) return // 迟到的旧档响应丢弃
       setData(body)
       setQueue(body.queue ?? [])
     } catch {
+      if (seq !== loadSeqRef.current) return
       setError(true)
       toast.error('选股池加载失败')
     }
@@ -95,7 +133,11 @@ export function ScreeningPage({
   // 轮询只刷新队列徽标态（池表格以首屏/手动重试为准，避免高频整表重绘）
   const poll = useCallback(async () => {
     try {
-      const resp = await fetch('/api/screening/pool')
+      // 主档不带参数（与既有请求零漂移）；显式带当前档位只为防切档窗口误刷
+      const resp = await fetch(
+        poolTier === 'main' ? '/api/screening/pool' : `/api/screening/pool?pool=${poolTier}`,
+        undefined
+      )
       if (!resp.ok) return
       const body = (await resp.json()) as ScreeningPoolResponse
       const entries = body.queue ?? []
@@ -104,7 +146,7 @@ export function ScreeningPage({
     } catch {
       // 单轮失败不打断轮询：下一轮重试（终态由后端队列驱动，徽标错一轮可自愈）
     }
-  }, [stopPolling])
+  }, [stopPolling, poolTier])
 
   const startPolling = useCallback(() => {
     if (timerRef.current !== null) return
@@ -113,10 +155,20 @@ export function ScreeningPage({
     }, pollIntervalMs)
   }, [poll, pollIntervalMs])
 
+  // 档位切换即重取；切回重取保证数据与对应档位严格对应
   useEffect(() => {
-    void load()
-  }, [load])
+    void load(poolTier)
+  }, [load, poolTier])
   useEffect(() => stopPolling, [stopPolling])
+
+  const switchTier = useCallback(
+    (tier: PoolTier) => {
+      if (tier === poolTier) return
+      stopPolling() // 队列徽标轮询属主档分析流，切档即停
+      setPoolTier(tier)
+    },
+    [poolTier, stopPolling]
+  )
 
   const triggerAnalyze = useCallback(async () => {
     setAnalyzing(true)
@@ -161,6 +213,15 @@ export function ScreeningPage({
   const formatScore = (score: number) =>
     fallback ? (score / 1e8).toFixed(2) : score.toFixed(3)
 
+  const isMicrocap = poolTier === 'microcap'
+  // testid 档位中缀：main 保持既有逐字（既有 E2E 零漂移），microcap 加前缀防选择器歧义
+  const tid = (base: string) => (isMicrocap ? `screening-microcap-${base}` : `screening-${base}`)
+  const gate = parseFrontierGate(data?.frontier_gate ?? null)
+  // 档位口径文案
+  const caliberText = isMicrocap
+    ? '口径：小票通道阈值（流动性下限 1000 万）· L3 keep'
+    : '口径：L3 粗筛 keep ∩ 连续在榜门槛达标'
+
   return (
     <div className="flex flex-col h-screen" data-testid="screening-page">
       {/* 标题栏（固定）：返回入口在所有状态下可见（空态/加载失败均可靠退回） */}
@@ -188,28 +249,32 @@ export function ScreeningPage({
           )}
         </div>
         <p className="text-xs text-muted-foreground mt-1">
-          最近成功选股批次的候选池（L3 粗筛 keep ∩ 连续在榜门槛达标）
+          {isMicrocap
+            ? '小市值通道观察池（同 L1→L2→L3 链；仅观察，不产生订单）'
+            : '最近成功选股批次的候选池（L3 粗筛 keep ∩ 连续在榜门槛达标）'}
         </p>
-        <div className="flex items-center gap-3 mt-3">
-          <Button
-            data-testid="screening-analyze-btn"
-            onClick={() => { void triggerAnalyze() }}
-            disabled={analyzing || pool === null || pool.length === 0}
-            size="sm"
-          >
-            <i className="fas fa-play text-[10px]"></i>
-            对精选池跑深度分析
-          </Button>
-          {analyzeMessage && (
-            <span
-              data-testid="screening-analyze-message"
-              className="text-xs"
-              style={{ color: 'var(--status-error-default)' }}
+        {poolTier === 'main' && (
+          <div className="flex items-center gap-3 mt-3">
+            <Button
+              data-testid="screening-analyze-btn"
+              onClick={() => { void triggerAnalyze() }}
+              disabled={analyzing || pool === null || pool.length === 0}
+              size="sm"
             >
-              {analyzeMessage}
-            </span>
-          )}
-        </div>
+              <i className="fas fa-play text-[10px]"></i>
+              对精选池跑深度分析
+            </Button>
+            {analyzeMessage && (
+              <span
+                data-testid="screening-analyze-message"
+                className="text-xs"
+                style={{ color: 'var(--status-error-default)' }}
+              >
+                {analyzeMessage}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
@@ -220,6 +285,26 @@ export function ScreeningPage({
           className="rounded-lg border p-4"
           style={{ borderColor: 'var(--border-neutral-l1)' }}
         >
+          <div className="mb-2 flex items-center gap-1" role="tablist" aria-label="池档位">
+            {(['main', 'microcap'] as const).map(tier => (
+              <button
+                key={tier}
+                type="button"
+                role="tab"
+                aria-selected={poolTier === tier}
+                data-testid={`screening-tier-${tier}`}
+                onClick={() => switchTier(tier)}
+                className="rounded-full px-2.5 py-1 text-xs"
+                style={
+                  poolTier === tier
+                    ? { background: 'var(--primary)', color: '#fff' }
+                    : { background: 'var(--bg-overlay-l2)', color: 'var(--text-secondary)' }
+                }
+              >
+                {tier === 'main' ? '主档池' : '小市值池'}
+              </button>
+            ))}
+          </div>
           <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
             <div className="flex flex-wrap items-baseline gap-2">
               <span className="text-sm font-medium text-foreground">精选池</span>
@@ -237,7 +322,7 @@ export function ScreeningPage({
               )}
             </div>
             <span className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
-              口径：L3 粗筛 keep ∩ 连续在榜门槛达标
+              {caliberText}
             </span>
           </div>
 
@@ -265,6 +350,56 @@ export function ScreeningPage({
           </div>
         )}
 
+        {isMicrocap && gate?.ready && (
+          <div
+            data-testid="screening-microcap-gate-ready"
+            className="rounded-lg border px-3 py-2 text-xs flex items-center gap-2"
+            style={{ borderColor: 'var(--status-success-default)', color: 'var(--status-success-default)' }}
+          >
+            <i className="fas fa-circle-check text-xs"></i>
+            前置齐备，可执行候选（仍不自动产生订单）
+          </div>
+        )}
+
+        {isMicrocap && gate && !gate.ready && (
+          <div
+            data-testid="screening-microcap-gate-observation"
+            className="rounded-lg border px-3 py-2 text-xs flex items-center gap-2 flex-wrap"
+            style={{ borderColor: 'var(--status-warning-default)', color: 'var(--status-warning-default)' }}
+          >
+            <i className="fas fa-triangle-exclamation text-xs"></i>
+            <span>观察模式：以下前置未就绪 ——</span>
+            <span className="font-medium text-foreground">
+              {gate.missing.map(code => FRONTIER_MISSING_LABEL[code] ?? code).join('、')}
+            </span>
+            <span>（仍不产生订单）</span>
+          </div>
+        )}
+
+        {isMicrocap && data?.exec_constraints && (
+          <div
+            data-testid="screening-microcap-constraints"
+            className="rounded-lg border px-3 py-2 text-xs"
+            style={{ borderColor: 'var(--border)', color: 'var(--text-secondary)' }}
+          >
+            建议执行约束（记录字段，非生效约束）：
+            {typeof data.exec_constraints.suggested_single_cap === 'number' &&
+              ` 单票上限 ${Math.round(data.exec_constraints.suggested_single_cap * 100)}%`}
+            {typeof data.exec_constraints.slippage_tier_bump === 'number' &&
+              ` · 滑点档位提升 ${data.exec_constraints.slippage_tier_bump} 档`}
+          </div>
+        )}
+
+        {isMicrocap && (
+          <div
+            data-testid="screening-microcap-observation-note"
+            className="text-xs"
+            style={{ color: 'var(--text-tertiary)' }}
+          >
+            小市值通道 v1 仅观察：批次与约束仅为记录字段，不向执行链产生订单
+          </div>
+        )}
+
         {removedGroups.length > 0 && (
           <div
             data-testid="screening-removed-list"
@@ -287,7 +422,7 @@ export function ScreeningPage({
         {error ? (
           <div data-testid="screening-error" className="flex items-center gap-2 text-sm text-foreground">
             选股池加载失败
-            <Button variant="ghost" size="sm" onClick={() => { void load() }}>
+            <Button variant="ghost" size="sm" onClick={() => { void load(poolTier) }}>
               重试
             </Button>
           </div>
@@ -296,8 +431,14 @@ export function ScreeningPage({
             加载中…
           </div>
         ) : poolEmpty ? (
-          <div data-testid="screening-empty" className="text-sm" style={{ color: 'var(--text-tertiary)' }}>
-            暂无可分析的精选池：等待下一批选股日批（或批次失败后重跑）
+          <div
+            data-testid={isMicrocap ? 'screening-microcap-empty' : 'screening-empty'}
+            className="text-sm"
+            style={{ color: 'var(--text-tertiary)' }}
+          >
+            {isMicrocap
+              ? '尚无小市值批次：等待小票通道日批落库'
+              : '暂无可分析的精选池：等待下一批选股日批（或批次失败后重跑）'}
           </div>
         ) : (
           <table data-testid="screening-pool-table" className="w-full text-xs">
@@ -318,7 +459,7 @@ export function ScreeningPage({
                 return (
                   <tr
                     key={row.symbol}
-                    data-testid={`screening-row-${row.symbol}`}
+                    data-testid={`${tid('row')}-${row.symbol}`}
                     className="border-t"
                     style={{ borderColor: 'var(--border)' }}
                   >
@@ -326,7 +467,7 @@ export function ScreeningPage({
                       <span className="font-medium text-foreground">{row.symbol}</span>
                       {badge && (
                         <span
-                          data-testid={`screening-queue-badge-${row.symbol}`}
+                          data-testid={`${tid('queue-badge')}-${row.symbol}`}
                           className="ml-2 rounded-full px-2 py-0.5 text-[10px]"
                           style={{ background: 'var(--bg-overlay-l2)', color: 'var(--text-secondary)' }}
                         >
@@ -335,14 +476,14 @@ export function ScreeningPage({
                       )}
                     </td>
                     <td
-                      data-testid={`screening-stock-name-${row.symbol}`}
+                      data-testid={`${tid('stock-name')}-${row.symbol}`}
                       className="py-2 pr-3 align-top"
                       style={{ color: 'var(--text-secondary)' }}
                     >
                       {row.stock_name || '—'}
                     </td>
                     <td
-                      data-testid={`screening-score-${row.symbol}`}
+                      data-testid={`${tid('score')}-${row.symbol}`}
                       className="py-2 pr-3 relative align-top"
                       onMouseEnter={() => setHoverSymbol(row.symbol)}
                       onMouseLeave={() => setHoverSymbol(null)}
@@ -352,7 +493,7 @@ export function ScreeningPage({
                       </span>
                       {hoverSymbol === row.symbol && (
                         <div
-                          data-testid="screening-contribs-tooltip"
+                          data-testid={tid('contribs-tooltip')}
                           className="absolute left-0 top-full z-20 mt-1 w-56 rounded-lg border p-2 shadow-lg"
                           style={{ borderColor: 'var(--border)', background: 'var(--background)' }}
                         >
@@ -395,7 +536,7 @@ export function ScreeningPage({
         {/* ③ 上下文卡片：市场温度计 → 因子信号 → 事件观察。
             它们是解释池子的上下文，排在主体之下；事件清单自带固定高度滚动框。 */}
         <MarketRegimeCard />
-        {data?.factor_signal && <FactorSignalCard signal={data.factor_signal} />}
+        {poolTier === 'main' && data?.factor_signal && <FactorSignalCard signal={data.factor_signal} />}
         <EventWatchlistCard queue={queue} onAnalysisStarted={startPolling} />
       </div>
     </div>
