@@ -217,11 +217,11 @@ class TestTestingMode:
         assert resp.status_code == 404
 
     def test_health_endpoint_works_in_both_modes(self, client_testing, client_normal):
-        """/api/health 在两种模式下都返回 200。"""
-        resp_t = client_testing.get("/api/health")
-        assert resp_t.status_code == 200
-        assert resp_t.json() == {"status": "ok"}
-
-        resp_n = client_normal.get("/api/health")
-        assert resp_n.status_code == 200
-        assert resp_n.json() == {"status": "ok"}
+        """/api/health 在两种模式下都返回 200，status ok 且带各库探针明细。"""
+        for client in (client_testing, client_normal):
+            resp = client.get("/api/health")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["status"] == "ok"
+            assert body["databases"]
+            assert all(v.get("status") == "ok" for v in body["databases"].values())
