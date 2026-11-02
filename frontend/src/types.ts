@@ -888,6 +888,10 @@ export interface ScreeningPoolResponse {
   // 因子 IC 就绪度（delta add-factor-ic-visibility）：逐 active 因子进度 + 恢复日
   factor_signal: ScreeningFactorSignal
   pool: ScreeningPoolRow[]
+  // 小票通道门禁与建议执行约束（add-microcap-pool-ui）：批次级记录字段透传，
+  // main 档批次与无成功批次时为 null
+  frontier_gate: string | null
+  exec_constraints: Record<string, number> | null
   queue: ScreeningQueueEntry[]
 }
 

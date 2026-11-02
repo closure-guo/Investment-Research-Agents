@@ -16,7 +16,7 @@ import uuid
 from collections.abc import AsyncGenerator, Callable, Generator
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -102,6 +102,7 @@ from finance_agent.screening.ranker import (  # noqa: E402
 from finance_agent.screening.store import (  # noqa: E402
     DEFAULT_BATCH_HISTORY_LIMIT,
     MAX_BATCH_HISTORY_LIMIT,
+    POOL_MAIN,
     latest_screening_batch,
     latest_successful_batch,
     list_batches,
@@ -889,7 +890,9 @@ if TESTING:
         顶层可选 snapshot（dict：写 snapshot_meta 键）与 snapshot_reset（bool：先清
         快照三表）造行情快照告警态（add-market-snapshot D6），同样无需 chat_history。
         顶层可选 screening（dict：``batch`` 造批次行（含 error 造失败横幅）、``pool``
-        造精选池行、``queue`` 造批量分析队列徽标态）与 screening_reset（bool：清
+        造精选池行、``queue`` 造批量分析队列徽标态；``batches[]/batch`` 行可选
+        ``tier``（档位，缺省 main）、``frontier_gate``、``exec_constraints``
+        （add-microcap-pool-ui））与 screening_reset（bool：清
         screening 五表**并丢弃进程内队列单例**）造选股页确定性状态
         （add-screening-pipeline S6）；库路径于调用期读 SCREENING_DB_PATH（导入期
         冻结会让 E2E 注入失效）。
@@ -1130,6 +1133,11 @@ if TESTING:
                         l3_keep=history_row.get("l3_keep", 0),
                         pool_rows=history_row.get("pool") or [],
                         selection_mode=history_row.get("selection_mode", "factor"),
+                        # add-microcap-pool-ui：档位/门禁/约束透传。既有 ``pool`` 键是池行列表
+                        # （历史语义不动），档位走独立 ``tier`` 键（缺省 main，缺省路径零漂移）
+                        pool=history_row.get("tier", "main"),
+                        frontier_gate=history_row.get("frontier_gate"),
+                        exec_constraints=history_row.get("exec_constraints"),
                     )
             batch_seed = screening_seed.get("batch")
             if isinstance(batch_seed, dict):
@@ -1145,6 +1153,9 @@ if TESTING:
                     l3_keep=batch_seed.get("l3_keep", 0),
                     pool_rows=screening_seed.get("pool") or [],
                     selection_mode=batch_seed.get("selection_mode", "factor"),
+                    pool=batch_seed.get("tier", "main"),
+                    frontier_gate=batch_seed.get("frontier_gate"),
+                    exec_constraints=batch_seed.get("exec_constraints"),
                 )
             queue_seed = screening_seed.get("queue")
             if isinstance(queue_seed, list):
@@ -3783,25 +3794,35 @@ def _factor_signal_block(selection_mode: str | None) -> dict[str, Any]:
         }
 
 
-def _screening_pool_payload(queue_snapshot: list[dict]) -> dict[str, Any]:
+# 池档位（add-microcap-pool-ui）：Literal 违例由 FastAPI 自动 422（非法值不静默回退）
+ScreeningPoolTier = Literal["main", "microcap"]
+
+
+def _screening_pool_payload(queue_snapshot: list[dict], pool: str = POOL_MAIN) -> dict[str, Any]:
     """池端点载荷（同步体，供 to_thread 包裹）：最近成功池 + 最近尝试状态 + 队列。
 
     披露（add-screening-empty-library-fallback）：``selection_mode`` 取自最近成功
     批次；``fallback`` 时附 ``notice``（明示非因子信号），``factor`` 时为 ``None``。
+    add-microcap-pool-ui：``pool`` 缺省 ``'main'``（既有契约零漂移）；批次记录字段
+    ``frontier_gate`` / ``exec_constraints`` 随最近成功批次透传（main 档批次该两
+    字段落库即 ``None``）；microcap 档不挂分析队列（v1 不触发池分析，队列属主档）。
     """
-    latest = latest_screening_batch()
-    successful = latest_successful_pool()
-    selection_mode = successful["batch"].get("selection_mode") if successful else None
+    latest = latest_screening_batch(pool=pool)
+    successful = latest_successful_pool(pool=pool)
+    batch = successful["batch"] if successful else None
+    selection_mode = batch.get("selection_mode") if batch else None
     return {
-        "batch_date": successful["batch"]["trade_date"] if successful else None,
+        "batch_date": batch["trade_date"] if batch else None,
         "batch_status": latest["status"] if latest else None,
         # 最近一次尝试非 ok（含失败）→ stale：页面横幅可见，池仍展示最近成功批次
         "stale": bool(latest is not None and latest["status"] != "ok"),
         "selection_mode": selection_mode,
         "notice": _SCREENING_FALLBACK_NOTICE if selection_mode == "fallback" else None,
         "factor_signal": _factor_signal_block(selection_mode),
+        "frontier_gate": batch.get("frontier_gate") if batch else None,
+        "exec_constraints": batch.get("exec_constraints") if batch else None,
         "pool": successful["pool"] if successful else [],
-        "queue": queue_snapshot,
+        "queue": queue_snapshot if pool == POOL_MAIN else [],
     }
 
 
@@ -3825,14 +3846,15 @@ def _screening_event_source(
 
 
 @app.get("/api/screening/pool")
-async def screening_pool() -> dict[str, Any]:
+async def screening_pool(pool: ScreeningPoolTier = "main") -> dict[str, Any]:
     """选股页取数（S4）：最近成功批次池（含贡献分解）+ 批次状态 + 队列快照。
 
     无成功批次 → ``batch_date=None`` + 空池；最近一次尝试失败 → ``stale=True``，
-    池仍为最近成功批次（spec：页面标注其日期）。
+    池仍为最近成功批次（spec：页面标注其日期）。``pool`` 缺省 ``'main'``——既有
+    消费者零变化；``pool=microcap`` 返回小票通道池（add-microcap-pool-ui）。
     """
     queue_snapshot = _get_analyze_queue().snapshot()
-    return await asyncio.to_thread(_screening_pool_payload, queue_snapshot)
+    return await asyncio.to_thread(_screening_pool_payload, queue_snapshot, pool)
 
 
 @app.get("/api/screening/status")
@@ -3869,17 +3891,20 @@ async def screening_status() -> dict[str, Any]:
 
 
 @app.get("/api/screening/batches")
-async def screening_batches(limit: int = DEFAULT_BATCH_HISTORY_LIMIT) -> list[dict[str, Any]]:
+async def screening_batches(
+    limit: int = DEFAULT_BATCH_HISTORY_LIMIT, pool: ScreeningPoolTier = "main"
+) -> list[dict[str, Any]]:
     """选股批次历史（delta add-daily-ops-page T1；spec「批次历史查询」）。
 
     按交易日期倒序返回近 ``limit`` 批次（默认 20），字段 = 日期 / 状态（ok/failed）/
     错误 / 起止时间 / 各层计数（l1_passed/l2_top/l3_keep）/ 池数（pool_size）。
     空库 → 200 + 空列表（不以错误冒充「无历史」）；``limit`` 钳制到
     ``[1, MAX_BATCH_HISTORY_LIMIT]``（越界不 422——越界值只影响窗口大小，
-    钳制后再交给 store 的严格校验）。只读端点：无任何写操作暴露。
+    钳制后再交给 store 的严格校验）。``pool`` 缺省 ``'main'``，``pool=microcap`` 返回小票
+    通道批次历史（add-microcap-pool-ui）。只读端点：无任何写操作暴露。
     """
     clamped = max(1, min(limit, MAX_BATCH_HISTORY_LIMIT))
-    return await asyncio.to_thread(list_batches, clamped)
+    return await asyncio.to_thread(list_batches, clamped, None, pool=pool)
 
 
 def _screening_freshness_removals(

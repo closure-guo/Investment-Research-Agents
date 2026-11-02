@@ -274,3 +274,113 @@ test('因子信号状态卡：可见并如实披露样本进度口径', async ({
   // 断言口径存在（不锁定具体样本数，避免跨 spec 共享库串扰造成假红）。
   await expect(card).toContainText(/无 active 因子|IC 样本不足|全部 active 因子 IC 样本达标/)
 })
+
+const MICROCAP_DATE = '2026-10-16'
+const MICROCAP_POOL = [
+  {
+    symbol: '300001',
+    stock_name: '特锐德',
+    composite_score: 0.98,
+    rank: 1,
+    consecutive_days: 4,
+    l3_verdict: 'keep',
+    l3_reason: '无风险事件',
+    factor_contribs: [],
+  },
+]
+
+// 两档并存种子（Task 2 的 tier/frontier_gate/exec_constraints 透传；既有 pool 键=池行列表）
+async function seedTwoTiers(request: APIRequestContext, frontierGate: string) {
+  const resp = await request.post(`${apiBase()}/api/test/seed`, {
+    data: {
+      screening: {
+        batches: [
+          {
+            trade_date: BATCH_DATE,
+            status: 'ok',
+            started_at: `${BATCH_DATE}T15:30:00`,
+            finished_at: `${BATCH_DATE}T15:33:00`,
+            l1_passed: 20,
+            l2_top: 9,
+            l3_keep: 2,
+            pool: POOL,
+            tier: 'main',
+          },
+          {
+            trade_date: MICROCAP_DATE,
+            status: 'ok',
+            started_at: `${MICROCAP_DATE}T16:45:00`,
+            finished_at: `${MICROCAP_DATE}T16:47:00`,
+            l1_passed: 30,
+            l2_top: 12,
+            l3_keep: 1,
+            pool: MICROCAP_POOL,
+            tier: 'microcap',
+            frontier_gate: frontierGate,
+            exec_constraints: { suggested_single_cap: 0.05, slippage_tier_bump: 1 },
+          },
+        ],
+      },
+    },
+  })
+  expect(resp.ok()).toBeTruthy()
+}
+
+test('种子两档 → 切小市值：行 + 观察横幅（缺失要点映射）+ 约束 + 声明 + 无分析按钮', async ({ page, request }) => {
+  await seedTwoTiers(request, 'observation_only:missing=delist_pool,regime_data')
+
+  await page.goto('/screening')
+  await expect(page.getByTestId('screening-row-600519')).toBeVisible({ timeout: 15_000 })
+
+  await page.getByTestId('screening-tier-microcap').click()
+  const row = page.getByTestId('screening-microcap-row-300001')
+  await expect(row).toBeVisible()
+  await expect(row).toContainText('特锐德')
+  const gate = page.getByTestId('screening-microcap-gate-observation')
+  await expect(gate).toContainText('退市股池')
+  await expect(gate).toContainText('拥挤度数据')
+  await expect(gate).toContainText('不产生订单')
+  await expect(page.getByTestId('screening-microcap-constraints')).toContainText('单票上限 5%')
+  await expect(page.getByTestId('screening-microcap-constraints')).toContainText('滑点档位提升 1 档')
+  await expect(page.getByTestId('screening-microcap-observation-note')).toContainText('不向执行链产生订单')
+  await expect(page.getByTestId('screening-analyze-btn')).toHaveCount(0)
+})
+
+test('小市值门禁 ready → 「可执行候选」横幅（与观察态可区分）', async ({ page, request }) => {
+  await seedTwoTiers(request, 'ready')
+
+  await page.goto('/screening')
+  await expect(page.getByTestId('screening-row-600519')).toBeVisible({ timeout: 15_000 })
+  await page.getByTestId('screening-tier-microcap').click()
+
+  const banner = page.getByTestId('screening-microcap-gate-ready')
+  await expect(banner).toContainText('可执行候选')
+  await expect(banner).toContainText('不自动产生订单')
+  await expect(page.getByTestId('screening-microcap-gate-observation')).toHaveCount(0)
+})
+
+test('小市值无批次 → 专用空态（非报错、非主档数据）', async ({ page, request }) => {
+  await seedPool(request) // 仅主档
+
+  await page.goto('/screening')
+  await expect(page.getByTestId('screening-row-600519')).toBeVisible({ timeout: 15_000 })
+  await page.getByTestId('screening-tier-microcap').click()
+
+  await expect(page.getByTestId('screening-microcap-empty')).toContainText('尚无小市值批次')
+  await expect(page.getByTestId('screening-error')).toHaveCount(0)
+  await expect(page.getByTestId('screening-row-600519')).toHaveCount(0)
+})
+
+test('切回主档：既有行与批次内容恢复', async ({ page, request }) => {
+  await seedTwoTiers(request, 'observation_only:missing=regime_data')
+
+  await page.goto('/screening')
+  await expect(page.getByTestId('screening-row-600519')).toBeVisible({ timeout: 15_000 })
+  await page.getByTestId('screening-tier-microcap').click()
+  await expect(page.getByTestId('screening-microcap-row-300001')).toBeVisible()
+  await page.getByTestId('screening-tier-main').click()
+
+  await expect(page.getByTestId('screening-row-600519')).toBeVisible()
+  await expect(page.getByTestId('screening-analyze-btn')).toBeVisible()
+  await expect(page.getByTestId('screening-microcap-gate-observation')).toHaveCount(0)
+})

@@ -875,3 +875,139 @@ def test_seed_daily_brief_roundtrip(testing_client) -> None:
     assert row is not None
     assert row["markdown"].startswith("# 日报")
     assert row["model"] == "openai/deepseek-v4.1-flash"
+
+
+# ── 池档位（add-microcap-pool-ui） ──────────────────────────────────────────
+
+_MICROCAP_DATE = "2026-10-15"
+_MICROCAP_GATE = "observation_only:missing=regime_data"
+_MICROCAP_CONSTRAINTS = {"suggested_single_cap": 0.05, "slippage_tier_bump": 1}
+
+
+def _seed_microcap_batch(db_path, trade_date: str = _MICROCAP_DATE) -> None:
+    """microcap 档成功批次 + 2 池行（复用 _pool_rows；门禁/约束为批次记录字段）。"""
+    record_screening_batch(
+        trade_date,
+        status="ok",
+        started_at=f"{trade_date}T16:45:00",
+        finished_at=f"{trade_date}T16:47:00",
+        l1_passed=30,
+        l2_top=12,
+        l3_keep=2,
+        pool_rows=_pool_rows(2),
+        selection_mode="factor",
+        pool="microcap",
+        frontier_gate=_MICROCAP_GATE,
+        exec_constraints=dict(_MICROCAP_CONSTRAINTS),
+        db_path=db_path,
+    )
+
+
+def test_pool_default_main_unchanged(pool_seed, _screening_db) -> None:
+    """缺省（不带 pool 参数）= main 档：既有字段语义零漂移，microcap 行不混入。"""
+    _seed_microcap_batch(_screening_db)
+    body = TestClient(app).get("/api/screening/pool").json()
+
+    assert body["batch_date"] == _AS_OF
+    assert body["frontier_gate"] is None
+    assert body["exec_constraints"] is None
+    assert all(row["symbol"].startswith("60000") for row in body["pool"])
+
+
+def test_pool_microcap_tier(pool_seed, _screening_db) -> None:
+    _seed_microcap_batch(_screening_db)
+    body = TestClient(app).get("/api/screening/pool", params={"pool": "microcap"}).json()
+
+    assert body["batch_date"] == _MICROCAP_DATE
+    assert body["frontier_gate"] == _MICROCAP_GATE
+    assert body["exec_constraints"] == _MICROCAP_CONSTRAINTS
+    assert len(body["pool"]) == 2
+    assert body["queue"] == []  # microcap 档不挂分析队列（add-microcap-pool-ui）
+    assert all(row["symbol"].startswith("60000") for row in body["pool"])
+
+
+def test_pool_microcap_empty(_screening_db) -> None:
+    """microcap 尚无成功批次 → 200 空态，不报错（池与批次历史两接口）。"""
+    client = TestClient(app)
+    body = client.get("/api/screening/pool", params={"pool": "microcap"}).json()
+
+    assert body["batch_date"] is None
+    assert body["pool"] == []
+    assert body["frontier_gate"] is None
+    assert body["exec_constraints"] is None
+
+    assert client.get("/api/screening/batches", params={"pool": "microcap"}).json() == []
+
+
+def test_pool_invalid_tier_422() -> None:
+    client = TestClient(app)
+
+    assert client.get("/api/screening/pool", params={"pool": "foo"}).status_code == 422
+    assert client.get("/api/screening/batches", params={"pool": "foo"}).status_code == 422
+
+
+def test_batches_default_excludes_microcap(pool_seed, _screening_db) -> None:
+    """缺省批次历史只出 main 档行（须先有 main 批次才能证明 microcap 未混入）。"""
+    _seed_microcap_batch(_screening_db)
+    rows = TestClient(app).get("/api/screening/batches").json()
+
+    assert rows and all(row["pool"] == "main" for row in rows)
+    assert all(row["trade_date"] != _MICROCAP_DATE for row in rows)
+
+
+def test_batches_microcap_tier(_screening_db) -> None:
+    _seed_microcap_batch(_screening_db)
+    rows = TestClient(app).get("/api/screening/batches", params={"pool": "microcap"}).json()
+
+    assert [row["trade_date"] for row in rows] == [_MICROCAP_DATE]
+    assert rows[0]["frontier_gate"] == _MICROCAP_GATE
+    assert rows[0]["exec_constraints"] == _MICROCAP_CONSTRAINTS
+
+
+def test_seed_screening_microcap_tier(testing_client) -> None:
+    """seed 透传档位/门禁/约束（add-microcap-pool-ui T2）：两档并存、缺省只见 main。"""
+    resp = testing_client.post(
+        "/api/test/seed",
+        json={
+            "screening": {
+                "batches": [
+                    {
+                        "trade_date": _AS_OF,
+                        "status": "ok",
+                        "started_at": f"{_AS_OF}T15:30:00",
+                        "finished_at": f"{_AS_OF}T15:33:00",
+                        "l1_passed": 20,
+                        "l2_top": 9,
+                        "l3_keep": 2,
+                        "pool": _pool_rows(1),
+                        "tier": "main",
+                    },
+                    {
+                        "trade_date": _MICROCAP_DATE,
+                        "status": "ok",
+                        "started_at": f"{_MICROCAP_DATE}T16:45:00",
+                        "finished_at": f"{_MICROCAP_DATE}T16:47:00",
+                        "l1_passed": 30,
+                        "l2_top": 12,
+                        "l3_keep": 1,
+                        "pool": _pool_rows(2),
+                        "tier": "microcap",
+                        "frontier_gate": _MICROCAP_GATE,
+                        "exec_constraints": _MICROCAP_CONSTRAINTS,
+                    },
+                ]
+            }
+        },
+    )
+    assert resp.status_code == 200
+
+    main_rows = testing_client.get("/api/screening/batches").json()
+    assert [row["trade_date"] for row in main_rows] == [_AS_OF]
+
+    micro_rows = testing_client.get("/api/screening/batches", params={"pool": "microcap"}).json()
+    assert [row["trade_date"] for row in micro_rows] == [_MICROCAP_DATE]
+    assert micro_rows[0]["frontier_gate"] == _MICROCAP_GATE
+    assert micro_rows[0]["exec_constraints"] == _MICROCAP_CONSTRAINTS
+
+    micro_pool = testing_client.get("/api/screening/pool", params={"pool": "microcap"}).json()
+    assert len(micro_pool["pool"]) == 2

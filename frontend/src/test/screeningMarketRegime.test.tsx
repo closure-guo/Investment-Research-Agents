@@ -111,6 +111,8 @@ function poolBody(overrides: Partial<ScreeningPoolResponse> = {}): ScreeningPool
         factor_contribs: [],
       },
     ],
+    frontier_gate: null,
+    exec_constraints: null,
     queue: [],
     ...overrides,
   }
