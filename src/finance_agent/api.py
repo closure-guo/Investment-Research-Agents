@@ -890,7 +890,9 @@ if TESTING:
         顶层可选 snapshot（dict：写 snapshot_meta 键）与 snapshot_reset（bool：先清
         快照三表）造行情快照告警态（add-market-snapshot D6），同样无需 chat_history。
         顶层可选 screening（dict：``batch`` 造批次行（含 error 造失败横幅）、``pool``
-        造精选池行、``queue`` 造批量分析队列徽标态）与 screening_reset（bool：清
+        造精选池行、``queue`` 造批量分析队列徽标态；``batches[]/batch`` 行可选
+        ``tier``（档位，缺省 main）、``frontier_gate``、``exec_constraints``
+        （add-microcap-pool-ui））与 screening_reset（bool：清
         screening 五表**并丢弃进程内队列单例**）造选股页确定性状态
         （add-screening-pipeline S6）；库路径于调用期读 SCREENING_DB_PATH（导入期
         冻结会让 E2E 注入失效）。
@@ -1131,6 +1133,11 @@ if TESTING:
                         l3_keep=history_row.get("l3_keep", 0),
                         pool_rows=history_row.get("pool") or [],
                         selection_mode=history_row.get("selection_mode", "factor"),
+                        # add-microcap-pool-ui：档位/门禁/约束透传。既有 ``pool`` 键是池行列表
+                        # （历史语义不动），档位走独立 ``tier`` 键（缺省 main，缺省路径零漂移）
+                        pool=history_row.get("tier", "main"),
+                        frontier_gate=history_row.get("frontier_gate"),
+                        exec_constraints=history_row.get("exec_constraints"),
                     )
             batch_seed = screening_seed.get("batch")
             if isinstance(batch_seed, dict):
@@ -1146,6 +1153,9 @@ if TESTING:
                     l3_keep=batch_seed.get("l3_keep", 0),
                     pool_rows=screening_seed.get("pool") or [],
                     selection_mode=batch_seed.get("selection_mode", "factor"),
+                    pool=batch_seed.get("tier", "main"),
+                    frontier_gate=batch_seed.get("frontier_gate"),
+                    exec_constraints=batch_seed.get("exec_constraints"),
                 )
             queue_seed = screening_seed.get("queue")
             if isinstance(queue_seed, list):

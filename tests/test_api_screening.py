@@ -961,3 +961,56 @@ def test_batches_microcap_tier(_screening_db) -> None:
     assert [row["trade_date"] for row in rows] == [_MICROCAP_DATE]
     assert rows[0]["frontier_gate"] == _MICROCAP_GATE
     assert rows[0]["exec_constraints"] == _MICROCAP_CONSTRAINTS
+
+
+def test_seed_screening_microcap_tier(testing_client) -> None:
+    """seed 透传档位/门禁/约束（add-microcap-pool-ui T2）：两档并存、缺省只见 main。"""
+    resp = testing_client.post(
+        "/api/test/seed",
+        json={
+            "screening": {
+                "batches": [
+                    {
+                        "trade_date": _AS_OF,
+                        "status": "ok",
+                        "started_at": f"{_AS_OF}T15:30:00",
+                        "finished_at": f"{_AS_OF}T15:33:00",
+                        "l1_passed": 20,
+                        "l2_top": 9,
+                        "l3_keep": 2,
+                        "pool": _pool_rows(1),
+                        "tier": "main",
+                    },
+                    {
+                        "trade_date": _MICROCAP_DATE,
+                        "status": "ok",
+                        "started_at": f"{_MICROCAP_DATE}T16:45:00",
+                        "finished_at": f"{_MICROCAP_DATE}T16:47:00",
+                        "l1_passed": 30,
+                        "l2_top": 12,
+                        "l3_keep": 1,
+                        "pool": _pool_rows(2),
+                        "tier": "microcap",
+                        "frontier_gate": _MICROCAP_GATE,
+                        "exec_constraints": _MICROCAP_CONSTRAINTS,
+                    },
+                ]
+            }
+        },
+    )
+    assert resp.status_code == 200
+
+    main_rows = testing_client.get("/api/screening/batches").json()
+    assert [row["trade_date"] for row in main_rows] == [_AS_OF]
+
+    micro_rows = testing_client.get(
+        "/api/screening/batches", params={"pool": "microcap"}
+    ).json()
+    assert [row["trade_date"] for row in micro_rows] == [_MICROCAP_DATE]
+    assert micro_rows[0]["frontier_gate"] == _MICROCAP_GATE
+    assert micro_rows[0]["exec_constraints"] == _MICROCAP_CONSTRAINTS
+
+    micro_pool = testing_client.get(
+        "/api/screening/pool", params={"pool": "microcap"}
+    ).json()
+    assert len(micro_pool["pool"]) == 2
