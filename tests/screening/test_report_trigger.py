@@ -5,9 +5,22 @@
 
 from __future__ import annotations
 
+import pytest
+
 from finance_agent.data import research_reports_store as rr_store
 from finance_agent.screening import pool_analysis
 from finance_agent.screening import report_trigger as rt
+
+
+@pytest.fixture(autouse=True)
+def _no_live_freshness(monkeypatch):
+    """单测不触网：freshness 校验读生产快照库并逐标的真发事件搜索。CI 无快照库时
+    该校验降级跳过（确定绿）；本机有库时网络结果污染 removed_symbols，
+    per_report_cap 期望 3 实得 2（2026-11-03 归因）。本文件测的是触发/上限/幂等
+    逻辑，freshness 行为归 check_signal_freshness 专项测试。"""
+    monkeypatch.setattr(
+        rt, "screening_freshness_removals", lambda pool_rows, batch_date: []
+    )
 
 
 def _doc(db, key, stocks, *, report_date="2026-10-20", report_type="个股研报"):
