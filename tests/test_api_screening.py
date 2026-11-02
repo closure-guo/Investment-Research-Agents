@@ -1004,14 +1004,10 @@ def test_seed_screening_microcap_tier(testing_client) -> None:
     main_rows = testing_client.get("/api/screening/batches").json()
     assert [row["trade_date"] for row in main_rows] == [_AS_OF]
 
-    micro_rows = testing_client.get(
-        "/api/screening/batches", params={"pool": "microcap"}
-    ).json()
+    micro_rows = testing_client.get("/api/screening/batches", params={"pool": "microcap"}).json()
     assert [row["trade_date"] for row in micro_rows] == [_MICROCAP_DATE]
     assert micro_rows[0]["frontier_gate"] == _MICROCAP_GATE
     assert micro_rows[0]["exec_constraints"] == _MICROCAP_CONSTRAINTS
 
-    micro_pool = testing_client.get(
-        "/api/screening/pool", params={"pool": "microcap"}
-    ).json()
+    micro_pool = testing_client.get("/api/screening/pool", params={"pool": "microcap"}).json()
     assert len(micro_pool["pool"]) == 2

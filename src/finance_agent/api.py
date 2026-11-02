@@ -3798,9 +3798,7 @@ def _factor_signal_block(selection_mode: str | None) -> dict[str, Any]:
 ScreeningPoolTier = Literal["main", "microcap"]
 
 
-def _screening_pool_payload(
-    queue_snapshot: list[dict], pool: str = POOL_MAIN
-) -> dict[str, Any]:
+def _screening_pool_payload(queue_snapshot: list[dict], pool: str = POOL_MAIN) -> dict[str, Any]:
     """池端点载荷（同步体，供 to_thread 包裹）：最近成功池 + 最近尝试状态 + 队列。
 
     披露（add-screening-empty-library-fallback）：``selection_mode`` 取自最近成功
