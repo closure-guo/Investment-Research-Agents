@@ -4,9 +4,16 @@ D1/RM 结构化评级（harden-decision-report-semantics）：JSON 输出（reas
 rating 在后——先推理后结论）、评级前置拼装、解析失败降级不中断。
 """
 
+import json
+import logging
 from unittest.mock import patch
 
-from finance_agent.nodes.research_manager import research_manager
+from finance_agent.models import DebateMessage
+from finance_agent.nodes.research_manager import (
+    _build_research_context,
+    format_assumptions_text,
+    research_manager,
+)
 
 
 class TestResearchManager:
@@ -65,3 +72,126 @@ class TestStructuredRating:
         assert result["research_manager_rating"] is None
         assert result["research_manager_confidence"] is None
         assert result.get("parse_degraded") is True
+
+
+class TestContextNumbering:
+    """spec：RM 上下文复用「R{n} 论点: ①…」编号行；无 key_arguments 退化基础格式。"""
+
+    def test_numbered_arguments_enter_context(self):
+        msg = DebateMessage(
+            role="bull",
+            round=1,
+            content="看多正文",
+            key_arguments=[
+                {"text": "份额 35% 创新高", "kind": "data", "anchors": ["x.y"]},
+                {"text": "回购提振", "kind": "event", "anchors": ["回购公告"]},
+            ],
+        )
+        ctx = _build_research_context({"analyst_reports": {}, "debate_history": [msg]})
+        assert "R1 论点: ①.份额 35% 创新高 ②.回购提振" in ctx
+        assert "bull(R1): 看多正文" in ctx
+
+    def test_missing_key_arguments_degrades(self):
+        ctx = _build_research_context(
+            {
+                "analyst_reports": {},
+                "debate_history": [{"role": "bear", "round": 1, "content": "空方正文"}],
+            }
+        )
+        assert "bear(R1): 空方正文" in ctx
+        assert "论点:" not in ctx
+
+
+def _valid_table():
+    rows = []
+    for code, dim in (
+        ("H1", "竞争格局"),
+        ("H2", "成长驱动"),
+        ("H3", "盈利质量"),
+        ("H4", "估值与预期"),
+    ):
+        rows.append(
+            {
+                "code": code,
+                "dimension": dim,
+                "assumption": f"{dim}命题 ≥ 30%",
+                "bull_evidence": [f"Bull R1 论点①: {dim}利多"],
+                "bear_evidence": [],
+                "inflection_signal": f"{dim}连续两季恶化",
+                "status": "成立",
+                "time_tag": "long",
+            }
+        )
+    return rows
+
+
+def _rm_json(table):
+    return json.dumps(
+        {
+            "reasoning": "多空交锋后偏多。",
+            "rating": "看多",
+            "confidence": 0.62,
+            "assumption_table": table,
+        },
+        ensure_ascii=False,
+    )
+
+
+class TestAssumptionTable:
+    """spec：合法表落 state + 拼进结论；非法整表丢弃不触碰评级降级语义。"""
+
+    @patch("finance_agent.nodes.research_manager.call_llm_streaming_with_fallback")
+    def test_valid_table_lands_state_and_conclusion(self, mock_llm):
+        mock_llm.return_value = _rm_json(_valid_table())
+        result = research_manager({"analyst_reports": {}, "debate_history": []})
+        assert result["research_manager_assumptions"] == _valid_table()
+        conclusion = result["research_manager_conclusion"]
+        assert conclusion.startswith("评级: 看多")
+        assert "| H1 竞争格局 |" in conclusion
+        assert "✅ 成立" in conclusion
+        assert "Bull R1 论点①: 竞争格局利多" in conclusion
+        assert result["research_manager_rating"] == "看多"
+
+    @patch("finance_agent.nodes.research_manager.call_llm_streaming_with_fallback")
+    def test_missing_row_drops_table_keeps_rating(self, mock_llm, caplog):
+        table = [r for r in _valid_table() if r["code"] != "H3"]
+        mock_llm.return_value = _rm_json(table)
+        with caplog.at_level(logging.WARNING, logger="finance_agent.research_manager"):
+            result = research_manager({"analyst_reports": {}, "debate_history": []})
+        assert result["research_manager_assumptions"] is None
+        assert "| H1" not in result["research_manager_conclusion"]
+        assert result["research_manager_rating"] == "看多"
+        assert result["research_manager_confidence"] == 0.62
+        assert "parse_degraded" not in result
+        assert any("H3" in r.message for r in caplog.records)
+
+    @patch("finance_agent.nodes.research_manager.call_llm_streaming_with_fallback")
+    def test_bad_enum_drops_table(self, mock_llm):
+        table = _valid_table()
+        table[1]["status"] = "大概成立"
+        mock_llm.return_value = _rm_json(table)
+        result = research_manager({"analyst_reports": {}, "debate_history": []})
+        assert result["research_manager_assumptions"] is None
+        assert result["research_manager_rating"] == "看多"
+
+    @patch("finance_agent.nodes.research_manager.call_llm_streaming_with_fallback")
+    def test_unsupported_row_no_evidence_drops(self, mock_llm):
+        table = _valid_table()
+        table[3]["bull_evidence"] = []
+        table[3]["bear_evidence"] = []
+        mock_llm.return_value = _rm_json(table)
+        result = research_manager({"analyst_reports": {}, "debate_history": []})
+        assert result["research_manager_assumptions"] is None
+
+    @patch("finance_agent.nodes.research_manager.call_llm_streaming_with_fallback")
+    def test_free_text_degradation_sets_assumptions_none(self, mock_llm):
+        mock_llm.return_value = "自由文本结论。"
+        result = research_manager({"analyst_reports": {}, "debate_history": []})
+        assert result.get("parse_degraded") is True
+        assert result["research_manager_assumptions"] is None
+
+    def test_pipe_in_cell_is_escaped(self):
+        table = _valid_table()
+        table[0]["assumption"] = "A|B"
+        text = format_assumptions_text(table)
+        assert "A／B" in text and "| A|B |" not in text

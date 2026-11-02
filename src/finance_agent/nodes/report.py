@@ -21,6 +21,7 @@ from finance_agent.llm.output_guard import validate_deliverable_text
 from finance_agent.metric_vocab import render_date
 from finance_agent.models import AnalystReport, DebateMessage, TradeDecision
 from finance_agent.nodes.fund_manager import final_integrity_notes
+from finance_agent.nodes.research_manager import format_assumptions_text
 from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS
 
 # ── focus -> 结构化标签（规则驱动，可测试） ──
@@ -453,6 +454,23 @@ def _format_divergence_card(state: dict) -> str | None:
     return f"评级: {rating} · 置信度 {confidence:.2f} · 分歧焦点: {first_sentence}"
 
 
+def _render_assumptions_section(state: dict, conclusion_body: str) -> str:
+    """多空假设表（add-rm-assumption-table）：按结构化键渲染于分歧卡与结论文本之后。
+
+    RM 节点已把同格式表拼进 conclusion 文本（供 trader/risk_judge 上下文消费），报告侧
+    先剥离该精确后缀再重渲染，避免同一张表出现两次。结构化键缺失/None（历史会话、解析
+    降级、表被丢弃）→ 原样返回现状渲染，MUST NOT 渲染空表或编造行。
+    """
+    table = state.get("research_manager_assumptions")
+    if not isinstance(table, list) or not table:
+        return conclusion_body
+    table_md = format_assumptions_text(table)
+    suffix = "\n\n" + table_md
+    if conclusion_body.endswith(suffix):
+        conclusion_body = conclusion_body[: -len(suffix)]
+    return f"{conclusion_body}\n\n**多空假设表**\n\n{table_md}"
+
+
 # ── 研究聚焦摘要（LLM 生成，有兜底） ──
 
 
@@ -780,6 +798,8 @@ def generate_report(state: dict) -> dict:
         # 结构化评级缺失时退化为纯文本现状渲染，不编造评级
         divergence_card = _format_divergence_card(state)
         conclusion_body = f"{divergence_card}\n\n{conclusion}" if divergence_card else conclusion
+        # add-rm-assumption-table：假设表置于分歧卡与结论文本之后；结构化缺失退化现状
+        conclusion_body = _render_assumptions_section(state, conclusion_body)
         sections.append(f"{next_title('多空辩论结论')}\n{conclusion_body}\n")
 
     decision = state.get("final_trade_decision") or state.get("trader_plan")

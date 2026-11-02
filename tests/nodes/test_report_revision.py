@@ -143,6 +143,74 @@ class TestDivergenceCard:
         assert "多空各执一词，结论偏谨慎。" in report
 
 
+class TestAssumptionsTableRendering:
+    """add-rm-assumption-table：分歧卡与结论文本之后渲染假设表；缺失退化现状。"""
+
+    @staticmethod
+    def _table():
+        return [
+            {
+                "code": c,
+                "dimension": d,
+                "assumption": f"{d}命题",
+                "bull_evidence": [f"Bull R1 论点①: {d}利多"],
+                "bear_evidence": [],
+                "inflection_signal": f"{d}拐点",
+                "status": s,
+                "time_tag": "long",
+            }
+            for c, d, s in (
+                ("H1", "竞争格局", "成立"),
+                ("H2", "成长驱动", "注意"),
+                ("H3", "盈利质量", "不成立"),
+                ("H4", "估值与预期", "成立"),
+            )
+        ]
+
+    def test_table_rendered_from_structured_key_not_text(self):
+        """渲染由结构化键驱动：conclusion 文本无表时仍须出表（带节标题），置于结论之后。"""
+        state = _base_state()
+        state["research_manager_rating"] = "看多"
+        state["research_manager_confidence"] = 0.62
+        state["research_manager_assumptions"] = self._table()
+        state["research_manager_conclusion"] = "评级: 看多（置信度 0.62）\n多空交锋后偏多。"
+        report = generate_report(state)["final_report"]
+
+        assert "**多空假设表**" in report
+        assert report.count("| H1 竞争格局 |") == 1
+        assert "✅ 成立" in report and "⚠️ 注意" in report and "❌ 不成立" in report
+        assert (
+            report.index("分歧焦点")
+            < report.index("多空交锋后偏多")
+            < report.index("**多空假设表**")
+            < report.index("| H1 竞争格局 |")
+        )
+
+    def test_no_duplication_when_conclusion_already_carries_table(self):
+        """RM 节点把表拼进了 conclusion（消费端可见）——报告须剥离该后缀再按结构化键重渲染。"""
+        from finance_agent.nodes.research_manager import format_assumptions_text
+
+        state = _base_state()
+        table = self._table()
+        state["research_manager_rating"] = "看多"
+        state["research_manager_confidence"] = 0.62
+        state["research_manager_assumptions"] = table
+        state["research_manager_conclusion"] = (
+            "评级: 看多（置信度 0.62）\n多空交锋后偏多。\n\n" + format_assumptions_text(table)
+        )
+        report = generate_report(state)["final_report"]
+
+        assert "**多空假设表**" in report
+        assert report.count("| H1 竞争格局 |") == 1
+
+    def test_missing_structured_table_degrades(self):
+        state = _base_state()
+        state["research_manager_conclusion"] = "多空各执一词。"
+        report = generate_report(state)["final_report"]
+        assert "| 维度 |" not in report
+        assert "多空各执一词。" in report
+
+
 class TestRealPipelineShapes:
     """真实管线形态回归（本地实跑 601066 抓到的两处断点）。"""
 

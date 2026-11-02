@@ -4,7 +4,11 @@ import pytest
 from pydantic import ValidationError
 
 from finance_agent.models import DebateArgument, DebateMessage
-from finance_agent.nodes.debate import _build_debate_context
+from finance_agent.nodes.debate import (
+    _build_debate_context,
+    debate_message_fields,
+    format_debate_message,
+)
 
 
 class TestDebateArgumentModel:
@@ -216,3 +220,24 @@ class TestDebateContextRenderingPrivacy:
         assert "technical_indicators.MA.5.-1" not in context
         assert "anchors" not in context
         assert "kind" not in context
+
+
+class TestSharedMessageFormatter:
+    """add-rm-assumption-table：编号行渲染抽共用——辩论层与 RM 上下文同一格式。"""
+
+    def test_numbered_line_precedes_content(self):
+        out = format_debate_message("bull", 1, "正文", ["份额 35%", "回购 10 亿"])
+        assert out == "R1 论点: ①.份额 35% ②.回购 10 亿\nbull(R1): 正文"
+
+    def test_no_args_degrades_to_basic_format(self):
+        assert format_debate_message("bear", 2, "正文", []) == "bear(R2): 正文"
+        assert format_debate_message("bear", 2, "正文", None) == "bear(R2): 正文"
+
+    def test_fields_from_dict_and_invalid(self):
+        assert debate_message_fields({"role": "bull", "round": 1, "content": "c"}) == (
+            "bull",
+            1,
+            "c",
+            [],
+        )
+        assert debate_message_fields("garbage") is None
