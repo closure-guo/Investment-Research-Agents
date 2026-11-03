@@ -1206,3 +1206,108 @@ class TestSelfReferenceFalsePositives:
             reasoning="激进方的试探仓（止损 20.5、目标 26.0）经 20 日 1σ 校验后赔率不成立，不予采纳。"
         )
         assert check_decision_prices(decision, TI_601066, PL_601066, CLOSE_601066) == []
+
+
+# ── 000767 形态夹具：现价 2.93，止损参考带下沿 2.7543（2026-11-03 生产值）──
+TI_000767 = _indicators(
+    ma5=2.90,
+    ma10=2.95,
+    ma20=3.02,
+    ma60=3.15,
+)
+PL_000767 = {
+    "available": True,
+    "entry_ref": 2.93,
+    "recent_high": 3.11,
+    "recent_low": 2.75,
+    "atr": 0.08,
+    "stop_band_long": {"low": 2.7543, "high": 3.06185},
+    "target_band_long": {"low": 2.60, "high": 2.90},
+    "full_band": [2.55, 3.25],
+}
+CLOSE_000767 = 2.93
+
+# ── 300505 形态夹具：现价 16.11，MA5=16.154，止损带上沿 17.11935 ──
+TI_300505 = _indicators(
+    ma5=16.154,
+    ma10=16.02,
+    ma20=15.80,
+    ma60=15.45,
+)
+PL_300505 = {
+    "available": True,
+    "entry_ref": 16.11,
+    "recent_high": 17.0,
+    "recent_low": 14.76,
+    "atr": 0.55,
+    "stop_band_long": {"low": 15.46, "high": 17.11935},
+    "target_band_long": {"low": 14.0913, "high": 15.46},
+    "full_band": [14.09, 17.12],
+}
+CLOSE_300505 = 16.11
+
+
+class TestTradingDayAndCoverageContextFalsePositives:
+    """交易日计数/汉字「至」区间/覆盖比率语境不得按价位校验
+    （fix-price-check-trading-day-context，2026-11-03 cohort 双阻断实证）。
+
+    000767 晋控电力 / 300505 川金诺均死于 risk_judge 终稿的**计数语境裸数字**
+    逃过量纲守卫，打回重试后仍异常 → 报告阻断：
+
+    - 「（3 至 5 个交易日内未修复 MA5 即无条件清完）」的 3——汉字「至」不在
+      区间豁免（连字/破折号区间同族已先行豁免），「5」被「个」后缀救了、「3」
+      没救，与 15 字符窗内 MA5=16.154 配对 → 81.43% 阻断；
+    - 「【20 交易日窗口适配】」的 20——「N 个交易日」靠「个」后缀豁免，
+      「N 交易日」的量词被「交」隔开 → 16.83% 阻断；
+    - 「1.2 倍覆盖仍 >1」的 1——利息覆盖比率整部，「覆盖」不在关键词表 →
+      63.69% 阻断。变体行文「覆盖仍大于 1」同族。
+
+    三处均为确定性校验器拦截自然行文，打回重试不可能修复（incident 022
+    同款「确定性校验 × 重试空转」形状）。
+    """
+
+    def test_zhishu_day_range_not_treated_as_price(self):
+        """「3 至 5 个交易日」的 3 不得按价位校验（300505 生产 81.43% 阻断实证）。"""
+        decision = _decision(
+            action="sell",
+            reasoning="剩余三分之一以时间止损方式进行（3 至 5 个交易日内未修复 MA5 即无条件清完）。",
+        )
+        assert check_decision_prices(decision, TI_300505, PL_300505, CLOSE_300505) == []
+
+    def test_trading_day_count_without_ge_not_treated_as_price(self):
+        """「20 交易日窗口」（无「个」）的 20 不得按价位校验（300505 第二条 16.83%）。"""
+        decision = _decision(
+            action="sell",
+            reasoning="【20 交易日窗口适配】减仓依据不依赖长周期估值回归，止损参考 17.11935 一线。",
+        )
+        assert check_decision_prices(decision, TI_300505, PL_300505, CLOSE_300505) == []
+
+    def test_coverage_ratio_symbol_bare_integer_not_treated_as_price(self):
+        """「1.2 倍覆盖仍 >1」的 1 不得按价位校验（000767 生产 63.69% 阻断实证）。"""
+        decision = _decision(
+            action="sell",
+            reasoning="9 月一次性利空落地、1.2 倍覆盖仍 >1 属薄而未破，仅作下行缓冲。",
+        )
+        assert check_decision_prices(decision, TI_000767, PL_000767, CLOSE_000767) == []
+
+    def test_coverage_ratio_spelled_bare_integer_not_treated_as_price(self):
+        """「覆盖仍大于 1」变体同样豁免（000767 第一跑行文形态）。"""
+        decision = _decision(
+            action="sell",
+            reasoning="1.2 倍覆盖仍大于 1 未进入违约叙事，是多方有效之处，仅作缓冲。",
+        )
+        assert check_decision_prices(decision, TI_000767, PL_000767, CLOSE_000767) == []
+
+    def test_breakdown_real_price_still_checked(self):
+        """护栏：同句含「至」区间/交易日计数时，带外真实价位仍须校验（排除区不得过宽）。
+
+        13.0 落在全部参考带外（full_band 下沿 14.09 之下）→ SHALL 登记 deviation。
+        """
+        decision = _decision(
+            action="sell",
+            reasoning="时间止损 3 至 5 个交易日；若反抽前先跌破 13.0 支撑则无条件清完。",
+        )
+        anomalies = check_decision_prices(decision, TI_300505, PL_300505, CLOSE_300505)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert "13" in anomalies[0]["message"]
