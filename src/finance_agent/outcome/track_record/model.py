@@ -685,6 +685,64 @@ def list_index_closes(
         conn.close()
 
 
+def prediction_symbols(db_path: str | Path | None = None) -> dict[str, str]:
+    """prediction_id → symbol 映射(组合聚合按标的去重用,§1.12② 2026-11-04 修订)。"""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute("SELECT prediction_id, symbol FROM predictions").fetchall()
+        return {str(r["prediction_id"]): str(r["symbol"]) for r in rows}
+    finally:
+        conn.close()
+
+
+# ── 组合构成披露(add-track-record-caliber-disclosure;只读计数,不改任何聚合)──
+def count_directional_views(
+    start: str,
+    end: str,
+    db_path: str | Path | None = None,
+) -> dict[str, int]:
+    """窗口内有盯市记录的方向性观点数(按方向拆分,去重)。
+
+    口径与净值聚合对齐:daily_marks.mark_date ∈ [start, end]、direction ∈
+    {long, short}、排除 status='duplicate_of_day'(重复观点不进组合)。
+    neutral 不计——它本来就不进组合仓位,披露里单列为「不计入」。
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT p.direction AS direction, COUNT(DISTINCT p.prediction_id) AS n
+               FROM daily_marks m
+               JOIN predictions p ON p.prediction_id = m.prediction_id
+               WHERE m.mark_date BETWEEN ? AND ?
+                 AND p.direction IN ('long', 'short')
+                 AND p.status <> 'duplicate_of_day'
+               GROUP BY p.direction""",
+            (start, end),
+        ).fetchall()
+    finally:
+        conn.close()
+    out = {"long": 0, "short": 0}
+    for r in rows:
+        out[str(r["direction"])] = int(r["n"])
+    return out
+
+
+def count_settled_in_window(start: str, end: str, db_path: str | Path | None = None) -> int:
+    """窗口内已结算(win/loss)观点数;resolved_at 取日期前 10 字符比较。"""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM predictions
+               WHERE status IN ('resolved_win', 'resolved_loss')
+                 AND resolved_at IS NOT NULL
+                 AND substr(resolved_at, 1, 10) BETWEEN ? AND ?""",
+            (start, end),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+    finally:
+        conn.close()
+
+
 # ── risk_free_rates:无风险利率日频序列(update-risk-free-rate-source;夏普/α 消费)──
 def upsert_risk_free_rates(
     rows: list[tuple[str, float, str]],

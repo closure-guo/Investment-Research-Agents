@@ -28,12 +28,12 @@ import pandas as pd
 from finance_agent.data.akshare_client import SETTLEMENT_ADJUST
 from finance_agent.outcome.track_record.judgment import (
     AVOIDANCE_STATUSES,
-    DEFAULT_NEUTRAL_BAND,
     TERMINAL_AVOIDANCE_STATUS,
     Resolution,
     day_master_ids,
     derive_entry,
     resolve_prediction,
+    settle_at_exit,
     should_supersede,
 )
 from finance_agent.outcome.track_record.model import (
@@ -187,25 +187,18 @@ def settle_open_predictions(
                             result["skipped"] += 1
                             continue
                         exit_date = str(kline.iloc[-1]["日期"])
-                        sign = 1.0 if old["direction"] == "long" else -1.0
-                        # 分类前 round 消浮点噪声；与 horizon 路径共用 ±2% 中性带
-                        raw = round(sign * (exit_price / entry - 1.0), 6)
-                        band = DEFAULT_NEUTRAL_BAND
-                        sup_resolution = Resolution(
-                            status=(
-                                "resolved_win"
-                                if raw > band
-                                else ("resolved_loss" if raw < -band else "resolved_neutral")
-                            ),
+                        # update-superseded-excess：与 horizon 到点共用同一套结算数学
+                        # （收益/超额/±2% 中性带），基准腿用本批已取的 benchmark；
+                        # 基准不可得时超额退化为 raw，不写 NULL。
+                        sup_resolution = settle_at_exit(
+                            direction=str(old["direction"]),
                             entry_date=entry_date,
-                            entry_price=round(entry, 6),
+                            entry_price=entry,
                             exit_date=exit_date,
                             exit_price=exit_price,
-                            raw_return=round(raw, 6),
-                            # superseded 为提前结算:无完整同期基准区间,超额不可得
-                            excess_return=None,
-                            hold_days=int((kline["日期"] > entry_date).sum()),
+                            benchmark=benchmark,
                             resolution_rule="superseded",
+                            hold_days=int((kline["日期"] > entry_date).sum()),
                         )
                         update_prediction_status(
                             old["prediction_id"],
@@ -213,6 +206,7 @@ def settle_open_predictions(
                                 "status": sup_resolution.status,
                                 "exit_price": sup_resolution.exit_price,
                                 "raw_return": sup_resolution.raw_return,
+                                "excess_return": sup_resolution.excess_return,
                                 "resolution_rule": sup_resolution.resolution_rule,
                                 "resolved_at": sup_resolution.exit_date,
                                 "settle_entry_price": sup_resolution.entry_price,

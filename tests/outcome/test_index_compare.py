@@ -238,3 +238,118 @@ class TestBuildIndexCompare:
         # 3m 截点 ≈ 2026-07-09 → 窗口从 09-28 起
         assert out["window"]["start"] == "2026-09-28"
         assert out["agent_return"] == pytest.approx(round(1.05 / 1.10 - 1, 6))
+
+
+# ── add-track-record-caliber-disclosure：对比读数必须披露组合构成与样本量 ──
+
+
+def _seed_pred(
+    db,
+    *,
+    direction: str,
+    created_at: str,
+    status: str = "open",
+    resolved_at: str | None = None,
+) -> str:
+    from finance_agent.outcome.track_record.model import insert_prediction, update_prediction_status
+
+    pid = insert_prediction(
+        {
+            "source_type": "live",
+            "symbol": "600000.SH",
+            "symbol_name": "浦发银行",
+            "direction": direction,
+            "entry_price": 10.0,
+            "horizon_days": 20,
+            "confidence": 0.6,
+            "rationale_snapshot": {"action": "buy" if direction == "long" else "sell"},
+            "created_at": created_at,
+        },
+        db_path=db,
+        status=status,
+    )
+    if resolved_at is not None:
+        update_prediction_status(
+            pid,
+            {
+                "status": "resolved_win",
+                "resolved_at": resolved_at,
+                "exit_price": 9.9,
+                "raw_return": 0.01,
+                "excess_return": None,
+                "resolution_rule": "superseded",
+            },
+            db_path=db,
+        )
+    return pid
+
+
+def _mark(db, pid: str, dates: list[str], cum_return: float = 0.0) -> None:
+    from finance_agent.outcome.track_record.model import insert_daily_mark
+
+    for d in dates:
+        insert_daily_mark(pid, d, mark_price=10.0, cum_return=cum_return, db_path=db)
+
+
+class TestCaliberDisclosure:
+    """spec index-comparison「跑赢指数对比的口径披露」。"""
+
+    def test_caliber_counts_directional_views_and_settled(self, db):
+        _seed_curve(db, [("2026-09-28", 1.0), ("2026-09-30", 1.01), ("2026-10-09", 1.05)])
+        s1 = _seed_pred(db, direction="short", created_at="2026-09-25T10:00:00")
+        s2 = _seed_pred(db, direction="short", created_at="2026-09-26T10:00:00")
+        long1 = _seed_pred(db, direction="long", created_at="2026-09-25T10:00:00")
+        neutral1 = _seed_pred(db, direction="neutral", created_at="2026-09-25T10:00:00")
+        dup1 = _seed_pred(
+            db, direction="short", created_at="2026-09-26T10:00:00", status="duplicate_of_day"
+        )
+        win = _seed_pred(
+            db, direction="short", created_at="2026-09-27T10:00:00", resolved_at="2026-10-01"
+        )
+        outside = _seed_pred(
+            db, direction="short", created_at="2026-09-27T10:00:00", resolved_at="2026-10-20"
+        )
+        for pid in (s1, s2, long1, neutral1, dup1, win, outside):
+            _mark(db, pid, ["2026-09-28", "2026-09-30"])
+
+        cal = build_index_compare("all", db_path=db)["caliber"]
+        assert cal["nav_points"] == 3
+        # short: s1 s2 win outside → 4；long: 1；neutral 与 duplicate_of_day 不计
+        assert cal["directional_views"] == 5
+        assert cal["long_views"] == 1
+        assert cal["short_views"] == 4
+        # 仅 resolved_at 落在窗口 [09-28, 10-09] 内的 win 计入
+        assert cal["settled_count"] == 1
+
+    def test_caliber_empty_db_all_zero(self, db):
+        cal = build_index_compare("all", db_path=db)["caliber"]
+        assert cal == {
+            "nav_points": 0,
+            "directional_views": 0,
+            "long_views": 0,
+            "short_views": 0,
+            "settled_count": 0,
+        }
+
+    def test_caliber_neutral_only_has_no_directional_views(self, db):
+        _seed_curve(db, [("2026-09-28", 1.0), ("2026-10-09", 1.0)])
+        neutral1 = _seed_pred(db, direction="neutral", created_at="2026-09-25T10:00:00")
+        _mark(db, neutral1, ["2026-09-28", "2026-10-09"])
+
+        cal = build_index_compare("all", db_path=db)["caliber"]
+        assert (cal["directional_views"], cal["long_views"], cal["short_views"]) == (0, 0, 0)
+        assert cal["nav_points"] == 2
+
+    def test_caliber_does_not_change_existing_readings(self, db):
+        """披露为纯追加：既有 agent_return / 指数读数不受影响。"""
+        _seed_curve(db, [("2026-09-28", 1.0), ("2026-10-09", 1.05)])
+        upsert_index_closes(
+            [("000300", "2026-09-28", 4000.0), ("000300", "2026-10-09", 4040.0)], db_path=db
+        )
+        short1 = _seed_pred(db, direction="short", created_at="2026-09-25T10:00:00")
+        _mark(db, short1, ["2026-09-28", "2026-10-09"])
+
+        out = build_index_compare("all", db_path=db)
+        assert out["agent_return"] == pytest.approx(0.05)
+        assert out["window"] == {"start": "2026-09-28", "end": "2026-10-09"}
+        assert {i["code"]: i["beat"] for i in out["indices"]}["000300"] is True

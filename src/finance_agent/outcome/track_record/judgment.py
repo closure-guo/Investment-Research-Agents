@@ -65,14 +65,18 @@ def direction_for_action(action: str) -> str:
 
 
 def should_supersede(old: dict, new: dict) -> bool:
-    """同标的方向相反或目标价不同 → 旧观点立即结算。"""
+    """同标的**方向翻转**才 supersede（update-view-min-survival，2026-11-04）。
+
+    同向重复（含目标价调整）不再结算旧观点：目标价变化是同一方向观点的跟踪更新，
+    不是方向改变。旧实现把目标价差异也当 supersede 条件，叠加「同标的几乎每日
+    重新分析」，一条连续看空观点被切成 1~2 天的碎片——生产实测方向性观点中位存活
+    2 天、活过 20 天者为 **0%**，T+20 主指标因此永远产不出读数。
+
+    目标价仍随各自观点独立落库与判定，不因本条规则丢失。
+    """
     if old.get("symbol") != new.get("symbol"):
         return False
-    if old.get("direction") != new.get("direction"):
-        return True
-    old_t = old.get("target_price")
-    new_t = new.get("target_price")
-    return old_t is not None and new_t is not None and abs(float(old_t) - float(new_t)) > 1e-9
+    return old.get("direction") != new.get("direction")
 
 
 def _norm(df: pd.DataFrame) -> pd.DataFrame:
@@ -130,6 +134,62 @@ def day_master_ids(predictions: list[dict], calendar: list[str]) -> set[str]:
     return masters
 
 
+def settle_at_exit(
+    *,
+    direction: str,
+    entry_date: str,
+    entry_price: float,
+    exit_date: str,
+    exit_price: float,
+    benchmark: pd.DataFrame | None,
+    resolution_rule: str,
+    hold_days: int,
+    neutral_band: float = DEFAULT_NEUTRAL_BAND,
+) -> Resolution:
+    """按给定出场结算：收益 / 超额 / ±2% 中性带分类的**唯一实现**。
+
+    horizon 到点（`expiry`）与提前结算（`superseded`）共用同一套数学
+    （update-superseded-excess）：同一条观点不应因为「被新观点覆盖」还是
+    「走到窗口」而得到不同的超额与分类。基准不可得时超额退化为 raw_return
+    （与既有降级口径一致，不写 NULL）。
+    """
+    sign = -1.0 if direction == "short" else 1.0  # neutral 按 long 口径
+    raw_return = sign * (exit_price / entry_price - 1.0)
+    excess = raw_return
+    if benchmark is not None and not benchmark.empty:
+        bench_df = _norm(benchmark)
+        entry_bench = _bench_close_on_or_before(bench_df, entry_date)
+        exit_bench = _bench_close_on_or_before(bench_df, exit_date)
+        if entry_bench is not None and exit_bench is not None:
+            excess = raw_return - sign * (exit_bench / entry_bench - 1.0)
+    # 分类前先消浮点噪声:102/100−1 = 0.020000000000000018 会被误判越出 ±2% 中性带
+    excess = round(excess, 6)
+    band = float(neutral_band)
+    if direction == "neutral":
+        status = (
+            "avoidance_win"
+            if excess < -band
+            else ("avoidance_loss" if excess > band else "avoidance_neutral")
+        )
+    else:
+        status = (
+            "resolved_win"
+            if excess > band
+            else ("resolved_loss" if excess < -band else "resolved_neutral")
+        )
+    return Resolution(
+        status=status,
+        entry_date=entry_date,
+        entry_price=round(entry_price, 6),
+        exit_date=exit_date,
+        exit_price=exit_price,
+        raw_return=round(raw_return, 6),
+        excess_return=excess,
+        hold_days=hold_days,
+        resolution_rule=resolution_rule,
+    )
+
+
 def resolve_prediction(
     prediction: dict,
     kline: pd.DataFrame,
@@ -166,38 +226,14 @@ def resolve_prediction(
     exit_row = rows.iloc[horizon - 1]
     exit_price = float(exit_row["收盘"])
     exit_date = str(exit_row["日期"])
-    sign = -1.0 if direction == "short" else 1.0  # neutral 按 long 口径
-    raw_return = sign * (exit_price / entry_price - 1.0)
-    excess = raw_return
-    if benchmark is not None and not benchmark.empty:
-        bench_df = _norm(benchmark)
-        entry_bench = _bench_close_on_or_before(bench_df, entry_date)
-        exit_bench = _bench_close_on_or_before(bench_df, exit_date)
-        if entry_bench is not None and exit_bench is not None:
-            excess = raw_return - sign * (exit_bench / entry_bench - 1.0)
-    # 分类前先消浮点噪声:102/100−1 = 0.020000000000000018 会被误判越出 ±2% 中性带
-    excess = round(excess, 6)
-    band = float(neutral_band)
-    if direction == "neutral":
-        status = (
-            "avoidance_win"
-            if excess < -band
-            else ("avoidance_loss" if excess > band else "avoidance_neutral")
-        )
-    else:
-        status = (
-            "resolved_win"
-            if excess > band
-            else ("resolved_loss" if excess < -band else "resolved_neutral")
-        )
-    return Resolution(
-        status=status,
+    return settle_at_exit(
+        direction=str(direction),
         entry_date=entry_date,
-        entry_price=round(entry_price, 6),
+        entry_price=entry_price,
         exit_date=exit_date,
         exit_price=exit_price,
-        raw_return=round(raw_return, 6),
-        excess_return=round(excess, 6),
-        hold_days=horizon,
+        benchmark=benchmark,
         resolution_rule="expiry",
+        hold_days=horizon,
+        neutral_band=neutral_band,
     )
