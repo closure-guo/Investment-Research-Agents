@@ -222,9 +222,12 @@ def test_superseded():
     # 同方向同目标价 → 不触发提前结算
     same = {"symbol": "600519.SH", "direction": "long", "target_price": 120.0}
     assert should_supersede(old, same) is False
-    # 目标价不同 → 触发
+    # update-view-min-survival：同方向仅调目标价 → 不结算（目标调整不是方向改变）
     diff_target = {"symbol": "600519.SH", "direction": "long", "target_price": 121.0}
-    assert should_supersede(old, diff_target) is True
+    assert should_supersede(old, diff_target) is False
+    # 不同标的永不触发
+    other = {"symbol": "000001.SZ", "direction": "short", "target_price": 100.0}
+    assert should_supersede(old, other) is False
 
 
 def test_default_horizon_days_and_cutoff_pinned():

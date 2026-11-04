@@ -158,6 +158,8 @@ describe('IndexCompareCard', () => {
     expect(caliber.textContent).toContain('累计多 0')
     expect(caliber.textContent).toContain('空 27')
     expect(caliber.textContent).toContain('期内已结算 5 笔')
+    // B1 标注：空头是评分语义，不是可执行仓位（A 股该路径不建模做空）
+    expect(caliber.textContent).toContain('评分语义')
   })
 
   it('响应缺 caliber(旧后端)时不渲染披露行,其余内容照常', async () => {

@@ -571,6 +571,8 @@ date×code 格。快照缺数空洞（BSE 断档、退市缺行、次新股上�
 
 **净值口径切点（2026-11-04，delta `update-track-record-symbol-aggregation`）**：§1.12② 组合分母由「观点数 N」改为「去重标的数 M」——同一标的在同一盯市日的多条 long/short 观点先按标的取均值，再按 M 等权 1/M。触发：归因发现 600029 在 2026-10-22~10-26 有 2 条 open 观点并存、单票权重达 100%（11-04 有 3 条）。**切点前后读数（同一批 marks）**：`equity_curve` 期末 0.942872（**-5.71%**）→ 0.953992（**-4.60%**）；最大回撤 5.71%→4.60%；`agent_metrics_daily` 2026-11-04 行 risk_score 7（高）→ 6（中）、夏普 -9.56→-7.49。对沪深300 的区间超额由 -0.87pp 转为 **+0.25pp**（对中证500/1000/创业板仍跑赢，对上证仍跑输 1.30pp）。**重算执行**：`scripts/track_record_recompute_caliber.py`（非破坏性——不清 `daily_marks`，原地重算 `equity_curve` 全序列 + `--metrics-scope latest` 只覆盖最新指标行；历史 `agent_metrics_daily` 行保留切点前口径）。**跨切点读数不可混引**，历史行与切点后行分属两种口径。**未覆盖**：M=1 时单票仍可占 100%（最小持仓数问题）、`sell=exit` 被记为 short 的语义问题（§1.12② 人口口径未动）——均另案。
 
+**观点存活期切点（2026-11-04，delta `update-view-min-survival`）**：`should_supersede` 由「同标的方向相反**或目标价不同**」改为「仅方向相反」。触发：生产实测方向性观点中位存活 2 天、活过 20 天者 **0%**，56 条已闭仓方向性观点全部 `superseded`，T+20 主指标至今零读数。**本条只影响今后**新观点是否结算旧观点，不回填、不重算；历史 `resolved_*` 行状态保持不变。预期：同向重复不再杀死旧观点，`expiry` 结算将首次出现；**观察期 ≥2 周**后再评估存活分布与 §1.9 读数可用性。未解决：方向翻转仍会结算（合理），故短期读数仍以 superseded 为主；`superseded` 结算目前 `excess_return=None`（job.py 显式置空），该字段的补齐是下一个独立变量。
+
 ## 2.1 round7 预登记分析计划（标注前锁定，防事后口径漂移）
 - 数据：`judge-sample-round7-blind.xlsx`（人工 human_score + confidence）× `judge-sample-round7-judge.jsonl`（judge 分，r3 运行时落库，已冻结）
 - 每维计算：MAE、方向一致率（>3 分界）、judge 分有方差的维度另算 Spearman（report_relevance / debate_quality judge 全 5，Spearman 不计）；整体 MAE / 方向一致率

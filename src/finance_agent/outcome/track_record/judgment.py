@@ -65,14 +65,18 @@ def direction_for_action(action: str) -> str:
 
 
 def should_supersede(old: dict, new: dict) -> bool:
-    """同标的方向相反或目标价不同 → 旧观点立即结算。"""
+    """同标的**方向翻转**才 supersede（update-view-min-survival，2026-11-04）。
+
+    同向重复（含目标价调整）不再结算旧观点：目标价变化是同一方向观点的跟踪更新，
+    不是方向改变。旧实现把目标价差异也当 supersede 条件，叠加「同标的几乎每日
+    重新分析」，一条连续看空观点被切成 1~2 天的碎片——生产实测方向性观点中位存活
+    2 天、活过 20 天者为 **0%**，T+20 主指标因此永远产不出读数。
+
+    目标价仍随各自观点独立落库与判定，不因本条规则丢失。
+    """
     if old.get("symbol") != new.get("symbol"):
         return False
-    if old.get("direction") != new.get("direction"):
-        return True
-    old_t = old.get("target_price")
-    new_t = new.get("target_price")
-    return old_t is not None and new_t is not None and abs(float(old_t) - float(new_t)) > 1e-9
+    return old.get("direction") != new.get("direction")
 
 
 def _norm(df: pd.DataFrame) -> pd.DataFrame:

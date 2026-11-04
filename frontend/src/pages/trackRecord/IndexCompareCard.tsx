@@ -104,6 +104,9 @@ export function IndexCompareCard({ span }: { span: TrackTimeSpan }) {
           口径:仅统计买入/卖出观点(观望/持有不计入组合仓位);{data.caliber.nav_points} 个交易日 ·
           累计多 {data.caliber.long_views} / 空 {data.caliber.short_views} · 期内已结算{' '}
           {data.caliber.settled_count} 笔
+          <div className="mt-1">
+            卖出观点按做空记账,属评分语义;A 股该路径不建模可执行做空,故本曲线不等于实盘账户净值。
+          </div>
         </div>
       )}
       <div className="mt-2 text-xs text-[var(--text-secondary)]">{data?.disclaimer}</div>
