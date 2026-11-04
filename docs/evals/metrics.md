@@ -573,6 +573,8 @@ date×code 格。快照缺数空洞（BSE 断档、退市缺行、次新股上�
 
 **观点存活期切点（2026-11-04，delta `update-view-min-survival`）**：`should_supersede` 由「同标的方向相反**或目标价不同**」改为「仅方向相反」。触发：生产实测方向性观点中位存活 2 天、活过 20 天者 **0%**，56 条已闭仓方向性观点全部 `superseded`，T+20 主指标至今零读数。**本条只影响今后**新观点是否结算旧观点，不回填、不重算；历史 `resolved_*` 行状态保持不变。预期：同向重复不再杀死旧观点，`expiry` 结算将首次出现；**观察期 ≥2 周**后再评估存活分布与 §1.9 读数可用性。未解决：方向翻转仍会结算（合理），故短期读数仍以 superseded 为主；`superseded` 结算目前 `excess_return=None`（job.py 显式置空），该字段的补齐是下一个独立变量。
 
+**superseded 超额补齐切点（2026-11-04，delta `update-superseded-excess`）**：`superseded` 提前结算 SHALL 计算并落库 `excess_return`（此前恒为 NULL，理由「无同期基准区间」不成立——基准 df 在批内可用），且分类口径回到 spec 的**超额**而非 raw。`expiry` 与 `superseded` 共用 `judgment.settle_at_exit` 单一实现。**存量不回填**：切点前已结算的 56 条方向性观点 `excess_return` 仍为 NULL，按「存量不重算」惯例保留；跨切点的 §1.9 均值人口因此**新旧混排**，读数时须按 `resolved_at` 切分，或等切点后的样本单独积累。`scores_reported` 由 2 变 3（补 `decision_excess`）。观察点：§1.9 主指标是否从零读数开始积累（下一批 16:35 结算后可见）。
+
 ## 2.1 round7 预登记分析计划（标注前锁定，防事后口径漂移）
 - 数据：`judge-sample-round7-blind.xlsx`（人工 human_score + confidence）× `judge-sample-round7-judge.jsonl`（judge 分，r3 运行时落库，已冻结）
 - 每维计算：MAE、方向一致率（>3 分界）、judge 分有方差的维度另算 Spearman（report_relevance / debate_quality judge 全 5，Spearman 不计）；整体 MAE / 方向一致率

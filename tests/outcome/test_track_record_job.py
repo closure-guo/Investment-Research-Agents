@@ -9,6 +9,7 @@ import datetime
 import logging
 
 import pandas as pd
+import pytest
 
 from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.model import (
@@ -410,7 +411,11 @@ def test_langfuse_none_leg_skips_scores(tmp_path, monkeypatch, caplog):
 
 
 def test_superseded_reports_scores(tmp_path):
-    """superseded 提前结算(状态转 resolved_*)同样上报 Score;excess 未知 → 只报 2 个。"""
+    """superseded 提前结算(状态转 resolved_*)上报 3 个 Score。
+
+    update-superseded-excess 起超额不再是未知量：基准不可得时退化为 raw，
+    故 decision_excess 一并上报（此前为「无同期基准区间」只报 2 个）。
+    """
     db = _db(tmp_path)
     old = _insert(db, direction="long", created="2026-09-01T10:00:00", trace_id="trace-old")
     _insert(db, direction="short", created="2026-09-03T10:00:00")  # 反向 → supersede
@@ -418,8 +423,12 @@ def test_superseded_reports_scores(tmp_path):
     client = _StubClient({"600519": _kline([100, 99, 98, 97])})
     result = settle_open_predictions(client=client, db_path=db, langfuse=langfuse)
     assert result["superseded"] == 1 and result["errors"] == 0
-    assert result["scores_reported"] == 2  # 无同期基准区间 → 不报 decision_excess
-    assert {c["name"] for c in langfuse.calls} == {"decision_hit", "decision_return"}
+    assert result["scores_reported"] == 3
+    assert {c["name"] for c in langfuse.calls} == {
+        "decision_hit",
+        "decision_return",
+        "decision_excess",
+    }
     assert {c["trace_id"] for c in langfuse.calls} == {"trace-old"}  # 用旧观点的 trace
     by_name = {c["name"]: c for c in langfuse.calls}
     assert by_name["decision_hit"]["data_type"] == "BOOLEAN"
@@ -455,6 +464,59 @@ def test_superseded_beyond_band_still_win(tmp_path):
     assert result["superseded"] == 1 and result["errors"] == 0
     row = {r["prediction_id"]: r for r in list_predictions(db_path=db)}[old]
     assert row["status"] == "resolved_win"
+
+
+# ── update-superseded-excess：superseded 结算补基准腿（超额不再恒 None）──
+
+
+def test_superseded_settlement_carries_excess_return(tmp_path):
+    """superseded 结算 SHALL 用同期基准腿算超额并落库（此前恒 None）。
+
+    个股 100→90（raw -10%）、基准 4000→3800（-5%）→ excess = -5%。
+    """
+    db = _db(tmp_path)
+    old = _insert(db, direction="long", created="2026-09-01T10:00:00")
+    _insert(db, direction="short", created="2026-09-03T10:00:00")  # 反向 → supersede
+    client = _StubClient(
+        {"600519": _kline([100, 100, 100, 90])},
+        benchmark=_kline([4000, 4000, 4000, 3800]),
+    )
+    result = settle_open_predictions(client=client, db_path=db)
+    assert result["superseded"] == 1 and result["errors"] == 0
+    row = {r["prediction_id"]: r for r in list_predictions(db_path=db)}[old]
+    assert row["raw_return"] == pytest.approx(-0.1, abs=1e-6)
+    assert row["excess_return"] == pytest.approx(-0.05, abs=1e-6)
+
+
+def test_superseded_classifies_on_excess_not_raw(tmp_path):
+    """分类口径为**超额**：raw +3%、基准 +6% → excess -3% → resolved_loss。
+
+    旧实现按 raw 分类，此例会记成 resolved_win（与 spec「区间超额收益 > +2%」相悖）。
+    """
+    db = _db(tmp_path)
+    old = _insert(db, direction="long", created="2026-09-01T10:00:00")
+    _insert(db, direction="short", created="2026-09-03T10:00:00")
+    client = _StubClient(
+        {"600519": _kline([100, 100, 100, 103])},
+        benchmark=_kline([4000, 4000, 4000, 4240]),
+    )
+    result = settle_open_predictions(client=client, db_path=db)
+    assert result["superseded"] == 1 and result["errors"] == 0
+    row = {r["prediction_id"]: r for r in list_predictions(db_path=db)}[old]
+    assert row["raw_return"] == pytest.approx(0.03, abs=1e-6)
+    assert row["excess_return"] == pytest.approx(-0.03, abs=1e-6)
+    assert row["status"] == "resolved_loss"
+
+
+def test_superseded_without_benchmark_falls_back_to_raw(tmp_path):
+    """基准不可得 → 超额退化为 raw（与 horizon 路径同一降级口径），不写 NULL。"""
+    db = _db(tmp_path)
+    old = _insert(db, direction="long", created="2026-09-01T10:00:00")
+    _insert(db, direction="short", created="2026-09-03T10:00:00")
+    client = _StubClient({"600519": _kline([100, 100, 100, 90])}, benchmark=None)
+    settle_open_predictions(client=client, db_path=db)
+    row = {r["prediction_id"]: r for r in list_predictions(db_path=db)}[old]
+    assert row["excess_return"] == pytest.approx(row["raw_return"], abs=1e-6)
 
 
 def test_superseded_within_band_for_short_is_neutral(tmp_path):
