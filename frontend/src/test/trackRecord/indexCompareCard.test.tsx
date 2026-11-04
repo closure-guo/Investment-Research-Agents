@@ -142,4 +142,41 @@ describe('IndexCompareCard', () => {
     expect(screen.queryByTestId(/^index-compare-row-/)).not.toBeInTheDocument()
     expect(fetchMock).toHaveBeenLastCalledWith(expect.stringContaining('span=3m'))
   })
+
+  // ── add-track-record-caliber-disclosure:组合构成必须在卡片内可见 ──
+
+  it('渲染口径披露:观望不计入组合、交易日数、多空条数、期内已结算', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ...RESP,
+      caliber: { nav_points: 20, directional_views: 27, long_views: 0, short_views: 27, settled_count: 5 },
+    }), { status: 200 })))
+    render(<IndexCompareCard span="all" />)
+    const caliber = await screen.findByTestId('index-compare-caliber')
+    expect(caliber.textContent).toContain('仅统计买入/卖出观点')
+    expect(caliber.textContent).toContain('观望/持有不计入组合仓位')
+    expect(caliber.textContent).toContain('20 个交易日')
+    expect(caliber.textContent).toContain('累计多 0')
+    expect(caliber.textContent).toContain('空 27')
+    expect(caliber.textContent).toContain('期内已结算 5 笔')
+  })
+
+  it('响应缺 caliber(旧后端)时不渲染披露行,其余内容照常', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(RESP), { status: 200 })))
+    render(<IndexCompareCard span="all" />)
+    await screen.findByTestId('index-compare-summary')
+    expect(screen.queryByTestId('index-compare-caliber')).not.toBeInTheDocument()
+    // 既有内容零回归
+    expect(screen.getByTestId('index-compare-summary').textContent).toContain('跑赢 3/4 个指数')
+  })
+
+  it('净值不足(agent_return=null)时不渲染披露行', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ...RESP,
+      agent_return: null,
+      caliber: { nav_points: 1, directional_views: 0, long_views: 0, short_views: 0, settled_count: 0 },
+    }), { status: 200 })))
+    render(<IndexCompareCard span="all" />)
+    expect(await screen.findByTestId('index-compare-empty')).toBeInTheDocument()
+    expect(screen.queryByTestId('index-compare-caliber')).not.toBeInTheDocument()
+  })
 })

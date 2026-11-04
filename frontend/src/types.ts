@@ -600,8 +600,19 @@ export interface IndexCompareResponse {
   window: { start: string | null; end: string | null }
   agent_return: number | null
   indices: IndexCompareIndex[]
+  // add-track-record-caliber-disclosure:组合构成披露(旧后端无该键 → 不渲染)
+  caliber?: IndexCompareCaliber
   as_of: string
   disclaimer: string
+}
+
+// 口径披露:净值只聚合 long/short 观点(neutral 不进组合),如实给出样本构成。
+export interface IndexCompareCaliber {
+  nav_points: number
+  directional_views: number
+  long_views: number
+  short_views: number
+  settled_count: number
 }
 
 // 策略族成绩单（delta add-strategy-family-scorecards：GET /api/scorecards）。
