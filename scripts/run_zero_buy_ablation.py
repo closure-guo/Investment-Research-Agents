@@ -136,14 +136,33 @@ async def run_symbol(symbol: str, *, timeout_s: int = 2400) -> dict:
     while time.time() < deadline:
         row = _read_session(session_id)
         if row and row["status"] in ("completed", "failed", "interrupted"):
-            return {
+            result = {
                 "symbol": symbol,
                 "session_id": session_id,
                 "status": row["status"],
                 "final_trade_decision": row["final_trade_decision"],
             }
+            if row["status"] == "failed":
+                # 失败含可重试形态（provider 过载）→ 抛错交符号级重试；决策类失败
+                # （如价位校验打回）不重试——那是变体的真实输出，重跑会掩盖
+                reason = str(_read_failure_reason(session_id) or "")
+                if "RateLimitError" in reason or "限流" in reason:
+                    raise RuntimeError(f"provider_overloaded: {reason[:200]}")
+            return result
         await asyncio.sleep(15)
     raise TimeoutError(f"{symbol} 分析超时（{timeout_s}s）")
+
+
+def _read_failure_reason(session_id: str) -> str | None:
+    import sqlite3
+
+    conn = sqlite3.connect(os.environ["SESSIONS_DB_PATH"])
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT failure_reason FROM sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    conn.close()
+    return row["failure_reason"] if row else None
 
 
 def _action(result: dict) -> str | None:
@@ -164,8 +183,8 @@ async def _run_symbol_with_retry(
     symbol: str,
     *,
     timeout_s: int,
-    attempts: int = 4,
-    cooldown_s: float = 90.0,
+    attempts: int = 6,
+    cooldown_s: float = 180.0,
 ) -> dict:
     """符号级重试：调度失败（如 Windows 上间歇性 SQLite 文件锁窗口）冷却后重派。
 
