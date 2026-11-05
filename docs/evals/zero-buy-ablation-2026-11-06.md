@@ -88,16 +88,41 @@ prompt 均为 `variant:*`；A 臂同法核验 `variant:trader`）。
 4. **运行器加固**（均为基础设施，不触及实验变量）：`--variant` 可重复（B 臂需双变体）、
    仓库根 sys.path 引导、符号级重试（文件锁窗口 + provider 过载兜底）。
 
-## 5. 锁的全链分布（归因发现，代码出处）
+## 5. 锁的全链分布（归因发现；以 Langfuse production 实发版本为准）
 
-| # | 位置 | 内容 | 本实验是否覆盖 |
+> **核验方式（owner 质询后升级）**：最初按本地 prompts/*.md 核对；owner 指出生产权威源
+> 在 Langfuse 后，改从 Langfuse Postgres `prompts` 表直取 **production label 版本**逐一
+> 扫描（REST API 此刻故障 400/404）。实验当时 trace 元数据证实各节点实际消费的正是这些
+> 版本：fund_manager **v32**、risk_judge **v35**、trader v37（实验中被变体替换）、
+> 4 分析师 v31/v32/v36、RM v29、bull v30 / bear v31 / risk_debater v30。
+> 扫描规则 7 条：R1 催化剂门槛 / R2 T+20 窗口 / R3 长线禁作买入主因 / R4 horizon_hint
+> 标注 / R5 证据均衡带增量 / R6 止损vs日波动 / R7 ±2% 中性带。
+
+| 提示词 | production 版本 | 命中规则 | 实验是否覆盖 |
 |---|---|---|---|
-| 1 | `prompts/trader.md:4-12` 周期契约 | 催化剂 MUST + 长线论据禁作买入主因 | A/B 已删（变体） |
-| 2 | `prompts/risk_judge.md:4-12` 周期契约 | 同上（裁判侧） | B 已删（变体） |
-| 3 | `prompts/risk_judge.md:69` 滞回条款 | 「证据均衡带：是」时执行动作须申报证据增量 | 未覆盖（机制在代码注入的 context） |
-| 4 | `prompts/fund_manager.md:6-12` 周期契约 | **完整拷贝**（含催化剂 MUST），FM 是 trader 下游审批者 | **未覆盖** |
-| 5 | 4 个分析师 `horizon_hint` 条款 | 「决策层按 T+20 考核，long 档论据不能支撑买入主因」——每条论据自带窗口标注 | **未覆盖** |
-| 6 | 风控辩论否决权 | 「止损距离 < 日波动」可否决任何方案 | B 臂部分覆盖（否决改降仓） |
+| trader | v37 | R1 / R2 / R3 / R7 | A/B 已删（变体） |
+| risk_judge | v35 | R1 / R2 / R3 / **R5 均衡带增量** / R7 | B 删契约；R5 留存于变体外 |
+| fund_manager | v32 | R1 / R2 / R3 / R7（**完整契约拷贝**） | **未覆盖** |
+| fundamental_analyst | v36 | R2 / R3 / R4 | **未覆盖** |
+| technical_analyst | v31 | R2 / R3 / R4 | **未覆盖** |
+| macro_analyst | v32 | R1 / R2 / R3 / R4 | **未覆盖** |
+| sentiment_analyst | v32 | R2 / R3 / R4 | **未覆盖** |
+| research_manager | v29 | —（干净） | — |
+| bull_debater | v30 | —（干净） | — |
+| bear_debater | v31 | —（干净） | — |
+| risk_debater | v30 | —（干净） | — |
+
+**读法**：11 个提示词中 7 个带锁——决策审批三层（trader/risk_judge/FM）带同一份完整
+契约，原料层 4 个分析师给每条论据盖「窗口章」（R4 条款明文「决策层按 T+20 考核，
+long 档论据不能支撑买入主因」）。唯一「干净」的角色是多头辩手（bull_debater），但
+它的输出要连过 5 道带锁关卡。R6（止损距离 < 日波动的否决）不是任何提示词的成文
+条款，而是风控辩论的**行为模式**（配以「派生指标已算出止损距离与赔率」的指令武装），
+只能靠行为层消融验证。
+
+**附带 ops 发现**：实验凌晨时段 Langfuse prompt 下发正常（trace 证实）；当日白天起
+宿主侧 loader 11/11 全量回退本地（prompts REST API 400/404，traces API 正常）——
+若持续，生产将静默运行本地兜底文本（版本漂移风险 + prompt-deploy 一致性门禁失效），
+建议单独 issue 排查 Langfuse prompt 服务。
 
 ## 5.1 事后走势核验（owner 复盘质询补充，2026-11-06）
 
