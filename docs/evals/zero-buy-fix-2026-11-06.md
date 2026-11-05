@@ -22,16 +22,24 @@
 | 阶段 | 状态 | 证据 |
 |---|---|---|
 | 计划文档 | ✅ 完成 | `docs/superpowers/plans/2026-11-06-zero-buy-decision-fix.md` |
-| Task 0 决策分布读数 | ⬜ 未开始 | — |
-| Task 1 日报告警 | ⬜ 未开始 | — |
-| Task 2 变体提示词 | ⬜ 未开始 | — |
-| Task 3 隔离运行器 | ⬜ 未开始 | — |
-| Task 4 消融实验 | ⬜ 未开始 | — |
+| Task 0 决策分布读数 | ✅ 完成 | `f754c109`；`tests/outcome/test_decision_mix.py` 3 passed |
+| Task 1 日报告警 | ✅ 完成 | `436521fb`；6 新测试 + 6 既有测试全绿（12 passed） |
+| Task 2 变体提示词 | ✅ 完成 | `6b67c5ed`；grep 校验 A 保留 ±2%/删催化剂、B 删契约（117→108 行） |
+| Task 3 隔离运行器 | ✅ 完成 | `743d6309` + `77d29bcf`；6 测试绿；**--variant 改可重复（修 B 臂双变体缺口）** |
+| Task 3 冒烟 | ✅ 通过 | 002916 watch(completed)，9 分钟，隔离库落库、生产库未动 |
+| Task 4 消融实验 | 🏃 A 臂运行中 | 01:40 启动，8 只 × trader_no_catalyst，隔离库 tmp/ablation-A.db |
 | Task 5 trader 提示词 | ⬜ 依赖 Task 4 结论 | — |
 | Task 6 risk_judge 提示词 | ⬜ 依赖 Task 4 结论 | — |
 | Task 7 回归验证 | ⬜ 依赖 Task 5/6 | — |
-| Task 8 账本语义提案 | ⬜ 未开始 | — |
-| Task 9 评分口径提案 | ⬜ 未开始 | — |
+| Task 8 账本语义提案 | ✅ 提案已交（待 owner 拍板） | `4c828d05`；`openspec validate --strict` 通过 |
+| Task 9 评分口径提案 | ✅ 提案已交（待 owner 拍板） | `be500ec2`；metrics.md §1.24 + openspec validate 通过 |
+
+## 执行偏差记录（相对计划）
+
+1. **Task 0 测试路径**：`tests/outcome/test_decision_mix.py`（flat，符合仓库 tests/outcome 惯例）而非计划的 `tests/outcome/ops/`；实现为加固版（缺表容错，多一个测试）。
+2. **Task 1 接入点**：daily_brief 的 `warnings` 实为数据缺口专用 `list[dict]`——决策分布改为独立事实段 `facts["decision_mix"]`（含告警句），LLM 日报与降级渲染两条路都能看见；`zero_buy_warning` 契约与计划一致。
+3. **Task 3 运行器**：`--variant` 改可重复 + `parse_variant_mapping` 独立函数——计划的草案无法表达 B 臂（trader+risk_judge 同时注入）；另补 scripts 引导（ops_api 依赖顶层 evals 包，`monitor_unverifiable_ratio.py` 同款先例）。
+4. **Task 4 样本替换**：计划点名的 4 只看空票（002852/600780/600496/000019）在生产库无会话无 prediction（幽灵引用）；按「同批基线配对」意图替换为 10-30 批次的 000428(sell)、600916(sell)、002648(watch)、600015(watch)。**「本日 20 条决策」实为 10-30 批次**（生产库 predictions 按日恰好 20 条，11 月后新会话在容器卷，与本计划宿主侧库无关）。
 
 ## 停止点（触发即停，不硬做）
 
@@ -43,3 +51,5 @@
 ## 日志
 
 - 2026-11-06 01:0x 完成机制诊断，落计划文档与台账。
+- 2026-11-06 01:0x-01:40 Task 0-3 全绿 + 冒烟通过；Task 8/9 提案交付。分支 `fix/zero-buy-decision-20261106`。
+- 2026-11-06 01:40 A 臂启动（8 只，顺序执行，预计 ~80 分钟）；B 臂候跑。
