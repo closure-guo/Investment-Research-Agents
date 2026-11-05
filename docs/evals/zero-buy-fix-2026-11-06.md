@@ -1,6 +1,7 @@
 # 零买入修复 · 进度台账（2026-11-06）
 
 > 计划：[docs/superpowers/plans/2026-11-06-zero-buy-decision-fix.md](../superpowers/plans/2026-11-06-zero-buy-decision-fix.md)
+> 分支：`fix/zero-buy-decision-20261106`（rebase 至 origin/main 后推送）→ **PR #569**
 > 本文件按小时更新，记录「做了什么 / 得到什么 / 下一步」。
 
 ## 诊断结论（已定稿）
