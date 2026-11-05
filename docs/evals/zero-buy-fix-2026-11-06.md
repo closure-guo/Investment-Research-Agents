@@ -27,12 +27,13 @@
 | Task 2 变体提示词 | ✅ 完成 | `6b67c5ed`；grep 校验 A 保留 ±2%/删催化剂、B 删契约（117→108 行） |
 | Task 3 隔离运行器 | ✅ 完成 | `743d6309` + `77d29bcf`；6 测试绿；**--variant 改可重复（修 B 臂双变体缺口）** |
 | Task 3 冒烟 | ✅ 通过 | 002916 watch(completed)，9 分钟，隔离库落库、生产库未动 |
-| Task 4 消融实验 | 🏃 A 臂运行中 | 01:40 启动，8 只 × trader_no_catalyst，隔离库 tmp/ablation-A.db |
-| Task 5 trader 提示词 | ⬜ 依赖 Task 4 结论 | — |
-| Task 6 risk_judge 提示词 | ⬜ 依赖 Task 4 结论 | — |
-| Task 7 回归验证 | ⬜ 依赖 Task 5/6 | — |
+| Task 4 消融实验 | ✅ 完成（判据落「两臂都 0 buy」格） | 报告：[zero-buy-ablation-2026-11-06.md](zero-buy-ablation-2026-11-06.md)；A 0/8 buy、B 0/4 buy（4 只 provider 过载未完） |
+| Task 5 trader 提示词 | ⏭️ 按计划前置跳过 | 「两臂都 0」→ 不改生产提示词；归因修正见报告 §5（锁分布全链） |
+| Task 6 risk_judge 提示词 | ⏭️ 按计划前置跳过 | 同上 |
+| Task 7 回归验证 | ⏭️ 依赖 Task 5/6，一并跳过 | — |
 | Task 8 账本语义提案 | ✅ 提案已交（待 owner 拍板） | `4c828d05`；`openspec validate --strict` 通过 |
 | Task 9 评分口径提案 | ✅ 提案已交（待 owner 拍板） | `be500ec2`；metrics.md §1.24 + openspec validate 通过 |
+| 收尾验证 | ✅ 全绿 | 目标面 21 passed；tests/outcome 全套件 999 passed + 2 skipped |
 
 ## 执行偏差记录（相对计划）
 
@@ -57,3 +58,7 @@
 - 2026-11-06 02:26/02:40 两波 `sqlite3.OperationalError: unable to open database file`（session_store.append_session_event 重试耗尽）：A 臂 000428/002648 失败、B 臂 002916/601066 失败，两进程随后崩溃退出。**根因假设：实验期间的隔离库只读轮询**——Windows 上读连接 close 触发 WAL checkpoint + 删 -wal/-shm，与高频写 session_events 的管线进程发生 shm 映射竞态（session_store.py:36 已有同类瞬态错误先例注释；两波失败与轮询时刻重合）。磁盘未满（D: 剩 102G）、非独占锁。
 - 2026-11-06 02:55 盘点：A 臂 5/8 completed（600026/300033/002916/601066/600916）+ B 臂 2/8（600026/300033）数据完好保留在隔离库；failed 会话无 prediction，不污染。**处置**：残余符号补跑（复用原隔离库），全程只用 Langfuse 只读监控、禁碰隔离库文件；顺序执行。
 - 2026-11-06 02:57 A 臂补跑启动（000428,002648,600015 → tmp/ablation-A.db）。
+- 2026-11-06 03:20 A 臂 8/8 全齐；B 臂二轮补跑（4 只）全灭于 provider 过载（RateLimitError）。
+- 2026-11-06 03:2x-06:55 B 臂三轮补跑：运行器两轮加固（符号级重试 + RateLimit 纳入重试、6×180s）；002916 一只成功，其余持续过载。**成本纪律行使：停止补跑**——每次失败派单烧 ~100-150k token 零产出，已完成样本已足以落判据。
+- 2026-11-06 07:0x **实验收口**：A 0/8 buy、B 0/4 buy → 判据「两臂都 0」格 → Task 5/6/7 按计划前置跳过。**归因修正（本实验最重要产出）**：锁分布在 fund_manager 完整契约拷贝 + 4 分析师 horizon_hint 条款 + 滞回机制——B 臂 300033 在变体删净「20 个交易日」文本后仍引用该逻辑，来源是上游材料而非模型自发；计划的「改 trader/risk_judge 即可解锁」假设不成立。第二轮消融设计建议见报告 §6，待 owner 拍板。
+- 2026-11-06 07:1x 收尾验证全绿（目标面 21 passed + outcome 全套件 999 passed/2 skipped）；生产库 predictions=287/sessions=586 逐字未动。
