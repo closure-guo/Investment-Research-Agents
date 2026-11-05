@@ -160,6 +160,36 @@ def _action(result: dict) -> str | None:
     return str(action) if action else None
 
 
+async def _run_symbol_with_retry(
+    symbol: str,
+    *,
+    timeout_s: int,
+    attempts: int = 4,
+    cooldown_s: float = 90.0,
+) -> dict:
+    """符号级重试：调度失败（如 Windows 上间歇性 SQLite 文件锁窗口）冷却后重派。
+
+    失败派单只留 failed 会话行、无 prediction，重派不产生重复数据；
+    TimeoutError（已跑满 40 分钟）不重试——重跑代价过高，直接上抛。
+    """
+    last: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await run_symbol(symbol, timeout_s=timeout_s)
+        except TimeoutError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 瞬态窗口类型不可枚举，冷却重试兜底
+            last = exc
+            print(
+                f"[ablation] {symbol} 第 {attempt}/{attempts} 次失败: "
+                f"{type(exc).__name__}: {exc}；{cooldown_s}s 后重试",
+                flush=True,
+            )
+            if attempt < attempts:
+                await asyncio.sleep(cooldown_s)
+    raise last  # type: ignore[misc]
+
+
 async def _main(args: argparse.Namespace) -> int:
     variant_paths = [Path(v) for v in args.variant]
     dirs = {p.parent.resolve() for p in variant_paths}
@@ -173,7 +203,7 @@ async def _main(args: argparse.Namespace) -> int:
                 f"[ablation] symbol={symbol} variants={mapping} db={os.environ['SESSIONS_DB_PATH']}",
                 flush=True,
             )
-            results.append(await run_symbol(symbol, timeout_s=args.timeout))
+            results.append(await _run_symbol_with_retry(symbol, timeout_s=args.timeout))
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
