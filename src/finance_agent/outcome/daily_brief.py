@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from finance_agent.llm.gateway import complete_text
+from finance_agent.outcome.ops.decision_mix import action_from_snapshot, compute_decision_mix
 from finance_agent.prompts.loader import load_prompt_with_meta
 
 logger = logging.getLogger("finance_agent.outcome.daily_brief")
@@ -87,14 +88,21 @@ def _read_one(path: Path, sql: str, params: tuple[Any, ...] = ()) -> dict[str, A
 
 
 def _action_from_snapshot(raw: object) -> str | None:
-    try:
-        payload = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, ValueError):
+    # 2026-11-06 零买入修复：与决策分布读数共用同一口径（outcome.ops.decision_mix）
+    return action_from_snapshot(raw)
+
+
+def zero_buy_warning(mix: dict, threshold: int = 3) -> str | None:
+    """连续零买入告警：决策分布退化为「只会说不」时，日报必须显式喊出来。"""
+    streak = int(mix.get("zero_buy_streak") or 0)
+    if streak < threshold:
         return None
-    if not isinstance(payload, dict):
-        return None
-    action = payload.get("action")
-    return str(action) if action else None
+    total = mix.get("total") or {}
+    return (
+        f"决策分布异常：连续 {streak} 个交易日零买入"
+        f"（sell={total.get('sell', 0)}、watch={total.get('watch', 0)}）"
+        "——疑似决策规则锁死，排查方向见 docs/superpowers/plans/2026-11-06-zero-buy-decision-fix.md"
+    )
 
 
 def _screening_facts(path: Path, as_of: str) -> dict[str, Any]:
@@ -334,6 +342,14 @@ def collect_daily_facts(
     facts["execution"] = _safe("execution", lambda: _execution_facts(execution_db, as_of)) or {}
     facts["factors"] = _safe("factors", lambda: _factor_facts(factor_db)) or {}
     facts["failures"] = _safe("failures", lambda: _job_failure_facts(sessions_db, as_of)) or []
+    # 决策分布读数（2026-11-06 零买入修复 Task 1）：连续零买入必须被日报看见
+    facts["decision_mix"] = (
+        _safe("decision_mix", lambda: compute_decision_mix(days=10, db_path=sessions_db)) or {}
+    )
+    if facts["decision_mix"]:
+        _buy_warning = zero_buy_warning(facts["decision_mix"])
+        if _buy_warning:
+            facts["decision_mix"]["zero_buy_warning"] = _buy_warning
     return facts
 
 
@@ -390,6 +406,14 @@ def render_fallback(facts: dict[str, Any], error: str) -> str:
     warnings = facts.get("warnings") or []
     for warning in warnings:
         lines.append(f"- 数据缺口（{warning.get('section')}）：{warning.get('error')}")
+    decision_mix = facts.get("decision_mix") or {}
+    if decision_mix:
+        lines.append(
+            f"- 连续零买入天数：{_fmt(decision_mix.get('zero_buy_streak'))}；"
+            f"近窗合计：{json.dumps(decision_mix.get('total') or {}, ensure_ascii=False)}"
+        )
+        if decision_mix.get("zero_buy_warning"):
+            lines.append(f"- ⚠️ {decision_mix['zero_buy_warning']}")
     lines.extend(
         [
             "",
