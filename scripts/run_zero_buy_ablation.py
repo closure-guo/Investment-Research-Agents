@@ -22,6 +22,12 @@ import sys
 import time
 from pathlib import Path
 
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(
+        0, str(_ROOT)
+    )  # evals/ 未安装进 venv（packages.find where=src），ops_api 依赖 evals 包，需显式加根
+
 _NODE_MODULES = (
     "finance_agent.nodes.trader",
     "finance_agent.nodes.risk",
