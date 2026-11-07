@@ -117,11 +117,12 @@ def _has_incremental_claim(reasoning: object) -> bool:
 
 
 def _evaluate_hysteresis(state: dict, decision: TradeDecision) -> dict:
-    """均衡带/滞回判定（纯判定，不改决策）：balanced_zone / prior / flip /
+    """均衡带观测/滞回判定（纯判定，不改决策）：balanced_zone / prior / flip /
     incremental_claimed / needs_reaffirm。历史查询 fail-open（空序列即不翻转）。
 
     判定本体为共享纯函数 ``execution/hysteresis.evaluate_direction_hysteresis``
-    （add-signal-portfolio-risk-gate G5：决策侧与信号路径同一判定，行为保持抽取）；
+    （add-signal-portfolio-risk-gate G5：决策侧与信号路径同一判定）；T3 收窄后
+    ``needs_reaffirm`` 仅由方向翻转触发，均衡带仅落 state 供 trace 观测。
     本函数只做 state/decision → 判定输入的适配与外围字段（prior_date 等）组装。
     """
     rating = str(state.get("research_manager_rating") or "")
@@ -153,9 +154,11 @@ def _build_hysteresis_context(state: dict) -> str:
     无历史且非均衡带时返回空串（零增量）。"""
     parts: list[str] = []
     if "中性" in str(state.get("research_manager_rating") or ""):
+        # T3 收窄（update-decision-buy-gates）：均衡带标志仅要求 reasoning 披露
+        # 对峙点，不再约束执行动作（增量义务收窄至方向翻转，见 _reaffirm_decision_semantics）
         parts.append(
-            "证据均衡带：是（Research Manager 评级中性）——执行动作（buy/sell）"
-            "须以证据增量（新报告期披露/重大公告/技术形态破位确认）为支撑"
+            "证据均衡带：是（Research Manager 评级中性）——reasoning 如实披露"
+            "多空对峙点（仅披露义务，不约束方向裁决）"
         )
     history = recent_directions(str(state.get("stock_code") or ""))
     if history:
@@ -175,17 +178,18 @@ def _reaffirm_decision_semantics(
     llm_config: dict | None,
     pinfo,
 ) -> tuple[TradeDecision, dict]:
-    """均衡带/滞回复核回路：无增量的执行动作或翻转 → 携反馈打回重申恰一次；
-    重申仍无 → 降级观望（均衡带执行）/ 维持前判（翻转），如实标注落 hysteresis。"""
+    """滞回复核回路（T3 收窄：仅方向翻转受约束）：无增量的翻转 → 携反馈打回
+    重申恰一次；重申仍无 → 维持前判，如实标注落 hysteresis。均衡带内首建/同向
+    执行不进入本回路（均衡带标志仅要求披露对峙点，见 _build_hysteresis_context）。"""
     hy = _evaluate_hysteresis(state, decision)
     if not hy["needs_reaffirm"]:
         return decision, hy
-    why = "方向翻转未申报证据增量" if hy["flip"] else "证据均衡带内执行动作未申报证据增量"
+    why = "方向翻转未申报证据增量"
     retry_context = (
-        f"{context}\n\n【决策滞回复核打回】{why}。滞回约束要求：方向翻转或证据均衡带内"
-        "执行动作（buy/sell）MUST 在 reasoning 中显式申报增量事实（新报告期披露、"
-        "重大公告、技术形态破位确认之一或多）。若确有增量请改写 reasoning 显式申报后"
-        "重新输出完整决策 JSON；若无增量请输出与近窗前向一致的观望决策。"
+        f"{context}\n\n【决策滞回复核打回】{why}。滞回约束要求：方向翻转（与近窗"
+        "前向方向不同的执行动作）MUST 在 reasoning 中显式申报增量事实（新报告期"
+        "披露、重大公告、技术形态破位确认之一或多）。若确有增量请改写 reasoning "
+        "显式申报后重新输出完整决策 JSON；若无增量请输出与近窗前向一致的观望决策。"
     )
     data = call_llm_for_json(
         retry_context,
@@ -203,47 +207,33 @@ def _reaffirm_decision_semantics(
         hy["applied"] = ""
         hy["reaffirmed"] = True
         return decision, hy
-    # 重申仍无增量 → 确定性处置
+    # 重申仍无增量 → 确定性处置（T3 收窄后 needs_reaffirm 仅由翻转触发：维持前判；
+    # 均衡带单独触发的降级观望分支已随增量义务移除而不可达，删除）
     hy["reaffirmed"] = True
-    if hy["flip"]:
-        prior_action = _DIRECTION_ACTION.get(str(hy["prior_direction"]), "watch")
-        # 维持前判到执行动作时：反方向价位不可信清空（交既有价位完整性打回补报）；
-        # sell_type 维持可执行默认 exit（add-holdings-context：原为 short——与生产
-        # 分型语义相反，且 A 股散户普遍不可执行）
-        update: dict = {
-            "action": prior_action,
-            "position_size": None,
-            "entry_price": None,
-            "stop_loss": None,
-            "target_price": None,
-            "exit_schedule": None,
-        }
-        if prior_action == "sell":
-            update["sell_type"] = "exit"
-        else:
-            update["sell_type"] = None
-        decision = decision.model_copy(update=update)
-        if prior_action == "watch":
-            decision = decision.model_copy(
-                update={
-                    "inaction_reason": "维持前判（无证据增量）：近窗前向为观望，本次翻转未申报增量事实"
-                }
-            )
-        hy["applied"] = "维持前判（无证据增量）"
+    prior_action = _DIRECTION_ACTION.get(str(hy["prior_direction"]), "watch")
+    # 维持前判到执行动作时：反方向价位不可信清空（交既有价位完整性打回补报）；
+    # sell_type 维持可执行默认 exit（add-holdings-context：原为 short——与生产
+    # 分型语义相反，且 A 股散户普遍不可执行）
+    update: dict = {
+        "action": prior_action,
+        "position_size": None,
+        "entry_price": None,
+        "stop_loss": None,
+        "target_price": None,
+        "exit_schedule": None,
+    }
+    if prior_action == "sell":
+        update["sell_type"] = "exit"
     else:
+        update["sell_type"] = None
+    decision = decision.model_copy(update=update)
+    if prior_action == "watch":
         decision = decision.model_copy(
             update={
-                "action": "watch",
-                "position_size": None,
-                "entry_price": None,
-                "stop_loss": None,
-                "target_price": None,
-                "sell_type": None,
-                "exit_schedule": None,
-                "inaction_reason": "证据均衡无增量，默认观望：均衡带内执行动作未申报证据增量",
+                "inaction_reason": "维持前判（无证据增量）：近窗前向为观望，本次翻转未申报增量事实"
             }
         )
-        hy["applied"] = "证据均衡无增量，默认观望"
+    hy["applied"] = "维持前判（无证据增量）"
     return decision, hy
 
 
@@ -322,9 +312,9 @@ def risk_judge(state: dict) -> dict:
         prompt_version=_pinfo.prompt_version,
     )
     decision = TradeDecision.model_validate(data)
-    # 证据均衡带与方向滞回复核（add-decision-hysteresis）：无增量的执行动作或
-    # 翻转打回重申恰一次，重申仍无 → 降级观望/维持前判（决策语义最先定型，
-    # 后续 sell_type/价位回路在其上验参数）
+    # 方向滞回复核（add-decision-hysteresis；update-decision-buy-gates T3 收窄）：
+    # 无增量的方向翻转打回重申恰一次，重申仍无 → 维持前判（均衡带不再单独触发
+    # 打回/降级，决策语义最先定型，后续 sell_type/价位回路在其上验参数）
     decision, decision_hysteresis = _reaffirm_decision_semantics(
         state, decision, context, system, api_key, state.get("llm_config"), _pinfo
     )
