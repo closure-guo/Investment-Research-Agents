@@ -151,10 +151,11 @@ def generate_signal(
 ) -> Signal:
     """信号生成路径入口：契约转换 → 共享滞回判定 → 落库（幂等 upsert）。
 
-    滞回（delta spec decision-hysteresis）：信号方向翻转（或均衡带内执行）经过与
-    决策侧相同的共享判定；被应用时（``keep_prior``/``downgrade_balanced``）以判定
-    后的方向落库，并把判定记录写入 ``hysteresis_events``。``prior_direction`` 由
-    调用方解析（如前一日 ``list_signals(symbol=...)``）后传入；无历史且非均衡带时
+    滞回（delta spec decision-hysteresis；update-decision-buy-gates T3 收窄）：
+    信号方向翻转且未申报增量经过与决策侧相同的共享判定；被应用时
+    （``keep_prior``）以判定后的方向落库，并把判定记录写入 ``hysteresis_events``。
+    均衡带不再单独触发降级（首建/同向执行原样放行）。``prior_direction`` 由
+    调用方解析（如前一日 ``list_signals(symbol=...)``）后传入；无翻转时
     判定为 no-op（原样落库，不写判定记录）。
 
     契约边界（评审修正）：``prior_direction`` 必须落在信号枚举 {long, flat} 内——

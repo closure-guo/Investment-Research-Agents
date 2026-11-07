@@ -13,6 +13,8 @@ _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "src/finance_agent/prompts"
 
 
 def _load(name: str) -> str:
+    if not name.endswith(".md"):
+        name = f"{name}.md"
     return (_PROMPTS_DIR / name).read_text(encoding="utf-8")
 
 
@@ -87,7 +89,14 @@ class TestTraderSemantics:
 
 class TestRiskJudgeSemantics:
     def test_balanced_evidence_guidance(self):
-        assert "均衡" in _load("risk_judge.md")
+        text = _load("risk_judge.md")
+        # update-decision-buy-gates：均衡带=披露义务，增量检查仅约束方向翻转
+        assert "均衡" in text
+        assert "倾向 hold/watch" not in text
+        assert "仅披露义务，不约束方向" in text
+        assert "不受增量检查约束" in text
+        assert "否决纪律与参数协商" in text
+        assert "可执行参数缺口" in text
 
 
 class TestFundManagerSemantics:
@@ -378,19 +387,58 @@ class TestDecisionLayerHorizonContract:
         assert "沪深300" in HORIZON_CONTRACT
         assert "±2%" in HORIZON_CONTRACT
 
-    def test_contract_buys_require_catalyst_path(self):
-        """buy 须说明催化剂在 20 个交易日内兑现。"""
-        assert "20 个交易日内兑现" in HORIZON_CONTRACT
+    def test_contract_buys_disclose_window_matching(self):
+        """buy 不再承担催化剂证明义务：改为披露兑现窗口与考核窗口匹配（update-decision-buy-gates）。"""
+        assert "兑现窗口与考核窗口的匹配情况" in HORIZON_CONTRACT
+        assert "催化剂缺失本身不构成不买理由" in HORIZON_CONTRACT
 
-    def test_contract_long_arguments_not_primary(self):
-        """长线论据不得作买入主因，仅作安全垫或否决项。"""
-        assert "买入主因" in HORIZON_CONTRACT
-        assert "安全垫" in HORIZON_CONTRACT
-        assert "否决" in HORIZON_CONTRACT
+    def test_contract_long_arguments_allowed_with_disclosure(self):
+        """长线论据可作买入依据，须同步披露窗口错配风险（update-decision-buy-gates）。"""
+        assert "长线论据（估值回归、产能释放等）可作为买入依据" in HORIZON_CONTRACT
+        assert "窗口错配风险" in HORIZON_CONTRACT
 
     def test_contract_literal_20_tied_to_config(self):
         """字面 20 与 OUTCOME_DEFAULT_HORIZON_DAYS 联动声明存在。"""
         assert "OUTCOME_DEFAULT_HORIZON_DAYS" in HORIZON_CONTRACT
+
+
+# ---------------------------------------------------------------------------
+# 决策买入闸门拆除（update-decision-buy-gates Task 1）
+# ---------------------------------------------------------------------------
+
+
+def test_horizon_contract_is_settlement_not_gate():
+    """周期契约段=纯结算口径：无催化剂义务、无长线禁令，有错配披露。"""
+    text = HORIZON_CONTRACT
+    assert "结算口径" in text and "而非决策门槛" in text
+    assert "MUST 说明催化剂" not in text
+    assert "MUST NOT 作为" not in text and "买入主因" not in text
+    assert "窗口" in text and "OUTCOME_DEFAULT_HORIZON_DAYS" in text
+
+
+def test_trader_has_stop_anchoring():
+    md = _load("trader")
+    assert "止损锚定与仓位预算" in md
+    assert "max(2×日波动" in md or "max（2×日波动" in md
+    assert "自由选边" in md
+    # 回归修复（perfect_tight PARTIAL）：堵「带宽 vs 考核期波动」规避框架
+    assert "预算化即定价" in md
+    assert "不构成 trader 侧 watch 的独立理由" in md
+
+
+def test_risk_judge_veto_discipline():
+    md = _load("risk_judge")
+    assert "否决纪律与参数协商" in md
+    for kw in ("财务造假嫌疑", "退市", "流动性枯竭", "可执行参数缺口", "等比下调"):
+        assert kw in md
+    assert "倾向 hold/watch" not in md  # 旧倾向废除
+
+
+def test_confidence_mid_band_deanchored():
+    for name in ("trader", "risk_judge", "fund_manager"):
+        md = _load(name)
+        assert "示例 0.55" not in md
+        assert "向示例值收敛" in md
 
 
 class TestAnalystHorizonHint:
@@ -406,6 +454,18 @@ class TestAnalystHorizonHint:
     @pytest.mark.parametrize("name", ANALYSTS)
     def test_horizon_hint_example_present(self, name):
         assert '"horizon_hint"' in _load(f"{name}.md")
+
+    @pytest.mark.parametrize("name", ANALYSTS)
+    def test_no_decision_verdict_on_horizon(self, name):
+        """原料层只申报兑现窗口，不得附决策判语（update-decision-buy-gates）。"""
+        text = _load(f"{name}.md")
+        assert "不能支撑买入主因" not in text
+        assert "决策层按 T+20" not in text
+
+
+def test_fund_manager_json_example_confidence_not_mid_anchor():
+    """输出格式 JSON 示例不得用中段锚值（与分档判据去锚同目标）。"""
+    assert '"confidence": 0.55' not in _load("fund_manager.md")
 
 
 def test_fundamental_analyst_banking_cashflow_exemption():
