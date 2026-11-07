@@ -112,24 +112,34 @@ class TestInactionRationalePromptContract:
 
 
 class TestConfidenceCalibrationPromptContract:
-    """calibrate-decision-confidence：三档示例 + 证据判据（不得只给区间描述）。"""
+    """calibrate-decision-confidence：三档判据 + 证据规则。
+
+    update-decision-buy-gates 修订：中档示例区间化去锚（0.45–0.65 区间内按证据
+    组合取值 + 反锚定纪律），高/低档保留单值示例——断言随新契约更新。
+    """
 
     def test_trader_has_three_tier_examples_and_evidence_rule(self):
         text = _load("trader.md")
-        for value in ("0.85", "0.55", "0.30"):
+        for value in ("0.85", "0.30"):
             assert value in text, f"trader.md 缺示例值 {value}"
+        assert "0.45–0.65" in text  # 中档区间化取值（去单值锚）
+        assert "向示例值收敛" in text  # 反锚定纪律
         assert "证据" in text
 
     def test_risk_judge_has_three_tier_examples_and_evidence_rule(self):
         text = _load("risk_judge.md")
-        for value in ("0.85", "0.55", "0.30"):
+        for value in ("0.85", "0.30"):
             assert value in text, f"risk_judge.md 缺示例值 {value}"
+        assert "0.45–0.65" in text
+        assert "向示例值收敛" in text
         assert "证据" in text
 
     def test_fund_manager_has_three_tier_examples_and_evidence_rule(self):
         text = _load("fund_manager.md")
-        for value in ("0.85", "0.55", "0.30"):
+        for value in ("0.85", "0.30"):
             assert value in text, f"fund_manager.md 缺示例值 {value}"
+        assert "0.45–0.65" in text
+        assert "向示例值收敛" in text
         assert "证据" in text
 
 

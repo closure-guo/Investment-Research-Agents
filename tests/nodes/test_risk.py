@@ -871,34 +871,10 @@ class TestSellTypeDeclarationLoop:
         assert result["final_trade_decision"].sell_type == "short"
 
 
-def _watch_from_exec_json(reasoning: str) -> str:
-    """均衡带降级重申形态：LLM 重申仍输出执行动作（供 side_effect 第二段）。
-
-    trigger_high/trigger_low 随重申决策申报：均衡带降级的 model_copy 不清洗
-    触发位字段（只清仓位/价位），降级后的 watch 终稿据此满足触发位申报契约
-    （add-watch-trigger-tracking），本测试不误入触发位申报打回回路。
-    """
-    return json.dumps(
-        {
-            "action": "sell",
-            "confidence": 0.55,
-            "position_size": "light",
-            "sell_type": "short",
-            "entry_price": 640.0,
-            "stop_loss": 700.0,
-            "target_price": 571.0,
-            "trigger_high": 700.0,
-            "trigger_low": 570.0,
-            "reasoning": reasoning,
-            "reeval_triggers": ["跌破 570 重估"],
-        },
-        ensure_ascii=False,
-    )
-
-
 class TestDecisionHysteresis:
-    """add-decision-hysteresis：证据均衡带 + 方向滞回——无增量的执行/翻转
-    打回重申一次，重申仍无 → 降级观望 / 维持前判；携带增量放行。"""
+    """add-decision-hysteresis + update-decision-buy-gates T3：均衡带标志仅落
+    state/上下文（披露对峙点义务），增量申报义务收窄至方向翻转——翻转无增量
+    打回重申恰一次，重申仍无 → 维持前判；均衡带内首建/同向执行放行。"""
 
     @staticmethod
     def _state(rating: str | None, history: list[dict]) -> dict:
@@ -910,22 +886,65 @@ class TestDecisionHysteresis:
             "price_levels": {"available": True, "entry_ref": 640.0, "recent_low": 570.0},
         }
 
+    @staticmethod
+    def _buy_json(reasoning: str = "超跌反弹") -> str:
+        """buy 终稿 JSON：结构化价位/再评估齐全；trigger_high/trigger_low 随申报——
+        维持前判降为 watch 时 model_copy 不清洗触发位字段，watch 终稿据此满足
+        触发位申报契约（add-watch-trigger-tracking），不误入触发位打回回路。"""
+        return json.dumps(
+            {
+                "action": "buy",
+                "confidence": 0.6,
+                "position_size": "light",
+                "entry_price": 640.0,
+                "stop_loss": 600.0,
+                "target_price": 750.0,
+                "trigger_high": 700.0,
+                "trigger_low": 570.0,
+                "reasoning": reasoning,
+                "reeval_triggers": ["放量收复 645 上方"],
+            },
+            ensure_ascii=False,
+        )
+
     @patch("finance_agent.nodes.risk.recent_directions", return_value=[])
     @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
-    def test_balanced_zone_exec_no_incremental_downgraded(self, mock_llm, _mock_hist):
-        """RM 中性（均衡带）+ sell 无增量 → 重申仍无 → 降级 watch + 标注。"""
-        mock_llm.side_effect = [
-            _sell_decision_json(["跌破 570 重估"]),
-            _watch_from_exec_json("技术形态走弱，趋势延续"),
-        ]
+    def test_balanced_zone_first_build_no_incremental_passes(self, mock_llm, _mock_hist):
+        """T3 Scenario 1：RM 中性（均衡带）+ 近窗无历史（首建）+ buy 无增量申报
+        → 放行（不打回、不降级），均衡带要素仍落 state。"""
+        mock_llm.return_value = self._buy_json()
         result = risk_judge(self._state("中性", []))
-        assert mock_llm.call_count == 2
+        mock_llm.assert_called_once()  # 不触发打回
+        # Scenario 3：均衡带成立时决策上下文仍携带均衡带标志（供 reasoning 披露对峙点）
+        assert "证据均衡带：是" in mock_llm.call_args_list[0].args[0]
         decision = result["final_trade_decision"]
-        assert decision.action == "watch"
-        assert "证据均衡" in (decision.inaction_reason or "")
+        assert decision.action == "buy"  # 不降级
         hy = result["decision_hysteresis"]
+        assert hy["balanced_zone"] is True  # Scenario 3：判定要素仍落 state
+        assert hy["flip"] is False
+        assert hy["needs_reaffirm"] is False
+        assert hy["applied"] == ""
+
+    @patch(
+        "finance_agent.nodes.risk.recent_directions",
+        return_value=[{"date": "2026-10-01", "direction": "neutral", "confidence": 0.5}],
+    )
+    @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
+    def test_balanced_zone_flip_from_watch_maintains_prior(self, mock_llm, _mock_hist):
+        """T3 Scenario 2：均衡带成立 + 近窗前向 watch + buy 无增量 → 打回重申
+        恰一次，重申仍无增量 → 维持前判（方向滞回语义不变）。"""
+        mock_llm.side_effect = [self._buy_json(), self._buy_json("反弹动能仍在")]
+        result = risk_judge(
+            self._state("中性", [{"date": "2026-10-01", "direction": "neutral", "confidence": 0.5}])
+        )
+        assert mock_llm.call_count == 2  # 滞回打回恰一次
+        decision = result["final_trade_decision"]
+        assert decision.action == "watch"  # 维持前判
+        assert "维持前判" in (decision.inaction_reason or "")
+        hy = result["decision_hysteresis"]
+        assert hy["flip"] is True
         assert hy["balanced_zone"] is True
-        assert "默认观望" in hy["applied"]
+        assert "维持前判" in hy["applied"]
 
     @patch("finance_agent.nodes.risk.recent_directions", return_value=[])
     @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
@@ -1051,28 +1070,20 @@ class TestDecisionHysteresis:
         assert result["decision_hysteresis"]["applied"] == ""
         assert result["decision_hysteresis"]["balanced_zone"] is False
 
-    @patch("finance_agent.nodes.risk.recent_directions", return_value=[])
+    @patch(
+        "finance_agent.nodes.risk.recent_directions",
+        return_value=[{"date": "2026-10-01", "direction": "short", "confidence": 0.6}],
+    )
     @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
     def test_reaffirm_with_incremental_second_pass_keeps_exec(self, mock_llm, _mock_hist):
-        """首次无增量被打回，重申携带增量 → 放行执行动作（恰 2 次调用）。"""
+        """翻转无增量被打回，重申携带增量 → 放行执行动作（恰 2 次调用）。"""
         mock_llm.side_effect = [
-            _sell_decision_json(["跌破 570 重估"]),
-            json.dumps(
-                {
-                    "action": "sell",
-                    "confidence": 0.55,
-                    "position_size": "light",
-                    "sell_type": "short",
-                    "entry_price": 640.0,
-                    "stop_loss": 700.0,
-                    "target_price": 571.0,
-                    "reasoning": "中报披露后现金流质量证伪，破位风险上升",
-                    "reeval_triggers": ["跌破 570 重估"],
-                },
-                ensure_ascii=False,
-            ),
+            self._buy_json(),  # 首次翻转（short→buy）无增量 → 打回
+            self._buy_json("三季报披露后毛利率拐点确认，估值消化"),  # 重申申报增量 → 放行
         ]
-        result = risk_judge(self._state("中性", []))
+        result = risk_judge(
+            self._state("看空", [{"date": "2026-10-01", "direction": "short", "confidence": 0.6}])
+        )
         assert mock_llm.call_count == 2
-        assert result["final_trade_decision"].action == "sell"
+        assert result["final_trade_decision"].action == "buy"
         assert result["decision_hysteresis"]["applied"] == ""

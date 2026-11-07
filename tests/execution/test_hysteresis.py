@@ -1,13 +1,16 @@
 """execution/hysteresis.py 共享滞回判定单测（add-signal-portfolio-risk-gate Task 4 / G5）。
 
-覆盖计划 G5 与 delta spec decision-hysteresis「滞回机制适用路径」：
+覆盖计划 G5 与 delta spec decision-hysteresis（update-decision-buy-gates T3 收窄后）：
 
-- 抽取为共享纯函数后与 ``nodes/risk.py::_evaluate_hysteresis`` 旧行为逐位一致
-  （对既有 tests/nodes/test_risk.py hysteresis 用例覆盖的输入组合逐一断言）——
-  ``nodes/risk.py`` 既有测试**零修改**通过（红线），本文件只做等价性与挂点断言；
-- 信号侧应用 ``apply_signal_hysteresis``：抖动被吸收（维持前向）/ 有增量放行 /
-  均衡带内执行无增量降为 flat（与决策侧降级观望同语义）；
-- spec 场景：前日 long、今日裸输出 flat 且均衡带内 → 今日信号维持 long 且
+- ``needs_reaffirm`` 仅由「方向翻转且未申报证据增量」触发——均衡带内执行动作
+  （含首次建仓与同向执行）不再施加增量申报义务，均衡带标志仅要求 reasoning
+  披露对峙点（T3 收窄）；
+- 抽取为共享纯函数后与 ``nodes/risk.py::_evaluate_hysteresis`` 判定逐位一致
+  （对 tests/nodes/test_risk.py hysteresis 用例覆盖的输入组合逐一断言）——
+  本文件只做等价性与挂点断言；
+- 信号侧应用 ``apply_signal_hysteresis``：翻转无增量被吸收（维持前向）/
+  有增量放行翻转 / 均衡带内首建放行（不再降级 flat）；
+- spec 场景：前日 long、今日裸输出 flat → 今日信号维持 long 且
   滞回判定记录落库（hysteresis_events）。
 
 数值/枚举断言独立手写（不复用被测实现的计算）。
@@ -21,7 +24,6 @@ from unittest.mock import patch
 import pytest
 
 from finance_agent.execution.hysteresis import (
-    HYSTERESIS_DOWNGRADE_BALANCED,
     HYSTERESIS_KEEP_PRIOR,
     apply_signal_hysteresis,
     evaluate_direction_hysteresis,
@@ -53,20 +55,22 @@ def _decision(**overrides: object) -> dict:
         ("short", "long", False, False, True, True),
         # 翻转 + 有增量 → 放行（三季报披露）
         ("short", "long", False, True, True, False),
-        # 均衡带内执行 + 无增量 → 需重申（中性→sell）
-        (None, "short", True, False, False, True),
+        # 均衡带内执行 + 无增量 → 放行（T3 收窄：均衡带不再施增量义务）
+        (None, "short", True, False, False, False),
         # 均衡带内执行 + 有增量（放量破位确认）→ 放行
         (None, "short", True, True, False, False),
         # 非均衡带 + 无历史 → 零增量 no-op（看多→sell）
         (None, "short", False, False, False, False),
-        # 均衡带内同向执行：无翻转但有执行动作 → 仍需增量申报
-        ("short", "short", True, False, False, True),
+        # 均衡带内同向执行：无翻转 → 放行（T3 收窄）
+        ("short", "short", True, False, False, False),
         ("short", "short", True, True, False, False),
         # 前向 long → hold（neutral）：方向翻转 → 需重申（维持前判路径）
         ("long", "neutral", False, False, True, True),
+        # 均衡带内方向翻转（近窗前向 watch→buy）+ 无增量 → 仍需重申（滞回不豁免）
+        ("neutral", "long", True, False, True, True),
         # 无翻转且非均衡带 → no-op
         ("long", "long", False, False, False, False),
-        # 无历史且观望（非执行）→ 零增量；均衡带观望同样不降级
+        # 无历史且观望（非执行）→ 零增量；均衡带观望同样 no-op
         (None, "neutral", False, False, False, False),
         (None, "neutral", True, False, False, False),
     ],
@@ -199,13 +203,23 @@ def test_apply_signal_hysteresis_flip_with_increment_not_absorbed():
     assert judgment == {"flip": True, "needs_reaffirm": False, "applied": ""}
 
 
-def test_apply_signal_hysteresis_balanced_exec_without_increment_downgrades():
-    """均衡带内执行（long）无增量 → 降为 flat（与决策侧降级观望同语义）。"""
+def test_apply_signal_hysteresis_balanced_first_build_passes():
+    """T3 收窄（spec Scenario 1）：均衡带内首建（无历史）执行无增量 → 放行，不降级。"""
     direction, judgment = apply_signal_hysteresis(
         "long", None, balanced_zone=True, incremental_claimed=False
     )
+    assert direction == "long"
+    assert judgment == {"flip": False, "needs_reaffirm": False, "applied": ""}
+
+
+def test_apply_signal_hysteresis_flip_from_watch_absorbed():
+    """T3（spec Scenario 2）：均衡带成立 + 近窗前向 watch（flat）+ buy 无增量
+    → 仍走维持前判（方向滞回语义不变）。"""
+    direction, judgment = apply_signal_hysteresis(
+        "long", "flat", balanced_zone=True, incremental_claimed=False
+    )
     assert direction == "flat"
-    assert judgment["applied"] == HYSTERESIS_DOWNGRADE_BALANCED == "downgrade_balanced"
+    assert judgment == {"flip": True, "needs_reaffirm": True, "applied": HYSTERESIS_KEEP_PRIOR}
 
 
 def test_apply_signal_hysteresis_balanced_exec_with_increment_kept():
@@ -293,7 +307,9 @@ def test_signal_path_flip_with_increment_not_absorbed_no_event(tmp_path):
     assert list_hysteresis_events(db_path=db) == []
 
 
-def test_signal_path_balanced_exec_without_increment_downgrades(tmp_path):
+def test_signal_path_balanced_first_build_passes(tmp_path):
+    """T3 收窄（spec Scenario 1 信号侧）：均衡带首建无增量 → 原样落库，不降级、
+    无判定事件（放行即零处置）。"""
     db = tmp_path / "execution.db"
     signal = generate_signal(
         _decision(action="buy"),
@@ -304,10 +320,8 @@ def test_signal_path_balanced_exec_without_increment_downgrades(tmp_path):
         incremental_claimed=False,
         db_path=db,
     )
-    assert signal.direction == "flat"  # 均衡带内执行无增量 → 降级
-    events = list_hysteresis_events(signal_id=signal.signal_id, db_path=db)
-    assert len(events) == 1
-    assert json.loads(events[0]["detail_json"])["applied"] == "downgrade_balanced"
+    assert signal.direction == "long"  # 均衡带首建不再降级
+    assert list_hysteresis_events(db_path=db) == []
 
 
 def test_signal_path_noop_records_no_event(tmp_path):
