@@ -29,6 +29,7 @@ if str(_ROOT) not in sys.path:
     )  # evals/ 未安装进 venv（packages.find where=src），ops_api 依赖 evals 包，需显式加根
 
 _NODE_MODULES = (
+    "finance_agent.nodes.analysts",
     "finance_agent.nodes.trader",
     "finance_agent.nodes.risk",
     "finance_agent.nodes.fund_manager",
@@ -92,7 +93,7 @@ def _swap(obj, attr: str, value):
 
 @contextlib.contextmanager
 def patch_prompts(variant_dir: Path, mapping: dict[str, str]):
-    """把 mapping 指定的 prompt 换成变体文件，覆盖五个节点模块的模块级引用。
+    """把 mapping 指定的 prompt 换成变体文件，覆盖六个节点模块（含分析师）的模块级引用。
 
     节点在函数调用期才调 load_prompt_with_meta，故 patch 模块属性即可生效；
     未命中 mapping 的名字走真实 loader（Langfuse production → 本地兜底）。

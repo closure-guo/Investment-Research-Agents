@@ -44,6 +44,17 @@ def test_patch_falls_back_to_real_loader_for_unpatched_names(tmp_path):
         assert info.prompt_name == "research_manager"
 
 
+def test_patch_covers_analyst_module(tmp_path):
+    variant = tmp_path / "fundamental_analyst.md"
+    variant.write_text("VARIANT-FUND", encoding="utf-8")
+    import finance_agent.nodes.analysts as analysts_mod
+
+    original = analysts_mod.load_prompt_with_meta
+    with patch_prompts(tmp_path, {"fundamental_analyst": "fundamental_analyst.md"}):
+        assert analysts_mod.load_prompt_with_meta("fundamental_analyst").template == "VARIANT-FUND"
+    assert analysts_mod.load_prompt_with_meta is original
+
+
 def test_refuses_production_db(tmp_path):
     with pytest.raises(RuntimeError):
         assert_isolated_db(Path("data/sessions.db"))
