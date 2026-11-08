@@ -13,5 +13,10 @@
       2026-10-31 四重取证（mtime/备份/幂等复跑/py_compile）+ 渲染探针 846 字符非空，
       详见 tests/validation/2026-10-31-feed-dsl-contract-into-proposal-prompt-deployment.md；
       首个真实会话 prompt 落日志复核随任务 10 批次读数一并核）
-- [ ] 实施后 3-5 个收割批次 untranslatable/入库读数 vs 前置基线对照，写入 `docs/evals/metrics.md` 时间线
-- [ ] 人工验证报告落 `tests/validation/` → sync + archive
+- [x] 实施后 3-5 个收割批次 untranslatable/入库读数 vs 前置基线对照，写入 `docs/evals/metrics.md` 时间线
+      （两批 10-29/30 读数已入 metrics.md §2 时间线（70.5%/80.3%、translator 78%→100%）；
+      第 3 批 void（供给断供）→ 预登记按 owner 终裁收口（2026-11-09 选项 1，判效报告 §9.1），
+      3-5 批完整对照不再可能，判效以两批证据 + 终裁为准）
+- [x] 人工验证报告落 `tests/validation/` → sync + archive
+      （报告在案：`2026-10-31-feed-dsl-contract-into-proposal-prompt-deployment.md` 四重取证
+      + `2026-10-31-a2-funnel-readout.md`；sync + archive 随 A2 终裁轮执行）
