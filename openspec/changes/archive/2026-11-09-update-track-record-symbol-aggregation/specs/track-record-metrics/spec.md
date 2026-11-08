@@ -29,3 +29,35 @@
 - **WHEN** 聚合组合日收益
 - **THEN** 系统 SHALL 按观点逐条聚合（与修订前行为一致）
 - **AND** SHALL NOT 抛错
+
+#### Scenario: 净值计算
+
+- **WHEN** 日批任务运行
+- **THEN** equity_curve 追加当日 agent 净值与基准净值，空仓日 agent 日收益为 0
+- **AND** 组合等权分母 SHALL 为当日有盯市的去重标的数 M（标的集合由日主观点池构成）
+
+#### Scenario: 同日重复不进组合
+
+- **GIVEN** 某标的同一交易日产出 7 条观点（1 日主 + 6 同日重复）
+- **WHEN** 盯市日批构建组合
+- **THEN** 该标的当日 SHALL 在组合中计 1 份（日主观点）
+- **AND** 6 条同日重复观点 SHALL NOT 进入分母与盯市贡献
+
+#### Scenario: 首盯市日不放大入场漂移
+
+- **GIVEN** 某观点 created 于周六，其参考价与周一盯市价因参考价错记相差 27%
+- **WHEN** 构建净值曲线
+- **THEN** 该观点首个盯市日对组合日收益贡献 SHALL 为 0
+- **AND** 组合净值 SHALL NOT 因入场→首盯市日漂移产生单日跳变
+
+#### Scenario: 交易日历覆盖空仓期
+
+- **GIVEN** 首个盯市日以来某交易日全部观点无盯市（空仓或缺数据）
+- **WHEN** 构建净值曲线
+- **THEN** 该交易日 SHALL 产生一个 equity_curve 点，agent 日收益 0、净值持平
+- **AND** 基准净值 SHALL 按基准日 K 同日推进
+
+#### Scenario: 基准行情缺失降级
+
+- **WHEN** 日批任务运行且基准指数日 K 拉取失败
+- **THEN** SHALL 降级为仅按 daily_marks 内日期构建净值（现行行为）并记 WARN
