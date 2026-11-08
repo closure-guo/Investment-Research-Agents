@@ -1,0 +1,256 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "因子研发闭环全景",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/assets/factor-loop.html",
+    "legend": {
+      "mode": "hidden"
+    }
+  },
+  "lanes": [
+    {
+      "id": "rdagent",
+      "label": "RD-Agent 研发循环 · WSL distro"
+    },
+    {
+      "id": "bridge",
+      "label": "收割桥 · 后端调度"
+    },
+    {
+      "id": "reject",
+      "label": "拒收 · 复评 · 回喂",
+      "variant": "exception"
+    },
+    {
+      "id": "library",
+      "label": "因子库 · 监控"
+    }
+  ],
+  "mainPath": [
+    "propose",
+    "code",
+    "run",
+    "record",
+    "collector",
+    "transcribe",
+    "gates",
+    "f_lib"
+  ],
+  "nodes": [
+    {
+      "id": "propose",
+      "lane": "rdagent",
+      "col": 0,
+      "type": "backend",
+      "label": "因子提案",
+      "sublabel": "direct_exp_gen · 文献+记忆",
+      "width": 132
+    },
+    {
+      "id": "code",
+      "lane": "rdagent",
+      "col": 1,
+      "type": "backend",
+      "label": "CoSTEER 编码",
+      "sublabel": "因子实现 · 每循环 ×5",
+      "width": 132
+    },
+    {
+      "id": "run",
+      "lane": "rdagent",
+      "col": 2,
+      "type": "backend",
+      "label": "qrun 回测",
+      "sublabel": "running · pyqlib 容器",
+      "width": 132
+    },
+    {
+      "id": "record",
+      "lane": "rdagent",
+      "col": 3,
+      "type": "backend",
+      "label": "反馈 · 记录",
+      "sublabel": "feedback → record · 日志",
+      "width": 132
+    },
+    {
+      "id": "collector",
+      "lane": "bridge",
+      "col": 3,
+      "type": "backend",
+      "label": "采集器",
+      "sublabel": "增量解析 → candidates.json",
+      "width": 132
+    },
+    {
+      "id": "transcribe",
+      "lane": "bridge",
+      "col": 4,
+      "type": "backend",
+      "label": "LLM 转译 · 翻译",
+      "sublabel": "3 次重试 · 确定性翻译",
+      "width": 132
+    },
+    {
+      "id": "gates",
+      "lane": "bridge",
+      "col": 5,
+      "type": "security",
+      "label": "五道闸准入",
+      "sublabel": "查重 覆盖 ICIR FDR 增量 OOS",
+      "width": 132
+    },
+    {
+      "id": "refeed",
+      "lane": "reject",
+      "col": 1,
+      "type": "messagebus",
+      "label": "契约回喂",
+      "sublabel": "explored_factors.json · 配额",
+      "width": 132
+    },
+    {
+      "id": "revival",
+      "lane": "reject",
+      "col": 4,
+      "type": "backend",
+      "label": "复活通道",
+      "sublabel": "静默线预筛 · 30 天冷却",
+      "width": 132
+    },
+    {
+      "id": "reject_pool",
+      "lane": "reject",
+      "col": 5,
+      "type": "database",
+      "label": "拒绝池",
+      "sublabel": "rejected 终态 · IC 采集",
+      "width": 132
+    },
+    {
+      "id": "decay",
+      "lane": "library",
+      "col": 4,
+      "type": "backend",
+      "label": "衰减监控",
+      "sublabel": "60 日窗 · degraded 判定",
+      "width": 132
+    },
+    {
+      "id": "f_lib",
+      "lane": "library",
+      "col": 5,
+      "type": "database",
+      "label": "因子库",
+      "sublabel": "candidate→active · IC 台账",
+      "width": 132
+    }
+  ],
+  "edges": [
+    {
+      "from": "propose",
+      "to": "code"
+    },
+    {
+      "from": "code",
+      "to": "run"
+    },
+    {
+      "from": "run",
+      "to": "record"
+    },
+    {
+      "from": "record",
+      "to": "propose",
+      "label": "循环 ×N",
+      "variant": "dashed",
+      "role": "return",
+      "fromSide": "left",
+      "toSide": "bottom"
+    },
+    {
+      "from": "record",
+      "to": "collector",
+      "label": "会话日志"
+    },
+    {
+      "from": "collector",
+      "to": "transcribe",
+      "label": "增量候选"
+    },
+    {
+      "from": "transcribe",
+      "to": "gates",
+      "label": "DSL 表达式"
+    },
+    {
+      "from": "gates",
+      "to": "reject_pool",
+      "label": "拒收落账",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "from": "gates",
+      "to": "f_lib",
+      "label": "过闸入库"
+    },
+    {
+      "from": "reject_pool",
+      "to": "revival",
+      "label": "IC 复苏",
+      "variant": "dashed",
+      "role": "return"
+    },
+    {
+      "from": "revival",
+      "to": "gates",
+      "label": "重提过闸",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "from": "reject_pool",
+      "to": "refeed",
+      "label": "拒收聚合",
+      "variant": "dashed",
+      "role": "return",
+      "route": "bottom-channel"
+    },
+    {
+      "from": "refeed",
+      "to": "propose",
+      "label": "契约块进 prompt",
+      "variant": "dashed",
+      "role": "return"
+    },
+    {
+      "from": "decay",
+      "to": "f_lib",
+      "label": "IC 台账"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "研发循环（RD-Agent fin_factor）",
+      "items": [
+        "五步循环：提案→编码→qrun→反馈→记录",
+        "chat=opencode deepseek · embedding=bigmodel",
+        "每循环 ×5 因子 · 无界多循环 · 看护自动拉起"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "收割桥 · 五道闸 · 库 · 复评回喂",
+      "items": [
+        "30s 增量解析 · LLM 转译 3 次重试 → DSL",
+        "代码裁决 LLM 无写权 · |ICIR|≥0.3 · FDR 0.1",
+        "cap=10 保种 · 17:10 复活零 LLM · 30 天冷却"
+      ]
+    }
+  ]
+}
