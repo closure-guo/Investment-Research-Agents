@@ -27,6 +27,17 @@ A 股全链路 AI 投研系统：从数据获取、选股与因子研究，到�
 
 > L2 Agent 5 层：4 分析师并行 -> Bull/Bear 辩论 -> Trader -> Risk Management 辩论 -> Fund Manager（详见 [ADR-0011](docs/adr/0011-five-layer-architecture.md)）
 
+### 因子研发闭环
+
+<a href="docs/assets/factor-loop.html">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/factor-loop.dark.png">
+    <img src="docs/assets/factor-loop.png" alt="因子研发闭环全景（RD-Agent 研发循环 → 收割桥 → 五道闸 → 因子库，含复评与契约回喂）">
+  </picture>
+</a>
+
+> 因子研发闭环全景由 [Archify](https://github.com/tt-a1i/archify) 生成（图源 [factor-loop.json](docs/assets/factor-loop.json)，交互版 [factor-loop.html](docs/assets/factor-loop.html) 支持缩放、搜索与导览路径）。生成侧 RD-Agent 在 WSL distro 内跑 `fin_factor` 五步循环（提案 direct_exp_gen → CoSTEER 编码 → qrun 回测 → 反馈 → 记录，每循环批量实现 5 个因子，chat=opencode deepseek-v4.1-flash / embedding=bigmodel，计划任务每 2 分钟看护自动拉起）；采集器以 30s 周期增量解析会话日志产出 `candidates.json`，收割桥（`factor_harvest_daily` 15:55 起多批清空、状态幂等可重放）经 LLM 转译（purpose=factor_transcription，3 次重试）与 `qlib_translate` 确定性翻译为 DSL 后进入五道闸：闸0 结构查重 → ①缺失率≤0.2 → ②|ICIR|≥0.3 + 十分位单调性 → ③置换 999 次 + BH-FDR q=0.1 → ④与池 |ρ|≤0.7 且验证段 IR 增量>0（训练段符号定向）→ ⑤70/30 样本外同号复核，准入面板 500 交易日 fail loud，全程纯代码裁决、LLM 无写权。入库 candidate→active（外部桶 cap=10 分桶保种），15:45 衰减监控按 60 日窗判 degraded，17:10 复活通道对拒绝池做零 LLM 重评（静默线预筛 + 30 天冷却）；拒收聚合与 DSL 契约（复杂度上限 + 算子字段白名单）经 per-gate 配额回喂生成侧跨会话记忆与提案 prompt 本体，月批（每月 1 日 10:00）因子提案以近三期拒收分布与 degraded 复盘为反馈闭环。图中主链终于因子库——active 因子由选股日批 15:40 以 Σ|IC| 带符号权重打分消费（见上图）；另有 15:50 内置注册 5 条 builtin 因子走同一五道闸。治理裁决与升级触发见 [docs/factor-governance.md](docs/factor-governance.md)。
+
 ## 功能特性
 
 ### 分析决策
@@ -38,7 +49,7 @@ A 股全链路 AI 投研系统：从数据获取、选股与因子研究，到�
 
 ### 选股与因子研究
 - **选股日批**：15:40 生成精选池、18:00 批量入链；硬约束过滤 + 排序 + LLM 候选 + 池分析；`/screening` 选股池页内置事件观察与市场温度计
-- **因子供给线**：RD-Agent 提案 → LLM 转译 DSL → 五道闸准入（代码裁决，LLM 无写权）→ 因子库；`/factor-research` 监控采集器与看护状态，`/factors` 查看 candidate/active/IC 台账与风格暴露
+- **因子供给线**：RD-Agent 提案 → LLM 转译 DSL → 五道闸准入（代码裁决，LLM 无写权）→ 因子库（闭环全景图见 [因子研发闭环](#因子研发闭环)）；`/factor-research` 监控采集器与看护状态，`/factors` 查看 candidate/active/IC 台账与风格暴露
 - **市场温度计与事件观察**：regime 日批输出拥挤度/温度计；事件线采集、分诊、结算，重要公告与事件进入观察区
 - **研究结论可交易**：ST/停牌/次新/一字板/流动性等硬约束在选股与执行两侧复用，避免「研究看好但无法下单」
 
