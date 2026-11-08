@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import os
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,11 +70,19 @@ def daily_portfolio_returns(
     marks: list[dict[str, Any]],
     calendar_dates: list[str] | None = None,
     exclude_prediction_ids: set[str] | None = None,
+    symbol_by_prediction: Mapping[str, str] | None = None,
 ) -> dict[str, float]:
     """按日聚合组合收益：每观点日收益 = 当日 cum_return - 前一盯市日 cum_return。
 
     首盯市日贡献 0（现金口径）：入场→首盯市日的漂移不进组合净值（incident 032
-    根因 C），组合日收益纯盯市差分、对坏参考价免疫。等权平均当日有盯市的各观点。
+    根因 C），组合日收益纯盯市差分、对坏参考价免疫。
+
+    仓位单位是**标的**不是观点（update-track-record-symbol-aggregation，
+    metrics.md §1.12② 2026-11-04 修订）：同一标的多条观点先取当日收益算术平均
+    （一只票只占一个仓位），再按当日有盯市的去重标的数等权。传
+    ``symbol_by_prediction`` 时启用该口径；缺省退化为按观点聚合（既有调用与
+    测试的兼容路径）。
+
     传入 calendar_dates（基准交易日历）时序列覆盖首个盯市日以来全部交易日，无盯市
     交易日（空仓/整体缺数据）记 0；缺省维持 marks-only 口径。
     exclude_prediction_ids 把 neutral 方向观点排除出组合聚合（根因 A）。
@@ -107,10 +116,19 @@ def daily_portfolio_returns(
         dates = sorted({d for d in calendar_dates if d >= first_mark} | set(all_marked))
     else:
         dates = sorted({d for dd in per_pred.values() for d in dd})
+
+    symbol_map = symbol_by_prediction or {}
     out: dict[str, float] = {}
     for d in dates:
-        rets = [per_pred[pid][d] for pid in per_pred if d in per_pred[pid]]
-        out[d] = sum(rets) / len(rets) if rets else 0.0
+        by_symbol: dict[str, list[float]] = defaultdict(list)
+        for pid in per_pred:
+            if d in per_pred[pid]:
+                # 映射缺失时以 prediction_id 充当标的：退化为逐观点聚合，不静默丢仓位
+                by_symbol[symbol_map.get(pid) or pid].append(per_pred[pid][d])
+        if by_symbol:
+            out[d] = sum(sum(v) / len(v) for v in by_symbol.values()) / len(by_symbol)
+        else:
+            out[d] = 0.0
     return out
 
 
@@ -180,6 +198,7 @@ def compute_metrics_from_marks(
     calendar_dates: list[str] | None = None,
     benchmark_by_date: dict[str, float] | None = None,
     exclude_prediction_ids: set[str] | None = None,
+    symbol_by_prediction: Mapping[str, str] | None = None,
 ) -> PortfolioMetrics:
     """由 daily_marks 计算组合指标与双净值曲线。
 
@@ -198,7 +217,11 @@ def compute_metrics_from_marks(
     excl = exclude_prediction_ids or set()
     if excl:
         marks = [m for m in marks if m["prediction_id"] not in excl]
-    rets = daily_portfolio_returns(marks, calendar_dates=calendar_dates)
+    rets = daily_portfolio_returns(
+        marks,
+        calendar_dates=calendar_dates,
+        symbol_by_prediction=symbol_by_prediction,
+    )
     if not rets:
         return PortfolioMetrics()
 
@@ -308,6 +331,7 @@ def build_equity_curve_points(
         duplicate_prediction_ids,
         list_daily_marks,
         prediction_ids_by_direction,
+        prediction_symbols,
     )
 
     marks = list_daily_marks(db_path=db_path)
@@ -319,6 +343,7 @@ def build_equity_curve_points(
         calendar_dates=calendar_dates,
         benchmark_by_date=benchmark_by_date,
         exclude_prediction_ids=excl,
+        symbol_by_prediction=prediction_symbols(db_path=db_path),
     ).nav_points
 
 
@@ -340,6 +365,7 @@ def compute_metrics_snapshot(
         list_daily_marks,
         prediction_ids_by_direction,
         prediction_stats,
+        prediction_symbols,
     )
 
     stats = prediction_stats(source_type=None, db_path=db_path, horizon_days=DEFAULT_HORIZON_DAYS)
@@ -358,6 +384,7 @@ def compute_metrics_snapshot(
         calendar_dates=calendar_dates,
         benchmark_by_date=benchmark_by_date,
         exclude_prediction_ids=excl,
+        symbol_by_prediction=prediction_symbols(db_path=db_path),
     )
     return {
         "sample_size": stats["total"],
@@ -391,18 +418,24 @@ def recompute_rf_metrics_history(db_path: Any = None) -> list[dict[str, Any]]:
         list_daily_marks,
         list_metric_dates,
         prediction_ids_by_direction,
+        prediction_symbols,
         update_metrics_daily_columns,
     )
     from finance_agent.outcome.track_record.risk_free import risk_free_series
 
     marks_all = list_daily_marks(db_path=db_path)
+    symbols = prediction_symbols(db_path=db_path)
     excl = prediction_ids_by_direction("neutral", db_path=db_path) | duplicate_prediction_ids(
         db_path=db_path
     )
     out: list[dict[str, Any]] = []
     for md in list_metric_dates(db_path=db_path):
         marks = [m for m in marks_all if str(m["mark_date"]) <= md]
-        rets = daily_portfolio_returns(marks, exclude_prediction_ids=excl)
+        rets = daily_portfolio_returns(
+            marks,
+            exclude_prediction_ids=excl,
+            symbol_by_prediction=symbols,
+        )
         bench_ret = _benchmark_returns(marks)
         dates = sorted(rets)
         rf_daily = {

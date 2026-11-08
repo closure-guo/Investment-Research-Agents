@@ -258,12 +258,14 @@ ICIR 的 std = 总体标准差（ddof=0；量化惯例，Grinold-Kahn）（澄�
 | 项 | 口径 |
 |---|---|
 | ① neutral 盯市符号 | neutral（hold/watch）的 `daily_marks.cum_return` 按多头口径记录（= 标的相对参考价走势，与回避判定引擎 `judgment` 同号），SHALL NOT 取反；long/short 维持现行方向符号（long 多头、short 取反） |
-| ② 组合人口 | 组合日收益/净值/风险指标聚合 SHALL 排除 neutral 观点的盯市记录——回避决策不产生持仓损益；long/short 按观点等权 1/N |
+| ② 组合人口 | 组合日收益/净值/风险指标聚合 SHALL 排除 neutral 观点的盯市记录——回避决策不产生持仓损益。**仓位单位是标的，不是观点**：同一标的在同一盯市日存在多条 long/short 观点的盯市记录时，SHALL 先按标的取当日收益的算术平均（该标的一个仓位），再按当日有盯市的**去重标的数 M** 等权 1/M（2026-11-04 修订，见下） |
 | ③ 净值口径 | 观点在组合内的首盯市日贡献 0 收益（现金口径）；组合日收益仅由相邻盯市日 `cum_return` 差分构成；入场参考价 SHALL NOT 参与净值与指标计算（展示口径保留在 marks 与观点详情页）；agent 与基准双线均以首个盯市日为基日归一 1.0 |
 | ④ 交易日历 | 净值序列以基准指数日 K 的交易日历为骨架，覆盖首个盯市日以来全部交易日；空仓/整体缺数据交易日 agent 日收益记 0；基准净值按同一日历推进（基准收盘取自基准日 K）；基准行情不可得时降级 marks-only 口径并记 WARN |
 | ⑤ 年化/风险 | 年化 = `final_nav^(252/n) - 1`，n = 交易日数（含空仓日），SHALL NOT 按有盯市日期数外推；波动 = 全序列日收益总体标准差 ×√252；夏普 = (年化 − rf)/波动（rf 默认 2%，`TRACK_RISK_FREE_RATE` 可配）；最大回撤基于全序列 NAV；风险分公式不变（§同 track-record-metrics spec） |
 | ⑥ 参考价护栏 | 落库：quote 价与最近 K 线收盘偏离 > `TRACK_ENTRY_PRICE_MAX_DEVIATION`（默认 0.30，覆盖各板块涨跌幅限制）→ 拒绝采信 quote、降级 K 线收盘 + WARN；盯市：entry_price 与 created 后首个交易日收盘偏离 > 阈值 → skipped + WARN 不写 marks（append-only 冻结语义下不修存量 entry_price，供人工甄别） |
 | ⑦ as_of | 总览 `portfolio.as_of` = equity_curve 最新数据日期，SHALL NOT 用快照写入日期（metric_date）冒充数据日期 |
+
+> **修订记录（2026-11-04）**：§1.12② 由「long/short 按**观点**等权 1/N」改为「先按标的合并、再按**去重标的数**等权 1/M」。理由：同一标的可同时挂多条 open 观点（不同决策日的观点各自存活到 horizon 或被 superseded，互不覆盖），1/N 会把同一只票重复计价——生产实测 600029 南方航空在 2026-10-22~10-26 有 2 条并存、单票权重达 **100%**，11-04 有 3 条并存。本修订**只改仓位单位**，不改 neutral 排除、首日 0 贡献、交易日历骨架、基准对齐等其余口径；view-level 的收益符号与结算语义不动。落地 delta `update-track-record-symbol-aggregation`；derived 三表重算前后读数**不可混引**，切点行追加于 §2。未覆盖：M 极小时（如 M=1）单票仍可占 100%，属「最小持仓数」问题，另行登记。
 
 ### 1.13 策略族 scorecard 口径（2026-10-19 登记；裁决自 2026-10-18 调研 §4.2 P0；实施 delta `add-strategy-family-scorecards`）
 
@@ -883,8 +885,15 @@ date×code 格。快照缺数空洞（BSE 断档、退市缺行、次新股上�
 - 原始读数与取证见 `tests/validation/2026-10-31-a2-funnel-readout.md`。
 - **第 3 批（11-02）void，判据停摆转 owner 终裁（2026-11-03 补记）**：预登记的「第 3 批」收割三连跑（10-31/11-01/11-02）均零候选——研究开关 10-29 23:00 被主动关闭（结合 chat 模型 403 待续费）、10-30 排干队列尾巴后断供，**第 3 批是「无数据」不是「无信号」**；按词表判 void 不硬读，预登记降级触发条件无预定义出口，#510 降级 vs 补批由 owner 终裁。两批既有证据不受影响（复杂度桶双升、横截面桶塌缩、入库 0，B1 必要性论证仍成立）。取证见判效报告 §9（`docs/evals/2026-10-31-因子供给判效读数.md`）。
 
-## 2.1 round7 预登记分析计划（标注前锁定，防事后口径漂移）
+**口径披露上线（2026-11-04，delta `add-track-record-caliber-disclosure`）**：`GET /api/v1/track-record/index-compare` 响应追加 `caliber`（净值点数 / 方向性观点数 / 多空拆分 / 期内已结算），战绩页卡片渲染披露行。**不改任何读数、不改聚合算法**；目的仅是让「本组合」的构成与样本量可见（触发：2026-11-04 归因发现该卡片实际比较的是 100% 空头账本与只做多宽基指数）。
 
+**净值口径切点（2026-11-04，delta `update-track-record-symbol-aggregation`）**：§1.12② 组合分母由「观点数 N」改为「去重标的数 M」——同一标的在同一盯市日的多条 long/short 观点先按标的取均值，再按 M 等权 1/M。触发：归因发现 600029 在 2026-10-22~10-26 有 2 条 open 观点并存、单票权重达 100%（11-04 有 3 条）。**切点前后读数（同一批 marks）**：`equity_curve` 期末 0.942872（**-5.71%**）→ 0.953992（**-4.60%**）；最大回撤 5.71%→4.60%；`agent_metrics_daily` 2026-11-04 行 risk_score 7（高）→ 6（中）、夏普 -9.56→-7.49。对沪深300 的区间超额由 -0.87pp 转为 **+0.25pp**（对中证500/1000/创业板仍跑赢，对上证仍跑输 1.30pp）。**重算执行**：`scripts/track_record_recompute_caliber.py`（非破坏性——不清 `daily_marks`，原地重算 `equity_curve` 全序列 + `--metrics-scope latest` 只覆盖最新指标行；历史 `agent_metrics_daily` 行保留切点前口径）。**跨切点读数不可混引**，历史行与切点后行分属两种口径。**未覆盖**：M=1 时单票仍可占 100%（最小持仓数问题）、`sell=exit` 被记为 short 的语义问题（§1.12② 人口口径未动）——均另案。
+
+**观点存活期切点（2026-11-04，delta `update-view-min-survival`）**：`should_supersede` 由「同标的方向相反**或目标价不同**」改为「仅方向相反」。触发：生产实测方向性观点中位存活 2 天、活过 20 天者 **0%**，56 条已闭仓方向性观点全部 `superseded`，T+20 主指标至今零读数。**本条只影响今后**新观点是否结算旧观点，不回填、不重算；历史 `resolved_*` 行状态保持不变。预期：同向重复不再杀死旧观点，`expiry` 结算将首次出现；**观察期 ≥2 周**后再评估存活分布与 §1.9 读数可用性。未解决：方向翻转仍会结算（合理），故短期读数仍以 superseded 为主；`superseded` 结算目前 `excess_return=None`（job.py 显式置空），该字段的补齐是下一个独立变量。
+
+**superseded 超额补齐切点（2026-11-04，delta `update-superseded-excess`）**：`superseded` 提前结算 SHALL 计算并落库 `excess_return`（此前恒为 NULL，理由「无同期基准区间」不成立——基准 df 在批内可用），且分类口径回到 spec 的**超额**而非 raw。`expiry` 与 `superseded` 共用 `judgment.settle_at_exit` 单一实现。**存量不回填**：切点前已结算的 56 条方向性观点 `excess_return` 仍为 NULL，按「存量不重算」惯例保留；跨切点的 §1.9 均值人口因此**新旧混排**，读数时须按 `resolved_at` 切分，或等切点后的样本单独积累。`scores_reported` 由 2 变 3（补 `decision_excess`）。观察点：§1.9 主指标是否从零读数开始积累（下一批 16:35 结算后可见）。
+
+## 2.1 round7 预登记分析计划（标注前锁定，防事后口径漂移）
 - 数据：`judge-sample-round7-blind.xlsx`（人工 human_score + confidence）× `judge-sample-round7-judge.jsonl`（judge 分，r3 运行时落库，已冻结）
 - 每维计算：MAE、方向一致率（>3 分界）、judge 分有方差的维度另算 Spearman（report_relevance / debate_quality judge 全 5，Spearman 不计）；整体 MAE / 方向一致率
 - 判定：MAE ≤ 1.0 且方向一致率 ≥ 0.7 视为该维 judge 可用；Spearman ≥ 0.5 为加强项。n=9 的维度**不单独下结论**，与 round8 合并后判

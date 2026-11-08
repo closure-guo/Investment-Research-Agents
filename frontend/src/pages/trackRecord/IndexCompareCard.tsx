@@ -93,6 +93,22 @@ export function IndexCompareCard({ span }: { span: TrackTimeSpan }) {
           净值数据积累中,暂无法对比
         </div>
       )}
+      {/* 口径披露(add-track-record-caliber-disclosure):净值只聚合 long/short 观点,
+          观望/持有不进组合。不写清这一条,读者会把「空头账本」当成全仓组合来读。 */}
+      {data && data.agent_return !== null && data.caliber && (
+        <div
+          data-testid="index-compare-caliber"
+          className="mt-3 border-t pt-2 text-xs text-[var(--text-secondary)]"
+          style={{ borderColor: 'var(--border-neutral-l1)' }}
+        >
+          口径:仅统计买入/卖出观点(观望/持有不计入组合仓位);{data.caliber.nav_points} 个交易日 ·
+          累计多 {data.caliber.long_views} / 空 {data.caliber.short_views} · 期内已结算{' '}
+          {data.caliber.settled_count} 笔
+          <div className="mt-1">
+            卖出观点按做空记账,属评分语义;A 股该路径不建模可执行做空,故本曲线不等于实盘账户净值。
+          </div>
+        </div>
+      )}
       <div className="mt-2 text-xs text-[var(--text-secondary)]">{data?.disclaimer}</div>
     </div>
   )

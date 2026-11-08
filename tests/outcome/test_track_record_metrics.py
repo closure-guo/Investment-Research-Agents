@@ -766,3 +766,64 @@ def test_superseded_marks_kept_in_portfolio_aggregation(db):
     points = build_equity_curve_points(db_path=db)
     assert len(points) == 2
     assert abs(points[1]["agent_nav"] - 1.01) < 1e-6
+
+
+# ---- update-track-record-symbol-aggregation: 仓位单位是标的,不是观点 ----
+
+_SYM_MARKS = [
+    {"prediction_id": "a1", "mark_date": "2026-06-02", "cum_return": 0.0},
+    {"prediction_id": "a1", "mark_date": "2026-06-03", "cum_return": 0.10},
+    {"prediction_id": "a2", "mark_date": "2026-06-02", "cum_return": 0.0},
+    {"prediction_id": "a2", "mark_date": "2026-06-03", "cum_return": 0.02},
+    {"prediction_id": "b1", "mark_date": "2026-06-02", "cum_return": 0.0},
+    {"prediction_id": "b1", "mark_date": "2026-06-03", "cum_return": -0.02},
+]
+_SYM_MAP = {"a1": "600029.SH", "a2": "600029.SH", "b1": "600001.SH"}
+
+
+class TestSymbolAggregation:
+    """同一标的多条 open 观点只占一个仓位（metrics.md §1.12② 2026-11-04 修订）。"""
+
+    def test_same_symbol_views_collapse_to_one_slot(self):
+        rets = daily_portfolio_returns(_SYM_MARKS, symbol_by_prediction=_SYM_MAP)
+        # A = (0.10 + 0.02)/2 = 0.06；B = -0.02；两个标的等权 → (0.06 - 0.02)/2 = 0.02
+        assert rets["2026-06-03"] == pytest.approx(0.02)
+
+    def test_per_view_caliber_would_double_count(self):
+        """反例钉旧口径：按观点聚合会把 A 的两条当成两个仓位。"""
+        legacy = daily_portfolio_returns(_SYM_MARKS)
+        assert legacy["2026-06-03"] == pytest.approx(0.10 / 3)
+
+    def test_single_symbol_is_full_slot(self):
+        marks = [
+            {"prediction_id": "a1", "mark_date": "2026-06-02", "cum_return": 0.0},
+            {"prediction_id": "a1", "mark_date": "2026-06-03", "cum_return": 0.04},
+            {"prediction_id": "a2", "mark_date": "2026-06-02", "cum_return": 0.0},
+            {"prediction_id": "a2", "mark_date": "2026-06-03", "cum_return": 0.06},
+        ]
+        rets = daily_portfolio_returns(
+            marks, symbol_by_prediction={"a1": "600029.SH", "a2": "600029.SH"}
+        )
+        # 单一标的 = 100% 仓位；当日收益为两条观点均值 0.05
+        assert rets["2026-06-03"] == pytest.approx(0.05)
+
+    def test_missing_symbol_map_falls_back_to_per_view(self):
+        rets = daily_portfolio_returns(_SYM_MARKS, symbol_by_prediction=None)
+        # 缺映射 → 逐观点聚合（与修订前一致），不抛错
+        assert rets["2026-06-03"] == pytest.approx(0.10 / 3)
+
+    def test_build_equity_curve_points_resolves_symbols_from_db(self, db):
+        a1 = _insert(db, prediction_id="a1", symbol="600029.SH")
+        a2 = _insert(db, prediction_id="a2", symbol="600029.SH")
+        b1 = _insert(db, prediction_id="b1", symbol="600001.SH")
+        for pid, day2 in ((a1, 0.10), (a2, 0.02), (b1, -0.02)):
+            insert_daily_mark(pid, "2026-06-02", cum_return=0.0, benchmark_price=4000.0, db_path=db)
+            insert_daily_mark(
+                pid, "2026-06-03", cum_return=day2, benchmark_price=4000.0, db_path=db
+            )
+
+        points = build_equity_curve_points(db_path=db)
+        # 两个标的等权：A=(0.10+0.02)/2=0.06，B=-0.02 → 日收益 0.02
+        assert points[-1]["agent_nav"] == pytest.approx(1.02, abs=1e-9)
+        # 旧口径会得到 1.0333；净值必须体现标的级去重
+        assert points[-1]["agent_nav"] != pytest.approx(1.0 + 0.10 / 3, abs=1e-6)

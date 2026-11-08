@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from finance_agent.outcome.track_record.model import (
+    count_directional_views,
+    count_settled_in_window,
     list_equity_curve,
     list_index_closes,
     upsert_index_closes,
@@ -80,6 +82,35 @@ def _shift_months(d: date, months: int) -> date:
     return date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
 
 
+def _build_caliber(
+    *,
+    nav_points: int,
+    window_start: str | None,
+    window_end: str | None,
+    db_path: str | Path | None,
+) -> dict[str, int]:
+    """对比读数的组合构成披露(add-track-record-caliber-disclosure)。
+
+    纯追加口径:告诉读者这条「组合」到底是什么、样本多大。窗口缺值时各计数
+    归零(不报错、不影响既有读数)。
+    """
+    out = {
+        "nav_points": int(nav_points),
+        "directional_views": 0,
+        "long_views": 0,
+        "short_views": 0,
+        "settled_count": 0,
+    }
+    if not window_start or not window_end:
+        return out
+    by_direction = count_directional_views(window_start, window_end, db_path=db_path)
+    out["long_views"] = by_direction.get("long", 0)
+    out["short_views"] = by_direction.get("short", 0)
+    out["directional_views"] = out["long_views"] + out["short_views"]
+    out["settled_count"] = count_settled_in_window(window_start, window_end, db_path=db_path)
+    return out
+
+
 def build_index_compare(
     span: str = "all",
     db_path: str | Path | None = None,
@@ -135,4 +166,10 @@ def build_index_compare(
         "window": {"start": window_start, "end": window_end},
         "agent_return": agent_return,
         "indices": indices,
+        "caliber": _build_caliber(
+            nav_points=len(curve),
+            window_start=window_start,
+            window_end=window_end,
+            db_path=db_path,
+        ),
     }
