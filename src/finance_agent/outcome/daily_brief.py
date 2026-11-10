@@ -125,7 +125,7 @@ def _screening_facts(path: Path, as_of: str) -> dict[str, Any]:
         raw_runs = _read(
             path,
             "SELECT symbol, session_id, status, error FROM pool_analysis_runs "
-            "WHERE trade_date = ? ORDER BY symbol",
+            "WHERE trade_date = ? AND pool = 'main' ORDER BY symbol",
             (as_of,),
         )
         # 库内 status 是「派发状态」（queued=已入队 / dispatch_failed / session_failed），
@@ -143,6 +143,30 @@ def _screening_facts(path: Path, as_of: str) -> dict[str, Any]:
         ]
     except sqlite3.Error as exc:
         logger.warning("读取 pool_analysis_runs 失败（%s）", exc)
+    # 小票池运行行（add-microcap-lane-analysis T7）：与主档行分开成独立输入键，
+    # 日报不得把两池混在一张表里读。
+    microcap_runs: list[dict[str, Any]] = []
+    try:
+        raw_mc = _read(
+            path,
+            "SELECT symbol, session_id, status, error FROM pool_analysis_runs "
+            "WHERE trade_date = ? AND pool = 'microcap' ORDER BY symbol",
+            (as_of,),
+        )
+        microcap_runs = [
+            {
+                "symbol": row.get("symbol"),
+                "session_id": row.get("session_id"),
+                "dispatch_status": (
+                    "enqueued" if row.get("status") == "queued" else row.get("status")
+                ),
+                "error": row.get("error"),
+            }
+            for row in raw_mc
+        ]
+    except sqlite3.Error as exc:
+        logger.warning("读取小票运行行失败（%s）", exc)
+    microcap_equity = _read_microcap_equity()
     removals: list[dict[str, Any]] = []
     try:
         removals = _read(
@@ -157,8 +181,28 @@ def _screening_facts(path: Path, as_of: str) -> dict[str, Any]:
         "batch": batch,
         "pool_top": pool,
         "auto_analysis_runs": runs,
+        "microcap_runs": microcap_runs,
+        "microcap_equity": microcap_equity,
         "removals": removals,
     }
+
+
+def _read_microcap_equity() -> dict[str, Any] | None:
+    """小票账本最新净值（add-microcap-lane-analysis）；库/表缺失 → None（日报写「无数据」）。"""
+    path = Path(os.getenv("EXECUTION_MICROCAP_DB_PATH", "data/execution_microcap.db"))
+    if not path.exists():
+        return None
+    try:
+        rows = _read(
+            path,
+            "SELECT trade_date, cash, positions_value, equity FROM paper_equity "
+            "ORDER BY trade_date DESC LIMIT 1",
+            (),
+        )
+        return rows[0] if rows else None
+    except sqlite3.Error as exc:
+        logger.warning("读取小票净值失败（%s）", exc)
+        return None
 
 
 def _session_statuses(sessions_db: Path, session_ids: list[str]) -> dict[str, str]:

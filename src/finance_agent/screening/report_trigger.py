@@ -201,8 +201,10 @@ def _today_used(day: str, screening_db_path: str | Path | None) -> int:
         ).fetchone()
         pool_rows = 0
         if pool_exists:
+            # 主档口径（add-microcap-lane-analysis T7）：小票池行不占研报触发日预算
             pool_rows = conn.execute(
-                "SELECT COUNT(*) FROM pool_analysis_runs WHERE trade_date=?", (day,)
+                "SELECT COUNT(*) FROM pool_analysis_runs WHERE trade_date=? AND pool='main'",
+                (day,),
             ).fetchone()[0]
     finally:
         conn.close()

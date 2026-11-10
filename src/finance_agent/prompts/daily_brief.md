@@ -15,6 +15,10 @@
 ## 风险与异常
 ## 明日关注
 
+小票池附加事实（add-microcap-lane-analysis）：
+- facts.screening.microcap_runs 为小票池（lane=microcap）自动分析运行行，与主档运行行分开陈述，不得混计。
+- facts.screening.microcap_equity 为小票账本最新净值；两者无数据时写「无数据」，不得推测补齐。
+
 <facts>
 {{daily_facts}}
 </facts>
