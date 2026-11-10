@@ -1311,3 +1311,117 @@ class TestTradingDayAndCoverageContextFalsePositives:
         assert len(anomalies) == 1
         assert anomalies[0]["kind"] == "deviation"
         assert "13" in anomalies[0]["message"]
+
+
+# ── 600198 形态夹具：现价 6.37，空头排列（MA20/MA60 在价上方），止损参考带下沿 5.8843 ──
+TI_600198 = _indicators(
+    ma5=6.30,
+    ma10=6.45,
+    ma20=6.60,
+    ma60=7.10,
+    boll_upper=6.90,
+    boll_middle=6.50,
+    boll_lower=6.10,
+)
+PL_600198 = {
+    "available": True,
+    "entry_ref": 6.37,
+    "recent_high": 7.20,
+    "recent_low": 6.00,
+    "atr": 0.30,
+    "stop_band_long": {"low": 5.8843, "high": 6.20},
+    "target_band_long": {"low": 6.85, "high": 7.50},
+    "full_band": [5.70, 7.60],
+}
+CLOSE_600198 = 6.37
+
+# 2026-11-09 cohort risk_judge 重试稿终稿 reasoning（Langfuse trace 逐字提取，
+# 二次阻断被拦的原文）。终稿 reeval_triggers 同批提取。
+REASONING_600198_ROUND2 = (
+    "维持交易方案的 sell/exit 方向：最新期次硬数据全面恶化（2026前三季营收同比 -13.68%、"
+    "归母亏损扩大至 -1.47 亿元、资产负债率 82.27%；2025 年报归母 -0.572 亿元、ROE -19.73%、"
+    "PB 78.29 倍），证据层级高于 Bull 自标推断的赔率链；中期均线完全空头排列且股价低于 MA20/MA60，"
+    "缩量弱反弹属弱势修复；宏观 PMI 与 M1/M2 偏空，但 beta 0.8628 低于 1 使宏观传导权重下调；"
+    "同时最大回撤 0.4996、年化波动 0.5083、95% 单日 VaR 4.97% 提供独立于多空判断的降敞口理由。"
+    "风险辩论三方对方向无分歧，分歧集中在执行节奏：原方案把剩余仓位挂在 MA20 压力位并附加“放量站稳”"
+    "主观条件，在空头排列中易无限期悬置；跌破近期低点的盘中触发又可能被高波动噪音打掉。"
+    "故裁决采用分批减仓并加机械时间/收盘确认：现价附近先减半，剩余仓位在反弹至 MA20/目标参考带下沿附近"
+    "且未能放量站稳时执行第二批；若收盘跌破止损参考带下沿附近（约 5.8843）或盘中跌幅超过约 1.5 个日波动"
+    "则清仓；T+10 个交易日内未收复 MA20 也未触及目标参考带则按市价完成剩余退出。未持有情形："
+    "受众未申报持仓，若实际未持有，exit 不构成动作，应转为观望、不追空、不融券，以 re-eval 触发为"
+    "再介入前置；若持有则按上述节奏减仓。兑现窗口：基本面与技术空头属已发生事实，T+20 内回避下跌的"
+    "相对超额可体现；但 beta<1 且超额依赖个股负 alpha，若横盘则超额不确定，叠加债务重组/研发楼转让"
+    "金额口径缺失、正反两侧不可量化，故置信度维持中段 0.62，不上调至 0.7，也不下修至 0.5 以下。"
+)
+TRIGGERS_600198_ROUND2 = [
+    "单季营收同比降幅连续两季收窄至 -5% 以内并伴随订单/集采中标公告",
+    "披露债务重组或研发楼转让落地公告且确认金额达到亿元级",
+    "股价放量收盘站上 MA60 且中期均线转多",
+]
+
+
+class TestBetaThresholdComparisonFalsePositives:
+    """600198 大唐电信（2026-11-09 cohort）实证：beta 与中性线 1 的比较阈值被当股价。
+
+    risk_judge 终稿 reasoning 的两稿行文——「经 beta 0.8628<1 校准后…」（初稿）与
+    「beta 0.8628 低于 1 使宏观传导权重下调」（重试稿）——1 是 beta 的中性线阈值，
+    属 spec price-level-tooling 非价格量纲排除条款的比值语境。两处守卫缺口：
+
+    - 紧凑形「0.8628<1」：比较算符不在前缀豁免表（_NON_PRICE_PREFIX 仅 :：第/），
+      且「beta」被数值 0.8628 挤出 8 字符关键词窗 → 1 归属止损参考带下沿
+      5.8843、偏差 83.01% 阻断；
+    - 分离形「低于 1」：无数值算符可比照斜杠分数豁免，「beta」同样出窗 → 同一
+      anomaly，打回重试换不掉（下一稿仍要写 beta 与 1 的比较）。
+
+    打回反馈的 source_text 摘录已点名「beta 0.8628<1」，但模型误读为「1 亿元」
+    问题：重试稿把「确认金额不低于 1 亿元」改成「亿元级」（该形态本就被「亿」
+    后缀豁免、从未触发），「低于 1」原样保留 → 二次阻断 → 报告交付阻断。
+    确定性校验 × 重试空转（incident 022 形状），修复只能在守卫侧。
+    """
+
+    def test_compact_operator_form_not_treated_as_price(self):
+        """「beta 0.8628<1」紧凑形：比较算符直接前缀的数字不得按价位校验。"""
+        decision = _decision(
+            action="sell",
+            reasoning=(
+                "宏观 PMI 回落，流动性 M1 低于 M2（宏观，但经 beta 0.8628<1 校准后"
+                "宏观利空对大盘的传导被削弱，权重下调而非归零）。"
+            ),
+        )
+        assert check_decision_prices(decision, TI_600198, PL_600198, CLOSE_600198) == []
+
+    def test_separated_verb_form_not_treated_as_price(self):
+        """「beta 0.8628 低于 1」分离形：比率指标数值 + 比较动词 + 阈值链整体豁免。"""
+        decision = _decision(
+            action="sell",
+            reasoning="但 beta 0.8628 低于 1 使宏观传导权重下调；同时最大回撤 0.4996 支持降敞口。",
+        )
+        assert check_decision_prices(decision, TI_600198, PL_600198, CLOSE_600198) == []
+
+    def test_full_production_reasoning_zero_anomalies(self):
+        """600198 重试稿终稿全文（reasoning + reeval_triggers）过校验器归零。
+
+        与 #567 的验收口径一致：真实生产文本跑修复后校验器，零 anomaly。
+        """
+        decision = _decision(
+            action="sell",
+            sell_type="exit",
+            confidence=0.62,
+            reasoning=REASONING_600198_ROUND2,
+            reeval_triggers=TRIGGERS_600198_ROUND2,
+        )
+        assert check_decision_prices(decision, TI_600198, PL_600198, CLOSE_600198) == []
+
+    def test_comparison_verb_real_price_still_checked(self):
+        """护栏：无比率指标链时，「低于 5.00」带外真实价位仍须校验（豁免不得过宽）。
+
+        5.00 在全部参考带外（full_band 下沿 5.70 之下）→ SHALL 登记 deviation。
+        """
+        decision = _decision(
+            action="sell",
+            reasoning="若收盘低于 5.00 则无条件清仓，避免与止损参考带下沿纠缠。",
+        )
+        anomalies = check_decision_prices(decision, TI_600198, PL_600198, CLOSE_600198)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert "5" in anomalies[0]["message"]

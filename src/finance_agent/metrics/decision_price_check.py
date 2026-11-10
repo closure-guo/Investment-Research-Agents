@@ -112,6 +112,20 @@ _INDEX_NAME_PATTERN = re.compile(
 # 重试仍然写 T+N（契约要求，换不掉）→ 恶化判定 → 报告阻断。记号后紧邻的
 # 真实价位不受豁免（T+N 恒以汉字连接，数字不与记号粘连）。
 _T_PLUS_PATTERN = re.compile(r"[Tt]\+\d{1,3}")
+# 比率指标与阈值的比较链整体排除（600198 大唐电信 2026-11-09 cohort 实证）：
+# risk_judge 终稿「beta 0.8628 低于 1」的 1 是 beta 中性线阈值——「beta」被
+# 数值 0.8628 挤出 8 字符关键词窗、「低于」无数值算符可比照斜杠豁免 → 1 归属
+# 止损参考带下沿 5.8843 偏差 83.01%。打回反馈的 source_text 已点名
+# 「beta 0.8628<1」，但模型误读为「1 亿元」问题、重试改写错误对象，「低于 1」
+# 原样保留 → 二次阻断 → 报告交付阻断（确定性校验 × 重试空转，incident 022
+# 形状，重试不可能修复）。链条要求「比率指标名 + 数值 + 比较 + 阈值数字」
+# 四要素齐备才豁免，孤立的「低于 5.88」真实价位不受豁免（护栏测试钉死）
+_RATIO_CHAIN_PATTERN = re.compile(
+    r"(?:beta|β|夏普|胜率|赔率|换手|量比|波动率|市盈率?|市净率?|pe|pb|roe|roa)"
+    r"\s*[:：]?\s*[\d.]+\s*"
+    r"(?:[<>＜＞≥≤]|低于|高于|超过|不低于|不足|大于|小于)\s*\d+(?:\.\d+)?",
+    re.IGNORECASE,
+)
 # 数值后紧跟（可隔空格）即非价格量纲：百分比/倍率/比值/成交量/日期时间单位/均线
 # + 计数量词（fix-decision-price-enumerators：「3个月」「3成仓」的 3 不是股价；
 # 计量字后接真实价位的表述不存在，不伤及正常价位提取；「家」为 2026-10-13
@@ -123,8 +137,11 @@ _T_PLUS_PATTERN = re.compile(r"[Tt]\+\d{1,3}")
 _NON_PRICE_SUFFIX = "%％倍折万亿手天日均月年号时点分秒周季:：个家成档条项次笔轮层类种枚名步位线/σ"
 # 数值前紧跟（可隔空格）即非价格上下文：比值冒号、序数、斜杠分数分母
 # （「1/3」的 3；斜杠并列价位「19.99/20.10」一并豁免——与连字区间同策，
-# 误杀由观测通道承担，好过阻断）
-_NON_PRICE_PREFIX = ":：第/"
+# 误杀由观测通道承担，好过阻断）+ 比较算符（600198 大唐电信 11-09 cohort
+# 实证「经 beta 0.8628<1 校准后」的 1 是 beta 中性线阈值——算符紧邻的数字
+# 是比较的阈值侧而非股价；本语料中股价恒跟随 CJK 方向词裸写，无「跌破 <6」
+# 行文形态，排除不伤及真实价位）
+_NON_PRICE_PREFIX = ":：第/<＜>＞≥≤"
 # 数值前窗（8 字符）内出现即非价格量纲：技术指标（RSI/KDJ…）、财务与比率语义词
 _NON_PRICE_KEYWORDS: tuple[str, ...] = (
     "rsi",
@@ -360,6 +377,7 @@ def _exclusion_spans(text: str, aliases: list[tuple[int, int, str, str]]) -> lis
         spans.extend((m.start(), m.end()) for m in pattern.finditer(text))
     spans.extend((m.start(), m.end()) for m in _INDEX_NAME_PATTERN.finditer(text))
     spans.extend((m.start(), m.end()) for m in _T_PLUS_PATTERN.finditer(text))
+    spans.extend((m.start(), m.end()) for m in _RATIO_CHAIN_PATTERN.finditer(text))
     return spans
 
 
