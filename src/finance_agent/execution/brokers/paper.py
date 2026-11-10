@@ -112,6 +112,7 @@ class PaperBroker(Broker):
         config: MatchingConfig | None = None,
         initial_cash: float = 1_000_000.0,
         pending_expire_days: int = 3,
+        slippage_tier_bump: int = 0,
     ) -> None:
         if pending_expire_days < 1:
             raise ValueError(f"pending_expire_days 必须为正整数: {pending_expire_days!r}")
@@ -119,6 +120,8 @@ class PaperBroker(Broker):
         self._config = config if config is not None else load_matching_config()
         self._initial_cash = float(initial_cash)
         self._pending_expire_days = int(pending_expire_days)
+        # 小票账本滑点档位提升（add-microcap-lane-analysis；0 = 主档行为不变）
+        self._slippage_tier_bump = int(slippage_tier_bump)
 
     # ── 订单 id 与证据链校验 ────────────────────────────────────────────────
 
@@ -163,6 +166,7 @@ class PaperBroker(Broker):
                 config=self._config,
                 position=position_ctx,
                 market_amounts=market_amounts,
+                tier_bump=self._slippage_tier_bump,
             )
             status, reason, fill_price, fee = self._apply_fill(
                 conn,
