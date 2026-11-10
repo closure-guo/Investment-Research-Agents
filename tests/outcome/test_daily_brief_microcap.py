@@ -6,6 +6,7 @@ import sqlite3
 
 from finance_agent.outcome import daily_brief
 from finance_agent.outcome.daily_brief import collect_daily_facts
+from finance_agent.outcome.ops.model import finish_job_run, init_ops, insert_job_run
 from finance_agent.screening.pool_analysis import (
     POOL_MICROCAP,
     record_pool_analysis_run,
@@ -83,3 +84,117 @@ def test_read_microcap_equity_latest_row(tmp_path, monkeypatch):
 def test_read_microcap_equity_missing_db_returns_none(tmp_path, monkeypatch):
     monkeypatch.setenv("EXECUTION_MICROCAP_DB_PATH", str(tmp_path / "nope.db"))
     assert daily_brief._read_microcap_equity() is None
+
+
+def _microcap_pool_rows(symbols: list[str]) -> list[dict]:
+    return [
+        {
+            "symbol": symbol,
+            "composite_score": 90.0,
+            "rank": idx + 1,
+            "consecutive_days": 1,
+            "l3_verdict": "keep",
+            "l3_reason": "测试",
+            "factor_contribs": [],
+        }
+        for idx, symbol in enumerate(symbols)
+    ]
+
+
+def test_collect_facts_microcap_pool_size(tmp_path, monkeypatch):
+    """池规模 = 当日 selection_pool microcap 行数；当日无行 → None（「无数据」）。"""
+    db = tmp_path / "screening.db"
+    record_screening_batch(
+        "2026-11-10",
+        status="ok",
+        started_at="2026-11-10T15:45:00",
+        finished_at="2026-11-10T15:50:00",
+        pool=POOL_MICROCAP,
+        pool_rows=_microcap_pool_rows(["002749", "300001", "300002"]),
+        db_path=db,
+    )
+    monkeypatch.setenv("EXECUTION_MICROCAP_DB_PATH", str(tmp_path / "missing-microcap.db"))
+    facts = collect_daily_facts(
+        "2026-11-10",
+        sessions_db_path=tmp_path / "sessions.db",
+        screening_db_path=db,
+        execution_db_path=tmp_path / "execution.db",
+        factor_db_path=tmp_path / "factor.db",
+    )
+    assert facts["screening"]["microcap_pool_size"] == 3
+
+    # 换一个无池行的日期采集 → None（prompt 侧写「无数据」）
+    facts_missing = collect_daily_facts(
+        "2026-11-11",
+        sessions_db_path=tmp_path / "sessions.db",
+        screening_db_path=db,
+        execution_db_path=tmp_path / "execution.db",
+        factor_db_path=tmp_path / "factor.db",
+    )
+    assert facts_missing["screening"]["microcap_pool_size"] is None
+
+
+def test_collect_facts_microcap_run_summary_from_ops_store(tmp_path, monkeypatch):
+    """分析/跳过/派发失败数权威来源 = ops 作业摘要（auto_pool_analysis_microcap 最新行）。"""
+    db = tmp_path / "screening.db"
+    record_screening_batch(
+        "2026-11-10",
+        status="ok",
+        started_at="2026-11-10T15:45:00",
+        finished_at="2026-11-10T15:50:00",
+        pool=POOL_MICROCAP,
+        pool_rows=_microcap_pool_rows(["002749"]),
+        db_path=db,
+    )
+    sessions = tmp_path / "sessions.db"
+    run_id = insert_job_run("auto_pool_analysis_microcap", "scheduled", "running", db_path=sessions)
+    finish_job_run(
+        run_id,
+        status="ok",
+        summary={
+            "trade_date": "2026-11-10",
+            "pool_size": 5,
+            "selected": 4,
+            "started": 3,
+            "skipped_existing": 1,
+            "dispatch_failed": 2,
+        },
+        db_path=sessions,
+    )
+    monkeypatch.setenv("EXECUTION_MICROCAP_DB_PATH", str(tmp_path / "missing-microcap.db"))
+    facts = collect_daily_facts(
+        "2026-11-10",
+        sessions_db_path=sessions,
+        screening_db_path=db,
+        execution_db_path=tmp_path / "execution.db",
+        factor_db_path=tmp_path / "factor.db",
+    )
+    summary = facts["screening"]["microcap_run_summary"]
+    assert summary["started"] == 3
+    assert summary["skipped_existing"] == 1
+    assert summary["dispatch_failed"] == 2
+
+
+def test_collect_facts_microcap_run_summary_missing_run_returns_none(tmp_path, monkeypatch):
+    """作业从未运行（库在、无运行行）→ 摘要为 None（prompt 侧逐字段写「无数据」）。"""
+    db = tmp_path / "screening.db"
+    record_screening_batch(
+        "2026-11-10",
+        status="ok",
+        started_at="2026-11-10T15:45:00",
+        finished_at="2026-11-10T15:50:00",
+        pool=POOL_MICROCAP,
+        pool_rows=_microcap_pool_rows(["002749"]),
+        db_path=db,
+    )
+    sessions = tmp_path / "sessions.db"
+    init_ops(db_path=sessions)  # 建空 ops 库
+    monkeypatch.setenv("EXECUTION_MICROCAP_DB_PATH", str(tmp_path / "missing-microcap.db"))
+    facts = collect_daily_facts(
+        "2026-11-10",
+        sessions_db_path=sessions,
+        screening_db_path=db,
+        execution_db_path=tmp_path / "execution.db",
+        factor_db_path=tmp_path / "factor.db",
+    )
+    assert facts["screening"]["microcap_run_summary"] is None

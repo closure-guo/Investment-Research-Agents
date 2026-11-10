@@ -24,9 +24,13 @@ from typing import Any
 
 from finance_agent.llm.gateway import complete_text
 from finance_agent.outcome.ops.decision_mix import action_from_snapshot, compute_decision_mix
+from finance_agent.outcome.ops.model import last_job_run
 from finance_agent.prompts.loader import load_prompt_with_meta
 
 logger = logging.getLogger("finance_agent.outcome.daily_brief")
+
+# 小票池自动分析作业（add-microcap-lane-analysis）：摘要落 ops job_runs（scheduler 记 prepare 结果）
+_MICROCAP_POOL_ANALYSIS_JOB_ID = "auto_pool_analysis_microcap"
 
 _BRIEF_SCHEMA = """
 CREATE TABLE IF NOT EXISTS daily_briefs (
@@ -105,7 +109,7 @@ def zero_buy_warning(mix: dict, threshold: int = 3) -> str | None:
     )
 
 
-def _screening_facts(path: Path, as_of: str) -> dict[str, Any]:
+def _screening_facts(path: Path, as_of: str, sessions_db: Path | None = None) -> dict[str, Any]:
     batch = _read_one(
         path,
         "SELECT trade_date, pool, status, error, started_at, finished_at, l1_passed, "
@@ -167,6 +171,21 @@ def _screening_facts(path: Path, as_of: str) -> dict[str, Any]:
     except sqlite3.Error as exc:
         logger.warning("读取小票运行行失败（%s）", exc)
     microcap_equity = _read_microcap_equity()
+    # 小票池规模（评审修复：五字段之「池规模」）：当日 selection_pool microcap 行数；
+    # 查询失败或当日无行（COUNT=0）→ None（日报写「无数据」）。
+    microcap_pool_size: int | None = None
+    try:
+        count_row = _read_one(
+            path,
+            "SELECT COUNT(*) AS n FROM selection_pool WHERE trade_date = ? AND pool = 'microcap'",
+            (as_of,),
+        )
+        microcap_pool_size = int(count_row["n"]) if count_row and count_row["n"] else None
+    except sqlite3.Error as exc:
+        logger.warning("读取小票池规模失败（%s）", exc)
+    # 跳过/分析/派发失败数的权威来源是 ops 作业摘要（microcap_run_summary）；
+    # microcap_runs 行只作 LLM 计数备份，两处冲突以摘要为准。
+    microcap_run_summary = _read_microcap_run_summary(sessions_db or _sessions_db())
     removals: list[dict[str, Any]] = []
     try:
         removals = _read(
@@ -182,6 +201,8 @@ def _screening_facts(path: Path, as_of: str) -> dict[str, Any]:
         "pool_top": pool,
         "auto_analysis_runs": runs,
         "microcap_runs": microcap_runs,
+        "microcap_pool_size": microcap_pool_size,
+        "microcap_run_summary": microcap_run_summary,
         "microcap_equity": microcap_equity,
         "removals": removals,
     }
@@ -203,6 +224,39 @@ def _read_microcap_equity() -> dict[str, Any] | None:
     except sqlite3.Error as exc:
         logger.warning("读取小票净值失败（%s）", exc)
         return None
+
+
+def _read_microcap_run_summary(db_path: Path) -> dict[str, Any] | None:
+    """小票池自动分析作业摘要（评审修复：跳过/分析/派发失败数的权威来源）。
+
+    读 ops ``job_runs`` 里 ``auto_pool_analysis_microcap`` 最新一行的 ``summary``
+    （scheduler 落的 prepare 结果 dict，键 selected/started/skipped_existing/
+    dispatch_failed/pool_size/status）；作业从未运行 / 摘要非 dict / 库不可用 →
+    None，缺键逐字段记 None（日报写「无数据」）。库不存在时不经 ``init_ops``
+    建库（读路径无写副作用），与 ``_read_microcap_equity`` 的 exists 守卫同款。
+    """
+    if not db_path.exists():
+        return None
+    try:
+        run = last_job_run(_MICROCAP_POOL_ANALYSIS_JOB_ID, db_path=db_path)
+    except sqlite3.Error as exc:
+        logger.warning("读取小票作业摘要失败（%s）", exc)
+        return None
+    if not run:
+        return None
+    summary = run.get("summary")
+    if not isinstance(summary, dict):
+        return None
+    out: dict[str, Any] = {
+        key: (
+            int(summary[key])
+            if isinstance(summary.get(key), int) and not isinstance(summary.get(key), bool)
+            else None
+        )
+        for key in ("selected", "started", "skipped_existing", "dispatch_failed", "pool_size")
+    }
+    out["status"] = str(summary["status"]) if isinstance(summary.get("status"), str) else None
+    return out
 
 
 def _session_statuses(sessions_db: Path, session_ids: list[str]) -> dict[str, str]:
@@ -370,7 +424,7 @@ def collect_daily_facts(
             warnings.append({"section": name, "error": f"{type(exc).__name__}: {exc}"})
             return None
 
-    screening = _safe("screening", lambda: _screening_facts(screening_db, as_of))
+    screening = _safe("screening", lambda: _screening_facts(screening_db, as_of, sessions_db))
     facts["screening"] = screening or {}
     if screening and screening.get("auto_analysis_runs"):
         session_ids = [

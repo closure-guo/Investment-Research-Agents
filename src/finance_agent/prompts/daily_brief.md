@@ -15,9 +15,14 @@
 ## 风险与异常
 ## 明日关注
 
-小票池附加事实（add-microcap-lane-analysis）：
-- facts.screening.microcap_runs 为小票池（lane=microcap）自动分析运行行，与主档运行行分开陈述，不得混计。
-- facts.screening.microcap_equity 为小票账本最新净值；两者无数据时写「无数据」，不得推测补齐。
+小票池附加事实（add-microcap-lane-analysis），小票行必须覆盖以下五个字段：
+- 池规模：facts.screening.microcap_pool_size。
+- 分析数（新建会话数）：facts.screening.microcap_run_summary.started；无摘要时按 facts.screening.microcap_runs 行数推导。
+- 跳过的跨池重叠数：facts.screening.microcap_run_summary.skipped_existing。
+- 派发失败数：facts.screening.microcap_run_summary.dispatch_failed；无摘要时按 facts.screening.microcap_runs 中 dispatch_status=dispatch_failed 行数推导。
+- 小票账本净值：facts.screening.microcap_equity。
+- facts.screening.microcap_runs 为小票池（lane=microcap）自动分析运行行，与主档运行行分开陈述，不得混计；与 microcap_run_summary 冲突时以后者为准。
+- 以上五个字段任一缺失或为 null 时写「无数据」，不得推测补齐，也不要省略该字段。
 
 <facts>
 {{daily_facts}}
