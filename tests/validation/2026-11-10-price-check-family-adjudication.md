@@ -50,4 +50,7 @@
 - Langfuse trace：`946efab88a47c0fa3bfcdb5050d3b688`（risk_judge 两轮 GENERATION：`5315cfe838400192` 初稿 / `a11be8b7477565c0` 重试稿）
 - 复现脚本输出：两轮真实文本 → `文本价位 1 与 止损参考带下沿 已验证值 5.8843 偏差 83.01%`（与生产逐字一致）
 - 测试：`TestBetaThresholdComparisonFalsePositives`（修复前 3 红/修复后绿）；`tests/metrics` + `test_risk.py` + `test_validate_trade_prices.py` 362 passed
+- 部署后生产链路实测（11-11 01:45，会话 5d5f79a8-c69）：600198 补跑 completed、
+  报告 22,030 字符正常交付，价位门禁零阻断（该次 reasoning 未复现 beta 比较句，
+  修复有效性以容器内真实文本归零 + 单测回归锚为准）
 - 测试常量与 Langfuse 原文程序化逐字比对：`reasoning identical: True`、`triggers identical: True`
