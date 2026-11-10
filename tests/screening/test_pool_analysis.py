@@ -89,9 +89,16 @@ def test_top_n_and_idempotent(tmp_path):
         db_path=db,
         screening_db_path=db,
     )
-    assert out2["started"] == 0
+    # T5（add-microcap-lane-analysis）选样由「先截断后查 existing」改为
+    # 「跳过 + 顺延补位」：重跑时已分析的 600519/000001 计入 skipped_existing、
+    # 不重复建会话（幂等性质不变：每个 (trade_date, symbol) 至多一个会话），
+    # 其占用的配额由 rank 下一名 300750 顺延补位。语义变化：单日总处理数不再
+    # 被首次 cap 封顶——重跑可继续补位（原语义重跑为纯 no-op，started=0）。
     assert out2["skipped_existing"] == 2
-    assert started == ["600519", "000001"]
+    assert out2["selected"] == 1
+    assert out2["started"] == 1
+    assert out2["started_symbols"] == ["300750"]
+    assert started == ["600519", "000001", "300750"]
 
 
 def test_freshness_removal(tmp_path, monkeypatch):

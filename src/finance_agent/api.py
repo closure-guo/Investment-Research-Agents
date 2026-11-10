@@ -3941,9 +3941,15 @@ def _enqueue_pool_analysis(symbol: str, session_id: str) -> bool:
 
 
 def submit_pool_analysis_batch(
-    *, max_symbols: int | None = None, timeout: float = 120.0
+    *,
+    max_symbols: int | None = None,
+    pool: str = POOL_MAIN,
+    timeout: float = 120.0,
 ) -> dict[str, Any]:
     """调度线程入口：在 uvicorn 主循环上准备并投递自动分析批次。
+
+    ``pool`` 指定池档位（``'main'`` 主档 / ``'microcap'`` 小票通道，
+    add-microcap-lane-analysis T5），原样透传 ``prepare_pool_analysis_batch``。
 
     只等待「建会话 + 入队」完成（通常 <1s/标的），不等待分析本身；分析由
     ``AnalyzeQueue`` 在后台补位执行并复用既有 SSE/journal。
@@ -3961,6 +3967,7 @@ def submit_pool_analysis_batch(
         return await asyncio.to_thread(
             prepare_pool_analysis_batch,
             max_symbols=max_symbols,
+            pool=pool,
             enqueue=_enqueue_pool_analysis,
         )
 
