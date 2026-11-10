@@ -41,8 +41,14 @@ from finance_agent.data.research_reports import (
     run_reports_daily,
 )
 from finance_agent.data.snapshot_job import MARKET_SNAPSHOT_SCHEDULE, run_market_snapshot_batch
-from finance_agent.execution.brokers.paper import run_paper_settle_daily
-from finance_agent.execution.driver import run_execution_daily
+from finance_agent.execution.brokers.paper import (
+    run_paper_settle_daily,
+    run_paper_settle_microcap,
+)
+from finance_agent.execution.driver import (
+    run_execution_daily,
+    run_execution_microcap,
+)
 from finance_agent.factors.builtin import run_factor_builtin_register
 from finance_agent.factors.diagnostics import run_factor_diagnostics
 from finance_agent.factors.harvest import run_factor_harvest_until_drained
@@ -71,7 +77,10 @@ from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
 from finance_agent.screening.pipeline import run_microcap_lane, run_screening_daily
-from finance_agent.screening.pool_analysis import run_pool_analysis_daily
+from finance_agent.screening.pool_analysis import (
+    run_pool_analysis_daily,
+    run_pool_analysis_microcap_daily,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +98,18 @@ JOB_IDS: tuple[str, ...] = (
     # 业绩预告事件线（add-event-driven-lane）：16:05 抓取插在判定（16:00）之后
     "earnings_fetch_daily",
     "paper_execute_daily",
+    # 小票执行（add-microcap-lane-analysis）：16:12——主档执行（16:10）之后、预告分诊
+    # （16:15）之前；第二账本（独立库 + 单票上限 5% + 滑点档 +1），与主档执行链互不依赖
+    "paper_execute_microcap",
     # 16:15 分诊插在仿真执行（16:10）之后
     "earnings_triage_daily",
     "paper_settle_daily",
     # 自动选股分析（add-auto-pool-analysis-daily-brief）：16:22——选股 15:40 完成、
     # paper 结算 16:20 之后；只建会话并入队，不阻塞调度线程
     "auto_pool_analysis_daily",
+    # 小票结算（add-microcap-lane-analysis）：16:24——自动选股分析（16:22）之后、事件
+    # 结算（16:25）之前；与主档同口径 mark 持仓，写独立库 paper_equity，互不依赖
+    "paper_settle_microcap",
     # 16:25 事件结算插在 paper 结算（16:20）之后
     "event_settle_daily",
     "daily_marking",
@@ -103,6 +118,9 @@ JOB_IDS: tuple[str, ...] = (
     # 小票通道（add-microcap-lane-guardrails）：16:45——完整性校验（16:40）之后、
     # cohort（18:00）之前；独立档位 + 前置门禁记录，observation_only（不下单）
     "microcap_screening_daily",
+    # 小票池自动分析（add-microcap-lane-analysis）：16:47——小票通道批次（16:45）之后、
+    # 转债日批（16:50）之前；读当日 microcap 池建会话并入 AnalyzeQueue，不阻塞调度线程
+    "auto_pool_analysis_microcap",
     # 转债日批（add-convertible-bond-coverage）：16:50——小票通道（16:45）之后、
     # cohort（18:00）之前；仅观察通道（零 LLM 准入、不接执行链、不产生订单）
     "cb_daily",
@@ -143,15 +161,19 @@ JOB_LABELS: dict[str, str] = {
     "decision_settle_daily": "判定",
     "earnings_fetch_daily": "业绩预告抓取",
     "paper_execute_daily": "仿真执行",
+    # add-microcap-lane-analysis：小票账本执行/结算/池自动分析（16:12/16:24/16:47）
+    "paper_execute_microcap": "小票执行",
     "earnings_triage_daily": "预告分诊",
     "event_settle_daily": "事件结算",
     "paper_settle_daily": "paper 结算",
     "auto_pool_analysis_daily": "自动选股分析",
+    "paper_settle_microcap": "小票结算",
     "daily_marking": "盯市",
     "metrics_snapshot": "指标快照",
     "integrity_check": "完整性校验",
     # add-microcap-lane-guardrails：小票通道日批（独立档位；observation_only，不下单）
     "microcap_screening_daily": "小票通道",
+    "auto_pool_analysis_microcap": "小票池自动分析",
     # add-convertible-bond-coverage：转债日批（规则化标注、零 LLM；仅观察通道）
     "cb_daily": "转债日批",
     # add-research-report-dataplane：研报数据面（只元数据）
@@ -180,14 +202,17 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
     "decision_settle_daily": settle_open_predictions,
     "earnings_fetch_daily": run_earnings_fetch_daily,
     "paper_execute_daily": run_execution_daily,
+    "paper_execute_microcap": run_execution_microcap,
     "earnings_triage_daily": run_earnings_triage_daily,
     "event_settle_daily": run_event_settle_daily,
     "paper_settle_daily": run_paper_settle_daily,
     "auto_pool_analysis_daily": run_pool_analysis_daily,
+    "paper_settle_microcap": run_paper_settle_microcap,
     "daily_marking": run_daily_marking,
     "metrics_snapshot": persist_metrics_snapshot,
     "integrity_check": integrity_check,
     "microcap_screening_daily": run_microcap_lane,
+    "auto_pool_analysis_microcap": run_pool_analysis_microcap_daily,
     "cb_daily": run_cb_daily,
     "research_reports_daily": run_reports_daily,
     "rating_changes_daily": run_ratings_daily,
@@ -274,6 +299,14 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "minute": 10,
         "timezone": "Asia/Shanghai",
     },
+    # 小票执行（add-microcap-lane-analysis）：16:12——主档执行（16:10）之后、预告分诊
+    # （16:15）之前；第二账本（独立库 + 单票上限 5% + 滑点档 +1），与主档执行链互不依赖
+    "paper_execute_microcap": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 12,
+        "timezone": "Asia/Shanghai",
+    },
     # 预告分诊（add-event-driven-lane）：16:15——抓取之后、paper 结算之前；
     # 扫未分诊（available_at <= 当日）→ LLM 分诊 → 观察清单
     "earnings_triage_daily": {
@@ -294,6 +327,14 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 22,
+        "timezone": "Asia/Shanghai",
+    },
+    # 小票结算（add-microcap-lane-analysis）：16:24——自动选股分析（16:22）之后、
+    # 事件结算（16:25）之前；与主档同口径 mark 持仓，写独立库 paper_equity
+    "paper_settle_microcap": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 24,
         "timezone": "Asia/Shanghai",
     },
     # 事件结算（add-event-driven-lane）：16:25——paper 结算之后、盯市（16:30）之前；
@@ -329,6 +370,14 @@ SCHEDULES: dict[str, dict[str, Any]] = {
         "day_of_week": "mon-fri",
         "hour": 16,
         "minute": 45,
+        "timezone": "Asia/Shanghai",
+    },
+    # 小票池自动分析（add-microcap-lane-analysis）：16:47——小票通道批次（16:45）之后、
+    # 转债日批（16:50）之前；读当日 microcap 池建会话并入 AnalyzeQueue
+    "auto_pool_analysis_microcap": {
+        "day_of_week": "mon-fri",
+        "hour": 16,
+        "minute": 47,
         "timezone": "Asia/Shanghai",
     },
     # 转债日批（add-convertible-bond-coverage）：16:50——小票通道（16:45）之后、

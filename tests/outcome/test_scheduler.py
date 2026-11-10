@@ -202,9 +202,11 @@ class TestCohortJobRegistration:
         mock_sched_cls.return_value = sched
         assert start_scheduler() is sched
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 31, (
+        assert len(ids) == 34, (
             ids
-        )  # 29 日批/月批 + 1 个一次性启动补跑 job（ops_catch_up_once，非 JOB_IDS 成员）
+        )  # 32 日批/月批 + 1 个一次性启动补跑 job（ops_catch_up_once，非 JOB_IDS 成员）
+        # 31→34：+paper_execute_microcap(16:12)/paper_settle_microcap(16:24)/auto_pool_analysis_microcap(16:47)
+        # （小票执行/结算/池自动分析接线，add-microcap-lane-analysis T6）
         # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
@@ -224,8 +226,10 @@ class TestCohortJobRegistration:
         assert set(ids) - {CATCH_UP_JOB_ID} == {
             "decision_settle_daily",
             "paper_execute_daily",
+            "paper_execute_microcap",
             "paper_settle_daily",
             "auto_pool_analysis_daily",
+            "paper_settle_microcap",
             "daily_marking",
             "metrics_snapshot",
             "integrity_check",
@@ -243,6 +247,7 @@ class TestCohortJobRegistration:
             "earnings_triage_daily",
             "event_settle_daily",
             "microcap_screening_daily",
+            "auto_pool_analysis_microcap",
             "cb_daily",
             "research_reports_daily",
             "rating_changes_daily",
@@ -556,9 +561,11 @@ class TestMisfireHardening:
         mock_sched_cls.return_value = sched
         start_scheduler()
         ids = [call.kwargs.get("id") for call in sched.add_job.call_args_list]
-        assert len(ids) == 31, (
+        assert len(ids) == 34, (
             ids
-        )  # 29 日批/月批 + 1 个一次性启动补跑 job（须同样带 misfire/coalesce）
+        )  # 32 日批/月批 + 1 个一次性启动补跑 job（须同样带 misfire/coalesce）
+        # 31→34：+paper_execute_microcap(16:12)/paper_settle_microcap(16:24)/auto_pool_analysis_microcap(16:47)
+        # （add-microcap-lane-analysis T6）
         # 29→30：+factor_revival_daily（拒绝池复苏日批，add-rejected-factor-revival，17:10）
         # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线）；
