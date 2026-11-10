@@ -185,7 +185,7 @@ def _screening_facts(path: Path, as_of: str, sessions_db: Path | None = None) ->
         logger.warning("读取小票池规模失败（%s）", exc)
     # 跳过/分析/派发失败数的权威来源是 ops 作业摘要（microcap_run_summary）；
     # microcap_runs 行只作 LLM 计数备份，两处冲突以摘要为准。
-    microcap_run_summary = _read_microcap_run_summary(sessions_db or _sessions_db())
+    microcap_run_summary = _read_microcap_run_summary(sessions_db or _sessions_db(), as_of)
     removals: list[dict[str, Any]] = []
     try:
         removals = _read(
@@ -226,14 +226,19 @@ def _read_microcap_equity() -> dict[str, Any] | None:
         return None
 
 
-def _read_microcap_run_summary(db_path: Path) -> dict[str, Any] | None:
+def _read_microcap_run_summary(db_path: Path, as_of: str) -> dict[str, Any] | None:
     """小票池自动分析作业摘要（评审修复：跳过/分析/派发失败数的权威来源）。
 
     读 ops ``job_runs`` 里 ``auto_pool_analysis_microcap`` 最新一行的 ``summary``
-    （scheduler 落的 prepare 结果 dict，键 selected/started/skipped_existing/
-    dispatch_failed/pool_size/status）；作业从未运行 / 摘要非 dict / 库不可用 →
-    None，缺键逐字段记 None（日报写「无数据」）。库不存在时不经 ``init_ops``
-    建库（读路径无写副作用），与 ``_read_microcap_equity`` 的 exists 守卫同款。
+    （scheduler 落的 prepare 结果 dict，键 trade_date/selected/started/
+    skipped_existing/dispatch_failed/pool_size/status）；作业从未运行 / 摘要非
+    dict / 库不可用 → None，缺键逐字段记 None（日报写「无数据」）。库不存在时
+    不经 ``init_ops`` 建库（读路径无写副作用），与 ``_read_microcap_equity`` 的
+    exists 守卫同款。
+
+    日期门（评审 Finding 2）：``summary.trade_date`` ≠ ``as_of`` → None——
+    当日 16:47 作业 misfire（后端宕/被关）时 ops 库最新一行是昨天的摘要，
+    昨日数字不得冒充当日（「数据缺失写无数据，MUST NOT 推测补齐」）。
     """
     if not db_path.exists():
         return None
@@ -246,6 +251,8 @@ def _read_microcap_run_summary(db_path: Path) -> dict[str, Any] | None:
         return None
     summary = run.get("summary")
     if not isinstance(summary, dict):
+        return None
+    if str(summary.get("trade_date") or "") != as_of:
         return None
     out: dict[str, Any] = {
         key: (

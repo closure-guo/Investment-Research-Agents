@@ -19,7 +19,7 @@ from typing import Any
 from finance_agent.data import research_reports_store as rr_store
 from finance_agent.screening.freshness import screening_freshness_removals
 from finance_agent.screening.pipeline import latest_successful_pool
-from finance_agent.screening.pool_analysis import create_analysis_session
+from finance_agent.screening.pool_analysis import create_analysis_session, init_pool_analysis_runs
 
 logger = logging.getLogger("finance_agent.screening.report_trigger")
 
@@ -190,6 +190,11 @@ def resolve_scope(
 
 
 def _today_used(day: str, screening_db_path: str | Path | None) -> int:
+    # 幂等建表 + 旧库补 pool 列（add-microcap-lane-analysis 评审 Finding 1）:
+    # 启动链 _init_stores 已注册 init_pool_analysis_runs,这里是读路径兜底——
+    # 旧库缺列时 ``AND pool='main'`` 裸 SQL 是 OperationalError（端点 500）,
+    # 且迁移后存量行默认 pool='main',日预算才不会漏计主档行。
+    init_pool_analysis_runs(screening_db_path)
     conn = _connect(_screening_path(screening_db_path))
     try:
         report_rows = conn.execute(

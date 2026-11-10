@@ -198,3 +198,45 @@ def test_collect_facts_microcap_run_summary_missing_run_returns_none(tmp_path, m
         factor_db_path=tmp_path / "factor.db",
     )
     assert facts["screening"]["microcap_run_summary"] is None
+
+
+def test_collect_facts_microcap_run_summary_stale_date_returns_none(tmp_path, monkeypatch):
+    """评审 Finding 2：摘要 trade_date ≠ 采集日 → None，昨日数字不得冒充当日。
+
+    当日 16:47 作业 misfire（后端宕/被关）时 ops 库最新一行是昨天的摘要；
+    日报 MUST 按日期过滤后写「无数据」，MUST NOT 推测补齐。
+    """
+    db = tmp_path / "screening.db"
+    record_screening_batch(
+        "2026-11-10",
+        status="ok",
+        started_at="2026-11-10T15:45:00",
+        finished_at="2026-11-10T15:50:00",
+        pool=POOL_MICROCAP,
+        pool_rows=_microcap_pool_rows(["002749"]),
+        db_path=db,
+    )
+    sessions = tmp_path / "sessions.db"
+    run_id = insert_job_run("auto_pool_analysis_microcap", "scheduled", "running", db_path=sessions)
+    finish_job_run(
+        run_id,
+        status="ok",
+        summary={
+            "trade_date": "2026-11-09",  # 昨日摘要
+            "pool_size": 5,
+            "selected": 4,
+            "started": 3,
+            "skipped_existing": 1,
+            "dispatch_failed": 2,
+        },
+        db_path=sessions,
+    )
+    monkeypatch.setenv("EXECUTION_MICROCAP_DB_PATH", str(tmp_path / "missing-microcap.db"))
+    facts = collect_daily_facts(
+        "2026-11-10",  # 采集 2026-11-10，摘要却是 11-09 的
+        sessions_db_path=sessions,
+        screening_db_path=db,
+        execution_db_path=tmp_path / "execution.db",
+        factor_db_path=tmp_path / "factor.db",
+    )
+    assert facts["screening"]["microcap_run_summary"] is None

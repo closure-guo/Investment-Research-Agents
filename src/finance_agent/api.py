@@ -90,6 +90,7 @@ from finance_agent.screening.pipeline import (  # noqa: E402
     latest_successful_pool,
 )
 from finance_agent.screening.pool_analysis import (  # noqa: E402
+    init_pool_analysis_runs,
     list_pool_analysis_runs,
     prepare_pool_analysis_batch,
 )
@@ -278,6 +279,11 @@ def _init_stores() -> None:
         ("track_record", init_track_record_tables),
         ("cohort_runs", init_cohort_runs),
         ("events", init_events_db),
+        # screening 侧 pool 迁移（add-microcap-lane-analysis 评审 Finding 1）:
+        # 旧 screening 库的 pool 列须在启动链补齐——否则首个 16:22 作业前,
+        # report_trigger 对旧库的 ``AND pool='main'`` 裸 SQL 直接 OperationalError
+        # （手动触发端点 500 / 计划任务静默失败）。
+        ("pool_analysis_runs", init_pool_analysis_runs),
     ):
         try:
             init_fn()
