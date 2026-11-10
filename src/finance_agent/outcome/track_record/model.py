@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS predictions (
   version_seq       INTEGER,
   snapshot_hash     TEXT,
   session_id        TEXT,
+  lane              TEXT NOT NULL DEFAULT 'main',
   trigger_high      REAL,
   trigger_low       REAL
 );
@@ -212,6 +213,7 @@ def init_track_record_tables(db_path: str | Path | None = None) -> None:
         _migrate_settlement_contract_columns(conn)
         _migrate_metrics_beta_alpha_columns(conn)
         _migrate_trigger_tracking_columns(conn)
+        _migrate_lane_column(conn)
         conn.commit()
     finally:
         conn.close()
@@ -274,6 +276,22 @@ def _migrate_trigger_tracking_columns(conn: sqlite3.Connection) -> None:
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
     for col, ddl in _TRIGGER_TRACKING_COLUMNS:
+        if col not in cols:
+            conn.execute(ddl)
+
+
+# ── add-microcap-lane-analysis：predictions.lane 池归属列（幂等迁移）──
+_LANE_COLUMN = (("lane", "ALTER TABLE predictions ADD COLUMN lane TEXT NOT NULL DEFAULT 'main'"),)
+
+
+def _migrate_lane_column(conn: sqlite3.Connection) -> None:
+    """补 lane 池归属列（幂等：先查 PRAGMA table_info）。
+
+    存量行经列 DEFAULT 'main' 回填；新落库默认 main，microcap 会话由 ingest
+    按会话反查池归属标注（反查失败回退 main，不阻断落库）。
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
+    for col, ddl in _LANE_COLUMN:
         if col not in cols:
             conn.execute(ddl)
 
@@ -943,8 +961,8 @@ def insert_prediction(
                  entry_price, target_price, horizon_days, confidence, benchmark,
                  rationale_snapshot, langfuse_trace_id, status, created_at, updated_at,
                  resolution_rule, version_seq, snapshot_hash,
-                 session_id, trigger_high, trigger_low
-               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 session_id, lane, trigger_high, trigger_low
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 prediction_id,
                 record["source_type"],
@@ -965,6 +983,9 @@ def insert_prediction(
                 version_seq,
                 snapshot_hash,
                 record.get("session_id"),
+                # add-microcap-lane-analysis：池归属；缺省回退 main（api 造数等
+                # 未带 lane 的调用方不受 NOT NULL 约束影响）。
+                record.get("lane") or "main",
                 record.get("trigger_high"),
                 record.get("trigger_low"),
             ),
@@ -1160,6 +1181,15 @@ def list_predictions(
     limit = max(1, min(int(limit), 100_000))
     conn = _connect(db_path)
     try:
+        # add-microcap-lane-analysis T2：空库读路径自愈（幂等建表，marking.py 同款
+        # 入口初始化先例）——列存在性由 DDL/迁移保证，空库返回空表不报错。
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='predictions'"
+        ).fetchone()
+        if has_table is None:
+            conn.close()
+            init_track_record_tables(db_path)
+            conn = _connect(db_path)
         clauses, params = _prediction_filters(
             ticker, status, source_type, keyword, date_from, date_to
         )

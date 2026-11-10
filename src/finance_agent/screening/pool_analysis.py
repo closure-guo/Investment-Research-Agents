@@ -149,6 +149,21 @@ def get_pool_analysis_run(
     return dict(row) if row else None
 
 
+def get_pool_by_session(session_id: str, *, db_path: str | Path | None = None) -> str | None:
+    """按会话 id 反查运行行池归属（add-microcap-lane-analysis T2）。
+
+    命中返回 POOL_MAIN / POOL_MICROCAP；无行返回 None（调用方回退 main）。
+    """
+    init_pool_analysis_runs(db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT pool FROM pool_analysis_runs WHERE session_id = ? "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (str(session_id or "").strip(),),
+        ).fetchone()
+    return str(row["pool"]) if row else None
+
+
 def list_pool_analysis_runs(
     trade_date: str,
     *,
