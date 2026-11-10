@@ -130,3 +130,113 @@ def test_microcap_stale_pool_skips(tmp_path, monkeypatch):
     assert out["status"] == "skipped_stale_pool"
     assert out["batch_date"] == "2026-11-06"
     assert out["started"] == 0
+
+
+# ── 补位封顶（T5 修正：补位以本池自有行数封顶，重跑不双烧） ─────────────────────
+
+
+def test_microcap_rerun_no_double_burn(monkeypatch, tmp_path):
+    """同日重跑不双烧：首跑已派 10 只（录 10 条 microcap queued 行）后重跑，
+    窗口段全跳过 + 补位段因 own_count 已满 cap 即止 → selected=0、started=0、
+    零新派发（首跑语义下重跑会再补 10 只，双烧）。"""
+    db = tmp_path / "screening.db"
+    rows = _rows([f"3000{i:02d}" for i in range(1, 15)])  # 14 只，cap=10
+    monkeypatch.setattr(
+        "finance_agent.screening.pool_analysis.latest_successful_pool", _FakePool(rows)
+    )
+    for row in rows[:10]:
+        record_pool_analysis_run(
+            "2026-11-10",
+            row["symbol"],
+            f"s-{row['symbol']}",
+            "queued",
+            pool=POOL_MICROCAP,
+            db_path=db,
+        )
+    spy = _EnqueueSpy()
+    result = prepare_pool_analysis_batch(
+        as_of="2026-11-10",
+        max_symbols=10,
+        enqueue=spy,
+        screening_db_path=db,
+        db_path=db,
+        pool=POOL_MICROCAP,
+    )
+    assert result["selected"] == 0
+    assert result["started"] == 0
+    assert spy.calls == []
+    assert result["skipped_existing"] == 10
+
+
+def test_microcap_overlap_fill_capped_at_cap(monkeypatch, tmp_path):
+    """主档重叠 4 只 + cap=10 的不变量：首跑窗口 6 只 + 补位 4 只 = 10；
+    重跑后 own_count 已满 → selected=0、started=0、无新会话。"""
+    db = tmp_path / "screening.db"
+    rows = _rows([f"3000{i:02d}" for i in range(1, 15)])
+    monkeypatch.setattr(
+        "finance_agent.screening.pool_analysis.latest_successful_pool", _FakePool(rows)
+    )
+    # 主档当日已分析 rank 2/4/6/8（前 10 名中的 4 只跨池重叠）
+    for row in rows[1:8:2]:
+        record_pool_analysis_run("2026-11-10", row["symbol"], "s-main", "queued", db_path=db)
+    spy = _EnqueueSpy()
+    first = prepare_pool_analysis_batch(
+        as_of="2026-11-10",
+        max_symbols=10,
+        enqueue=spy,
+        screening_db_path=db,
+        db_path=db,
+        pool=POOL_MICROCAP,
+    )
+    # 窗口 6 只（4 只重叠跳过）+ 补位 4 只（rank 11-14）= cap
+    assert first["selected"] == 10
+    assert first["started"] == 10
+    assert first["skipped_existing"] == 4
+    expected_window = [rows[i]["symbol"] for i in (0, 2, 4, 6, 8, 9)]
+    expected_fill = [rows[i]["symbol"] for i in (10, 11, 12, 13)]
+    assert spy.calls == expected_window + expected_fill
+    second = prepare_pool_analysis_batch(
+        as_of="2026-11-10",
+        max_symbols=10,
+        enqueue=spy,
+        screening_db_path=db,
+        db_path=db,
+        pool=POOL_MICROCAP,
+    )
+    assert second["selected"] == 0
+    assert second["started"] == 0
+    assert len(spy.calls) == 10  # 重跑零新派发（无新会话）
+
+
+def test_microcap_partial_failure_redispatch_no_fill(monkeypatch, tmp_path):
+    """失败行重派、零补位：own_count 已满 cap，补位段即止——恰好重派 4 只
+    failed 行，不向 rank 11-14 顺延补位。"""
+    db = tmp_path / "screening.db"
+    rows = _rows([f"3000{i:02d}" for i in range(1, 15)])
+    monkeypatch.setattr(
+        "finance_agent.screening.pool_analysis.latest_successful_pool", _FakePool(rows)
+    )
+    # 当日本池已有 10 行：rank 1/3/5/7（下标 0/2/4/6）失败，其余 queued
+    for i, row in enumerate(rows[:10]):
+        status = "failed" if i in (0, 2, 4, 6) else "queued"
+        record_pool_analysis_run(
+            "2026-11-10",
+            row["symbol"],
+            f"s-{row['symbol']}",
+            status,
+            pool=POOL_MICROCAP,
+            db_path=db,
+        )
+    spy = _EnqueueSpy()
+    result = prepare_pool_analysis_batch(
+        as_of="2026-11-10",
+        max_symbols=10,
+        enqueue=spy,
+        screening_db_path=db,
+        db_path=db,
+        pool=POOL_MICROCAP,
+    )
+    assert result["selected"] == 4
+    assert result["started"] == 4
+    assert spy.calls == [rows[i]["symbol"] for i in (0, 2, 4, 6)]
+    assert result["skipped_existing"] == 6

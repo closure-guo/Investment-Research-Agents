@@ -300,6 +300,65 @@ def _accept_batch_date(batch_date: str, day: str, calendar: list[str] | None) ->
     return bool(earlier) and earlier[-1] == batch_date
 
 
+def _rank_key(row: dict[str, Any]) -> tuple[int, str]:
+    return int(row.get("rank") or 10**9), str(row.get("symbol") or "")
+
+
+def _select_main(pool_rows: list[dict[str, Any]], cap: int) -> list[dict[str, Any]]:
+    """主档选样（legacy，先截断后查 existing）：rank 升序取前 cap 名整体入选。
+
+    当日是否已有 queued/completed 运行行不在此处判定，交由编排循环体逐行跳过
+    （issue #456 幂等）——已分析行占用配额，同日重跑为纯 no-op（started=0），
+    rank 之后的新标的轮不到：单日处理量被首次 cap 封顶，对调度双发有隐性成本
+    保护。主档行为必须与 add-microcap-lane-analysis 之前逐字节一致（主档回归
+    红线），不得随小票通道的选样语义联动变化。
+    """
+    return sorted(pool_rows, key=_rank_key)[:cap]
+
+
+def _select_microcap(
+    day: str,
+    pool_rows: list[dict[str, Any]],
+    cap: int,
+    pool: str,
+    db_path: str | Path | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """小票选样（跳过 + 顺延补位，补位以本池自有行数封顶）。
+
+    窗口段：rank 升序扫前 cap 名，当日已有 queued/completed 运行行（任意池）
+    → 跳过、计入 skipped、不占配额（跨池去重靠 (trade_date, symbol) 全局幂等键）；
+    failed/dispatch_failed/session_failed/无行 → 入选。
+    补位段：own_count = 本池当日运行行数（``list_pool_analysis_runs(day, pool=)``）；
+    rank cap 名之后按序扫描，每名先查 ``len(selected) + own_count >= cap`` 即止
+    ——重跑时 own_count 已记满本池当日处理量，补位自动归零（不双烧）；首跑窗口
+    被主档重叠占位时按序补足至 cap。返回 (selected, skipped_existing)。
+    """
+    ordered = sorted(pool_rows, key=_rank_key)
+    selected: list[dict[str, Any]] = []
+    skipped = 0
+    for row in ordered[:cap]:
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        existing = get_pool_analysis_run(day, symbol, db_path=db_path)
+        if existing is not None and existing.get("status") in ("queued", "completed"):
+            skipped += 1
+            continue
+        selected.append(row)
+    own_count = len(list_pool_analysis_runs(day, pool=pool, db_path=db_path))
+    for row in ordered[cap:]:
+        if len(selected) + own_count >= cap:
+            break
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        existing = get_pool_analysis_run(day, symbol, db_path=db_path)
+        if existing is not None and existing.get("status") in ("queued", "completed"):
+            continue
+        selected.append(row)
+    return selected, skipped
+
+
 def prepare_pool_analysis_batch(
     *,
     as_of: str | None = None,
@@ -316,9 +375,12 @@ def prepare_pool_analysis_batch(
     标题后缀（``小票池自动分析``）与会话事件 ``source``；运行行归属列随之落
     ``pool``。跨池去重以 ``(trade_date, symbol)`` 全局幂等键为准（pool 不参与）。
 
-    选样为「跳过 + 顺延补位」：按 rank 升序扫描，当日已有 ``queued`` /
-    ``completed`` 运行行（任意池）的标的不占配额、计入 ``skipped_existing``，
-    由 rank 下一名补足 N；补位不足如实披露 ``selected`` 实际数量。``failed`` /
+    选样按池档位分支（add-microcap-lane-analysis T5 修正）：主档保持「先截断后查
+    existing」的 legacy 语义——前 cap 名整体入选、已有 ``queued``/``completed``
+    运行行的标的在循环体逐行跳过（计入 ``skipped_existing``），同日重跑为纯
+    no-op；小票通道为「跳过 + 顺延补位」且补位以本池自有行数封顶——窗口段跳过
+    queued/completed（任意池）不占配额、由 rank 下一名补足 N，补位段以
+    ``own_count``（本池当日运行行数）封顶，重跑不双烧。``failed`` /
     ``dispatch_failed`` / ``session_failed`` 行放行入选，由下方循环体重派。
 
     ``enqueue(symbol, session_id)`` 返回 True 表示已交给队列；False/异常记
@@ -370,27 +432,17 @@ def prepare_pool_analysis_batch(
         result["status"] = "skipped_empty_pool"
         return result
 
-    # 选样「跳过 + 顺延补位」（add-microcap-lane-analysis T5）：边扫边查当日运行行，
-    # queued/completed（任意池）不占配额（计入 skipped_existing），failed 类行放行
-    # 入选、由循环体既有重派分支建全新会话；补位不足时 selected 如实披露实际数。
-    ordered = sorted(
-        pool_rows,
-        key=lambda row: (int(row.get("rank") or 10**9), str(row.get("symbol") or "")),
-    )
-    selected: list[dict[str, Any]] = []
-    for row in ordered:
-        symbol = str(row.get("symbol") or "").strip()
-        if not symbol:
-            continue
-        existing = get_pool_analysis_run(day, symbol, db_path=db_path)
-        if existing is not None and existing.get("status") in ("queued", "completed"):
-            # 当日任意批次已建会话待跑/已完成——不重复建会话、不重复烧分析，
-            # 也不占本次配额（issue #456；跨池去重靠 (trade_date, symbol) 全局键）。
-            result["skipped_existing"] += 1
-            continue
-        selected.append(row)
-        if len(selected) >= cap:
-            break
+    # 选样按池档位分支（add-microcap-lane-analysis T5 修正）：
+    # - 主档：legacy「先截断后查 existing」——前 cap 名整体入选，已有
+    #   queued/completed 运行行的标的在下方循环体逐行跳过（重跑纯 no-op）；
+    #   主档行为与 add-microcap-lane-analysis 之前逐字节一致（主档回归红线）。
+    # - 小票：窗口跳过 + 顺延补位，补位以本池自有行数封顶（重跑不双烧）；
+    #   补位不足时 selected 如实披露实际数。
+    if pool == POOL_MICROCAP:
+        selected, skipped_existing = _select_microcap(day, pool_rows, cap, pool, db_path)
+        result["skipped_existing"] += skipped_existing
+    else:
+        selected = _select_main(pool_rows, cap)
     result["selected"] = len(selected)
 
     removed = screening_freshness_removals(selected, batch_date)
