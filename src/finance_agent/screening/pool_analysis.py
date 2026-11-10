@@ -49,6 +49,11 @@ AUTO_POOL_DISPLAY_SUFFIX = "自动选股分析"
 DEFAULT_MAX_SYMBOLS = 10
 MAX_SYMBOLS_CAP = 100
 
+# 池归属常量（add-microcap-lane-analysis）：运行行标注来源档位；列不进主键，
+# (trade_date, symbol) 全局幂等键保持不变——跨池去重靠它实现。
+POOL_MAIN = "main"
+POOL_MICROCAP = "microcap"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS pool_analysis_runs (
   trade_date TEXT NOT NULL,
@@ -56,11 +61,17 @@ CREATE TABLE IF NOT EXISTS pool_analysis_runs (
   session_id TEXT NOT NULL,
   status TEXT NOT NULL,
   error TEXT,
+  pool TEXT NOT NULL DEFAULT 'main',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (trade_date, symbol)
 )
 """
+
+# 运行表增量列（ALTER 补齐；模式照抄 screening/store.py 的 _ensure_batch_columns）。
+_RUNS_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("pool", "ALTER TABLE pool_analysis_runs ADD COLUMN pool TEXT NOT NULL DEFAULT 'main'"),
+)
 
 
 def _default_db_path() -> Path:
@@ -81,6 +92,10 @@ def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
 def init_pool_analysis_runs(db_path: str | Path | None = None) -> None:
     with _connect(db_path) as conn:
         conn.execute(_SCHEMA)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(pool_analysis_runs)")}
+        for name, ddl in _RUNS_COLUMN_MIGRATIONS:
+            if name not in columns:
+                conn.execute(ddl)
         conn.commit()
 
 
@@ -95,24 +110,28 @@ def record_pool_analysis_run(
     status: str = "queued",
     error: str | None = None,
     *,
+    pool: str = POOL_MAIN,
     db_path: str | Path | None = None,
 ) -> None:
-    """写入/更新一条自动分析运行行（同 (trade_date, symbol) 幂等 upsert）。"""
+    """写入/更新一条自动分析运行行（同 (trade_date, symbol) 幂等 upsert）。
+
+    ON CONFLICT 更新不含 ``pool``——首次写入后归属不变，防重派改池。
+    """
     init_pool_analysis_runs(db_path)
     now = _now()
     with _connect(db_path) as conn:
         conn.execute(
             """
             INSERT INTO pool_analysis_runs
-                (trade_date, symbol, session_id, status, error, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (trade_date, symbol, session_id, status, error, pool, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trade_date, symbol) DO UPDATE SET
                 session_id = excluded.session_id,
                 status = excluded.status,
                 error = excluded.error,
                 updated_at = excluded.updated_at
             """,
-            (trade_date, symbol, session_id, status, error, now, now),
+            (trade_date, symbol, session_id, status, error, pool, now, now),
         )
         conn.commit()
 
@@ -123,7 +142,7 @@ def get_pool_analysis_run(
     init_pool_analysis_runs(db_path)
     with _connect(db_path) as conn:
         row = conn.execute(
-            "SELECT trade_date, symbol, session_id, status, error, created_at, updated_at "
+            "SELECT trade_date, symbol, session_id, status, error, pool, created_at, updated_at "
             "FROM pool_analysis_runs WHERE trade_date = ? AND symbol = ?",
             (trade_date, symbol),
         ).fetchone()
@@ -131,15 +150,23 @@ def get_pool_analysis_run(
 
 
 def list_pool_analysis_runs(
-    trade_date: str, *, db_path: str | Path | None = None
+    trade_date: str,
+    *,
+    pool: str | None = None,
+    db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     init_pool_analysis_runs(db_path)
+    sql = (
+        "SELECT trade_date, symbol, session_id, status, error, pool, created_at, updated_at "
+        "FROM pool_analysis_runs WHERE trade_date = ?"
+    )
+    params: list[str] = [trade_date]
+    if pool is not None:
+        sql += " AND pool = ?"
+        params.append(pool)
+    sql += " ORDER BY symbol"
     with _connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT trade_date, symbol, session_id, status, error, created_at, updated_at "
-            "FROM pool_analysis_runs WHERE trade_date = ? ORDER BY symbol",
-            (trade_date,),
-        ).fetchall()
+        rows = conn.execute(sql, tuple(params)).fetchall()
     return [dict(row) for row in rows]
 
 
