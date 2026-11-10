@@ -62,6 +62,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -654,3 +655,34 @@ def run_execution_daily(
     summary["pending"] = pending_count
     summary["skipped_symbols"] = sorted(skipped_symbols)
     return summary
+
+
+def run_execution_microcap(
+    as_of: str | None = None,
+    *,
+    db_path: str | Path | None = None,
+    snapshot_db_path: str | Path | None = None,
+    regime_db_path: str | Path | None = None,
+    window_days: int = _DEFAULT_BACKLOG_WINDOW_DAYS,
+) -> dict[str, Any]:
+    """ops 日批入口（小票账本，add-microcap-lane-analysis）：独立库 + 小票经济学。
+
+    与主档差异仅三处：lane='microcap'、单票上限 5%、滑点档 +1；其余语义
+    （次一交易日开盘 / 幂等 / 快照守卫 / regime）与主档一致。
+    """
+    from finance_agent.screening.constraints import (
+        MICROCAP_SLIPPAGE_TIER_BUMP,
+        MICROCAP_SUGGESTED_SINGLE_CAP,
+    )
+
+    return run_execution_daily(
+        as_of,
+        db_path=db_path,
+        execution_db_path=os.getenv("EXECUTION_MICROCAP_DB_PATH", "data/execution_microcap.db"),
+        snapshot_db_path=snapshot_db_path,
+        regime_db_path=regime_db_path,
+        window_days=window_days,
+        lane="microcap",
+        single_cap=MICROCAP_SUGGESTED_SINGLE_CAP,
+        slippage_tier_bump=MICROCAP_SLIPPAGE_TIER_BUMP,
+    )

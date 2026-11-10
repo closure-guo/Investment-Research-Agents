@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import math
+import os
 import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -410,9 +411,15 @@ def settle_daily(
     }
 
 
-def run_paper_settle_daily() -> dict[str, Any]:
+def run_paper_settle_daily(
+    as_of: str | None = None, *, execution_db_path: str | Path | None = None
+) -> dict[str, Any]:
     """ops 日批入口（B2）：取快照最新交易日与持仓标的 ``close_raw`` → ``settle_daily``。
 
+    - ``as_of``（add-microcap-lane-analysis）显式传入时按该日结算；缺省仍取快照
+      最新交易日（既有行为不变）；
+    - ``execution_db_path``（add-microcap-lane-analysis）账本库；缺省默认库（既有
+      行为不变）；小票通道经 ``run_paper_settle_microcap`` 传独立库；
     - 快照库为空（无任何数据行）→ 跳过摘要 ``reason="no_snapshot_data"``（部署初期
       常态，不抛错；旁路铁律下 job 记 ok 摘要）；
     - 持仓标的在快照中缺有效收盘价 → 由 ``settle_daily`` 抛错（job 记 failed、
@@ -422,8 +429,8 @@ def run_paper_settle_daily() -> dict[str, Any]:
     """
     from finance_agent.data.snapshot import latest_snapshot_date, read_bars
 
-    as_of = latest_snapshot_date()
-    if as_of is None:
+    eff_as_of = as_of or latest_snapshot_date()
+    if eff_as_of is None:
         return {
             "trade_date": None,
             "cash": None,
@@ -431,11 +438,11 @@ def run_paper_settle_daily() -> dict[str, Any]:
             "equity": None,
             "reason": "no_snapshot_data",
         }
-    positions = list_positions()
+    positions = list_positions(db_path=execution_db_path)
     close_prices: dict[str, float] = {}
     if positions:
         codes = sorted({_snapshot_code(str(p["symbol"])) for p in positions})
-        frame = read_bars(codes, as_of, as_of, as_of=as_of)
+        frame = read_bars(codes, eff_as_of, eff_as_of, as_of=eff_as_of)
         by_code = {
             str(row["code"]): price
             for row in frame[["code", "close_raw"]].to_dict("records")
@@ -446,4 +453,45 @@ def run_paper_settle_daily() -> dict[str, Any]:
             for p in positions
             if (code := _snapshot_code(str(p["symbol"]))) in by_code
         }
-    return {**settle_daily(as_of, close_prices=close_prices), "reason": None}
+    return {
+        **settle_daily(eff_as_of, close_prices=close_prices, db_path=execution_db_path),
+        "reason": None,
+    }
+
+
+def _microcap_execution_db() -> Path:
+    """小票账本路径（调用期读 env；add-microcap-lane-analysis）。"""
+    return Path(os.getenv("EXECUTION_MICROCAP_DB_PATH", "data/execution_microcap.db"))
+
+
+def run_paper_settle_microcap(as_of: str | None = None) -> dict[str, Any]:
+    """ops 日批入口（小票账本结算）：与主档同口径，写独立库 paper_equity。"""
+    db = _microcap_execution_db()
+    snapshot_db = None  # 快照库与主档共用（默认 env）
+    from finance_agent.data.snapshot import latest_snapshot_date, read_bars
+
+    eff_as_of = as_of or latest_snapshot_date(snapshot_db)
+    if eff_as_of is None:
+        return {
+            "trade_date": None,
+            "cash": None,
+            "positions_value": None,
+            "equity": None,
+            "reason": "no_snapshot_data",
+        }
+    positions = list_positions(db_path=db)
+    close_prices: dict[str, float] = {}
+    if positions:
+        codes = sorted({_snapshot_code(str(p["symbol"])) for p in positions})
+        frame = read_bars(codes, eff_as_of, eff_as_of, as_of=eff_as_of)
+        by_code = {
+            str(row["code"]): price
+            for row in frame[["code", "close_raw"]].to_dict("records")
+            if (price := _valid_close(row["close_raw"])) is not None
+        }
+        close_prices = {
+            str(p["symbol"]): by_code[code]
+            for p in positions
+            if (code := _snapshot_code(str(p["symbol"]))) in by_code
+        }
+    return {**settle_daily(eff_as_of, close_prices=close_prices, db_path=db), "reason": None}
