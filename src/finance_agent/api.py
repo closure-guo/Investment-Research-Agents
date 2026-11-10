@@ -5363,9 +5363,27 @@ async def factor_research_config(req: FactorResearchConfigRequest) -> dict[str, 
 #     0 只在「无持仓」时为真实读数（空集求和不需要价格）；
 #   - 门禁日志 = orders 中 status=rejected（add-execution-chain-driver 落库形态，
 #     零 schema 变更）；
-#   - 空账户如实：资金 = 初始 100 万（PaperBroker 惰性开户口径）、列表为空。
+#   - 空账户如实：资金 = 初始 100 万（PaperBroker 惰性开户口径）、列表为空；
+#   - 账本路由（add-microcap-lane-analysis T8）：``?book=`` 选执行账本——缺省
+#     ``main``（显式 ``EXECUTION_DB_PATH`` / ``data/execution.db``，与既有隐式
+#     缺省同 env 同默认值，主档行为零变化）；``microcap`` 读小票通道第二库
+#     （``EXECUTION_MICROCAP_DB_PATH``）。净值曲线端点不在此列（读 track_record
+#     库，小票净值由日报行披露）。
 
 _BROKER_NOTE_NO_SNAPSHOT = "快照缺失（无行情数据），持仓市值不可得，未以 0 冒充"
+
+# 账本选择（add-microcap-lane-analysis T8）：非法值由 FastAPI Literal 校验 422
+# （与 ``ScreeningPoolTier`` 同风格）；``_broker_db`` 的 raise 为直调兜底。
+BrokerBook = Literal["main", "microcap"]
+
+
+def _broker_db(book: str) -> Path:
+    """book → 执行账本库路径（调用期读 env，与 store ``_default_db_path`` 同口径）。"""
+    if book == "microcap":
+        return Path(os.getenv("EXECUTION_MICROCAP_DB_PATH", "data/execution_microcap.db"))
+    if book == "main":
+        return Path(os.getenv("EXECUTION_DB_PATH", "data/execution.db"))
+    raise HTTPException(status_code=422, detail=f"book 非法: {book!r}（须 main/microcap）")
 
 
 def _broker_snapshot_marks(symbols: list[str]) -> tuple[str | None, dict[str, float], list[str]]:
@@ -5399,7 +5417,7 @@ def _broker_snapshot_marks(symbols: list[str]) -> tuple[str | None, dict[str, fl
     return as_of, closes, missing
 
 
-def _broker_overview_payload() -> dict[str, Any]:
+def _broker_overview_payload(book: BrokerBook) -> dict[str, Any]:
     """总览载荷（同步体，供 to_thread）：资金 + 持仓市值/总资产/浮盈（快照 mark 口径）。
 
     无持仓 → 市值/浮盈为 0.0（空集求和的真实读数）；有持仓但快照不可得 → 三者记
@@ -5407,7 +5425,7 @@ def _broker_overview_payload() -> dict[str, Any]:
     """
     from finance_agent.execution.brokers.paper import PaperBroker
 
-    broker = PaperBroker()
+    broker = PaperBroker(db_path=_broker_db(book))
     cash = broker.query_cash()
     positions = broker.query_positions()
     if not positions:
@@ -5457,7 +5475,7 @@ def _broker_overview_payload() -> dict[str, Any]:
     }
 
 
-def _broker_positions_payload() -> dict[str, Any]:
+def _broker_positions_payload(book: BrokerBook) -> dict[str, Any]:
     """持仓载荷（同步体，供 to_thread）：标的/数量/成本/现价（close_raw）/市值/浮盈。
 
     现价不可得 → 该行 ``close``/``market_value``/``unrealized_pnl`` 为 ``null``（界面
@@ -5465,7 +5483,7 @@ def _broker_positions_payload() -> dict[str, Any]:
     """
     from finance_agent.execution.brokers.paper import PaperBroker
 
-    positions = PaperBroker().query_positions()
+    positions = PaperBroker(db_path=_broker_db(book)).query_positions()
     if positions:
         as_of, closes, _missing = _broker_snapshot_marks([str(row["symbol"]) for row in positions])
     else:
@@ -5492,49 +5510,55 @@ def _broker_positions_payload() -> dict[str, Any]:
     return {"snapshot_date": as_of, "positions": rows}
 
 
-def _broker_orders_payload(status: str | None) -> list[dict[str, Any]]:
+def _broker_orders_payload(status: str | None, book: BrokerBook) -> list[dict[str, Any]]:
     """订单行（store 只读；含状态/原因码/decision_id/signal_id 证据链，零业务复制）。"""
     from finance_agent.execution.store import list_orders
 
-    return list_orders(status=status)
+    return list_orders(status=status, db_path=_broker_db(book))
 
 
 @app.get("/api/broker/overview")
-async def broker_overview() -> dict[str, Any]:
+async def broker_overview(book: BrokerBook = "main") -> dict[str, Any]:
     """执行台账总览（只读）：可用资金 / 持仓市值 / 总资产 / 浮动盈亏。
 
     持仓市值按最新快照 ``close_raw`` mark；快照缺失 → 市值/总资产/浮盈 ``null`` +
     标注（MUST NOT 以 0 冒充）。空账户如实：资金 = 初始 100 万、市值/浮盈为 0。
-    库路径调用期读 ``EXECUTION_DB_PATH`` / ``SNAPSHOT_DB_PATH``（E2E env 注入即生效）。
+    库路径调用期读 ``EXECUTION_DB_PATH`` / ``SNAPSHOT_DB_PATH``（E2E env 注入即生效）；
+    ``?book=microcap`` 读小票通道账本（``EXECUTION_MICROCAP_DB_PATH``），缺省 main 不变。
     """
-    return await asyncio.to_thread(_broker_overview_payload)
+    return await asyncio.to_thread(_broker_overview_payload, book)
 
 
 @app.get("/api/broker/positions")
-async def broker_positions() -> dict[str, Any]:
-    """持仓列表（只读）：标的/数量/成本/现价/市值/浮盈；现价不可得逐行为 ``null``。"""
-    return await asyncio.to_thread(_broker_positions_payload)
+async def broker_positions(book: BrokerBook = "main") -> dict[str, Any]:
+    """持仓列表（只读）：标的/数量/成本/现价/市值/浮盈；现价不可得逐行为 ``null``。
+
+    ``?book=microcap`` 读小票通道账本（``EXECUTION_MICROCAP_DB_PATH``），缺省 main 不变。
+    """
+    return await asyncio.to_thread(_broker_positions_payload, book)
 
 
 @app.get("/api/broker/orders")
-async def broker_orders(status: str | None = None) -> dict[str, Any]:
+async def broker_orders(status: str | None = None, book: BrokerBook = "main") -> dict[str, Any]:
     """订单列表（只读）：四态（pending/filled/rejected/expired）+ 原因码 + 证据链。
 
     ``?status=`` 过滤；非法状态 → 400（fail loud，不静默返回空列表误导归因）。
+    ``?book=microcap`` 读小票通道账本（``EXECUTION_MICROCAP_DB_PATH``），缺省 main 不变。
     """
     if status is not None and status not in ORDER_STATUSES:
         raise HTTPException(status_code=400, detail=f"非法订单状态: {status}")
-    return {"orders": await asyncio.to_thread(_broker_orders_payload, status)}
+    return {"orders": await asyncio.to_thread(_broker_orders_payload, status, book)}
 
 
 @app.get("/api/broker/gate-log")
-async def broker_gate_log() -> dict[str, Any]:
+async def broker_gate_log(book: BrokerBook = "main") -> dict[str, Any]:
     """门禁拒绝视图（只读）：= orders 中 status=rejected 的记录（含原因码）。
 
     风控门禁拒绝经 ``store.record_order_rejection`` 落库后即在此回查（含 ST_FLAG
     等结构化原因码与关联 ``decision_id``/``signal_id``）——零 schema 变更。
+    ``?book=microcap`` 读小票通道账本（``EXECUTION_MICROCAP_DB_PATH``），缺省 main 不变。
     """
-    return {"orders": await asyncio.to_thread(_broker_orders_payload, STATUS_REJECTED)}
+    return {"orders": await asyncio.to_thread(_broker_orders_payload, STATUS_REJECTED, book)}
 
 
 # ── AG-UI 协议通道（add-assistant-ui-thread PoC，双轨隔离：仅挂载，不接入 registry）──
