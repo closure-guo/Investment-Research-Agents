@@ -230,6 +230,10 @@ class AnalysisState(TypedDict, total=False):
     # watch 终稿双向触发位申报完整性（add-watch-trigger-tracking）：{result, note}——
     # 打回后申报/「已打回仍未申报触发位」如实标注（未声明会被图合并静默丢弃）
     final_trigger_check: dict
+    # buy 入场形态软标注（update-conditional-entry-gate-waiver）：{result, note}——
+    # 逆势（收盘 < MA20 且 < MA60）立即入场未申报条件触发位时如实标注（I-1 模式，
+    # 不打回不阻断；未声明会被图合并静默丢弃），经完整性收集器进 FM 审批上下文
+    final_entry_form_check: dict
     # 决策文本价位交叉校验残留 anomaly（update-decision-integrity-gates Task 1 →
     # update-decision-price-gate 收窄）：保存 risk_judge **最终终稿**的残留 anomaly
     # （打回修正后为空列表），仅经 state/Langfuse trace 可观测，MUST NOT 渲染进报告
