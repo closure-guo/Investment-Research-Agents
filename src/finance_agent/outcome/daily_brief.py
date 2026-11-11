@@ -634,7 +634,11 @@ def run_daily_brief(
         raw, meta = complete_text(
             [{"role": "user", "content": prompt}],
             purpose="daily_brief",
-            max_tokens=4000,
+            # reasoning 与正文共享配额的端点预算必须覆盖 reasoning 峰值
+            # （incident 017 doctrine）：2026-11-11 实跑 4000 被 reasoning 吃空、
+            # 正文为空 → empty_llm_output（finish_reason=length，续写前置条件
+            # 「正文非空」不满足也无法自救）
+            max_tokens=16000,
             temperature=0.3,
             trace={"name": "daily_brief", "metadata": {"brief_date": day}},
         )

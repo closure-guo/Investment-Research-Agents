@@ -226,7 +226,9 @@ def test_llm_success_persists_and_writes_file(seeded_dbs, tmp_path, monkeypatch)
     assert out["status"] == "ok"
     assert out["model"] == "openai/deepseek-v4.1-flash"
     assert calls[0]["purpose"] == "daily_brief"
-    assert calls[0]["max_tokens"] == 4000
+    # 预算必须覆盖 reasoning 峰值（incident 017 doctrine）：2026-11-11 生产实跑
+    # 4000 全被 reasoning 吃空、正文为空 → empty_llm_output（finish_reason=length）
+    assert calls[0]["max_tokens"] >= 16000
     row = get_daily_brief(AS_OF, db_path=seeded_dbs["sessions_db_path"])
     assert row is not None and row["status"] == "ok"
     assert row["prompt_version"] == "3"
