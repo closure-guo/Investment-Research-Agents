@@ -42,6 +42,22 @@ _BREAKDOWN_WORDS: tuple[str, ...] = ("跌破", "回落至", "失守", "回撤至
 # 方向词与数值的最大字符距离（词尾 → 数值起点；触发条目为 1-3 个短句）
 _BREAK_WORD_WINDOW = 12
 
+# 分句/并列边界字符：方向词与数值间出现任一字符即不得绑定（002040 11-11
+# 双池阻断实证）。两族误绑形态：①主池「（连续两日收盘站上才暂停减仓并重评）；
+# 7.6014 为唯一操作清仓加速线」——站上属于 8.22895 的触发条件，隔「）；」
+# 10 字符（窗口 12 内）抢绑 7.6014 → 合法下破止损被判「上破触发不高于收盘」；
+# ②微盘「等待 8.05 放量站稳或 7.73 收盘跌破」——站稳属于 8.05（后置修饰），
+# 隔「或」抢绑 7.73。两族的 retry 改写文本必然产生新 source_text → 恶化判据
+# 硬阻断，模型无法自愈；绑定保守化（宁可少检不误拦）符合本门禁 precision-first
+# 的既有取向（#254/#337/600845/600198 同族）。
+_BINDING_BLOCKERS = '。；;）)】」"、，,或'
+
+
+def _binding_blocked(text: str, word_end: int, num_start: int) -> bool:
+    """方向词（词尾 word_end）与数值（起点 num_start）之间是否存在分句边界。"""
+    return any(ch in _BINDING_BLOCKERS for ch in text[word_end:num_start])
+
+
 # 点名指标与数值的最大字符距离（任一方向）
 _NAMED_WINDOW = 15
 
@@ -513,7 +529,10 @@ def _directions_in_window(text: str, num_start: int) -> set[str]:
                 pos = found + 1
                 if found > 0 and text[found - 1] == "已":
                     continue
-                if 0 <= num_start - (found + len(word)) <= _BREAK_WORD_WINDOW:
+                word_end = found + len(word)
+                if 0 <= num_start - word_end <= _BREAK_WORD_WINDOW and not _binding_blocked(
+                    text, word_end, num_start
+                ):
                     out.add(direction)
     return out
 
@@ -525,6 +544,9 @@ def _break_direction(text: str, num_start: int) -> str | None:
     「突破20.58确认/跌破16.73证伪」的 16.73 距「跌破」2 字符、距「突破」
     11 字符（窗口 12 内）→ up 抢占 → 跌破触发（16.73 < 收盘，有效前瞻门槛）
     被误判「上破触发价不高于收盘」空洞形态阻断。
+
+    分句边界阻断（002040 11-11 双池实证）：词与数值间隔「）；」「或」等分句/
+    并列边界时不得绑定——越界词属于前一个价位的触发条件（见 _BINDING_BLOCKERS）。
     """
     best: tuple[int, str] | None = None
     for words, direction in ((_BREAKOUT_WORDS, "up"), (_BREAKDOWN_WORDS, "down")):
@@ -534,8 +556,13 @@ def _break_direction(text: str, num_start: int) -> str | None:
                 pos = found + 1
                 if found > 0 and text[found - 1] == "已":
                     continue
-                dist = num_start - (found + len(word))
-                if 0 <= dist <= _BREAK_WORD_WINDOW and (best is None or dist < best[0]):
+                word_end = found + len(word)
+                dist = num_start - word_end
+                if (
+                    0 <= dist <= _BREAK_WORD_WINDOW
+                    and not _binding_blocked(text, word_end, num_start)
+                    and (best is None or dist < best[0])
+                ):
                     best = (dist, direction)
     return best[1] if best else None
 
