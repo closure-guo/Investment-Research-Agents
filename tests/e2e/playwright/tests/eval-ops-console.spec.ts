@@ -56,14 +56,17 @@ const JOB_IDS = [
   'decision_settle_daily',
   'earnings_fetch_daily',
   'paper_execute_daily',
+  'paper_execute_microcap',
   'earnings_triage_daily',
   'paper_settle_daily',
   'auto_pool_analysis_daily',
+  'paper_settle_microcap',
   'event_settle_daily',
   'daily_marking',
   'metrics_snapshot',
   'integrity_check',
   'microcap_screening_daily',
+  'auto_pool_analysis_microcap',
   'cb_daily',
   'research_reports_daily',
   'rating_changes_daily',
@@ -144,7 +147,7 @@ async function cohortAuditCount(request: APIRequestContext): Promise<number> {
 }
 
 test.describe('评估运维分区（设置中心）', () => {
-  test('分区渲染任务卡片（当前 30 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
+  test('分区渲染任务卡片（当前 33 个 job）与「调度器未运行」显式横幅', async ({ page }) => {
     await openEvalOps(page)
 
     // TESTING=1 → 调度器未启动：显式提示，不得空白、不得以空列表冒充「一切正常」
