@@ -70,8 +70,14 @@ from finance_agent.data.research_reports import (
     run_reports_daily,
 )
 from finance_agent.data.snapshot_job import run_market_snapshot_batch
-from finance_agent.execution.brokers.paper import run_paper_settle_daily
-from finance_agent.execution.driver import run_execution_daily
+from finance_agent.execution.brokers.paper import (
+    run_paper_settle_daily,
+    run_paper_settle_microcap,
+)
+from finance_agent.execution.driver import (
+    run_execution_daily,
+    run_execution_microcap,
+)
 from finance_agent.factors.builtin import run_factor_builtin_register
 from finance_agent.factors.diagnostics import run_factor_diagnostics
 from finance_agent.factors.harvest import run_factor_harvest_until_drained
@@ -101,7 +107,10 @@ from finance_agent.outcome.track_record.job import settle_open_predictions
 from finance_agent.outcome.track_record.marking import persist_metrics_snapshot, run_daily_marking
 from finance_agent.outcome.track_record.model import integrity_check
 from finance_agent.screening.pipeline import run_microcap_lane, run_screening_daily
-from finance_agent.screening.pool_analysis import run_pool_analysis_daily
+from finance_agent.screening.pool_analysis import (
+    run_pool_analysis_daily,
+    run_pool_analysis_microcap_daily,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +296,16 @@ def _paper_execute_job() -> None:
     _with_retry("paper_execute_daily", "paper execute", run_execution_daily)
 
 
+def _paper_execute_microcap_job() -> None:
+    """add-microcap-lane-analysis：小票账本执行日批（16:12，主档执行之后、预告分诊之前）。
+
+    ``run_execution_microcap``：与主档差异仅三处——lane='microcap'、单票上限 5%、
+    滑点档 +1；写第二账本（独立库），其余语义（次一交易日开盘 / 幂等 / 快照守卫 /
+    regime）与主档一致，经同一 ``_with_retry`` 入口（单飞锁 + 运行历史 + 3 次退避）。
+    """
+    _with_retry("paper_execute_microcap", "paper execute microcap", run_execution_microcap)
+
+
 def _paper_settle_job() -> None:
     """add-paper-broker：paper 仿真账户日结算（16:20，settle 之后、marking 之前）。
 
@@ -303,6 +322,15 @@ def _auto_pool_analysis_job() -> None:
     不等待分析完成。空池/过期池显式 skipped，不消费 LLM、不建会话。
     """
     _with_retry("auto_pool_analysis_daily", "auto pool analysis", run_pool_analysis_daily)
+
+
+def _paper_settle_microcap_job() -> None:
+    """add-microcap-lane-analysis：小票账本结算日批（16:24，自动选股分析之后、事件结算之前）。
+
+    ``run_paper_settle_microcap``：与主档同口径读快照收盘价 mark 持仓，写独立库
+    ``paper_equity``；快照库为空时返回跳过摘要（job 记 ok），与主档 paper 结算互不依赖。
+    """
+    _with_retry("paper_settle_microcap", "paper settle microcap", run_paper_settle_microcap)
 
 
 def _marking_job() -> None:
@@ -328,6 +356,19 @@ def _microcap_lane_job() -> None:
     **v1 不接执行链、不产生订单**（observation_only）。
     """
     _with_retry("microcap_screening_daily", "microcap screening daily", run_microcap_lane)
+
+
+def _auto_pool_analysis_microcap_job() -> None:
+    """add-microcap-lane-analysis：小票池自动分析日批（16:47，小票通道之后、转债之前）。
+
+    ``run_pool_analysis_microcap_daily``：读当日成功 microcap 池 → 时效性校验 →
+    建会话并入 AnalyzeQueue（跨池去重）；任务只等待入队，不等待分析完成。
+    """
+    _with_retry(
+        "auto_pool_analysis_microcap",
+        "auto pool analysis microcap",
+        run_pool_analysis_microcap_daily,
+    )
 
 
 def _cb_daily_job() -> None:
@@ -585,6 +626,16 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
+    # add-microcap-lane-analysis：小票账本执行（16:12）——主档执行（16:10）之后、
+    # 预告分诊（16:15）之前；lane='microcap' + 单票上限 5% + 滑点档 +1，写第二账本
+    # （独立库），与主档执行链互不依赖。
+    scheduler.add_job(
+        _paper_execute_microcap_job,
+        _cron_for("paper_execute_microcap"),
+        id="paper_execute_microcap",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
     # add-event-driven-lane：预告分诊（16:15）——抓取（16:05）之后、paper 结算（16:20）
     # 之前；未分诊为空时零 LLM 调用。
     scheduler.add_job(
@@ -609,6 +660,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         _auto_pool_analysis_job,
         _cron_for("auto_pool_analysis_daily"),
         id="auto_pool_analysis_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-microcap-lane-analysis：小票账本结算（16:24）——自动选股分析（16:22）之后、
+    # 事件结算（16:25）之前；与主档同口径 mark 持仓，写独立库 paper_equity。
+    scheduler.add_job(
+        _paper_settle_microcap_job,
+        _cron_for("paper_settle_microcap"),
+        id="paper_settle_microcap",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
@@ -651,6 +711,15 @@ def start_scheduler() -> BackgroundScheduler | None:
         _microcap_lane_job,
         _cron_for("microcap_screening_daily"),
         id="microcap_screening_daily",
+        replace_existing=True,
+        **_JOB_MISFIRE_KW,
+    )
+    # add-microcap-lane-analysis：小票池自动分析（16:47）——小票通道批次（16:45）之后、
+    # 转债日批（16:50）之前；读当日 microcap 池建会话并入 AnalyzeQueue（跨池去重）。
+    scheduler.add_job(
+        _auto_pool_analysis_microcap_job,
+        _cron_for("auto_pool_analysis_microcap"),
+        id="auto_pool_analysis_microcap",
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
@@ -775,9 +844,10 @@ def start_scheduler() -> BackgroundScheduler | None:
         "factor decay monitor 15:45;"
         "factor builtin register 15:50;factor harvest 15:55;"
         "decision settle 16:00;earnings fetch 16:05;paper execute 16:10;"
-        "earnings triage 16:15;paper settle 16:20;event settle 16:25);"
+        "paper execute microcap 16:12;earnings triage 16:15;"
+        "paper settle 16:20;paper settle microcap 16:24;event settle 16:25);"
         "daily marking 16:30;metrics snapshot 16:35;integrity check 16:40;"
-        "microcap screening 16:45;cb daily 16:50;"
+        "microcap screening 16:45;auto pool analysis microcap 16:47;cb daily 16:50;"
         "monthly: memory extract day-1 09:00 / factor proposal day-1 10:00;"
         "cohort batch %02d:%02d(开关关闭时记 skipped-disabled,零 LLM 调用)",
         cohort["hour"],

@@ -41,8 +41,9 @@ class TestRegistry:
     def test_ids_labels_funcs_schedules_aligned(self):
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
-            len(JOB_IDS) == 30
-        )  # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
+            len(JOB_IDS) == 33
+        )  # 30→33：+paper_execute_microcap(16:12)/paper_settle_microcap(16:24)/auto_pool_analysis_microcap(16:47)（小票执行/结算/池自动分析，add-microcap-lane-analysis T6）
+        # 6→8：+factor_decay_monitor(1) +paper_settle_daily(12)；8→9：+screening_daily；
         # 9→10：+paper_execute_daily（执行链日批接线，add-execution-chain-driver）；
         # 10→12：+memory_extract_monthly +factor_proposal_monthly（月批接线）；
         # 12→13：+factor_builtin_register（内置因子注册接线，wire-builtin-factor-registration）；
@@ -67,7 +68,7 @@ class TestRegimeDailyRegistration:
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
             len(JOB_IDS)
-            == 30  # 29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
+            == 33  # 30→33：+paper_execute_microcap/paper_settle_microcap/auto_pool_analysis_microcap（add-microcap-lane-analysis T6，16:12/16:24/16:47）；29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
         )  # 14→15：+regime_daily；15→18：+事件线三件；18→19：+microcap_screening_daily（小票通道）；10→12：+月批；12→13：+内置注册；13→14：+因子收割；19→20：+cb_daily（转债日批）
         assert (
             JOB_IDS.index("market_snapshot_daily")
@@ -99,7 +100,7 @@ class TestPaperExecuteDailyRegistration:
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
             len(JOB_IDS)
-            == 30  # 29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
+            == 33  # 30→33：+paper_execute_microcap/paper_settle_microcap/auto_pool_analysis_microcap（add-microcap-lane-analysis T6，16:12/16:24/16:47）；29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
         )  # 9→10：+paper_execute_daily；10→12：+月批两任务；12→13：+内置注册；
         # 13→14：+因子收割；14→15：+regime_daily（拥挤度）；15→18：+事件线三件；18→19：+小票通道；
         # 19→20：+cb_daily（转债日批，16:50）
@@ -139,7 +140,7 @@ class TestScreeningDailyRegistration:
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
             len(JOB_IDS)
-            == 30  # 29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
+            == 33  # 30→33：+paper_execute_microcap/paper_settle_microcap/auto_pool_analysis_microcap（add-microcap-lane-analysis T6，16:12/16:24/16:47）；29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
         )  # 8→9：+screening_daily；9→10：+paper_execute_daily；10→12：+月批；12→13：+内置注册；
         # 13→14：+收割；14→15：+regime_daily；15→18：+事件线三件；19→20：+cb_daily（转债日批）
         assert (
@@ -260,7 +261,7 @@ class TestMonthlyBatchRegistration:
         assert set(JOB_IDS) == set(JOB_LABELS) == set(JOB_FUNCS) == set(SCHEDULES)
         assert (
             len(JOB_IDS)
-            == 30  # 29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
+            == 33  # 30→33：+paper_execute_microcap/paper_settle_microcap/auto_pool_analysis_microcap（add-microcap-lane-analysis T6，16:12/16:24/16:47）；29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
         )  # 12→13：+内置注册；13→14：+因子收割；18→19：+小票通道；28→29：+factor_diagnostics_daily（17:15）
         # 29→30：+factor_revival_daily（拒绝池复苏，add-rejected-factor-revival，17:10）
         # 19→20：+cb_daily（转债日批，16:50 插于小票通道与 cohort 之间）
@@ -268,8 +269,9 @@ class TestMonthlyBatchRegistration:
         # 月批附于末尾：月批两任务下标不动；cohort 因日批链内插入后移
         assert JOB_IDS[-2:] == ("memory_extract_monthly", "factor_proposal_monthly")
         assert (
-            JOB_IDS.index("cohort_batch") == 26
-        )  # 9→10：+内置注册；13→14：+因子收割（15:55 插入其前）；18→19：+小票通道（16:45 插入其前）；
+            JOB_IDS.index("cohort_batch") == 29
+        )  # 26→29：+小票执行/结算/池自动分析三件（16:12/16:24/16:47 插入其前，add-microcap-lane-analysis T6）；
+        # 9→10：+内置注册；13→14：+因子收割（15:55 插入其前）；18→19：+小票通道（16:45 插入其前）；
         # 26：+factor_revival_daily（17:10 插入诊断之前，add-rejected-factor-revival）
         # 29→30 段：+factor_diagnostics_daily（17:15 插入其前，add-factor-diagnostics-batch）
         # 14→15：+regime_daily（15:35 插入其前）；

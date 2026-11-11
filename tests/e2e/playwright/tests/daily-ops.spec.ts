@@ -142,14 +142,16 @@ test('当日时间线：注册表全部任务按排程时刻升序渲染，每�
   //  + add-foreign-broker-sentiment 的外资快讯（17:05）
   //  + add-auto-pool-analysis-daily-brief 的自动选股分析（16:22）与每日汇报（20:30）
   //  + add-factor-diagnostics-batch 的因子诊断读数（17:15，日批窗口后 cohort 前）
-  //  + add-rejected-factor-revival 的拒绝池复苏（17:10，外资快讯与诊断之间）= 30）
+  //  + add-rejected-factor-revival 的拒绝池复苏（17:10，外资快讯与诊断之间）
+  //  + add-microcap-lane-analysis 的小票执行（16:12）/小票结算（16:24）/
+  //    小票池自动分析（16:47）= 33）
   const items = page.locator('[data-testid^="page-shell-batch-"]')
-  await expect(items).toHaveCount(30)
+  await expect(items).toHaveCount(33)
 
   // 排程升序（数据驱动）：09:00/10:00 月批 → 15:30 行情快照 → 15:35 拥挤度 →
   // 15:40 选股 → 15:45 因子衰减监控 → 15:50 内置因子注册 → 15:55 因子收割 →
-  // 16:00 判定 → 16:05 预告抓取 → 16:10 仿真执行 → 16:15 预告分诊 → 16:20 paper 结算
-  // → 16:22 自动选股分析 → 16:25 事件结算 → … → 16:45 小票通道 → 16:50 转债日批 →
+  // 16:00 判定 → 16:05 预告抓取 → 16:10 仿真执行 → 16:12 小票执行 → 16:15 预告分诊 → 16:20 paper 结算
+  // → 16:22 自动选股分析 → 16:24 小票结算 → 16:25 事件结算 → … → 16:45 小票通道 → 16:47 小票池自动分析 → 16:50 转债日批 →
   // 16:52 研报元数据 → 16:54 评级变动 → 16:56 一致预期快照 → 16:58 研报投喂 →
   // 17:00 分析师事后检验 → 17:05 外资快讯 → 17:10 拒绝池复苏 → 17:15 因子诊断读数 → 18:00 cohort →
   // 20:30 每日汇报
@@ -171,41 +173,47 @@ test('当日时间线：注册表全部任务按排程时刻升序渲染，每�
   await expect(items.nth(7)).toContainText('因子收割')
   await expect(items.nth(9)).toContainText('16:05')
   await expect(items.nth(9)).toContainText('业绩预告抓取')
-  await expect(items.nth(11)).toContainText('16:15')
-  await expect(items.nth(11)).toContainText('预告分诊')
-  await expect(items.nth(13)).toContainText('16:22')
-  await expect(items.nth(13)).toContainText('自动选股分析')
-  await expect(items.nth(14)).toContainText('16:25')
-  await expect(items.nth(14)).toContainText('事件结算')
-  await expect(items.nth(18)).toContainText('16:45')
-  await expect(items.nth(18)).toContainText('小票通道')
-  await expect(items.nth(19)).toContainText('16:50')
-  await expect(items.nth(19)).toContainText('转债日批')
-  await expect(items.nth(20)).toContainText('16:52')
-  await expect(items.nth(20)).toContainText('研报元数据')
-  await expect(items.nth(21)).toContainText('16:54')
-  await expect(items.nth(21)).toContainText('评级变动')
-  await expect(items.nth(22)).toContainText('16:56')
-  await expect(items.nth(22)).toContainText('一致预期快照')
-  await expect(items.nth(23)).toContainText('16:58')
-  await expect(items.nth(23)).toContainText('研报投喂')
-  await expect(items.nth(24)).toContainText('17:00')
-  await expect(items.nth(24)).toContainText('分析师事后检验')
-  await expect(items.nth(25)).toContainText('17:05')
-  await expect(items.nth(25)).toContainText('外资快讯')
-  await expect(items.nth(26)).toContainText('17:10')
-  await expect(items.nth(26)).toContainText('拒绝池复苏')
-  await expect(items.nth(27)).toContainText('17:15')
-  await expect(items.nth(27)).toContainText('因子诊断读数')
-  await expect(items.nth(28)).toContainText('18:00')
-  await expect(items.nth(28)).toContainText('cohort 跑批')
-  await expect(items.nth(29)).toContainText('20:30')
-  await expect(items.nth(29)).toContainText('每日汇报')
+  await expect(items.nth(11)).toContainText('16:12')
+  await expect(items.nth(11)).toContainText('小票执行')
+  await expect(items.nth(12)).toContainText('16:15')
+  await expect(items.nth(12)).toContainText('预告分诊')
+  await expect(items.nth(14)).toContainText('16:22')
+  await expect(items.nth(14)).toContainText('自动选股分析')
+  await expect(items.nth(15)).toContainText('16:24')
+  await expect(items.nth(15)).toContainText('小票结算')
+  await expect(items.nth(16)).toContainText('16:25')
+  await expect(items.nth(16)).toContainText('事件结算')
+  await expect(items.nth(20)).toContainText('16:45')
+  await expect(items.nth(20)).toContainText('小票通道')
+  await expect(items.nth(21)).toContainText('16:47')
+  await expect(items.nth(21)).toContainText('小票池自动分析')
+  await expect(items.nth(22)).toContainText('16:50')
+  await expect(items.nth(22)).toContainText('转债日批')
+  await expect(items.nth(23)).toContainText('16:52')
+  await expect(items.nth(23)).toContainText('研报元数据')
+  await expect(items.nth(24)).toContainText('16:54')
+  await expect(items.nth(24)).toContainText('评级变动')
+  await expect(items.nth(25)).toContainText('16:56')
+  await expect(items.nth(25)).toContainText('一致预期快照')
+  await expect(items.nth(26)).toContainText('16:58')
+  await expect(items.nth(26)).toContainText('研报投喂')
+  await expect(items.nth(27)).toContainText('17:00')
+  await expect(items.nth(27)).toContainText('分析师事后检验')
+  await expect(items.nth(28)).toContainText('17:05')
+  await expect(items.nth(28)).toContainText('外资快讯')
+  await expect(items.nth(29)).toContainText('17:10')
+  await expect(items.nth(29)).toContainText('拒绝池复苏')
+  await expect(items.nth(30)).toContainText('17:15')
+  await expect(items.nth(30)).toContainText('因子诊断读数')
+  await expect(items.nth(31)).toContainText('18:00')
+  await expect(items.nth(31)).toContainText('cohort 跑批')
+  await expect(items.nth(32)).toContainText('20:30')
+  await expect(items.nth(32)).toContainText('每日汇报')
 
   // 每项状态徽章 ∈ 五态（成功/失败/未跑/运行中/跳过；ops 时钟已冻结 + job_runs 已清
   // （beforeAll），徽章确定性落在「未跑」；「今日漏跑」覆盖层的确定性覆盖归
   // ops-missed-badge.spec）
-  for (let index = 0; index < 30; index += 1) {
+  for (let index = 0; index < 33; index += 1) {
     const badge = items.nth(index).getByTestId('status-badge')
     await expect(badge).toHaveAttribute('data-status', /^(active|failed|retired|running|degraded)$/)
     await expect(badge).toHaveText(/^(成功|失败|未跑|运行中|跳过)$/)

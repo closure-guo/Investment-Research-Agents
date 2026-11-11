@@ -72,6 +72,18 @@ def persist_prediction_from_accumulated(
                 "参考价不可得（quote 与 kline 均无）: %s；判定时由行情派生结算入场价", stock_code
             )
         symbol = f"{stock_code}.SH" if str(stock_code).startswith("6") else f"{stock_code}.SZ"
+        # lane 归属：按会话反查池（add-microcap-lane-analysis）——查不到回退 main，
+        # 反查失败不阻断落库（旁路铁律）。
+        try:
+            from finance_agent.screening.pool_analysis import (
+                POOL_MAIN,
+                get_pool_by_session,
+            )
+
+            lane = get_pool_by_session(session_id) or POOL_MAIN
+        except Exception:  # noqa: BLE001 -- 旁路：归属失败不阻断业务落库
+            logger.exception("lane 反查失败，回退 main")
+            lane = POOL_MAIN
         insert_prediction(
             {
                 "source_type": "live",
@@ -98,6 +110,9 @@ def persist_prediction_from_accumulated(
                 # add-watch-trigger-tracking：会话关联 + watch 双向触发位（写入即冻结）。
                 # 触发位仅取终稿决策结构化字段；不解析 reeval_triggers 自由文本。
                 "session_id": session_id,
+                # add-microcap-lane-analysis：池归属（microcap 池会话反查标注；
+                # 查不到/反查失败已在上文回退 main）。
+                "lane": lane,
                 # 触发位仅 watch 决策落数值；buy/sell/hold 等非 watch 决策强制 NULL
                 # （spec: 观点数据模型——未申报或非 watch 决策时为 NULL）。
                 "trigger_high": decision.get("trigger_high") if action == "watch" else None,

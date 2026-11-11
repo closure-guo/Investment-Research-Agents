@@ -46,8 +46,14 @@ from finance_agent.session_store import (
 logger = logging.getLogger("finance_agent.screening.pool_analysis")
 
 AUTO_POOL_DISPLAY_SUFFIX = "自动选股分析"
+AUTO_POOL_MICROCAP_DISPLAY_SUFFIX = "小票池自动分析"
 DEFAULT_MAX_SYMBOLS = 10
 MAX_SYMBOLS_CAP = 100
+
+# 池归属常量（add-microcap-lane-analysis）：运行行标注来源档位；列不进主键，
+# (trade_date, symbol) 全局幂等键保持不变——跨池去重靠它实现。
+POOL_MAIN = "main"
+POOL_MICROCAP = "microcap"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS pool_analysis_runs (
@@ -56,11 +62,17 @@ CREATE TABLE IF NOT EXISTS pool_analysis_runs (
   session_id TEXT NOT NULL,
   status TEXT NOT NULL,
   error TEXT,
+  pool TEXT NOT NULL DEFAULT 'main',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (trade_date, symbol)
 )
 """
+
+# 运行表增量列（ALTER 补齐；模式照抄 screening/store.py 的 _ensure_batch_columns）。
+_RUNS_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("pool", "ALTER TABLE pool_analysis_runs ADD COLUMN pool TEXT NOT NULL DEFAULT 'main'"),
+)
 
 
 def _default_db_path() -> Path:
@@ -81,6 +93,10 @@ def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
 def init_pool_analysis_runs(db_path: str | Path | None = None) -> None:
     with _connect(db_path) as conn:
         conn.execute(_SCHEMA)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(pool_analysis_runs)")}
+        for name, ddl in _RUNS_COLUMN_MIGRATIONS:
+            if name not in columns:
+                conn.execute(ddl)
         conn.commit()
 
 
@@ -95,24 +111,28 @@ def record_pool_analysis_run(
     status: str = "queued",
     error: str | None = None,
     *,
+    pool: str = POOL_MAIN,
     db_path: str | Path | None = None,
 ) -> None:
-    """写入/更新一条自动分析运行行（同 (trade_date, symbol) 幂等 upsert）。"""
+    """写入/更新一条自动分析运行行（同 (trade_date, symbol) 幂等 upsert）。
+
+    ON CONFLICT 更新不含 ``pool``——首次写入后归属不变，防重派改池。
+    """
     init_pool_analysis_runs(db_path)
     now = _now()
     with _connect(db_path) as conn:
         conn.execute(
             """
             INSERT INTO pool_analysis_runs
-                (trade_date, symbol, session_id, status, error, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (trade_date, symbol, session_id, status, error, pool, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trade_date, symbol) DO UPDATE SET
                 session_id = excluded.session_id,
                 status = excluded.status,
                 error = excluded.error,
                 updated_at = excluded.updated_at
             """,
-            (trade_date, symbol, session_id, status, error, now, now),
+            (trade_date, symbol, session_id, status, error, pool, now, now),
         )
         conn.commit()
 
@@ -123,23 +143,46 @@ def get_pool_analysis_run(
     init_pool_analysis_runs(db_path)
     with _connect(db_path) as conn:
         row = conn.execute(
-            "SELECT trade_date, symbol, session_id, status, error, created_at, updated_at "
+            "SELECT trade_date, symbol, session_id, status, error, pool, created_at, updated_at "
             "FROM pool_analysis_runs WHERE trade_date = ? AND symbol = ?",
             (trade_date, symbol),
         ).fetchone()
     return dict(row) if row else None
 
 
-def list_pool_analysis_runs(
-    trade_date: str, *, db_path: str | Path | None = None
-) -> list[dict[str, Any]]:
+def get_pool_by_session(session_id: str, *, db_path: str | Path | None = None) -> str | None:
+    """按会话 id 反查运行行池归属（add-microcap-lane-analysis T2）。
+
+    命中返回 POOL_MAIN / POOL_MICROCAP；无行返回 None（调用方回退 main）。
+    """
     init_pool_analysis_runs(db_path)
     with _connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT trade_date, symbol, session_id, status, error, created_at, updated_at "
-            "FROM pool_analysis_runs WHERE trade_date = ? ORDER BY symbol",
-            (trade_date,),
-        ).fetchall()
+        row = conn.execute(
+            "SELECT pool FROM pool_analysis_runs WHERE session_id = ? "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (str(session_id or "").strip(),),
+        ).fetchone()
+    return str(row["pool"]) if row else None
+
+
+def list_pool_analysis_runs(
+    trade_date: str,
+    *,
+    pool: str | None = None,
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    init_pool_analysis_runs(db_path)
+    sql = (
+        "SELECT trade_date, symbol, session_id, status, error, pool, created_at, updated_at "
+        "FROM pool_analysis_runs WHERE trade_date = ?"
+    )
+    params: list[str] = [trade_date]
+    if pool is not None:
+        sql += " AND pool = ?"
+        params.append(pool)
+    sql += " ORDER BY symbol"
+    with _connect(db_path) as conn:
+        rows = conn.execute(sql, tuple(params)).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -257,6 +300,65 @@ def _accept_batch_date(batch_date: str, day: str, calendar: list[str] | None) ->
     return bool(earlier) and earlier[-1] == batch_date
 
 
+def _rank_key(row: dict[str, Any]) -> tuple[int, str]:
+    return int(row.get("rank") or 10**9), str(row.get("symbol") or "")
+
+
+def _select_main(pool_rows: list[dict[str, Any]], cap: int) -> list[dict[str, Any]]:
+    """主档选样（legacy，先截断后查 existing）：rank 升序取前 cap 名整体入选。
+
+    当日是否已有 queued/completed 运行行不在此处判定，交由编排循环体逐行跳过
+    （issue #456 幂等）——已分析行占用配额，同日重跑为纯 no-op（started=0），
+    rank 之后的新标的轮不到：单日处理量被首次 cap 封顶，对调度双发有隐性成本
+    保护。主档行为必须与 add-microcap-lane-analysis 之前逐字节一致（主档回归
+    红线），不得随小票通道的选样语义联动变化。
+    """
+    return sorted(pool_rows, key=_rank_key)[:cap]
+
+
+def _select_microcap(
+    day: str,
+    pool_rows: list[dict[str, Any]],
+    cap: int,
+    pool: str,
+    db_path: str | Path | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """小票选样（跳过 + 顺延补位，补位以本池自有行数封顶）。
+
+    窗口段：rank 升序扫前 cap 名，当日已有 queued/completed 运行行（任意池）
+    → 跳过、计入 skipped、不占配额（跨池去重靠 (trade_date, symbol) 全局幂等键）；
+    failed/dispatch_failed/session_failed/无行 → 入选。
+    补位段：own_count = 本池当日运行行数（``list_pool_analysis_runs(day, pool=)``）；
+    rank cap 名之后按序扫描，每名先查 ``len(selected) + own_count >= cap`` 即止
+    ——重跑时 own_count 已记满本池当日处理量，补位自动归零（不双烧）；首跑窗口
+    被主档重叠占位时按序补足至 cap。返回 (selected, skipped_existing)。
+    """
+    ordered = sorted(pool_rows, key=_rank_key)
+    selected: list[dict[str, Any]] = []
+    skipped = 0
+    for row in ordered[:cap]:
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        existing = get_pool_analysis_run(day, symbol, db_path=db_path)
+        if existing is not None and existing.get("status") in ("queued", "completed"):
+            skipped += 1
+            continue
+        selected.append(row)
+    own_count = len(list_pool_analysis_runs(day, pool=pool, db_path=db_path))
+    for row in ordered[cap:]:
+        if len(selected) + own_count >= cap:
+            break
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        existing = get_pool_analysis_run(day, symbol, db_path=db_path)
+        if existing is not None and existing.get("status") in ("queued", "completed"):
+            continue
+        selected.append(row)
+    return selected, skipped
+
+
 def prepare_pool_analysis_batch(
     *,
     as_of: str | None = None,
@@ -264,8 +366,22 @@ def prepare_pool_analysis_batch(
     enqueue: Callable[[str, str], bool] | None = None,
     db_path: str | Path | None = None,
     screening_db_path: str | Path | None = None,
+    pool: str = POOL_MAIN,
 ) -> dict[str, Any]:
     """读取当日池并准备自动分析批次；返回可审计摘要。
+
+    ``pool`` 指定池档位（``'main'`` 主档 / ``'microcap'`` 小票通道，
+    add-microcap-lane-analysis）：决定读哪一档 ``latest_successful_pool``、会话
+    标题后缀（``小票池自动分析``）与会话事件 ``source``；运行行归属列随之落
+    ``pool``。跨池去重以 ``(trade_date, symbol)`` 全局幂等键为准（pool 不参与）。
+
+    选样按池档位分支（add-microcap-lane-analysis T5 修正）：主档保持「先截断后查
+    existing」的 legacy 语义——前 cap 名整体入选、已有 ``queued``/``completed``
+    运行行的标的在循环体逐行跳过（计入 ``skipped_existing``），同日重跑为纯
+    no-op；小票通道为「跳过 + 顺延补位」且补位以本池自有行数封顶——窗口段跳过
+    queued/completed（任意池）不占配额、由 rank 下一名补足 N，补位段以
+    ``own_count``（本池当日运行行数）封顶，重跑不双烧。``failed`` /
+    ``dispatch_failed`` / ``session_failed`` 行放行入选，由下方循环体重派。
 
     ``enqueue(symbol, session_id)`` 返回 True 表示已交给队列；False/异常记
     ``dispatch_failed`` 留痕，补跑重派一律创建全新会话（issue #546：终态会话
@@ -289,16 +405,18 @@ def prepare_pool_analysis_batch(
     # 全表对账（含历史僵尸行）；结果计数随摘要披露
     result["reconciled"] = reconcile_pool_analysis_runs(None, db_path=db_path)
 
-    successful = latest_successful_pool(db_path=screening_db_path)
+    successful = latest_successful_pool(db_path=screening_db_path, pool=pool)
     if successful is None:
         result["status"] = "skipped_empty_pool"
         return result
 
     batch = successful.get("batch") or {}
     batch_date = str(batch.get("trade_date") or "")
-    pool = list(successful.get("pool") or [])
+    # 池行改名 pool_rows（add-microcap-lane-analysis T5）：形参 pool 已指池档位，
+    # 不再复用同名局部变量装池行——原实现的重绑定会把 list 传进 record 的 pool 列。
+    pool_rows = list(successful.get("pool") or [])
     result["batch_date"] = batch_date
-    result["pool_size"] = len(pool)
+    result["pool_size"] = len(pool_rows)
 
     if not _accept_batch_date(batch_date, day, read_snapshot_calendar()):
         result["status"] = "skipped_stale_pool"
@@ -310,19 +428,33 @@ def prepare_pool_analysis_batch(
             batch_date,
             day,
         )
-    if not pool:
+    if not pool_rows:
         result["status"] = "skipped_empty_pool"
         return result
 
-    selected = sorted(
-        pool,
-        key=lambda row: (int(row.get("rank") or 10**9), str(row.get("symbol") or "")),
-    )[:cap]
+    # 选样按池档位分支（add-microcap-lane-analysis T5 修正）：
+    # - 主档：legacy「先截断后查 existing」——前 cap 名整体入选，已有
+    #   queued/completed 运行行的标的在下方循环体逐行跳过（重跑纯 no-op）；
+    #   主档行为与 add-microcap-lane-analysis 之前逐字节一致（主档回归红线）。
+    # - 小票：窗口跳过 + 顺延补位，补位以本池自有行数封顶（重跑不双烧）；
+    #   补位不足时 selected 如实披露实际数。
+    if pool == POOL_MICROCAP:
+        selected, skipped_existing = _select_microcap(day, pool_rows, cap, pool, db_path)
+        result["skipped_existing"] += skipped_existing
+    else:
+        selected = _select_main(pool_rows, cap)
     result["selected"] = len(selected)
 
     removed = screening_freshness_removals(selected, batch_date)
     result["removed"] = removed
     removed_symbols = {str(item.get("symbol") or "") for item in removed}
+
+    # 会话标题后缀与 source 按池档位切换（add-microcap-lane-analysis T5）：
+    # 小票批标题带「小票池自动分析」、source=auto_pool_microcap，与主档批次区分。
+    display_suffix = (
+        AUTO_POOL_MICROCAP_DISPLAY_SUFFIX if pool == POOL_MICROCAP else AUTO_POOL_DISPLAY_SUFFIX
+    )
+    source = "auto_pool" if pool == POOL_MAIN else "auto_pool_microcap"
 
     for row in selected:
         symbol = str(row.get("symbol") or "").strip()
@@ -345,23 +477,25 @@ def prepare_pool_analysis_batch(
             # 缺名回退纯代码，与池行缺名的 warning 口径一致（pipeline.py 同款兜底）。
             stock_name = str(row.get("stock_name") or "").strip()
             if stock_name:
-                display_name = f"{stock_name}({symbol}) {AUTO_POOL_DISPLAY_SUFFIX}"
+                display_name = f"{stock_name}({symbol}) {display_suffix}"
             else:
-                display_name = f"{symbol} {AUTO_POOL_DISPLAY_SUFFIX}"
+                display_name = f"{symbol} {display_suffix}"
             try:
                 session_id = create_analysis_session(
                     symbol,
                     display_name=display_name,
-                    source="auto_pool",
+                    source=source,
                 )
             except Exception as exc:  # noqa: BLE001 -- 单标的会话失败不阻断整批
                 logger.exception("自动选股分析建会话失败 %s", symbol)
                 record_pool_analysis_run(
-                    day, symbol, "", "session_failed", str(exc), db_path=db_path
+                    day, symbol, "", "session_failed", str(exc), pool=pool, db_path=db_path
                 )
                 result["dispatch_failed"] += 1
                 continue
-            record_pool_analysis_run(day, symbol, session_id, "queued", None, db_path=db_path)
+            record_pool_analysis_run(
+                day, symbol, session_id, "queued", None, pool=pool, db_path=db_path
+            )
 
         if enqueue is None:
             record_pool_analysis_run(
@@ -370,6 +504,7 @@ def prepare_pool_analysis_batch(
                 session_id,
                 "dispatch_failed",
                 "enqueue unavailable",
+                pool=pool,
                 db_path=db_path,
             )
             result["dispatch_failed"] += 1
@@ -379,7 +514,7 @@ def prepare_pool_analysis_batch(
         except Exception as exc:  # noqa: BLE001 -- 入队失败留痕，补跑重派走全新会话
             logger.exception("自动选股分析入队失败 %s", symbol)
             record_pool_analysis_run(
-                day, symbol, session_id, "dispatch_failed", str(exc), db_path=db_path
+                day, symbol, session_id, "dispatch_failed", str(exc), pool=pool, db_path=db_path
             )
             result["dispatch_failed"] += 1
             continue
@@ -390,11 +525,14 @@ def prepare_pool_analysis_batch(
                 session_id,
                 "dispatch_failed",
                 "enqueue returned false",
+                pool=pool,
                 db_path=db_path,
             )
             result["dispatch_failed"] += 1
             continue
-        record_pool_analysis_run(day, symbol, session_id, "queued", None, db_path=db_path)
+        record_pool_analysis_run(
+            day, symbol, session_id, "queued", None, pool=pool, db_path=db_path
+        )
         result["started"] += 1
         result["started_symbols"].append(symbol)
 
@@ -414,3 +552,22 @@ def run_pool_analysis_daily() -> dict[str, Any]:
     if os.getenv("AUTO_POOL_ANALYSIS_ENABLED", "1").strip() == "0":
         return {"status": "skipped_disabled"}
     return _submit(max_symbols=_resolve_max_symbols(None))
+
+
+def _resolve_microcap_max_symbols(max_symbols: int | None) -> int:
+    if max_symbols is None:
+        raw = os.getenv("AUTO_POOL_MICROCAP_MAX_SYMBOLS", "10")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            logger.warning("AUTO_POOL_MICROCAP_MAX_SYMBOLS 非法（%r），回退 10", raw)
+            value = 10
+        max_symbols = value
+    return max(1, min(MAX_SYMBOLS_CAP, int(max_symbols)))
+
+
+def run_pool_analysis_microcap_daily() -> dict[str, Any]:
+    """日批入口（小票池，add-microcap-lane-analysis）：开关解析后提交 API 主循环。"""
+    if os.getenv("AUTO_POOL_MICROCAP_ENABLED", "1").strip() == "0":
+        return {"status": "skipped_disabled"}
+    return _submit(pool=POOL_MICROCAP, max_symbols=_resolve_microcap_max_symbols(None))

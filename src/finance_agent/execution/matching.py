@@ -155,6 +155,7 @@ def slippage_rate_for_amount(
     amount: float | None,
     market_amounts: Sequence[float] | None,
     config: MatchingConfig,
+    tier_bump: int = 0,
 ) -> float:
     """按 M4 取滑点费率：``amount`` 在全市场成交额样本中的分位落档。
 
@@ -166,15 +167,19 @@ def slippage_rate_for_amount(
       本实现以「最保守 = 最大 slippage」语义为准（回测宁可高估成本、不美化收益）。
       空样本判定用 ``is None``/``len(...) == 0``（不依赖真值）：numpy 数组样本
       不得因真值歧义被当作缺失（评审修正 A3）。
+    - ``tier_bump``（add-microcap-lane-analysis）：选中档索引 +N 后
+      clamp 末档（小票账本滑点档位提升；0 = 主档行为不变）。
     """
     if amount is None or market_amounts is None or len(market_amounts) == 0:
         return max(tier.slippage_rate for tier in config.slippage_tiers)
     quantile = sum(1 for sample in market_amounts if sample <= amount) / len(market_amounts)
-    for tier in config.slippage_tiers:
-        if quantile <= tier.quantile_max:
-            return tier.slippage_rate
-    # 防御：配置校验（执行/加载处）已保证末档 quantile_max == 1.0，正常不可达
-    return config.slippage_tiers[-1].slippage_rate
+    tiers = config.slippage_tiers
+    index = next(
+        (i for i, tier in enumerate(tiers) if quantile <= tier.quantile_max),
+        len(tiers) - 1,  # 防御：末档 quantile_max==1.0 保证可达
+    )
+    bumped = min(index + max(0, int(tier_bump)), len(tiers) - 1)
+    return tiers[bumped].slippage_rate
 
 
 def _rejected(reason: str) -> FillResult:
@@ -206,6 +211,7 @@ def match_order(
     config: MatchingConfig,
     position: PositionContext | None = None,
     market_amounts: Sequence[float] | None = None,
+    tier_bump: int = 0,
 ) -> FillResult:
     """A 股撮合唯一实现：校验约束（M3）→ 定价（M1/M4）→ 计费（M5）。
 
@@ -219,6 +225,7 @@ def match_order(
     通过全部约束后：成交价 = ``round(open × (1 ± slippage_rate), 2)``（M1），
     ``slippage_rate`` 由 ``bar.amount`` 经 ``slippage_rate_for_amount`` 取档（M4），
     费用按 M5 计算并把 ``fee`` 记入结果（回放收益序列暂不折算费用，报告披露）。
+    ``tier_bump``（add-microcap-lane-analysis）透传滑点取档（0 = 主档行为不变）。
     """
     if order.qty <= 0:
         raise ValueError(f"委托数量必须为正整数: {order.qty!r}")
@@ -249,7 +256,7 @@ def match_order(
             return _rejected(REASON_T1_SELL_BLOCKED)
 
     # 成交价（M1）+ 滑点取档（M4）
-    slippage_rate = slippage_rate_for_amount(bar.amount, market_amounts, config)
+    slippage_rate = slippage_rate_for_amount(bar.amount, market_amounts, config, tier_bump)
     direction = 1.0 if order.side == "buy" else -1.0
     fill_price = round(bar.open * (1.0 + direction * slippage_rate), 2)
     fee = _compute_fee(fill_price, order.qty, order.side, config)

@@ -62,6 +62,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -90,6 +91,7 @@ from finance_agent.outcome.regime.config import load_regime_config
 from finance_agent.outcome.regime.judgment import judge, staleness
 from finance_agent.outcome.regime.model import latest_regime
 from finance_agent.outcome.track_record.model import list_predictions
+from finance_agent.screening import constraints
 from finance_agent.screening.constraints import LOT_SIZE
 
 logger = logging.getLogger(__name__)
@@ -272,8 +274,13 @@ def _create_signals_from_decisions(
     db_path: str | Path | None,
     execution_db_path: str | Path | None,
     skipped_symbols: set[str],
+    lane: str,
 ) -> tuple[int, int, int]:
-    """① 决策 → 信号（幂等）：返回 ``(新落库信号数, 窗口外存量数, 未审批数)``。"""
+    """① 决策 → 信号（幂等）：返回 ``(新落库信号数, 窗口外存量数, 未审批数)``。
+
+    ``lane``（add-microcap-lane-analysis）：本批次消费的观点通道——仅
+    ``lane`` 同名的观点参与转换（lane 隔离，主档/小票互不消费）。
+    """
     known_decision_ids = {signal.decision_id for signal in list_signals(db_path=execution_db_path)}
     predictions = list_predictions(status="open", limit=_PREDICTION_SCAN_LIMIT, db_path=db_path)
     cutoff = (date.fromisoformat(effective_date) - timedelta(days=window_days)).isoformat()
@@ -284,6 +291,8 @@ def _create_signals_from_decisions(
         predictions,
         key=lambda item: (str(item.get("created_at") or ""), str(item.get("prediction_id") or "")),
     ):
+        if str(row.get("lane") or "main") != lane:
+            continue  # lane 隔离：主档通道不消费 microcap 观点（反之亦然）
         decision_id = str(row.get("prediction_id") or "").strip()
         if not decision_id or decision_id in known_decision_ids:
             continue
@@ -382,14 +391,19 @@ def _plan_long_entries(
     projected_value: float,
     skipped_symbols: set[str],
     regime_multiplier: float = 1.0,
+    single_cap: float = constraints.MAX_SINGLE_POSITION,
 ) -> tuple[list[_PlannedOrder], float]:
     """③-b long 入场：按聚合目标权重与当前持仓差分，只补不缩（delta 整手）。
 
-    ``regime_multiplier``（市场状态总仓位系数，默认 1.0）透传 ``aggregate_targets``。
+    ``regime_multiplier``（市场状态总仓位系数，默认 1.0）透传 ``aggregate_targets``；
+    ``single_cap``（add-microcap-lane-analysis，默认主档 20%）同样透传（小票通道
+    传更紧的上限，主档不传 = 既有行为不变）。
     """
     planned: list[_PlannedOrder] = []
     first_long = _first_signal_by_symbol(signals)
-    for target in aggregate_targets(signals, method="equal", regime_multiplier=regime_multiplier):
+    for target in aggregate_targets(
+        signals, method="equal", regime_multiplier=regime_multiplier, single_cap=single_cap
+    ):
         symbol = target.symbol
         signal = first_long.get(symbol)
         context = contexts.get(symbol)
@@ -477,6 +491,9 @@ def run_execution_daily(
     snapshot_db_path: str | Path | None = None,
     regime_db_path: str | Path | None = None,
     window_days: int = _DEFAULT_BACKLOG_WINDOW_DAYS,
+    lane: str = "main",
+    single_cap: float = constraints.MAX_SINGLE_POSITION,
+    slippage_tier_bump: int = 0,
 ) -> dict[str, Any]:
     """执行链日批入口：五段编排（见模块 docstring），返回摘要字典。
 
@@ -486,7 +503,11 @@ def run_execution_daily(
     ``EXECUTION_DB_PATH``）；``snapshot_db_path`` 快照库（缺省 env
     ``SNAPSHOT_DB_PATH``）；``regime_db_path`` 拥挤度库（缺省 env
     ``REGIME_DB_PATH``）；``window_days`` 存量窗口（自然日，默认 5——窗口外
-    旧观点不回填执行，摘要 ``skipped_backlog`` 留痕）。返回 ``{trade_date,
+    旧观点不回填执行，摘要 ``skipped_backlog`` 留痕）。
+    ``lane``（add-microcap-lane-analysis，默认 "main"）本批次消费的观点通道——
+    lane 隔离，主档/小票互不消费对方观点；``single_cap``（默认主档 20%）单票
+    上限透传聚合；``slippage_tier_bump``（默认 0）滑点档位提升（小票账本；
+    0 = 主档行为不变）。三者默认值均=既有行为。返回 ``{trade_date,
     signals_created, orders_placed, rejected, pending, skipped_reason,
     skipped_symbols, skipped_backlog, skipped_unapproved, regime}``；快照不可用时
     ``skipped_reason="no_snapshot_data"``（信号已照常落库，仅跳过撮合与持仓变动）。
@@ -501,6 +522,7 @@ def run_execution_daily(
         db_path=db_path,
         execution_db_path=execution_db_path,
         skipped_symbols=skipped_symbols,
+        lane=lane,
     )
     summary: dict[str, Any] = {
         "trade_date": trade_date,
@@ -528,7 +550,7 @@ def run_execution_daily(
         value for row in universe if (value := _finite(row.get("amount"))) is not None
     ]
 
-    broker = PaperBroker(db_path=execution_db_path)
+    broker = PaperBroker(db_path=execution_db_path, slippage_tier_bump=slippage_tier_bump)
     cash = broker.query_cash()
     qty_now: dict[str, int] = {
         str(position["symbol"]): int(position["qty"]) for position in broker.query_positions()
@@ -578,6 +600,7 @@ def run_execution_daily(
         projected_value=projected_value,
         skipped_symbols=skipped_symbols,
         regime_multiplier=regime_multiplier,
+        single_cap=single_cap,
     )
     planned.extend(long_planned)
 
@@ -632,3 +655,34 @@ def run_execution_daily(
     summary["pending"] = pending_count
     summary["skipped_symbols"] = sorted(skipped_symbols)
     return summary
+
+
+def run_execution_microcap(
+    as_of: str | None = None,
+    *,
+    db_path: str | Path | None = None,
+    snapshot_db_path: str | Path | None = None,
+    regime_db_path: str | Path | None = None,
+    window_days: int = _DEFAULT_BACKLOG_WINDOW_DAYS,
+) -> dict[str, Any]:
+    """ops 日批入口（小票账本，add-microcap-lane-analysis）：独立库 + 小票经济学。
+
+    与主档差异仅三处：lane='microcap'、单票上限 5%、滑点档 +1；其余语义
+    （次一交易日开盘 / 幂等 / 快照守卫 / regime）与主档一致。
+    """
+    from finance_agent.screening.constraints import (
+        MICROCAP_SLIPPAGE_TIER_BUMP,
+        MICROCAP_SUGGESTED_SINGLE_CAP,
+    )
+
+    return run_execution_daily(
+        as_of,
+        db_path=db_path,
+        execution_db_path=os.getenv("EXECUTION_MICROCAP_DB_PATH", "data/execution_microcap.db"),
+        snapshot_db_path=snapshot_db_path,
+        regime_db_path=regime_db_path,
+        window_days=window_days,
+        lane="microcap",
+        single_cap=MICROCAP_SUGGESTED_SINGLE_CAP,
+        slippage_tier_bump=MICROCAP_SLIPPAGE_TIER_BUMP,
+    )
