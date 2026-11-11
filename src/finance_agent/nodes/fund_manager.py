@@ -23,6 +23,9 @@ FINAL_CHECK_LABELS: tuple[tuple[str, str], ...] = (
     # watch 终稿触发位申报检查（「已打回仍未申报触发位」/「打回后已申报」/
     # 门禁翻转注「…触发位缺失…」随完整性标注一并进 FM 上下文）
     ("final_trigger_check", "触发位申报"),
+    # buy 入场形态软标注（update-conditional-entry-gate-waiver）：逆势立即入场
+    # 未申报条件触发位的建议性注（措辞避开 _FM_INCOMPLETE_MARKERS，report 不渲染）
+    ("final_entry_form_check", "buy 入场形态"),
     # 决策价位门禁复核注（「打回后已修正」/「已打回仍未通过：N 条残留」）随完整性
     # 标注一并进 FM 上下文（report 侧经 _FM_INCOMPLETE_MARKERS 过滤，不渲染）
     ("decision_price_gate", "决策价位校验"),

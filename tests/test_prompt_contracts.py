@@ -512,3 +512,43 @@ def test_risk_judge_text_price_reference_band_rule():
     assert "price_levels" in text
     assert "带外" in text
     assert "定性表述" in text
+
+
+# ── buy 入场形态申报契约（update-conditional-entry-gate-waiver）──────────────
+
+
+class TestBuyEntryFormDeclaration:
+    """601066（2026-11-11）实证：逆势+窗口错配场景立即市价 buy、trigger 零使用。"""
+
+    @pytest.mark.parametrize("name", ["trader", "risk_judge"])
+    def test_declares_entry_form_contract(self, name):
+        md = _load(f"{name}.md")
+        assert "入场形态" in md
+        assert "立即市价入场" in md
+        assert "条件入场" in md
+        # 条件入场由 trigger 字段承载，与 watch 触发位同口径
+        assert "trigger_high" in md and "trigger_low" in md
+        assert "上破确认" in md and "回踩承接" in md
+        # 逆势/窗口错配默认条件入场 + 立即入场须申报理由
+        assert "MA20" in md and "MA60" in md
+        assert "兑现期" in md or "考核窗口" in md
+        assert "MUST" in md and "SHOULD" in md
+
+
+def test_fund_manager_adoption_itemized_list():
+    md = _load("fund_manager")
+    assert "方位采纳清单" in md
+    assert "逐项列明" in md
+    assert "拒绝的具体主张" in md
+    # 仅复述总结论不构成完整采纳声明
+    assert "采纳中性方框架" in md
+    assert "MUST NOT" in md
+
+
+def test_risk_judge_veto_discipline_covers_all_actions():
+    """二选一禁令覆盖 buy/sell（601066 案：缺口话术绕开申报输出 buy）。"""
+    md = _load("risk_judge")
+    assert "任何 action" in md
+    # 弃权修正（以仓位/复核机制承担缺口）MUST 归入缺口申报，不得话术绕开
+    assert "不构成缺口" in md
+    assert "仓位档位" in md and "复核机制" in md

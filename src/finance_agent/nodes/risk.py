@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from typing import cast
 
 from finance_agent.debate_anchors import anchor_stats, check_argument_anchors
 from finance_agent.execution.hysteresis import evaluate_direction_hysteresis
@@ -761,12 +762,54 @@ def risk_judge(state: dict) -> dict:
         "final_inaction_check": final_inaction_check,
         "final_reeval_check": final_reeval_check,
         "final_trigger_check": final_trigger_check,
+        "final_entry_form_check": _entry_form_check(decision, state),
         "decision_price_anomalies": decision_price_anomalies,
         "decision_price_gate": decision_price_gate,
         "decision_hysteresis": decision_hysteresis,
         # 未持有受众的 exit 可执行性门禁判定（add-holdings-context）：trace 可观测，
         # 报告不渲染（report.py 不消费本键）
         "holdings_executability_check": holdings_check,
+    }
+
+
+def _entry_form_check(decision: TradeDecision, state: dict) -> dict:
+    """buy 入场形态软标注（update-conditional-entry-gate-waiver，I-1 模式）。
+
+    终稿为 buy、未申报 trigger 双向位、且收盘低于 MA20 与 MA60（技术逆势）→
+    如实标注「逆势立即入场」（进 FM 审批上下文；措辞避开 _FM_INCOMPLETE_MARKERS
+    「仍未申报」/「缺失」，报告侧不渲染结构不完整块）。不打回、不阻断、MUST NOT
+    死循环；条件入场（任一触发位申报）、非逆势、或指标/收盘不可用 → 零注。
+    """
+    if str(getattr(decision, "action", "")) != "buy":
+        return {"result": "pass", "note": ""}
+    if (
+        getattr(decision, "trigger_high", None) is not None
+        or getattr(decision, "trigger_low", None) is not None
+    ):
+        return {"result": "pass", "note": ""}  # 条件入场已申报
+    ma = (state.get("technical_indicators") or {}).get("MA") or {}
+
+    def _latest(series: object) -> float | None:
+        try:
+            seq = cast("list[object]", series)
+            vals = [float(cast(float, v)) for v in seq if v is not None]
+            return vals[-1] if vals else None
+        except Exception:  # noqa: BLE001 -- 指标形态噪声不阻断观测
+            return None
+
+    ma20, ma60 = _latest(ma.get("20") or []), _latest(ma.get("60") or [])
+    close = _latest_close_for_price_check(state)
+    if close is None or ma20 is None or ma60 is None:
+        return {"result": "pass", "note": ""}
+    if close >= ma20 or close >= ma60:
+        return {"result": "pass", "note": ""}
+    return {
+        "result": "pass",
+        "note": (
+            f"逆势立即入场未申报条件触发位（收盘 {close:.2f} 低于 MA20 {ma20:.2f} "
+            f"与 MA60 {ma60:.2f}）——技术逆势/窗口错配场景 SHOULD 条件入场，"
+            "立即入场理由须在 reasoning 显式申报，待人工复核"
+        ),
     }
 
 
