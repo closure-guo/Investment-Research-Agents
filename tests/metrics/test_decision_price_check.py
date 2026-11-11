@@ -388,6 +388,49 @@ class TestBreakDirectionNearestWord:
         assert anomalies == []
 
 
+# 002040 11-11 双池阻断实证（主池 7.6014 / 微盘 7.73）：方向词越过分句边界
+# 抢绑下行价位 → 误判「上破触发不高于收盘」→ retry 改写产生新 source_text →
+# 恶化判据硬阻断。语义上「站上/站稳」属于前一个价位的触发条件，与分号/或
+# 之后的下行价位无涉。
+_PL_002040 = {
+    "available": True,
+    "entry_ref": 7.96,
+    "recent_high": 10.98,
+    "recent_low": 7.73,
+    "atr": 0.18,
+    "stop_band_long": {"low": 7.6014, "high": 7.78},
+    "target_band_long": {"low": 8.32, "high": 8.68},
+    "full_band": [7.42, 8.68],
+}
+
+
+class TestClauseBoundaryBinding:
+    """方向词绑定不得越过分句边界（002040 11-11 主池/微盘双池阻断实证）。"""
+
+    def test_up_word_across_clause_delimiter_not_bound_to_down_level(self):
+        """主池 7.6014 案：站上（8.22895 的触发词）隔「）；」10 字符抢绑 7.6014。"""
+        decision = _decision(
+            action="sell",
+            sell_type="exit",
+            reasoning=(
+                "统一口径：（连续两日收盘站上才暂停减仓并重评）；"
+                "7.6014 为唯一「操作清仓加速线」（收盘跌破才执行，盘中不触发）"
+            ),
+            reeval_triggers=["收盘跌破 7.6014（止损参考带下沿）→ 一次性清仓剩余"],
+        )
+        anomalies = check_decision_prices(decision, {}, _PL_002040, 7.96)
+        assert all(a["kind"] != "empty_trigger" for a in anomalies)
+
+    def test_up_word_before_conjunction_not_bound_to_alternative_level(self):
+        """微盘 7.73 案：「8.05 放量站稳或 7.73 收盘跌破」——站稳属于 8.05。"""
+        decision = _decision(
+            action="watch",
+            inaction_reason="未持有者回避不介入，等待 8.05 放量站稳或 7.73 收盘跌破确认",
+        )
+        anomalies = check_decision_prices(decision, {}, _PL_002040, 7.96)
+        assert all(a["kind"] != "empty_trigger" for a in anomalies)
+
+
 class TestFieldCoverage:
     """reeval_triggers 每条 + inaction_reason + reasoning 三字段全覆盖。"""
 
