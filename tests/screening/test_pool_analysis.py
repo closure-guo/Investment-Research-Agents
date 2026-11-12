@@ -192,9 +192,11 @@ def test_run_daily_disabled_skips(monkeypatch):
     assert pool_analysis.run_pool_analysis_daily() == {"status": "skipped_disabled"}
 
 
-def test_run_daily_passes_clamped_limit(monkeypatch):
+def test_run_daily_passes_clamped_limit(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTO_POOL_ANALYSIS_ENABLED", "1")
     monkeypatch.setenv("AUTO_POOL_ANALYSIS_MAX_SYMBOLS", "999")
+    # defer 护栏（add-pool-analysis-defer-guard）：指到空 sessions 库 → 无行零等待
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
     captured: dict = {}
 
     def fake_submit(**kwargs):
@@ -202,7 +204,10 @@ def test_run_daily_passes_clamped_limit(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr(pool_analysis, "_submit", fake_submit)
-    assert pool_analysis.run_pool_analysis_daily() == {"status": "ok"}
+    out = pool_analysis.run_pool_analysis_daily()
+    assert out["status"] == "ok"
+    assert out["defer"]["outcome"] == "not_running"
+    assert out["defer"]["waited_seconds"] == 0
     assert captured["max_symbols"] == 100
 
 
