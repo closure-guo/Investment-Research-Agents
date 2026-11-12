@@ -105,11 +105,25 @@ def _isolate_runtime_dbs(request, tmp_path, monkeypatch):
     # 同款调用期读 env；省略 db_path 的用例同样不得读/写开发库 data/research_reports.db）
     old_rr_env = os.environ.get("RESEARCH_REPORTS_DB_PATH")
     os.environ["RESEARCH_REPORTS_DB_PATH"] = str(tmp_path / "runtime-research-reports.db")
+    # ⑧ CACHE_DB_PATH：add-key-events-cache（data/cache.get_shared_cache 调用期读 env，
+    # 单例首建冻结）。缺省 cache.db 落仓库根——非 live 用例经 fetch_key_events 的当日
+    # 缓存读写开发/生产 cache.db（2026-11-12 实证：000001 当日真新闻被缓存命中回灌
+    # freshness 校验，单测结果随真实新闻流漂移）。
+    old_cache_env = os.environ.get("CACHE_DB_PATH")
+    os.environ["CACHE_DB_PATH"] = str(tmp_path / "runtime-cache.db")
     # 一致预期按需直拉属网络调用：非 live 测试一律离线（个别用例自行 monkeypatch
     # fetch_forecast_snapshot 时会覆盖本 patch）。fetch_data 的真实路径用例因此
     # 拿到 status=missing 而不触网。
     monkeypatch.setattr(
         "finance_agent.data.research_reports._call_ak",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline-test")),
+    )
+    # 事件 L2 WebSearch 同为网络调用（2026-11-12 实证：freshness→fetch_key_events 真
+    # 联网搜到 000001 当日新闻 → NEW_EVENT 误剔 → pool_analysis 单测数据依赖翻红）。
+    # 掐在搜索层而非 fetch_key_events 入口——tests/llm/test_legacy_migration.py 用
+    # @patch 打在本函数的内部依赖上，patch 装饰器在测试内覆盖本 patch 不受影响。
+    monkeypatch.setattr(
+        "finance_agent.events.web_fetcher._search_with_duckduckgo",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline-test")),
     )
     try:
@@ -140,6 +154,10 @@ def _isolate_runtime_dbs(request, tmp_path, monkeypatch):
             os.environ.pop("RESEARCH_REPORTS_DB_PATH", None)
         else:
             os.environ["RESEARCH_REPORTS_DB_PATH"] = old_rr_env
+        if old_cache_env is None:
+            os.environ.pop("CACHE_DB_PATH", None)
+        else:
+            os.environ["CACHE_DB_PATH"] = old_cache_env
 
 
 @pytest.fixture
