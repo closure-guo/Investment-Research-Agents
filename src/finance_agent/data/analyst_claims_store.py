@@ -99,7 +99,6 @@ def _connect(db_path: str | Path | None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
@@ -107,6 +106,7 @@ def _connect(db_path: str | Path | None) -> sqlite3.Connection:
 def init_db(db_path: str | Path | None = None) -> Path:
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
     try:
         conn.executescript(ANALYST_CLAIMS_DDL)
         _ensure_columns(conn)

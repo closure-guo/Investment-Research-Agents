@@ -144,13 +144,28 @@ def _default_db_path() -> Path:
 
 
 def _connect(db_path: str | Path | None) -> sqlite3.Connection:
-    """短连接（store.py 同款纪律）：WAL + busy_timeout，row_factory=Row。"""
+    """短连接（store.py 同款纪律）：busy_timeout，row_factory=Row。
+
+    连接纪律（harden-sqlite-connection-discipline）：journal 模式只在
+    ``init_snapshot_db`` 设置一次，每连接不跑 ``PRAGMA journal_mode``（每次
+    连接 attach 一次 ``-shm`` 是 incident 053 的放大器）。
+    """
     path = Path(db_path) if db_path else _default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=15000")
+    return conn
+
+
+def _connect_ro(db_path: str | Path | None) -> sqlite3.Connection:
+    """只读连接（读路径去 DDL 配套）：缺库直接 OperationalError，不创建文件。"""
+    path = Path(db_path) if db_path else _default_db_path()
+    conn = sqlite3.connect(
+        f"file:{path.as_posix()}?mode=ro", uri=True, check_same_thread=False, timeout=5.0
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -164,7 +179,9 @@ def init_snapshot_db(db_path: str | Path | None = None) -> Path:
     """
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
     try:
+        # 连接纪律：journal 模式只在 init 设置一次（库头持久化），见 _connect docstring
         conn.executescript(SNAPSHOT_DDL)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(security_master)")}
         if "delist_date" not in columns:
@@ -406,17 +423,25 @@ def latest_snapshot_date(
     ``before``（规范 ``YYYY-MM-DD``）只统计严格早于该日的行——日批在同日重跑时
     取「上一交易日」行作 rebase 基准/停牌合成源，防止把当日已写行当作历史基准
     而二次复权整段 qfq（T6 评审修正）。非规范日期 → ``SnapshotError``。
+    读路径去 DDL（harden-sqlite-connection-discipline）：``?mode=ro`` 连接，
+    缺库/缺表返回 None，MUST NOT 建库建表。
     """
-    init_snapshot_db(db_path)
     sql = "SELECT MAX(trade_date) FROM market_snapshot"
     params: list[Any] = []
     if before is not None:
         sql += " WHERE trade_date < ?"
         params.append(_parse_date_param(before, param="before").isoformat())
-    conn = _connect(db_path)
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        return None  # 缺库（mode=ro 不创建文件）
     try:
         row = conn.execute(sql, params).fetchone()
         return row[0] if row and row[0] is not None else None
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None  # 缺表按空语义，不建表
+        raise
     finally:
         conn.close()
 
@@ -429,9 +454,11 @@ def read_universe(
     ``as_of`` 须为规范 ``YYYY-MM-DD``（评审修正：``date.fromisoformat`` 解析后按
     date 对象比较，非规范 → ``SnapshotError``；SQL 参数用规范化字符串）。
     ``as_of > latest`` → ``SnapshotNotFreshError``（消息含最新数据日期，不返回
-    任何记录）；该日无行（含空库）→ ``SnapshotEmptyError``（不静默返回他日
-    数据）。``include_suspended=False`` 时剔除 ``is_suspended=1`` 的行（NULL
-    状态视为未知，同样剔除）。返回按 code 升序。
+    任何记录）；该日无行（含空库/缺表/缺库）→ ``SnapshotEmptyError``（不静默
+    返回他日数据）。``include_suspended=False`` 时剔除 ``is_suspended=1`` 的行
+    （NULL 状态视为未知，同样剔除）。返回按 code 升序。
+    读路径去 DDL（harden-sqlite-connection-discipline）：不再调 ``init_snapshot_db``，
+    ``?mode=ro`` 连接，缺库/缺表走既有空语义，MUST NOT 建库建表。
     """
     as_of_date = _parse_date_param(as_of, param="as_of")
     latest = latest_snapshot_date(db_path)
@@ -439,7 +466,10 @@ def read_universe(
         latest_date = _parse_date_param(latest, param="latest_snapshot_date")
         if as_of_date > latest_date:
             raise SnapshotNotFreshError(f"快照最新数据日期为 {latest}，不接受 as_of={as_of}")
-    conn = _connect(db_path)
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        raise SnapshotEmptyError(f"该日期无快照记录: {as_of}") from None
     try:
         sql = "SELECT * FROM market_snapshot WHERE trade_date = ?"
         params: list[Any] = [as_of_date.isoformat()]
@@ -447,6 +477,10 @@ def read_universe(
             sql += " AND is_suspended = 0"
         sql += " ORDER BY code"
         rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            raise SnapshotEmptyError(f"该日期无快照记录: {as_of}") from None
+        raise
     finally:
         conn.close()
     if not rows:

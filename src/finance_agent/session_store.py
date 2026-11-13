@@ -73,7 +73,6 @@ def _get_db() -> sqlite3.Connection:
         try:
             conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False, timeout=15.0)
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
             # 并发写等待锁而非立即抛 "database is locked"（流式 token 高频落库场景必需）
             conn.execute("PRAGMA busy_timeout=15000")
             return conn
@@ -90,6 +89,7 @@ def _get_db() -> sqlite3.Connection:
 def init_db() -> None:
     """Initialize sessions table and migrate schema."""
     conn = _get_db()
+    conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS sessions (
