@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -547,11 +548,165 @@ def _submit(**kwargs: Any) -> dict[str, Any]:
     return api.submit_pool_analysis_batch(**kwargs)
 
 
+# ── 前置顺延护栏（add-pool-analysis-defer-guard，issue #578）──────────────────
+# 16:22 触发与选股收尾只剩 38~60 秒余量（11-10/11-11 两日实证）；小票档更结构性
+# 错位（16:47 触发 vs 前置 16:45 起跑、17:04~17:17 收尾）。前置 job 当日仍在跑时
+# 顺延重查，等待耗尽照常提交（stale 降级路径不变）；前置不在跑零等待（深夜补跑
+# 不空等）。信号读 sessions 库 job_runs 最新行（与 daily brief 直读同款先例）。
+
+
+DEFER_JOB_MAIN = "screening_daily"
+DEFER_JOB_MICROCAP = "microcap_screening_daily"
+DEFER_INTERVAL_DEFAULT = 300
+DEFER_ROUNDS_MAIN_DEFAULT = 3
+DEFER_ROUNDS_MICROCAP_DEFAULT = 8
+
+
+def _sessions_db_path(db_path: str | Path | None = None) -> Path:
+    return Path(db_path) if db_path else Path(os.getenv("SESSIONS_DB_PATH", "data/sessions.db"))
+
+
+def _read_prerequisite_status(
+    job_id: str, day: str, db_path: str | Path | None = None
+) -> str | None:
+    """前置 job 当日 ``job_runs`` 最新行状态；读失败 fail-open 返回 None（不在跑）。"""
+    try:
+        conn = sqlite3.connect(_sessions_db_path(db_path), check_same_thread=False, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            row = conn.execute(
+                "SELECT status FROM job_runs WHERE job_id = ? AND substr(started_at, 1, 10) = ?"
+                " ORDER BY run_id DESC LIMIT 1",
+                (job_id, day),
+            ).fetchone()
+        finally:
+            conn.close()
+        return str(row["status"]) if row else None
+    except sqlite3.Error:
+        logger.warning("前置 job 状态读取失败（按不在跑放行）: job_id=%s day=%s", job_id, day)
+        return None
+
+
+def _resolve_defer_config(rounds_env: str, default_rounds: int) -> tuple[bool, int, int]:
+    """解析护栏开关/间隔/轮数；非法值回退默认并告警。返回 (enabled, interval, rounds)。"""
+    enabled = os.getenv("AUTO_POOL_ANALYSIS_DEFER_ENABLED", "1").strip() != "0"
+    interval = DEFER_INTERVAL_DEFAULT
+    raw = os.getenv("AUTO_POOL_ANALYSIS_DEFER_INTERVAL_SECONDS")
+    if raw is not None:
+        try:
+            interval = int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "AUTO_POOL_ANALYSIS_DEFER_INTERVAL_SECONDS 非法（%r），回退 %d",
+                raw,
+                DEFER_INTERVAL_DEFAULT,
+            )
+    if interval <= 0:
+        logger.warning(
+            "AUTO_POOL_ANALYSIS_DEFER_INTERVAL_SECONDS<=0，回退 %d", DEFER_INTERVAL_DEFAULT
+        )
+        interval = DEFER_INTERVAL_DEFAULT
+    rounds = default_rounds
+    raw = os.getenv(rounds_env)
+    if raw is not None:
+        try:
+            rounds = int(raw)
+        except (TypeError, ValueError):
+            logger.warning("%s 非法（%r），回退 %d", rounds_env, raw, default_rounds)
+    if rounds <= 0:
+        logger.warning("%s<=0，回退 %d", rounds_env, default_rounds)
+        rounds = default_rounds
+    return enabled, interval, rounds
+
+
+def wait_for_batch_prerequisite(
+    *,
+    prerequisite_job_id: str,
+    day: str,
+    interval_seconds: int,
+    max_rounds: int,
+    sleep: Callable[[float], None] | None = None,
+    status_reader: Callable[[str, str], str | None] | None = None,
+) -> dict[str, Any]:
+    """前置选股 job 当日仍在跑则顺延重查；返回可审计的 defer 摘要。
+
+    ``outcome``：``fresh_ready``（前置已收尾）/ ``not_running``（当日无行或读取
+    fail-open）/ ``prereq_failed``（前置终态非 ok）/ ``gave_up_still_running``
+    （等待耗尽仍 running，调用方照常提交、stale 降级路径不变）。
+    """
+    reader = status_reader or _read_prerequisite_status
+    rest = sleep or time.sleep
+
+    def _finish(outcome: str, rounds: int, waited: int) -> dict[str, Any]:
+        return {
+            "prerequisite": prerequisite_job_id,
+            "outcome": outcome,
+            "rounds": rounds,
+            "waited_seconds": waited,
+        }
+
+    try:
+        status = reader(prerequisite_job_id, day)
+    except Exception:  # noqa: BLE001 - 注入 reader 抛错同样 fail-open
+        status = None
+    rounds = 0
+    waited = 0
+    while status == "running" and rounds < max_rounds:
+        rest(interval_seconds)
+        waited += interval_seconds
+        rounds += 1
+        try:
+            status = reader(prerequisite_job_id, day)
+        except Exception:  # noqa: BLE001
+            status = None
+    if status == "running":
+        return _finish("gave_up_still_running", rounds, waited)
+    if status is None:
+        outcome = "not_running"
+    elif status == "ok":
+        outcome = "fresh_ready"
+    else:
+        outcome = "prereq_failed"
+    return _finish(outcome, rounds, waited)
+
+
+def _run_defer_guard(
+    *, prerequisite_job_id: str, rounds_env: str, default_rounds: int
+) -> dict[str, Any]:
+    """入口侧护栏：解析 env 配置后执行等待；关闭时返回 ``outcome=disabled``。"""
+    enabled, interval, rounds = _resolve_defer_config(rounds_env, default_rounds)
+    if not enabled:
+        return {
+            "prerequisite": prerequisite_job_id,
+            "outcome": "disabled",
+            "rounds": 0,
+            "waited_seconds": 0,
+        }
+    return wait_for_batch_prerequisite(
+        prerequisite_job_id=prerequisite_job_id,
+        day=datetime.now().strftime("%Y-%m-%d"),
+        interval_seconds=interval,
+        max_rounds=rounds,
+    )
+
+
 def run_pool_analysis_daily() -> dict[str, Any]:
-    """日批入口：开关/上限解析后，把批次准备提交到 API 主事件循环。"""
+    """日批入口：开关/上限解析后，把批次准备提交到 API 主事件循环。
+
+    提交前执行前置顺延护栏（issue #578）：选股日批当日仍在跑时顺延等待，
+    摘要 ``defer`` 字段披露轮数与等待秒数。
+    """
     if os.getenv("AUTO_POOL_ANALYSIS_ENABLED", "1").strip() == "0":
         return {"status": "skipped_disabled"}
-    return _submit(max_symbols=_resolve_max_symbols(None))
+    defer = _run_defer_guard(
+        prerequisite_job_id=DEFER_JOB_MAIN,
+        rounds_env="AUTO_POOL_ANALYSIS_DEFER_MAX_ROUNDS",
+        default_rounds=DEFER_ROUNDS_MAIN_DEFAULT,
+    )
+    result = _submit(max_symbols=_resolve_max_symbols(None))
+    result["defer"] = defer
+    return result
 
 
 def _resolve_microcap_max_symbols(max_symbols: int | None) -> int:
@@ -567,7 +722,19 @@ def _resolve_microcap_max_symbols(max_symbols: int | None) -> int:
 
 
 def run_pool_analysis_microcap_daily() -> dict[str, Any]:
-    """日批入口（小票池，add-microcap-lane-analysis）：开关解析后提交 API 主循环。"""
+    """日批入口（小票池，add-microcap-lane-analysis）：开关解析后提交 API 主循环。
+
+    前置顺延护栏同主档（issue #578）：前置为 ``microcap_screening_daily``
+    （16:45 起跑、17:04~17:17 收尾），默认轮次 8（16:47+8×5min=17:27 覆盖
+    P99+10min）。
+    """
     if os.getenv("AUTO_POOL_MICROCAP_ENABLED", "1").strip() == "0":
         return {"status": "skipped_disabled"}
-    return _submit(pool=POOL_MICROCAP, max_symbols=_resolve_microcap_max_symbols(None))
+    defer = _run_defer_guard(
+        prerequisite_job_id=DEFER_JOB_MICROCAP,
+        rounds_env="AUTO_POOL_MICROCAP_DEFER_MAX_ROUNDS",
+        default_rounds=DEFER_ROUNDS_MICROCAP_DEFAULT,
+    )
+    result = _submit(pool=POOL_MICROCAP, max_symbols=_resolve_microcap_max_symbols(None))
+    result["defer"] = defer
+    return result
