@@ -74,3 +74,88 @@ def test_declared_contract_triggers_only_for_buy():
     assert _declared_contract(decision, action="sell")["trigger_high"] is None
     assert _declared_contract(decision, action="sell")["exit_schedule"] == "首批减 70%"
     assert _declared_contract(decision, action="watch")["trigger_high"] is None
+
+
+import sqlite3
+
+from finance_agent.execution.signals import Signal
+from finance_agent.execution.store import (
+    exit_first_batch_done,
+    init_execution_db,
+    list_signals,
+    record_exit_first_batch_done,
+    record_signal,
+)
+
+
+def _base_signal(**overrides: object) -> Signal:
+    base = dict(
+        signal_id="600519.SH:2026-11-17",
+        symbol="600519.SH",
+        direction="long",
+        strength=0.8,
+        horizon_days=20,
+        source="predictions",
+        decision_id="p_test1",
+        created_at="2026-11-17",
+    )
+    base.update(overrides)
+    return Signal(**base)
+
+
+def test_signal_contract_fields_roundtrip(tmp_path):
+    db = tmp_path / "execution.db"
+    signal = _base_signal(
+        entry_price=22.40, trigger_high=22.35,
+        position_tier="light", exit_first_batch_ratio=0.7,
+    )
+    record_signal(signal, db_path=db)
+    loaded = list_signals(db_path=db)[0]
+    assert loaded.entry_price == 22.40
+    assert loaded.trigger_high == 22.35
+    assert loaded.position_tier == "light"
+    assert loaded.exit_first_batch_ratio == 0.7
+
+
+def test_legacy_signal_row_reads_back_none(tmp_path):
+    """旧 8 列行（迁移前写入）读回 → 新字段 None（零迁移兼容）。"""
+    db = tmp_path / "execution.db"
+    init_execution_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO signals (signal_id, symbol, direction, strength, horizon_days,"
+        " source, decision_id, created_at) VALUES ('x.SH:2026-11-17','x.SH','long',"
+        "0.5,20,'predictions','p_old','2026-11-17')"
+    )
+    conn.commit()
+    conn.close()
+    loaded = list_signals(db_path=db)[0]
+    assert loaded.entry_price is None and loaded.trigger_high is None
+    assert loaded.position_tier is None and loaded.exit_first_batch_ratio is None
+
+
+def test_migration_adds_columns_to_legacy_db(tmp_path):
+    """迁移前旧 DDL 建表 → init_execution_db 幂等补列。"""
+    db = tmp_path / "execution.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS signals (signal_id TEXT PRIMARY KEY, symbol TEXT"
+        " NOT NULL, direction TEXT NOT NULL, strength REAL NOT NULL, horizon_days"
+        " INTEGER NOT NULL, source TEXT NOT NULL, decision_id TEXT NOT NULL,"
+        " created_at TEXT NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+    init_execution_db(db)
+    conn = sqlite3.connect(db)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(signals)")}
+    conn.close()
+    assert {"entry_price", "trigger_high", "position_tier", "exit_first_batch_ratio"} <= columns
+
+
+def test_exit_first_batch_state_roundtrip(tmp_path):
+    db = tmp_path / "execution.db"
+    assert exit_first_batch_done(db_path=db) == set()
+    record_exit_first_batch_done("p_a", "2026-11-17", db_path=db)
+    record_exit_first_batch_done("p_a", "2026-11-17", db_path=db)  # 幂等重跑
+    assert exit_first_batch_done(db_path=db) == {"p_a"}

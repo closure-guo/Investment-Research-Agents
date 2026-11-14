@@ -46,7 +46,11 @@ CREATE TABLE IF NOT EXISTS signals (
   horizon_days INTEGER NOT NULL,
   source       TEXT NOT NULL,
   decision_id  TEXT NOT NULL,
-  created_at   TEXT NOT NULL
+  created_at   TEXT NOT NULL,
+  entry_price  REAL,
+  trigger_high REAL,
+  position_tier TEXT,
+  exit_first_batch_ratio REAL
 );
 CREATE INDEX IF NOT EXISTS idx_signals_symbol_created
   ON signals (symbol, created_at);
@@ -103,6 +107,11 @@ CREATE TABLE IF NOT EXISTS paper_equity (
   positions_value REAL NOT NULL,
   equity          REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS exit_schedule_state (
+  decision_id      TEXT PRIMARY KEY,
+  first_batch_done INTEGER NOT NULL,
+  updated_at       TEXT NOT NULL
+);
 """
 
 _SIGNAL_COLUMNS = (
@@ -114,12 +123,36 @@ _SIGNAL_COLUMNS = (
     "source",
     "decision_id",
     "created_at",
+    "entry_price",
+    "trigger_high",
+    "position_tier",
+    "exit_first_batch_ratio",
 )
 
 _SELECT_SIGNALS = (
     "SELECT signal_id, symbol, direction, strength, horizon_days, source, decision_id,"
-    " created_at FROM signals"
+    " created_at, entry_price, trigger_high, position_tier, exit_first_batch_ratio"
+    " FROM signals"
 )
+
+
+# enforce-decision-contract-at-execution：存量库 signals 表补列（幂等 ALTER；
+# CREATE TABLE IF NOT EXISTS 对已存在的表不加列）。duplicate column 视为已迁移。
+_SIGNAL_MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("entry_price", "REAL"),
+    ("trigger_high", "REAL"),
+    ("position_tier", "TEXT"),
+    ("exit_first_batch_ratio", "REAL"),
+)
+
+
+def _migrate_signal_columns(conn: sqlite3.Connection) -> None:
+    for name, decl in _SIGNAL_MIGRATION_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {name} {decl}")  # noqa: S608 - 列名为模块常量
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 _ORDER_SIGNALS = " ORDER BY created_at ASC, symbol ASC"
 
 
@@ -145,6 +178,7 @@ def init_execution_db(db_path: str | Path | None = None) -> Path:
     conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
     try:
         conn.executescript(EXECUTION_DDL)
+        _migrate_signal_columns(conn)
         conn.commit()
     finally:
         conn.close()
@@ -159,8 +193,9 @@ def record_signal(signal: Signal, *, db_path: str | Path | None = None) -> None:
         conn.execute(
             """INSERT INTO signals
                  (signal_id, symbol, direction, strength, horizon_days, source,
-                  decision_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  decision_id, created_at, entry_price, trigger_high, position_tier,
+                  exit_first_batch_ratio)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(signal_id) DO UPDATE SET
                  symbol=excluded.symbol,
                  direction=excluded.direction,
@@ -168,7 +203,11 @@ def record_signal(signal: Signal, *, db_path: str | Path | None = None) -> None:
                  horizon_days=excluded.horizon_days,
                  source=excluded.source,
                  decision_id=excluded.decision_id,
-                 created_at=excluded.created_at""",
+                 created_at=excluded.created_at,
+                 entry_price=excluded.entry_price,
+                 trigger_high=excluded.trigger_high,
+                 position_tier=excluded.position_tier,
+                 exit_first_batch_ratio=excluded.exit_first_batch_ratio""",
             (
                 signal.signal_id,
                 signal.symbol,
@@ -178,6 +217,10 @@ def record_signal(signal: Signal, *, db_path: str | Path | None = None) -> None:
                 signal.source,
                 signal.decision_id,
                 signal.created_at,
+                signal.entry_price,
+                signal.trigger_high,
+                signal.position_tier,
+                signal.exit_first_batch_ratio,
             ),
         )
         conn.commit()
@@ -222,6 +265,10 @@ def list_signals(
             source=str(row["source"]),
             decision_id=str(row["decision_id"]),
             created_at=str(row["created_at"]),
+            entry_price=row["entry_price"],
+            trigger_high=row["trigger_high"],
+            position_tier=row["position_tier"],
+            exit_first_batch_ratio=row["exit_first_batch_ratio"],
         )
         for row in rows
     ]
@@ -608,3 +655,37 @@ def delete_all_broker_state(db_path: str | Path | None = None) -> dict[str, int]
             "positions": int(conn.execute("DELETE FROM positions").rowcount),
             "cash": int(conn.execute("DELETE FROM cash").rowcount),
         }
+
+
+# ── enforce-decision-contract-at-execution：exit_schedule 首批执行状态 ──
+
+
+def record_exit_first_batch_done(
+    decision_id: str, updated_at: str, *, db_path: str | Path | None = None
+) -> None:
+    """首批减仓已执行标记（decision_id PK；幂等 upsert——重跑覆盖不翻倍）。"""
+    init_execution_db(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO exit_schedule_state (decision_id, first_batch_done, updated_at)"
+            " VALUES (?, 1, ?) ON CONFLICT(decision_id) DO UPDATE SET"
+            " first_batch_done=1, updated_at=excluded.updated_at",
+            (str(decision_id), str(updated_at)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def exit_first_batch_done(*, db_path: str | Path | None = None) -> set[str]:
+    """首批已执行 decision_id 集合（防次日重复执行首批，只读）。"""
+    init_execution_db(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT decision_id FROM exit_schedule_state WHERE first_batch_done = 1"
+        ).fetchall()
+    finally:
+        conn.close()
+    return {str(row["decision_id"]) for row in rows}
