@@ -36,6 +36,7 @@ from finance_agent.execution.driver import run_execution_daily
 from finance_agent.execution.store import (
     ensure_account,
     execution_conn,
+    exit_first_batch_done,
     list_orders,
     list_positions,
     list_signals,
@@ -172,8 +173,22 @@ def test_decision_to_position_closed_loop(tmp_path):
         "pending": 0,
         "skipped_reason": None,
         "skipped_symbols": [],
+        # 存量口径（无 declared_contract）→ 档位缺失按既有等权执行并留痕
+        "skipped_details": [{"reason": "no_position_tier", "symbol": "600519.SH"}],
         "skipped_backlog": 0,
         "skipped_unapproved": 0,
+        "plan_deviation": [
+            {
+                "symbol": "600519.SH",
+                "side": "buy",
+                "decision_id": prediction_id,
+                "declared_entry_price": 10.0,
+                "fill_price": 10.02,
+                "entry_deviation": 0.002,  # round(10.02/10.0 - 1, 4)
+                "position_tier": None,
+                "target_weight": 0.2,
+            }
+        ],
         # regime 未接入（未传 regime_db_path，conftest 已隔离 REGIME_DB_PATH）：
         # 缺失披露式降级，系数 1.0 不影响本用例手算结果
         "regime": {
@@ -311,8 +326,10 @@ def test_missing_snapshot_still_converts_decisions_to_signals(tmp_path):
         "rejected": 0,
         "pending": 0,
         "skipped_symbols": [],
+        "skipped_details": [],
         "skipped_backlog": 0,
         "skipped_unapproved": 0,
+        "plan_deviation": [],
         "regime": {
             "state": None,
             "multiplier": 1.0,
@@ -471,8 +488,10 @@ def test_empty_library_returns_zero_summary(tmp_path):
         "pending": 0,
         "skipped_reason": None,
         "skipped_symbols": [],
+        "skipped_details": [],
         "skipped_backlog": 0,
         "skipped_unapproved": 0,
+        "plan_deviation": [],
         "regime": {
             "state": None,
             "multiplier": 1.0,
@@ -739,3 +758,227 @@ def test_corrupt_regime_config_degrades_without_failing_job(tmp_path, monkeypatc
 
     assert summary["regime"] == _NO_REGIME_DATA
     assert list_orders(db_path=exe_db)[0]["qty"] == 20000
+
+
+# ── enforce-decision-contract-at-execution：触发门 / 档位 / 退化 ──────────────
+
+
+def _contract_prediction(*, trigger_high: float = 8.0, **overrides: object) -> dict:
+    """带 declared_contract 的观点造数（新 ingest 产物的同形记录）。"""
+    return _prediction(
+        rationale_snapshot={
+            "action": "buy",
+            "fund_manager_decision": "approve",
+            "fund_manager_decision_reasoning": "测试审批",
+            "declared_prices": {"entry_price": 10.0, "stop_loss": 9.0, "target_price": 12.0},
+            "declared_contract": {
+                "sell_type": None,
+                "position_size": "light",
+                "exit_schedule": None,
+                "trigger_high": trigger_high,
+                "trigger_low": None,
+            },
+        },
+        **overrides,
+    )
+
+
+def test_trigger_not_met_blocks_entry(tmp_path):
+    """bar.close < trigger_high → 零订单 + TRIGGER_NOT_MET 结构化留痕（#593 300927 实证场景）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_contract_prediction(trigger_high=10.8), db_path=dec_db)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["signals_created"] == 1
+    assert summary["orders_placed"] == 0
+    detail = next(d for d in summary["skipped_details"] if d["symbol"] == "600519.SH")
+    assert detail["reason"] == "TRIGGER_NOT_MET"
+    assert detail["trigger_high"] == 10.8
+    assert detail["bar_close"] == 10.2
+    assert list_positions(db_path=exe_db) == []
+
+
+def test_trigger_met_enters_with_tier_weight(tmp_path):
+    """触发满足 → light 档 10% 目标（非等权 20%）；手算：equity 100 万 → 10 万市值
+    → floor(100000/10.0/100)×100 = 10,000 股（等权口径是 20,000 股）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_contract_prediction(), db_path=dec_db)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 1
+    orders = list_orders(db_path=exe_db)
+    assert orders[0]["qty"] == 10_000
+    deviation = summary["plan_deviation"][0]
+    assert deviation["symbol"] == "600519.SH"
+    assert deviation["declared_entry_price"] == 10.0
+    assert deviation["position_tier"] == "light"
+
+
+def test_legacy_prediction_degrades_to_equal(tmp_path):
+    """无 declared_contract 的存量预测 → 等权 20%（既有行为）+ no_position_tier 留痕。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_prediction(), db_path=dec_db)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 1
+    assert list_orders(db_path=exe_db)[0]["qty"] == 20_000  # 等权 1/1 → clip 20%
+    assert any(
+        d["symbol"] == "600519.SH" and d["reason"] == "no_position_tier"
+        for d in summary["skipped_details"]
+    )
+
+
+# ── enforce-decision-contract-at-execution：exit 首批 ────────────────────────
+
+
+def _exit_prediction(*, exit_schedule: str = "首批减持有敞口的 70%，剩余按双向触发处置") -> dict:
+    return _prediction(
+        direction="short",
+        rationale_snapshot={
+            "action": "sell",
+            "fund_manager_decision": "approve",
+            "fund_manager_decision_reasoning": "测试审批",
+            "declared_prices": {"entry_price": None, "stop_loss": None, "target_price": None},
+            "declared_contract": {
+                "sell_type": "exit",
+                "position_size": None,
+                "exit_schedule": exit_schedule,
+                "trigger_high": None,
+                "trigger_low": None,
+            },
+        },
+    )
+
+
+def test_first_batch_sell_only(tmp_path):
+    """exit + 首批 70% + 持仓 9,100 → 卖 6,300 剩 2,800；状态表落 decision_id
+    （手算：floor(9100×0.7/100)×100 = 6,300）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    prediction_id = insert_prediction(_exit_prediction(), db_path=dec_db)
+    _seed_position(exe_db, "600519.SH", 9_100, 10.0, _AS_OF)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 1
+    assert list_orders(db_path=exe_db)[0]["qty"] == 6_300
+    positions = {p["symbol"]: p["qty"] for p in list_positions(db_path=exe_db)}
+    assert positions["600519.SH"] == 2_800
+    assert exit_first_batch_done(db_path=exe_db) == {prediction_id}  # 首批状态已落
+    progress = [d for d in summary["plan_deviation"] if d["side"] == "sell"]
+    assert progress == [
+        {
+            "symbol": "600519.SH",
+            "side": "sell",
+            "decision_id": prediction_id,
+            "schedule_ratio": 0.7,
+            "first_batch_qty": 6_300,
+            "remaining_qty": 2_800,
+        }
+    ]
+
+
+def test_first_batch_not_repeated(tmp_path):
+    """首批已执行的同决策次日重跑 → 不再生成卖出（剩余批次待新决策）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_exit_prediction(), db_path=dec_db)
+    _seed_position(exe_db, "600519.SH", 9_100, 10.0, _AS_OF)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+    run_execution_daily(db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db)
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 0
+    sell_orders = [o for o in list_orders(db_path=exe_db) if o["side"] == "sell"]
+    assert len(sell_orders) == 1  # 只有首日那笔
+    assert list_positions(db_path=exe_db)[0]["qty"] == 2_800
+
+
+def test_schedule_unparsed_falls_back_full_exit(tmp_path):
+    """exit_schedule 无首批表述 → 全额退出（既有行为）+ schedule_unparsed 留痕。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(
+        _exit_prediction(exit_schedule="视盘面一次性处理"),
+        db_path=dec_db,
+    )
+    _seed_position(exe_db, "600519.SH", 9_100, 10.0, _AS_OF)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 1
+    assert list_orders(db_path=exe_db)[0]["qty"] == 9_100
+    assert list_positions(db_path=exe_db) == []
+    assert any(d["reason"] == "schedule_unparsed" for d in summary["skipped_details"])
+
+
+def test_first_batch_below_lot_defers(tmp_path):
+    """首批不足一手（120×70%=84 → floor=0）→ 不卖 + first_batch_below_lot 留痕。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_exit_prediction(), db_path=dec_db)
+    _seed_position(exe_db, "600519.SH", 120, 10.0, _AS_OF)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 0
+    assert any(
+        d["reason"] == "first_batch_below_lot" and d["symbol"] == "600519.SH"
+        for d in summary["skipped_details"]
+    )
+    assert list_positions(db_path=exe_db)[0]["qty"] == 120

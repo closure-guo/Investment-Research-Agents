@@ -28,6 +28,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from finance_agent.execution.contracts import parse_first_batch_ratio, parse_position_tier
 from finance_agent.execution.hysteresis import apply_signal_hysteresis
 from finance_agent.execution.store import record_hysteresis_event, record_signal
 from finance_agent.outcome.track_record.judgment import DEFAULT_HORIZON_DAYS
@@ -50,7 +51,8 @@ class Signal:
     """标准化信号（落库单元，delta spec trade-execution 字段逐字）。
 
     ``direction`` 限 ``long``/``flat``（枚举不变量由 ``signal_from_decision``
-    保证；直接构造属调用方编程错误）。
+    保证；直接构造属调用方编程错误）。尾部 4 个可空字段为
+    enforce-decision-contract-at-execution 的决策约束（缺省 None = 既有行为退化）。
     """
 
     signal_id: str
@@ -61,6 +63,10 @@ class Signal:
     source: str
     decision_id: str
     created_at: str
+    entry_price: float | None = None
+    trigger_high: float | None = None
+    position_tier: str | None = None
+    exit_first_batch_ratio: float | None = None
 
 
 def _coerce_strength(value: object) -> float:
@@ -71,6 +77,21 @@ def _coerce_strength(value: object) -> float:
     if not math.isfinite(strength) or not 0.0 <= strength <= 1.0:
         raise SignalContractError(f"strength 非法值: {value!r}（须 0-1 数值）")
     return strength
+
+
+def _coerce_optional_price(value: object) -> float | None:
+    """可空价格清洗：None/非数值/非有限/<=0 → None（约束字段缺失不炸契约）。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number > 0 else None
 
 
 def _direction_for_action(decision: Mapping[str, Any]) -> str:
@@ -133,6 +154,10 @@ def signal_from_decision(
         source=str(source),
         decision_id=decision_id_text,
         created_at=str(created_at).strip() if created_at else trade_date_text,
+        entry_price=_coerce_optional_price(decision.get("entry_price")),
+        trigger_high=_coerce_optional_price(decision.get("trigger_high")),
+        position_tier=parse_position_tier(decision.get("position_tier")),
+        exit_first_batch_ratio=parse_first_batch_ratio(decision.get("exit_schedule")),
     )
 
 
