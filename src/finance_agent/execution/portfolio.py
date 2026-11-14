@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -48,11 +48,16 @@ def aggregate_targets(
     signals: Sequence[Signal],
     *,
     method: Literal["equal", "strength"] = "equal",
+    tier_weights: Mapping[str, float] | None = None,
     single_cap: float = constraints.MAX_SINGLE_POSITION,
     total_cap: float = constraints.MAX_TOTAL_POSITION,
     regime_multiplier: float = 1.0,
 ) -> list[TargetPosition]:
     """聚合为单票上限/总仓上限约束内的目标持仓（权重降序、symbol 升序）。
+
+    ``tier_weights``（enforce-decision-contract-at-execution）：symbol → 档位锚
+    权重；声明了的 symbol 用锚值，未声明的按 1/n 等权（仅 ``method="equal"``
+    生效）。
 
     ``regime_multiplier`` 为市场状态总仓位系数（[0, 1]，默认 1.0）：在总仓缩减
     **之后**对全部权重乘系数；≠ 1.0 时逐票追加 ``REGIME_SCALE``；默认 1.0 时
@@ -67,7 +72,10 @@ def aggregate_targets(
         return []
 
     if method == "equal":
-        raw: dict[str, float] = {signal.symbol: 1.0 / len(longs) for signal in longs}
+        raw: dict[str, float] = {}
+        for signal in longs:
+            declared = tier_weights.get(signal.symbol) if tier_weights else None
+            raw[signal.symbol] = declared if declared is not None else 1.0 / len(longs)
     else:
         total_strength = sum(signal.strength for signal in longs)
         if total_strength <= 0:

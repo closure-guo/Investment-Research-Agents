@@ -77,6 +77,7 @@ from finance_agent.data.snapshot import (
 )
 from finance_agent.execution.brokers.base import STATUS_FILLED, STATUS_PENDING
 from finance_agent.execution.brokers.paper import PaperBroker
+from finance_agent.execution.contracts import POSITION_TIER_WEIGHTS
 from finance_agent.execution.matching import MarketBar, PositionContext
 from finance_agent.execution.portfolio import aggregate_targets
 from finance_agent.execution.risk_gate import OrderIntent, check_order
@@ -117,7 +118,10 @@ class _BarContext:
 
 @dataclass(frozen=True)
 class _PlannedOrder:
-    """意图生成期定型的订单包：意图 + bar + 门禁上下文 + 权重快照。"""
+    """意图生成期定型的订单包：意图 + bar + 门禁上下文 + 权重快照。
+
+    尾部 3 个可空字段为 enforce-decision-contract-at-execution 的对账与首批标记。
+    """
 
     intent: OrderIntent
     bar: MarketBar
@@ -126,6 +130,9 @@ class _PlannedOrder:
     is_suspended: bool
     current_weight: float
     projected_total_weight: float
+    signal_entry_price: float | None = None
+    signal_position_tier: str | None = None
+    first_batch_decision_id: str | None = None
 
 
 def _finite(value: Any) -> float | None:
@@ -248,6 +255,10 @@ def _decision_payload(row: Mapping[Any, Any]) -> dict[str, Any]:
     （buy→long、hold/watch→flat、sell→flat），并透传 ``fund_manager_decision``
     作审批申报。缺 action / 快照不可解析/非对象 → ``ValueError``（调用方按脏数据
     跳过留痕，不阻断整批）。
+
+    enforce-decision-contract-at-execution：另解出 ``declared_contract`` 的
+    sell_type/trigger_high/position_size/exit_schedule 与 ``declared_prices`` 的
+    entry_price——缺键（存量预测）按 None 退化，不炸契约。
     """
     raw = row.get("rationale_snapshot")
     try:
@@ -259,11 +270,22 @@ def _decision_payload(row: Mapping[Any, Any]) -> dict[str, Any]:
     action = str(snapshot.get("action") or "").strip()
     if not action:
         raise ValueError("rationale_snapshot 缺 action")
+    contract = snapshot.get("declared_contract")
+    contract_map: dict[str, Any] = dict(contract) if isinstance(contract, Mapping) else {}
+    declared_prices = snapshot.get("declared_prices")
+    declared_entry = (
+        declared_prices.get("entry_price") if isinstance(declared_prices, Mapping) else None
+    )
     return {
         "symbol": str(row.get("symbol") or "").strip(),
         "confidence": row.get("confidence"),
         "action": action,
         "fund_manager_verdict": snapshot.get("fund_manager_decision"),
+        "sell_type": contract_map.get("sell_type"),
+        "entry_price": _finite(declared_entry),
+        "trigger_high": _finite(contract_map.get("trigger_high")),
+        "position_tier": str(contract_map.get("position_size") or "").strip().lower() or None,
+        "exit_schedule": contract_map.get("exit_schedule"),
     }
 
 
@@ -390,19 +412,33 @@ def _plan_long_entries(
     equity: float,
     projected_value: float,
     skipped_symbols: set[str],
+    skipped_details: list[dict[str, Any]],
     regime_multiplier: float = 1.0,
     single_cap: float = constraints.MAX_SINGLE_POSITION,
 ) -> tuple[list[_PlannedOrder], float]:
-    """③-b long 入场：按聚合目标权重与当前持仓差分，只补不缩（delta 整手）。
+    """③-b long 入场：触发门 → 档位/等权聚合 → 持仓差分，只补不缩（delta 整手）。
 
     ``regime_multiplier``（市场状态总仓位系数，默认 1.0）透传 ``aggregate_targets``；
     ``single_cap``（add-microcap-lane-analysis，默认主档 20%）同样透传（小票通道
     传更紧的上限，主档不传 = 既有行为不变）。
+
+    enforce-decision-contract-at-execution：①申报 ``trigger_high`` 的信号，bar
+    收盘未突破则不建仓（留痕 ``TRIGGER_NOT_MET``）；②申报档位的信号按锚权重聚合
+    （缺档走等权，留痕 ``no_position_tier``）。
     """
     planned: list[_PlannedOrder] = []
     first_long = _first_signal_by_symbol(signals)
+    tier_weights = {
+        signal.symbol: POSITION_TIER_WEIGHTS[signal.position_tier]
+        for signal in signals
+        if signal.position_tier in POSITION_TIER_WEIGHTS
+    }
     for target in aggregate_targets(
-        signals, method="equal", regime_multiplier=regime_multiplier, single_cap=single_cap
+        signals,
+        method="equal",
+        tier_weights=tier_weights or None,
+        regime_multiplier=regime_multiplier,
+        single_cap=single_cap,
     ):
         symbol = target.symbol
         signal = first_long.get(symbol)
@@ -410,6 +446,18 @@ def _plan_long_entries(
         if signal is None or context is None:
             skipped_symbols.add(symbol)
             continue
+        if signal.trigger_high is not None and context.bar.close < signal.trigger_high:
+            skipped_details.append(
+                {
+                    "symbol": symbol,
+                    "reason": "TRIGGER_NOT_MET",
+                    "trigger_high": signal.trigger_high,
+                    "bar_close": context.bar.close,
+                }
+            )
+            continue  # 条件入场未触发：不建仓（#593 300927 违约场景的门）
+        if signal.position_tier is None:
+            skipped_details.append({"symbol": symbol, "reason": "no_position_tier"})
         target_value = target.weight * equity
         target_shares = int(target_value / context.bar.open / LOT_SIZE) * LOT_SIZE
         current = int(qty_now.get(symbol, 0))
@@ -434,6 +482,8 @@ def _plan_long_entries(
                 is_suspended=context.is_suspended,
                 current_weight=current_weight,
                 projected_total_weight=_weight(projected_value, equity),
+                signal_entry_price=signal.entry_price,
+                signal_position_tier=signal.position_tier,
             )
         )
         qty_now[symbol] = current + delta
@@ -532,8 +582,10 @@ def run_execution_daily(
         "pending": 0,
         "skipped_reason": None,
         "skipped_symbols": [],  # 收尾统一填充（含信号段留痕）
+        "skipped_details": [],  # 契约退化/触发门明细（enforce-decision-contract）
         "skipped_backlog": skipped_backlog,
         "skipped_unapproved": skipped_unapproved,
+        "plan_deviation": [],  # 执行-计划对账（enforce-decision-contract）
     }
     # 市场状态总仓位系数（聚合前判定；缺失/陈旧/损坏 → 1.0 + no_regime_data 留痕）
     regime_multiplier, regime_block = _resolve_regime(regime_db_path)
@@ -580,6 +632,8 @@ def run_execution_daily(
     projected_value = marked_value
 
     planned: list[_PlannedOrder] = []
+    skipped_details = summary["skipped_details"]
+    plan_deviation = summary["plan_deviation"]
     # ③-a 退出先行（释放敞口与资金），再 ③-b 入场
     flat_signals = [signal for signal in pending_signals if signal.direction == "flat"]
     flat_planned, projected_value = _plan_flat_exits(
@@ -599,6 +653,7 @@ def run_execution_daily(
         equity=equity,
         projected_value=projected_value,
         skipped_symbols=skipped_symbols,
+        skipped_details=skipped_details,
         regime_multiplier=regime_multiplier,
         single_cap=single_cap,
     )
@@ -649,6 +704,25 @@ def run_execution_daily(
         else:
             # 下单侧拒单（INSUFFICIENT_CASH 等）：broker 已落 rejected 行，照计数
             rejected += 1
+        if record.status in (STATUS_FILLED, STATUS_PENDING) and item.intent.side == "buy":
+            declared = item.signal_entry_price
+            fill = record.fill_price
+            plan_deviation.append(
+                {
+                    "symbol": item.intent.symbol,
+                    "side": "buy",
+                    "decision_id": item.intent.decision_id,
+                    "declared_entry_price": declared,
+                    "fill_price": fill,
+                    "entry_deviation": (
+                        round(fill / declared - 1.0, 4)
+                        if declared is not None and fill is not None and declared > 0
+                        else None
+                    ),
+                    "position_tier": item.signal_position_tier,
+                    "target_weight": item.intent.target_weight,
+                }
+            )
 
     summary["orders_placed"] = orders_placed
     summary["rejected"] = rejected

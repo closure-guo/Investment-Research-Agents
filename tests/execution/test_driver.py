@@ -172,8 +172,22 @@ def test_decision_to_position_closed_loop(tmp_path):
         "pending": 0,
         "skipped_reason": None,
         "skipped_symbols": [],
+        # 存量口径（无 declared_contract）→ 档位缺失按既有等权执行并留痕
+        "skipped_details": [{"reason": "no_position_tier", "symbol": "600519.SH"}],
         "skipped_backlog": 0,
         "skipped_unapproved": 0,
+        "plan_deviation": [
+            {
+                "symbol": "600519.SH",
+                "side": "buy",
+                "decision_id": prediction_id,
+                "declared_entry_price": 10.0,
+                "fill_price": 10.02,
+                "entry_deviation": 0.002,  # round(10.02/10.0 - 1, 4)
+                "position_tier": None,
+                "target_weight": 0.2,
+            }
+        ],
         # regime 未接入（未传 regime_db_path，conftest 已隔离 REGIME_DB_PATH）：
         # 缺失披露式降级，系数 1.0 不影响本用例手算结果
         "regime": {
@@ -311,8 +325,10 @@ def test_missing_snapshot_still_converts_decisions_to_signals(tmp_path):
         "rejected": 0,
         "pending": 0,
         "skipped_symbols": [],
+        "skipped_details": [],
         "skipped_backlog": 0,
         "skipped_unapproved": 0,
+        "plan_deviation": [],
         "regime": {
             "state": None,
             "multiplier": 1.0,
@@ -471,8 +487,10 @@ def test_empty_library_returns_zero_summary(tmp_path):
         "pending": 0,
         "skipped_reason": None,
         "skipped_symbols": [],
+        "skipped_details": [],
         "skipped_backlog": 0,
         "skipped_unapproved": 0,
+        "plan_deviation": [],
         "regime": {
             "state": None,
             "multiplier": 1.0,
@@ -739,3 +757,98 @@ def test_corrupt_regime_config_degrades_without_failing_job(tmp_path, monkeypatc
 
     assert summary["regime"] == _NO_REGIME_DATA
     assert list_orders(db_path=exe_db)[0]["qty"] == 20000
+
+
+# ── enforce-decision-contract-at-execution：触发门 / 档位 / 退化 ──────────────
+
+
+def _contract_prediction(*, trigger_high: float = 8.0, **overrides: object) -> dict:
+    """带 declared_contract 的观点造数（新 ingest 产物的同形记录）。"""
+    return _prediction(
+        rationale_snapshot={
+            "action": "buy",
+            "fund_manager_decision": "approve",
+            "fund_manager_decision_reasoning": "测试审批",
+            "declared_prices": {"entry_price": 10.0, "stop_loss": 9.0, "target_price": 12.0},
+            "declared_contract": {
+                "sell_type": None,
+                "position_size": "light",
+                "exit_schedule": None,
+                "trigger_high": trigger_high,
+                "trigger_low": None,
+            },
+        },
+        **overrides,
+    )
+
+
+def test_trigger_not_met_blocks_entry(tmp_path):
+    """bar.close < trigger_high → 零订单 + TRIGGER_NOT_MET 结构化留痕（#593 300927 实证场景）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_contract_prediction(trigger_high=10.8), db_path=dec_db)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["signals_created"] == 1
+    assert summary["orders_placed"] == 0
+    detail = next(d for d in summary["skipped_details"] if d["symbol"] == "600519.SH")
+    assert detail["reason"] == "TRIGGER_NOT_MET"
+    assert detail["trigger_high"] == 10.8
+    assert detail["bar_close"] == 10.2
+    assert list_positions(db_path=exe_db) == []
+
+
+def test_trigger_met_enters_with_tier_weight(tmp_path):
+    """触发满足 → light 档 10% 目标（非等权 20%）；手算：equity 100 万 → 10 万市值
+    → floor(100000/10.0/100)×100 = 10,000 股（等权口径是 20,000 股）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_contract_prediction(), db_path=dec_db)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 1
+    orders = list_orders(db_path=exe_db)
+    assert orders[0]["qty"] == 10_000
+    deviation = summary["plan_deviation"][0]
+    assert deviation["symbol"] == "600519.SH"
+    assert deviation["declared_entry_price"] == 10.0
+    assert deviation["position_tier"] == "light"
+
+
+def test_legacy_prediction_degrades_to_equal(tmp_path):
+    """无 declared_contract 的存量预测 → 等权 20%（既有行为）+ no_position_tier 留痕。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_prediction(), db_path=dec_db)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 1
+    assert list_orders(db_path=exe_db)[0]["qty"] == 20_000  # 等权 1/1 → clip 20%
+    assert any(
+        d["symbol"] == "600519.SH" and d["reason"] == "no_position_tier"
+        for d in summary["skipped_details"]
+    )
