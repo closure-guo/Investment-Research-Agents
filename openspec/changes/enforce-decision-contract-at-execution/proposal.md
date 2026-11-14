@@ -27,6 +27,8 @@
 
 - `src/finance_agent/execution/`（signals.py / driver.py / portfolio.py / store.py）
 - `src/finance_agent/outcome/store.py`（可选：decision_log 加列或在信号阶段解析 snapshot，设计期定）
+- `src/finance_agent/outcome/track_record/ingest.py`（新增：rationale_snapshot 冻结 `declared_contract`——trigger/档位/exit_schedule/sell_type）
+- `src/finance_agent/execution/store.py`（signals 表加 4 可空列 + 幂等 ALTER 迁移；新增 `exit_schedule_state` 表）
 - 不改 trader/risk_judge prompt（`entry_cap` 结构化申报留待后续 delta；Phase 1 靠对账留痕暴露超限成交）
 - 纯后端逻辑变更，不触发 E2E 门禁（§3.5 不适用）
 - paper broker 生产行为变化：下一执行日批起，buy 必须过触发门、权重按档位、exit 按首批比例

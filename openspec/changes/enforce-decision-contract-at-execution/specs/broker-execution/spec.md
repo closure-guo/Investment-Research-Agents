@@ -22,7 +22,7 @@
 
 ### Requirement: 条件入场未触发不建仓
 
-订单规划层 SHALL 对申报了 `trigger_high`（或 `trigger_low`）的 buy 信号执行触发门：执行日 bar 收盘价未突破 `trigger_high`（或未跌破 `trigger_low`）时 MUST NOT 生成买入订单，且 MUST 以结构化明细留痕（标的 + 原因码 `TRIGGER_NOT_MET` + 触发位与实际收盘），供台账回查；触发满足时正常进入下单流程。留痕 MUST NOT 静默丢弃或仅计裸计数。
+订单规划层 SHALL 对申报了 `trigger_high` 的 buy 信号执行触发门：执行日 bar 收盘价未突破 `trigger_high` 时 MUST NOT 生成买入订单，且 MUST 以结构化明细留痕（标的 + 原因码 `TRIGGER_NOT_MET` + 触发位与实际收盘），供台账回查；触发满足时正常进入下单流程。留痕 MUST NOT 静默丢弃或仅计裸计数。`trigger_low`（下破型入场）本期不实现，消费侧忽略该字段（设计文档已披露）。
 
 #### Scenario: 触发未满足
 
