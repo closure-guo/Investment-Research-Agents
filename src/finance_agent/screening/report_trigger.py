@@ -71,13 +71,13 @@ def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=15000")
     return conn
 
 
 def init_db(db_path: str | Path | None = None) -> None:
     with _connect(_screening_path(db_path)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
         conn.execute(_SCHEMA)
         conn.commit()
 

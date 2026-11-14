@@ -86,13 +86,13 @@ def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=15000")
     return conn
 
 
 def init_pool_analysis_runs(db_path: str | Path | None = None) -> None:
     with _connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
         conn.execute(_SCHEMA)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(pool_analysis_runs)")}
         for name, ddl in _RUNS_COLUMN_MIGRATIONS:

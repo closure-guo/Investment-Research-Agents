@@ -39,7 +39,12 @@ class TestGetDbTransientRetry:
         conn.close()
 
     def test_pragma_failure_also_retried(self, isolated_db, monkeypatch):
-        """connect 成功但 PRAGMA 阶段瞬断，同样走重试（整块包裹）。"""
+        """connect 成功但 PRAGMA 阶段瞬断，同样走重试（整块包裹）。
+
+        harden-sqlite-connection-discipline（#515）：``_get_db`` 不再执行
+        ``PRAGMA journal_mode``（journal 收敛到 init_db 一次）；连接期 pragma
+        只剩 ``busy_timeout``，重试包裹保证改钉在它上。
+        """
 
         class FlakyConn:
             def __init__(self, inner):
@@ -48,7 +53,7 @@ class TestGetDbTransientRetry:
 
             def execute(self, sql, *a):
                 self._pragma_calls += 1
-                if sql.startswith("PRAGMA journal_mode") and self._pragma_calls == 1:
+                if sql.startswith("PRAGMA busy_timeout") and self._pragma_calls == 1:
                     raise sqlite3.OperationalError("disk I/O error")
                 return self._inner.execute(sql, *a)
 

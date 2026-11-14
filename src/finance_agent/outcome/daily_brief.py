@@ -76,7 +76,6 @@ def _connect_write(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=15000")
     return conn
 
@@ -543,6 +542,7 @@ def _write_report_file(as_of: str, markdown: str) -> Path:
 def init_daily_briefs(db_path: str | Path | None = None) -> None:
     path = _sessions_db(db_path)
     with _connect_write(path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
         conn.execute(_BRIEF_SCHEMA)
         conn.commit()
 

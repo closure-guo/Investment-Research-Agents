@@ -150,7 +150,6 @@ def _connect(db_path: str | Path | None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=15000")
     return conn
 
@@ -159,6 +158,7 @@ def init_library(db_path: str | Path | None = None) -> Path:
     """幂等建 3 表 + 索引（含存量库 orientation 列迁移），返回实际使用的库路径。"""
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
     try:
         conn.executescript(FACTOR_LIBRARY_DDL)
         existing = {row[1] for row in conn.execute("PRAGMA table_info(factors)")}

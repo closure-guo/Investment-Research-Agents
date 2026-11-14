@@ -108,13 +108,13 @@ def _connect(db_path: str | Path | None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=15000")
     return conn
 
 
 def init_predictions(db_path: str | Path | None = None) -> None:
     conn = _connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
     try:
         conn.executescript(PREDICTIONS_DDL)
         conn.commit()
@@ -206,6 +206,7 @@ CREATE TABLE IF NOT EXISTS risk_free_rates (
 def init_track_record_tables(db_path: str | Path | None = None) -> None:
     """建 predictions（若缺）与全部 stage-b/c 表；幂等，可重复调用。"""
     conn = _connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
     try:
         conn.executescript(PREDICTIONS_DDL)
         conn.executescript(TRACK_RECORD_EXTRA_DDL)
