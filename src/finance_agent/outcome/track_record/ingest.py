@@ -105,6 +105,7 @@ def persist_prediction_from_accumulated(
                         "stop_loss": decision.get("stop_loss"),
                         "target_price": decision.get("target_price"),
                     },
+                    "declared_contract": _declared_contract(decision, action),
                 },
                 "langfuse_trace_id": accumulated.get("langfuse_trace_id"),
                 # add-watch-trigger-tracking：会话关联 + watch 双向触发位（写入即冻结）。
@@ -125,6 +126,23 @@ def persist_prediction_from_accumulated(
         logger.info("prediction 已落库: %s %s status=%s", stock_code, action, status)
     except Exception:  # noqa: BLE001 - 旁路铁律:失败仅 ERROR 不阻断业务
         logger.exception("prediction 落库失败(不阻断业务)")
+
+
+def _declared_contract(decision: dict, action: str) -> dict:
+    """决策契约字段冻结（enforce-decision-contract-at-execution）。
+
+    trader 终稿的结构化约束进 ``rationale_snapshot.declared_contract``，供执行链
+    信号转换消费（触发门/档位/首批比例）。触发位仅 buy 落值——watch 触发已由
+    ``trigger_high``/``trigger_low`` 列承载（写入即冻结的既有语义），sell 无入场
+    触发语义。键恒全量（缺省 None），保证快照形状稳定可解析。
+    """
+    return {
+        "sell_type": decision.get("sell_type"),
+        "position_size": decision.get("position_size"),
+        "exit_schedule": decision.get("exit_schedule"),
+        "trigger_high": decision.get("trigger_high") if action == "buy" else None,
+        "trigger_low": decision.get("trigger_low") if action == "buy" else None,
+    }
 
 
 def _kline_last_close(kline: Any) -> float | None:

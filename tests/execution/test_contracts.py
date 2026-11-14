@@ -45,3 +45,32 @@ def test_parse_first_batch_ratio_invalid_inputs_return_none():
 
 def test_parse_first_batch_ratio_clamps_to_ratio():
     assert parse_first_batch_ratio("首批 100% 清仓") == 1.0
+
+
+from finance_agent.outcome.track_record.ingest import _declared_contract
+
+
+def test_declared_contract_freezes_all_fields_for_buy():
+    decision = {
+        "sell_type": None,
+        "position_size": "light",
+        "exit_schedule": None,
+        "trigger_high": 22.35,
+        "trigger_low": None,
+    }
+    contract = _declared_contract(decision, action="buy")
+    assert contract == {
+        "sell_type": None,
+        "position_size": "light",
+        "exit_schedule": None,
+        "trigger_high": 22.35,
+        "trigger_low": None,
+    }
+
+
+def test_declared_contract_triggers_only_for_buy():
+    decision = {"sell_type": "exit", "position_size": None,
+                "exit_schedule": "首批减 70%", "trigger_high": 22.35, "trigger_low": 20.0}
+    assert _declared_contract(decision, action="sell")["trigger_high"] is None
+    assert _declared_contract(decision, action="sell")["exit_schedule"] == "首批减 70%"
+    assert _declared_contract(decision, action="watch")["trigger_high"] is None
