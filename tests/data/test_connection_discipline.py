@@ -71,9 +71,7 @@ class TestWalOnlyInInit:
 
 
 class TestSnapshotReadNoDDL:
-    def test_latest_snapshot_date_missing_db_returns_none_without_creating(
-        self, tmp_path: Path
-    ):
+    def test_latest_snapshot_date_missing_db_returns_none_without_creating(self, tmp_path: Path):
         db = tmp_path / "absent.db"
         assert snapshot.latest_snapshot_date(db) is None
         assert not db.exists(), "读路径 MUST NOT 建库"
