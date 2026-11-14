@@ -83,7 +83,9 @@ from finance_agent.execution.portfolio import aggregate_targets
 from finance_agent.execution.risk_gate import OrderIntent, check_order
 from finance_agent.execution.signals import Signal, SignalContractError, signal_from_decision
 from finance_agent.execution.store import (
+    exit_first_batch_done,
     list_signals,
+    record_exit_first_batch_done,
     record_order_rejection,
     record_signal,
     signal_ids_with_orders,
@@ -368,8 +370,17 @@ def _plan_flat_exits(
     equity: float,
     projected_value: float,
     skipped_symbols: set[str],
+    skipped_details: list[dict[str, Any]],
+    plan_deviation: list[dict[str, Any]],
+    first_batch_done: set[str],
 ) -> tuple[list[_PlannedOrder], float]:
-    """③-a flat 退出：持仓标的生成全部卖出意图（零股尾数照卖）。"""
+    """③-a flat 退出：全额退出，或按申报首批比例执行首批（#593 T5）。
+
+    首批语义：``Signal.exit_first_batch_ratio`` 非空且该 decision 未落首批状态 →
+    卖 ``floor(持仓×比例/手)×手``；不足一手顺延留痕；首批已执行 → 本决策不再卖
+    （剩余批次由后续新 exit 决策承接——生产节奏为每晚复评）。ratio 缺失/不可解析
+    → 既有全额退出 + ``schedule_unparsed`` 留痕（保守方向：宁多卖不少留）。
+    """
     planned: list[_PlannedOrder] = []
     for symbol, signal in sorted(_first_signal_by_symbol(signals).items()):
         qty = int(qty_now.get(symbol, 0))
@@ -379,8 +390,38 @@ def _plan_flat_exits(
         if context is None:
             skipped_symbols.add(symbol)
             continue
+        sell_qty = qty
+        first_batch_decision_id: str | None = None
+        if signal.exit_first_batch_ratio is not None:
+            if signal.decision_id in first_batch_done:
+                continue  # 首批已执行：剩余批次待新决策，不在本决策重复执行
+            batch = int(qty * signal.exit_first_batch_ratio // LOT_SIZE) * LOT_SIZE
+            if batch <= 0:
+                skipped_details.append(
+                    {
+                        "symbol": symbol,
+                        "reason": "first_batch_below_lot",
+                        "ratio": signal.exit_first_batch_ratio,
+                        "qty": qty,
+                    }
+                )
+                continue  # 首批不足一手：顺延（design 风险 3 口径）
+            sell_qty = batch
+            first_batch_decision_id = signal.decision_id
+            plan_deviation.append(
+                {
+                    "symbol": symbol,
+                    "side": "sell",
+                    "decision_id": signal.decision_id,
+                    "schedule_ratio": signal.exit_first_batch_ratio,
+                    "first_batch_qty": batch,
+                    "remaining_qty": qty - batch,
+                }
+            )
+        else:
+            skipped_details.append({"symbol": symbol, "reason": "schedule_unparsed"})
         current_weight = _weight(qty * context.bar.close, equity)
-        projected_value -= qty * context.bar.close
+        projected_value -= sell_qty * context.bar.close
         planned.append(
             _PlannedOrder(
                 intent=OrderIntent(
@@ -388,8 +429,8 @@ def _plan_flat_exits(
                     signal_id=signal.signal_id,
                     symbol=symbol,
                     side="sell",
-                    qty=qty,
-                    target_weight=0.0,  # flat = 平仓目标 0
+                    qty=sell_qty,
+                    target_weight=0.0,  # exit = 平仓目标 0（首批按比例，剩余待新决策）
                 ),
                 bar=context.bar,
                 # 日初持仓视作隔日可卖（T+1）；当日买入不在本意图集内
@@ -398,9 +439,10 @@ def _plan_flat_exits(
                 is_suspended=context.is_suspended,
                 current_weight=current_weight,
                 projected_total_weight=_weight(projected_value, equity),
+                first_batch_decision_id=first_batch_decision_id,
             )
         )
-        qty_now[symbol] = 0
+        qty_now[symbol] = qty - sell_qty
     return planned, projected_value
 
 
@@ -636,6 +678,7 @@ def run_execution_daily(
     plan_deviation = summary["plan_deviation"]
     # ③-a 退出先行（释放敞口与资金），再 ③-b 入场
     flat_signals = [signal for signal in pending_signals if signal.direction == "flat"]
+    first_batch_done = exit_first_batch_done(db_path=execution_db_path)
     flat_planned, projected_value = _plan_flat_exits(
         flat_signals,
         contexts,
@@ -643,6 +686,9 @@ def run_execution_daily(
         equity=equity,
         projected_value=projected_value,
         skipped_symbols=skipped_symbols,
+        skipped_details=skipped_details,
+        plan_deviation=plan_deviation,
+        first_batch_done=first_batch_done,
     )
     planned.extend(flat_planned)
     long_signals = [signal for signal in pending_signals if signal.direction == "long"]
@@ -722,6 +768,14 @@ def run_execution_daily(
                     "position_tier": item.signal_position_tier,
                     "target_weight": item.intent.target_weight,
                 }
+            )
+        if (
+            record.status in (STATUS_FILLED, STATUS_PENDING)
+            and item.first_batch_decision_id is not None
+        ):
+            # 首批减仓订单已进入执行链（成交或挂单）：落首批状态，防次日重复执行
+            record_exit_first_batch_done(
+                item.first_batch_decision_id, trade_date, db_path=execution_db_path
             )
 
     summary["orders_placed"] = orders_placed

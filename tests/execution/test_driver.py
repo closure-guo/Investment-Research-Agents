@@ -35,6 +35,7 @@ from finance_agent.execution.brokers.paper import PaperBroker
 from finance_agent.execution.driver import run_execution_daily
 from finance_agent.execution.store import (
     ensure_account,
+    exit_first_batch_done,
     execution_conn,
     list_orders,
     list_positions,
@@ -852,3 +853,134 @@ def test_legacy_prediction_degrades_to_equal(tmp_path):
         d["symbol"] == "600519.SH" and d["reason"] == "no_position_tier"
         for d in summary["skipped_details"]
     )
+
+
+# ── enforce-decision-contract-at-execution：exit 首批 ────────────────────────
+
+
+def _exit_prediction(*, exit_schedule: str = "首批减持有敞口的 70%，剩余按双向触发处置") -> dict:
+    return _prediction(
+        direction="short",
+        rationale_snapshot={
+            "action": "sell",
+            "fund_manager_decision": "approve",
+            "fund_manager_decision_reasoning": "测试审批",
+            "declared_prices": {"entry_price": None, "stop_loss": None, "target_price": None},
+            "declared_contract": {
+                "sell_type": "exit",
+                "position_size": None,
+                "exit_schedule": exit_schedule,
+                "trigger_high": None,
+                "trigger_low": None,
+            },
+        },
+    )
+
+
+def test_first_batch_sell_only(tmp_path):
+    """exit + 首批 70% + 持仓 9,100 → 卖 6,300 剩 2,800；状态表落 decision_id
+    （手算：floor(9100×0.7/100)×100 = 6,300）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    prediction_id = insert_prediction(_exit_prediction(), db_path=dec_db)
+    _seed_position(exe_db, "600519.SH", 9_100, 10.0, _AS_OF)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 1
+    assert list_orders(db_path=exe_db)[0]["qty"] == 6_300
+    positions = {p["symbol"]: p["qty"] for p in list_positions(db_path=exe_db)}
+    assert positions["600519.SH"] == 2_800
+    assert exit_first_batch_done(db_path=exe_db) == {prediction_id}  # 首批状态已落
+    progress = [d for d in summary["plan_deviation"] if d["side"] == "sell"]
+    assert progress == [
+        {
+            "symbol": "600519.SH",
+            "side": "sell",
+            "decision_id": prediction_id,
+            "schedule_ratio": 0.7,
+            "first_batch_qty": 6_300,
+            "remaining_qty": 2_800,
+        }
+    ]
+
+
+def test_first_batch_not_repeated(tmp_path):
+    """首批已执行的同决策次日重跑 → 不再生成卖出（剩余批次待新决策）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_exit_prediction(), db_path=dec_db)
+    _seed_position(exe_db, "600519.SH", 9_100, 10.0, _AS_OF)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+    run_execution_daily(db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db)
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 0
+    sell_orders = [o for o in list_orders(db_path=exe_db) if o["side"] == "sell"]
+    assert len(sell_orders) == 1  # 只有首日那笔
+    assert list_positions(db_path=exe_db)[0]["qty"] == 2_800
+
+
+def test_schedule_unparsed_falls_back_full_exit(tmp_path):
+    """exit_schedule 无首批表述 → 全额退出（既有行为）+ schedule_unparsed 留痕。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(
+        _exit_prediction(exit_schedule="视盘面一次性处理"),
+        db_path=dec_db,
+    )
+    _seed_position(exe_db, "600519.SH", 9_100, 10.0, _AS_OF)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 1
+    assert list_orders(db_path=exe_db)[0]["qty"] == 9_100
+    assert list_positions(db_path=exe_db) == []
+    assert any(
+        d["reason"] == "schedule_unparsed" for d in summary["skipped_details"]
+    )
+
+
+def test_first_batch_below_lot_defers(tmp_path):
+    """首批不足一手（120×70%=84 → floor=0）→ 不卖 + first_batch_below_lot 留痕。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_exit_prediction(), db_path=dec_db)
+    _seed_position(exe_db, "600519.SH", 120, 10.0, _AS_OF)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 0
+    assert any(
+        d["reason"] == "first_batch_below_lot" and d["symbol"] == "600519.SH"
+        for d in summary["skipped_details"]
+    )
+    assert list_positions(db_path=exe_db)[0]["qty"] == 120
