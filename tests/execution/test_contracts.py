@@ -1,10 +1,21 @@
 """决策契约解析器单测（enforce-decision-contract-at-execution Task 1）。"""
 
+import sqlite3
+
 from finance_agent.execution.contracts import (
     POSITION_TIER_WEIGHTS,
     parse_first_batch_ratio,
     parse_position_tier,
 )
+from finance_agent.execution.signals import Signal
+from finance_agent.execution.store import (
+    exit_first_batch_done,
+    init_execution_db,
+    list_signals,
+    record_exit_first_batch_done,
+    record_signal,
+)
+from finance_agent.outcome.track_record.ingest import _declared_contract
 
 
 def test_tier_anchors_match_trader_prompt_lower_bounds():
@@ -27,7 +38,10 @@ def test_parse_position_tier_unknown_returns_none():
 
 def test_parse_first_batch_ratio_single_match():
     # 601066 2026-11-12 真实方案文本形态（首批…70%，中间含其他数字）
-    assert parse_first_batch_ratio("首批在现价 21.72 附近即减持有敞口的 70%（较原方案 50% 上调）") == 0.7
+    assert (
+        parse_first_batch_ratio("首批在现价 21.72 附近即减持有敞口的 70%（较原方案 50% 上调）")
+        == 0.7
+    )
     assert parse_first_batch_ratio("首批减仓 30%，余下等反弹") == 0.3
 
 
@@ -45,9 +59,6 @@ def test_parse_first_batch_ratio_invalid_inputs_return_none():
 
 def test_parse_first_batch_ratio_clamps_to_ratio():
     assert parse_first_batch_ratio("首批 100% 清仓") == 1.0
-
-
-from finance_agent.outcome.track_record.ingest import _declared_contract
 
 
 def test_declared_contract_freezes_all_fields_for_buy():
@@ -69,36 +80,29 @@ def test_declared_contract_freezes_all_fields_for_buy():
 
 
 def test_declared_contract_triggers_only_for_buy():
-    decision = {"sell_type": "exit", "position_size": None,
-                "exit_schedule": "首批减 70%", "trigger_high": 22.35, "trigger_low": 20.0}
+    decision = {
+        "sell_type": "exit",
+        "position_size": None,
+        "exit_schedule": "首批减 70%",
+        "trigger_high": 22.35,
+        "trigger_low": 20.0,
+    }
     assert _declared_contract(decision, action="sell")["trigger_high"] is None
     assert _declared_contract(decision, action="sell")["exit_schedule"] == "首批减 70%"
     assert _declared_contract(decision, action="watch")["trigger_high"] is None
 
 
-import sqlite3
-
-from finance_agent.execution.signals import Signal
-from finance_agent.execution.store import (
-    exit_first_batch_done,
-    init_execution_db,
-    list_signals,
-    record_exit_first_batch_done,
-    record_signal,
-)
-
-
 def _base_signal(**overrides: object) -> Signal:
-    base = dict(
-        signal_id="600519.SH:2026-11-17",
-        symbol="600519.SH",
-        direction="long",
-        strength=0.8,
-        horizon_days=20,
-        source="predictions",
-        decision_id="p_test1",
-        created_at="2026-11-17",
-    )
+    base: dict = {
+        "signal_id": "600519.SH:2026-11-17",
+        "symbol": "600519.SH",
+        "direction": "long",
+        "strength": 0.8,
+        "horizon_days": 20,
+        "source": "predictions",
+        "decision_id": "p_test1",
+        "created_at": "2026-11-17",
+    }
     base.update(overrides)
     return Signal(**base)
 
@@ -106,8 +110,10 @@ def _base_signal(**overrides: object) -> Signal:
 def test_signal_contract_fields_roundtrip(tmp_path):
     db = tmp_path / "execution.db"
     signal = _base_signal(
-        entry_price=22.40, trigger_high=22.35,
-        position_tier="light", exit_first_batch_ratio=0.7,
+        entry_price=22.40,
+        trigger_high=22.35,
+        position_tier="light",
+        exit_first_batch_ratio=0.7,
     )
     record_signal(signal, db_path=db)
     loaded = list_signals(db_path=db)[0]

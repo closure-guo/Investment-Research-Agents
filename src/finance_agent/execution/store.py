@@ -153,6 +153,8 @@ def _migrate_signal_columns(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column" not in str(exc).lower():
                 raise
+
+
 _ORDER_SIGNALS = " ORDER BY created_at ASC, symbol ASC"
 
 

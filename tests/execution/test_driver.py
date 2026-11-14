@@ -35,8 +35,8 @@ from finance_agent.execution.brokers.paper import PaperBroker
 from finance_agent.execution.driver import run_execution_daily
 from finance_agent.execution.store import (
     ensure_account,
-    exit_first_batch_done,
     execution_conn,
+    exit_first_batch_done,
     list_orders,
     list_positions,
     list_signals,
@@ -957,9 +957,7 @@ def test_schedule_unparsed_falls_back_full_exit(tmp_path):
     assert summary["orders_placed"] == 1
     assert list_orders(db_path=exe_db)[0]["qty"] == 9_100
     assert list_positions(db_path=exe_db) == []
-    assert any(
-        d["reason"] == "schedule_unparsed" for d in summary["skipped_details"]
-    )
+    assert any(d["reason"] == "schedule_unparsed" for d in summary["skipped_details"])
 
 
 def test_first_batch_below_lot_defers(tmp_path):
