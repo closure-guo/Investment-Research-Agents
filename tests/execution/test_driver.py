@@ -982,3 +982,125 @@ def test_first_batch_below_lot_defers(tmp_path):
         for d in summary["skipped_details"]
     )
     assert list_positions(db_path=exe_db)[0]["qty"] == 120
+
+
+# ── enforce-signal-freshness-at-planning：来源重验 + newest-wins ─────────────
+
+
+def _seed_pending_signal(
+    db, *, symbol: str, decision_id: str, direction: str, trade_date: str, **kwargs: object
+) -> None:
+    """直接落一条无订单 pending 信号（绕过决策转换，专测规划前过滤层）。"""
+    from finance_agent.execution.signals import Signal
+    from finance_agent.execution.store import record_signal
+
+    record_signal(
+        Signal(
+            signal_id=f"{symbol}:{trade_date}",
+            symbol=symbol,
+            direction=direction,  # type: ignore[arg-type]
+            strength=0.5,
+            horizon_days=20,
+            source="predictions",
+            decision_id=decision_id,
+            created_at=trade_date,
+            **kwargs,
+        ),
+        db_path=db,
+    )
+
+
+def test_stale_flat_source_skipped(tmp_path):
+    """resolved 来源的遗留 flat 信号不再击穿后续 buy 决策的新仓（#596 600780 实证）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    stale_id = insert_prediction(_exit_prediction(), status="resolved_win", db_path=dec_db)
+    _seed_pending_signal(
+        exe_db,
+        symbol="600519.SH",
+        decision_id=stale_id,
+        direction="flat",
+        trade_date="2026-10-08",
+    )
+    _seed_position(exe_db, "600519.SH", 9_100, 10.0, _AS_OF)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    sell_orders = [o for o in list_orders(db_path=exe_db) if o["side"] == "sell"]
+    assert sell_orders == []
+    assert list_positions(db_path=exe_db)[0]["qty"] == 9_100  # buy 新仓保留
+    assert any(
+        d["reason"] == "STALE_SOURCE" and d["decision_id"] == stale_id
+        for d in summary["skipped_details"]
+    )
+
+
+def test_newest_wins_direction_conflict(tmp_path):
+    """同标的两条 open 来源 pending 信号 → 仅最新决策日参与规划，旧者留痕。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    old_sell_id = insert_prediction(
+        _exit_prediction(), db_path=dec_db
+    )  # created_at = _DECISION_DATE (10-13)
+    new_buy = _prediction(created_at="2026-10-13T16:00:00")  # 同日更晚 → 更新
+    new_buy_id = insert_prediction(new_buy, db_path=dec_db)
+    _seed_pending_signal(
+        exe_db,
+        symbol="600519.SH",
+        decision_id=old_sell_id,
+        direction="flat",
+        trade_date="2026-10-12",
+    )
+    _seed_pending_signal(
+        exe_db,
+        symbol="600519.SH",
+        decision_id=new_buy_id,
+        direction="long",
+        trade_date="2026-10-13",
+    )
+    _seed_position(exe_db, "600519.SH", 1_000, 10.0, _AS_OF)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    sides = {o["side"] for o in list_orders(db_path=exe_db)}
+    assert sides == {"buy"}  # 旧 flat 不卖
+    assert any(
+        d["reason"] == "SUPERSEDED_BY_NEWER"
+        and d["stale_signal_id"] == "600519.SH:2026-10-12"
+        and d["winner_signal_id"] == "600519.SH:2026-10-13"
+        for d in summary["skipped_details"]
+    )
+
+
+def test_fresh_signal_unaffected(tmp_path):
+    """来源 open 且为最新的单条 long 信号 → 正常建仓，无新原因码（回归护栏）。"""
+    dec_db, exe_db, snap_db = _dbs(tmp_path)
+    init_predictions(dec_db)
+    insert_prediction(_prediction(), db_path=dec_db)
+    write_snapshot_rows(
+        _AS_OF,
+        [_spot_row("600519", open_=10.0, close_raw=10.2, amount=100.0), *_fillers()],
+        db_path=snap_db,
+    )
+
+    summary = run_execution_daily(
+        db_path=dec_db, execution_db_path=exe_db, snapshot_db_path=snap_db
+    )
+
+    assert summary["orders_placed"] == 1
+    reasons = {d["reason"] for d in summary["skipped_details"]}
+    assert "STALE_SOURCE" not in reasons and "SUPERSEDED_BY_NEWER" not in reasons
