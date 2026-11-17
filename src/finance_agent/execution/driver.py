@@ -216,6 +216,53 @@ def _first_signal_by_symbol(signals: list[Signal]) -> dict[str, Signal]:
     return first
 
 
+def _filter_stale_and_superseded(
+    pending_signals: list[Signal],
+    open_prediction_ids: set[str],
+    skipped_details: list[dict[str, Any]],
+) -> list[Signal]:
+    """规划前校验（enforce-signal-freshness-at-planning，issue #596）。
+
+    ① 来源状态重验：来源决策已非 open（resolved/superseded/duplicate_of_day/void）
+    的 pending 信号跳过（``STALE_SOURCE``）——已结算的旧方向不得再执行；
+    ② newest-wins：同标的仅保留决策日（created_at）最新的信号，更旧者跳过
+    （``SUPERSEDED_BY_NEWER`` + 胜者 signal_id）——新方向裁定不被旧方向击穿。
+    两层对 long/flat 同等生效；已产生订单的信号不进入本函数（调用方先滤）。
+    """
+    valid: list[Signal] = []
+    for signal in pending_signals:
+        if signal.decision_id in open_prediction_ids:
+            valid.append(signal)
+        else:
+            skipped_details.append(
+                {
+                    "symbol": signal.symbol,
+                    "reason": "STALE_SOURCE",
+                    "decision_id": signal.decision_id,
+                    "signal_id": signal.signal_id,
+                }
+            )
+    newest_by_symbol: dict[str, Signal] = {}
+    for signal in sorted(valid, key=lambda item: (item.created_at, item.signal_id)):
+        newest_by_symbol[signal.symbol] = signal  # 升序遍历 → 末次赋值即最新
+    plannable: list[Signal] = []
+    newest_ids = {signal.signal_id for signal in newest_by_symbol.values()}
+    for signal in valid:
+        if signal.signal_id in newest_ids:
+            plannable.append(signal)
+        else:
+            winner = newest_by_symbol[signal.symbol]
+            skipped_details.append(
+                {
+                    "symbol": signal.symbol,
+                    "reason": "SUPERSEDED_BY_NEWER",
+                    "stale_signal_id": signal.signal_id,
+                    "winner_signal_id": winner.signal_id,
+                }
+            )
+    return plannable
+
+
 def _load_bar_contexts(
     trade_date: str,
     symbols: list[str] | set[str],
@@ -655,6 +702,15 @@ def run_execution_daily(
         for signal in list_signals(db_path=execution_db_path)
         if signal.signal_id not in ordered_signal_ids
     ]
+    # 规划前校验（enforce-signal-freshness-at-planning）：来源重验 + newest-wins
+    open_prediction_ids = {
+        str(row.get("prediction_id") or "")
+        for row in list_predictions(status="open", limit=_PREDICTION_SCAN_LIMIT, db_path=db_path)
+    }
+    skipped_details = summary["skipped_details"]
+    pending_signals = _filter_stale_and_superseded(
+        pending_signals, open_prediction_ids, skipped_details
+    )
 
     # 需要行情的标的：现持仓（估值/平仓）+ 待执行信号标的（建仓/平仓）
     needed_symbols = {*qty_now, *(signal.symbol for signal in pending_signals)}
@@ -674,7 +730,6 @@ def run_execution_daily(
     projected_value = marked_value
 
     planned: list[_PlannedOrder] = []
-    skipped_details = summary["skipped_details"]
     plan_deviation = summary["plan_deviation"]
     # ③-a 退出先行（释放敞口与资金），再 ③-b 入场
     flat_signals = [signal for signal in pending_signals if signal.direction == "flat"]
