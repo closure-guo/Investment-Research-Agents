@@ -107,6 +107,12 @@ _DATE_PATTERNS = (
 _ENUM_SPAN_PATTERNS = (
     re.compile(r"[（(]\s*\d{1,2}\s*[)）]"),
     re.compile(r"(?<![\d.])\d{1,2}[)）]"),
+    # 「3. 」西文句点列表记号（301220 两轮生产实证：reasoning 结构化行文
+    # 「…余仓当日清空"\n3. "2026 年报…」「4. 风险指标…」的 3/4 被提为价位、
+    # 归属布林下轨 21.4241 偏差 86%/81.33% 阻断交付；编号列表是固有行文形态，
+    # 打回删不掉 → 重试空转）。双守卫防误吞：lookbehind 排小数（20.67 的 20）、
+    # lookahead \s 排真小数点后数字；记号后真实价位不受豁免
+    re.compile(r"(?<![\d.])\d{1,2}\.(?=\s)"),
 )
 # 指数名整体排除（add-horizon-semantics E2E 实证，600519 10-11 实跑）：
 # 决策层周期契约注入后 reasoning 恒含「相对沪深300 超额收益」——300 被提为
@@ -150,7 +156,9 @@ _RATIO_CHAIN_PATTERN = re.compile(
 # （600515 10-07 补跑实证「（1/3仓位…）」的 1 被提为价位偏差 61.79% 阻断）
 # + 标准差记号 σ（2026-10-22 南方航空「20 个交易日 1σ 约 9%」的 1 与止损参考带
 # 下沿 4.5314 偏差 77.93% → 阻断；σ 后恒无价位语义，排除不伤及真实价位）
-_NON_PRICE_SUFFIX = "%％倍折万亿手天日均月年号时点分秒周季:：个家成档条项次笔轮层类种枚名步位线/σ"
+_NON_PRICE_SUFFIX = "%％倍折万亿手天日均月年号时点分秒周季:：个家成档条项次笔轮层类种枚名步位线/σ×"
+# × 为 11-12 终裁 605033 round-1 实证补充：「约为 2×日波动以上」的 2 是波动倍数
+# （trace c9f86e2c-31d），与「倍」同策——× 后的数字无前缀豁免，真实价位照常校验
 # 数值前紧跟（可隔空格）即非价格上下文：比值冒号、序数、斜杠分数分母
 # （「1/3」的 3；斜杠并列价位「19.99/20.10」一并豁免——与连字区间同策，
 # 误杀由观测通道承担，好过阻断）+ 比较算符（600198 大唐电信 11-09 cohort
@@ -351,8 +359,17 @@ def _reference_bands(price_levels: dict) -> list[tuple[float, float]]:
     return bands
 
 
+# 带边吸附容差 = 最小报价量级 0.01：模型引用 context 参考带边界值时的两位小数
+# 舍入（差 ≤ 0.005）必落容差内——301220 round-1 生产实证（trace e6210fcf-843）：
+# full_band 下沿 20.6714 舍入成 20.67，精确区间判定 `lo <= value` 差 0.0014 判
+# 带外 → 归属近期低点 22.93 偏差 9.86% 阻断，打回后模型删 20.67 改写又触发
+# 编号列表缺口 → 二次阻断（incident 022 重试空转形状，模型无错可改）。上下沿
+# 对称；容差外（>0.01，即与带边差超过一个报价档位）的真实带外价位仍阻断
+_BAND_EDGE_SNAP = 0.01
+
+
 def _in_reference_bands(value: float, bands: list[tuple[float, float]]) -> bool:
-    return any(lo <= value <= hi for lo, hi in bands)
+    return any(lo - _BAND_EDGE_SNAP <= value <= hi + _BAND_EDGE_SNAP for lo, hi in bands)
 
 
 def _alias_boundary_ok(lower_text: str, start: int, end: int, alias: str) -> bool:
