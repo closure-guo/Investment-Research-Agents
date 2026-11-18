@@ -1468,3 +1468,311 @@ class TestBetaThresholdComparisonFalsePositives:
         assert len(anomalies) == 1
         assert anomalies[0]["kind"] == "deviation"
         assert "5" in anomalies[0]["message"]
+
+
+# ── 301220 形态夹具（update-price-check-exemption-tolerance）：低价股，收盘 25.1
+# （「3」落在 ±10 倍量纲带内 ≥2.51 逃过守卫）、布林下轨 21.4241、近期低点 22.93、
+# full_band 下沿 20.6714（11-12 阻断 trace e6210fcf-843 / 深链 e1187b914f85 取证） ──
+TI_301220 = _indicators(
+    ma5=25.4,
+    ma10=25.2,
+    ma20=24.9,
+    ma60=24.3,
+    boll_upper=28.8,
+    boll_middle=25.1,
+    boll_lower=21.4241,
+)
+PL_301220 = {
+    "available": True,
+    "entry_ref": 25.1,
+    "recent_high": 36.5286,
+    "recent_low": 22.93,
+    "atr": 1.2,
+    "stop_band_long": {"low": 22.0, "high": 23.5},
+    "target_band_long": {"low": 30.0, "high": 34.0},
+    "full_band": [20.6714, 36.5286],
+}
+CLOSE_301220 = 25.1
+
+# ── 605033 形态夹具（update-price-check-exemption-tolerance）：布林下轨
+# 15.8963、full_band 下沿 15.9（11-12 阻断 trace c9f86e2c-31d 取证） ──
+TI_605033 = _indicators(
+    ma5=17.8,
+    ma10=17.6,
+    ma20=17.2,
+    ma60=16.8,
+    boll_upper=19.2,
+    boll_middle=17.5,
+    boll_lower=15.8963,
+)
+PL_605033 = {
+    "available": True,
+    "entry_ref": 17.5,
+    "recent_high": 22.5,
+    "recent_low": 16.2,
+    "atr": 0.55,
+    "stop_band_long": {"low": 16.1, "high": 17.0},
+    "target_band_long": {"low": 19.5, "high": 21.5},
+    "full_band": [15.9, 22.5],
+}
+CLOSE_605033 = 17.5
+
+# 301220 两轮被阻断的 risk_judge reasoning 原文（Langfuse trace e1187b914f85…，
+# round-1 35b1efab5ff3f8 / round-2 b34cdcf75c8692，逐字取自 observation output）：
+# round-1 8 条 anomaly（「3. 」86.0% /「4. 」81.33% 编号列表 + 20.67 带边舍入 3.52%），
+# round-2 打回后保留编号列表行文（重试空转）+ 20.67 复现 → 恶化阻断交付。
+REASONING_301220_ROUND1 = """让我综合风险辩论，给出最终决策。
+
+受众持仓未申报，看空结论按 exit 表达，并说明未持有情形处置。
+
+交易方案原为 sell/exit，首批50%在25.1附近，第二批27.36–29.62，跌破22.93清空，止损/失效位27.40。
+
+关键争议：
+1. 首批比例：方案50%，激进50%，保守70%（后修正为70%但剩余下移到26.5–27.36），中性60%。
+2. 27.36/27.40 冲突：三方一致认为需消除。中性方案最可执行：功能分离——27.36–29.62 只做减仓窗，27.40 只做「放量条件下的中止判定」。且中止后不回到full。
+3. 赔率0.94:1（代码派生，直接引用），止损距离9.2%（代码派生）。
+4. 风险指标：max_drawdown 50.82%、volatility 46.81%、VaR95 4.56%、beta 0.688。
+
+我需要裁决：
+- 方向维持 sell/exit（无致命白名单否决理由，反而三方一致同意方向）。
+- 执行参数：首批60%（中性折中）、剩余40%自27.36起分两笔清（27.36–28.2、28.5以上）；中止门槛为「收盘站上27.40且成交量≥20日均量1.5倍」，且中止后剩余仓位保留29.62上沿减仓单，不回到full；跌破22.93当日清空、允许1个跌停内让价分笔执行。
+
+价位继承：维持 sell 方向时 MUST 继承 entry/stop/target 数值。可以调整数值但不得置null。Trader: entry 25.1, stop 27.4, target 22.93。我可以微调——但价格带纪律：任何具体价位MUST落在context.price_levels参考带内或等于边界。
+
+context.price_levels 给出了哪些？从交易方案里见到 target_band_long 为 27.36–29.62，recent_low 22.93，full_band 下沿 20.67，现价25.1。保守方提到 26.5–27.36 是估算值非派生。中性提到 27.40。这些都在参考带（27.36–29.62 为 target_band_long；22.93 recent_low；25.1现价；20.67 full_band下沿）。26.5 落在哪？可能在现价25.1与27.36之间，不属于任何参考带？嗯，参考带是 target_band_long 27.36–29.62、full_band 下沿20.67、recent_low 22.93。26.5 在 25.1 与 27.36 之间，不在参考带内。为安全，我避免使用 26.5。
+
+我采用：
+- entry_price 25.1（现价）
+- stop_loss 27.4（逻辑失效位/中止判定线，收盘+放量确认）
+- target_price 22.93（前低）
+
+exit_schedule: 首批60%在25.1附近；剩余40%自27.36起分两笔（27.36–28.2一笔、28.5以上一笔，均落在target_band_long 27.36–29.62内）；跌破22.93当日清空，允许1个跌停内让价分笔执行。
+
+reeval_triggers：
+1. 收盘站上27.40且成交量≥20日均量1.5倍，视为反弹升级为趋势修复，中止退出（剩余仓位不回到full，保留29.62上沿减仓单）
+2. 收盘跌破22.93前低，加速退出、当日清空余仓
+3. 2026年报/2027Q1单季毛利率环比回升≥2个百分点且经营性现金流转正，看空逻辑证伪
+
+inaction_reason: 这是 sell，不需要。但输出格式里示例有 inaction_reason。规则说 action 为 buy/sell 时两个字段无要求。但为完整性可给 null。sell 时没有特殊要求。trigger_high/trigger_low 对 sell 无要求。但为了可执行，我可以给 trigger_high = 27.4 之类？sell 不需要。不过标注也无妨——但注意触发位检查只对 watch。我给 null 也行，或者给 trigger_high 27.4。既然不要求，我给 null 更干净？实际决策 JSON 里包含字段也无害。我给 trigger_high: 27.4（中止判定线）可能有帮助。不过 trigger_high 需严格高于最新收盘价 25.1，27.4 > 25.1 满足。可以给。但 action 为 sell 时字段无要求；我给值不会打回。为清晰的可执行性，我就给 trigger_high 27.4、trigger_low 22.93。
+
+嗯，但需谨慎：给 trigger_high 可能被视为条件入场？不，sell 时无要求。我还是给吧，标明是中止判定。实际上为避免混淆（trigger_high 语义是上破确认位/条件入场），对 sell 决策而言给 trigger_low 22.93（跌破加速）比较自然。我就给 trigger_low: 22.93，trigger_high: 27.4。
+
+confidence：三方辩论主要矛盾已逐条裁决（首批比例、冲突规则、赔率、滑点），且执行参数有代码派生指标（赔率0.94:1、止损距离9.2%）和风险指标支撑。但存在未决分歧（首批50/60/70未完全统一）和赔率<1的结构性弱点。我给 0.62 左右。
+
+窗口匹配：需要在 reasoning 中说明？"buy 决策 SHALL 在 reasoning 中披露主要论据的兑现窗口与考核窗口的匹配情况"——这只对 buy。但 sell 也可以说明。我会写。
+
+注意 decision 不是方向翻转？近窗决策史没说。Trader 是 sell，我维持 sell，不是翻转。
+
+证据均衡带：context 未提。不需要。
+
+evidence_refs：采纳交易方案的 technical/fundamental/macro/sentiment/debate_bull/debate_bear/research_manager，加 risk_metrics 和 risk_neutral/risk_conservative/risk_aggressive 的论据。
+
+注意：risk 辩论中，激进方提案第二批上移 28.5–29.6；保守方 70%；中性 60% + 功能分离。我采纳中性的功能分离与60%作为主框架，并采纳保守方滑点纪律（1个跌停内让价，分笔）、激进方的「中止后不回到full」由中性提出。采纳标准：被推翻的论据不得沿用。比如激进方「上移到28.5–29.6」被保守与中性反驳（1σ之外兑现概率不足）——推翻，不采纳为全部第二批位置，但中性方案把28.5以上作为第二笔（剩余40%分两笔）——这是部分采纳。嗯，中性说27.36–28.2一笔、28.5以上一笔。这采纳了部分。我采用中性。
+
+注意价格带：28.5 落在 27.36–29.62 内，OK。27.40 在带内。22.93 边界。25.1 现价。29.62 边界。
+
+写 reasoning，说明：
+- 方向维持 exit 而非 short，受众未申报持仓，未持有则不介入不抄底。
+- 三方共识：方向无争议，争议在执行参数。
+- 逐条裁决：(1) 27.36/27.40 冲突 → 采纳中性功能分离，减仓指令优先于中止指令，中止需收盘+放量(≥20日均量1.5倍)确认；(2) 首批比例 → 50%（方案）/60%（中性）/70%（保守），取 60% 折中，理由：0.63 方向置信度不支持 70%，而赔率 0.94:1 与 46.81% 波动不支持仅 50%；(3) 第二批位置 → 激进 28.5–29.6 被 1σ 反驳，采纳中性两笔：27.36–28.2 与 28.5 以上；(4) 滑点 → 采纳保守/中性：跌破22.93即挂单，允许1个跌停内让价分笔执行，不接受激进方「1个ATR上限否则次日」的拖延（因跌破前低是趋势延续，拖延增加风险）。嗯，激进方说让价上限1个ATR，超出则次日。保守/中性说1个跌停。我采纳1个跌停内让价+分笔。
+- 赔率 0.94:1 直接引用：说明这不是赚价差交易而是降敞口交易，因此既不提价补偿（激进）也不一次性清仓（保守）。
+- 窗口：T+20 内最可能兑现的是估值/过热回归，与考核窗匹配；基本面拐点（毛利率回升、现金流转正）在2026年报/2027Q1，显著长于考核窗，故不作为本轮押注点，仅列为证伪触发。
+- confidence 0.62：主要矛盾已裁决，但赔率<1、首批比例未获三方一致、以及受众持仓未知仍构成执行不确定性。
+
+position_size: moderate（退出节奏）——保持。
+
+派生指标直接引用：止损距离 9.2%、赔率 0.94:1。
+
+写 JSON。注意 sell_type: exit。
+
+evidence_refs 需要包含 risk_aggressive/risk_conservative/risk_neutral/risk_metrics 的论据。
+
+我会列约 10 条。
+
+现在撰写 reasoning 文本，需包含价位（带内）。避免带外数字。46.81% 波动、9.2% 止损距离、0.94:1 赔率、50.82% 最大回撤、4.56% VaR、0.688 beta 是风险指标数字不是价位，允许。
+
+价位提及：25.1、27.36、28.2、28.5、29.62、27.40、22.93、20.67。28.2 — 这在 27.36–29.62 带内，OK。20.67 full_band 下沿，OK。
+
+reasoning 长度适中详细。"""
+
+REASONING_301220_ROUND2 = """Let me parse the situation.
+
+The trader's decision: sell / exit, moderate position, entry 25.1, stop 27.4, target 22.93. Exit schedule: two batches.
+
+Risk debate: aggressive wants 28.5-29.6 second batch and 50/50; conservative wants 70% first batch and remaining 30% at 26.5-27.36; neutral wants 60% first batch, remaining 40% split 27.36-28.2 and 28.5+.
+
+Derived metrics: stop distance 9.2%, odds 0.94:1.
+
+Risk metrics: max_drawdown 50.8%, volatility 46.8%, VaR95 4.56%, beta 0.688.
+
+Cross-check rejection: text price 20.67 (full_band lower) is outside price_levels reference band and deviates 9.86% from verified recent low 22.93 — must remove 20.67 from text. Also trigger conditions: upper break must be strictly above latest close, breakdown strictly below. Latest close = 25.1 presumably (entry 25.1 = 现价). Note 27.36 and 27.40 are above 25.1, fine. 22.93 below, fine. But must remove 20.67.
+
+Also note: price_levels reference band — mentioned target_band_long 27.36–29.62, recent_low 22.93, full_band lower 20.67. So the reference band is presumably something like 20.67–29.62 overall; but the rejection says 20.67 is not in the reference band? Actually the rejection says "文本价位 20.67 与 近期低点 已验证值 22.93 偏差 9.86%，超过 2% 阈值且不在 price_levels 参考带内". Hmm — 20.67 is full_band下沿, but the checker says it's not in price_levels reference band. Perhaps price_levels has a narrower band, e.g., 22.93 to 29.62? Actually target_band_long is 27.36-29.62 anchored at MA20 above; recent_low 22.93. The "full_band" 20.67 might be from a broader band not in price_levels... The safest fix: remove 20.67 entirely from the text and use only 22.93 and 27.36/27.40/29.62 (which trader used and apparently passed) and 26.5? Hmm, 26.5 was conservative's suggestion as "估算值". 26.5 is within 22.93–27.36 range likely — probably within the band. But to be safe, maybe I should avoid introducing 26.5 raw number... Actually 26.5 lies between verified values 25.1 and 27.36, presumably ins
+...[truncated 12884 bytes]...
+不构成看多方向；方向裁决不受该对峙影响。置信度 0.6：主要矛盾（方向、执行顺序、强度）已逐条裁决，但派生赔率 <1 且退出强度三方仍存分歧，故不给高置信。"
+
+Hmm, is 28.2 within price_levels band? uncertain. It's inside 27.36–29.62 which is target_band_long (a verified band). Likely fine. Alternatively I could avoid 28.2 and just say "27.36–29.62 区间内偏下沿分笔清完" without a new number. Safer! Because introducing 28.2 as a new number might be flagged as unverified (deviation from 27.36 is 3%, from 29.62 is 4.8%). Risky. Better to express qualitatively: "剩余 40% 在 27.36–29.62 压力带内偏下沿分笔清完，不向上提价等待". That avoids new numbers. But the "提高成交概率优于提高单价" needs some concreteness — qualitative works.
+
+Similarly, avoid 26.5. Good.
+
+So exit_schedule: "首批现价 25.1 附近减 60%；剩余 40% 在 27.36–29.62 压力带内（优先下沿）分笔清完，不再向上提价等待；若收盘跌破 22.93 前低，当日清空余仓，允许一个跌停板内的让价并分笔执行。"
+
+Also mention 27.36/27.40 priority in exit_schedule or reeval.
+
+reeval_triggers:
+1. "收盘放量（成交量≥20 日均量 1.5 倍）站上 27.40：视为反弹升级为趋势修复，中止退出逻辑并重评（仅对尚未减完的余仓生效，已成交部分不回补）"
+2. "收盘跌破 22.93 前低：视为趋势延续，退出加速、余仓当日清空"\n3. "2026 年报或 2027Q1 单季毛利率环比回升 ≥2 个百分点且经营性现金流转正：看空逻辑证伪，需重估"
+
+These all in band. Good.
+
+trigger_high/trigger_low: not required for sell; I'll set null (trader did). Actually with action sell it's fine.
+
+Now check the "价位继承" rule for sell: MUST inherit entry/stop/target. I keep 25.1 / 27.4 / 22.93. Good. Note stop_loss 27.4 > entry 25.1 for a short-type sell exit — that's the invalidation level, consistent with trader.
+
+Confidence 0.6.
+
+Write final JSON."""
+
+
+class TestEnumMarkerMultiplySuffixBandSnap:
+    """#592 三缺口（update-price-check-exemption-tolerance）：11-12 两例阻断的
+    逐条终裁 + 原文复现复核。
+
+    复现修正了 #592 原终裁的一处归因：301220 的 86%「文本价位 3」不是「2026Q3」
+    季度序号（半角 Q3 的 3 已被数字紧贴 ASCII 字母规则豁免，两轮原文复跑当前
+    校验器 Q3 形态均归零），真凶是 reasoning 编号列表记号「3. 」「4. 」——
+    「.」不在 _NON_PRICE_SUFFIX、前邻 " 非 ASCII 字母，逃过全部守卫；编号列表
+    是结构化行文固有形态，打回删不掉 → 重试空转（incident 022 形状）。
+    """
+
+    def test_enum_period_marker_not_treated_as_price(self):
+        """「3. 」列表记号（句点+空白）整体豁免：301220 round-2 的 86% 真凶形态。"""
+        decision = _decision(
+            action="sell",
+            reasoning='退出加速、余仓当日清空"\n3. "2026 年报或 2027Q1 单季毛利率环比回升则中止退出。"',
+        )
+        assert check_decision_prices(decision, TI_301220, PL_301220, CLOSE_301220) == []
+
+    def test_enum_two_digit_marker_not_treated_as_price(self):
+        """「12. 」两位数列表记号同形态豁免。"""
+        decision = _decision(
+            action="watch",
+            reasoning="风险清单：\n12. 流动性覆盖率下行趋势未逆转，维持观望。",
+        )
+        assert check_decision_prices(decision, TI_301220, PL_301220, CLOSE_301220) == []
+
+    def test_real_price_after_enum_marker_still_checked(self):
+        """护栏：记号后分离的真实价位不受豁免——15.0 带外（离带边 5.67）仍阻断。"""
+        decision = _decision(
+            action="watch",
+            reasoning="3. 若收盘跌破 15.0 无条件清仓，尊重趋势破位。",
+        )
+        anomalies = check_decision_prices(decision, TI_301220, PL_301220, CLOSE_301220)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert anomalies[0]["indicator"] == "布林下轨"
+
+    def test_decimal_price_not_swallowed_by_enum_exemption(self):
+        """护栏：20.67 含西文句点但小数点后无空白，不命中列表记号豁免——
+        本例因带边吸附判带内直通；若豁免误吞则此用例无法区分两条修法。"""
+        decision = _decision(
+            action="watch",
+            reasoning="若回踩 20.67 附近缩量企稳可考虑分批加仓。",
+        )
+        assert check_decision_prices(decision, TI_301220, PL_301220, CLOSE_301220) == []
+
+    def test_multiply_sign_not_treated_as_price(self):
+        """「2×日波动」的 2 是波动倍数：× 入后缀豁免后不按价位校验。"""
+        decision = _decision(
+            action="watch",
+            reasoning="距离约 12%，约为 2×日波动以上，短线空间不足，观望等待回踩。",
+        )
+        assert check_decision_prices(decision, TI_605033, PL_605033, CLOSE_605033) == []
+
+    def test_number_after_multiply_sign_still_checked(self):
+        """护栏：× 仅豁免紧邻其前的乘数，× 后数字无前缀豁免——15.0 带外仍阻断。"""
+        decision = _decision(
+            action="watch",
+            reasoning="距离约 12%，约为 2×日波动以上；若收盘跌破 15.0 无条件清仓。",
+        )
+        anomalies = check_decision_prices(decision, TI_605033, PL_605033, CLOSE_605033)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert anomalies[0]["indicator"] == "布林下轨"
+
+    def test_band_edge_rounding_snapped_in_band(self):
+        """带边吸附：20.67 与 full_band 下沿 20.6714 之差 0.0014 ≤ 0.01 报价量级 → 带内。"""
+        decision = _decision(
+            action="watch",
+            reasoning="若回踩 20.67 附近缩量企稳可考虑分批加仓。",
+        )
+        assert check_decision_prices(decision, TI_301220, PL_301220, CLOSE_301220) == []
+
+    def test_upper_band_edge_rounding_snapped_in_band(self):
+        """带边吸附上下沿对称：36.53 与 full_band 上沿 36.5286 之差 0.0014 → 带内。"""
+        decision = _decision(
+            action="watch",
+            reasoning="若反弹触及 36.53 附近分批止盈。",
+        )
+        assert check_decision_prices(decision, TI_301220, PL_301220, CLOSE_301220) == []
+
+    def test_outside_snap_tolerance_still_blocked(self):
+        """护栏：容差外（20.60 距带边 0.0714 > 0.01）的真实带外价位仍登记 deviation。"""
+        decision = _decision(
+            action="watch",
+            reasoning="若回踩 20.60 附近无条件清仓，尊重趋势破位事实。",
+        )
+        anomalies = check_decision_prices(decision, TI_301220, PL_301220, CLOSE_301220)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert anomalies[0]["indicator"] == "布林下轨"
+
+    def test_peg_ratio_not_treated_as_price(self):
+        """#588：「PEG≈2.07」的 2.07 是估值倍数，peg 关键词窗豁免后不按价位校验。
+
+        605033 终裁实证：辩论全程引用的 PEG≈2.07 被归属布林下轨 15.8963、
+        偏差 86.97% 标记，重试打偏后预算耗尽阻断。
+        """
+        decision = _decision(
+            action="watch",
+            reasoning="辩论双方全程在用的 PEG≈2.07 处于历史中枢下方，估值不贵。",
+        )
+        assert check_decision_prices(decision, TI_605033, PL_605033, CLOSE_605033) == []
+
+    def test_real_price_after_peg_marker_still_checked(self):
+        """护栏：peg 仅豁免关键词窗内紧邻的倍数，句内后续真实价位仍校验。"""
+        decision = _decision(
+            action="watch",
+            reasoning="PEG≈2.07 不贵；若收盘跌破 15.0 无条件清仓。",
+        )
+        anomalies = check_decision_prices(decision, TI_605033, PL_605033, CLOSE_605033)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert anomalies[0]["indicator"] == "布林下轨"
+
+    def test_approx_prefix_alone_still_checked(self):
+        """护栏：≈ 本身不入前缀豁免表——「现价≈15.0」是真实价位引用，仍阻断。"""
+        decision = _decision(
+            action="watch",
+            reasoning="现价≈15.0 附近有技术支撑，跌破即离场。",
+        )
+        anomalies = check_decision_prices(decision, TI_605033, PL_605033, CLOSE_605033)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert anomalies[0]["indicator"] == "最新收盘价"
+
+    def test_production_round1_reasoning_zero_anomalies(self):
+        """301220 round-1 risk_judge reasoning 原文（trace 35b1efab5ff3f8）过修复后校验器归零。
+
+        与 #567/#579 验收口径一致：真实生产文本跑修复后校验器，零 anomaly。
+        """
+        decision = _decision(action="sell", reasoning=REASONING_301220_ROUND1)
+        assert check_decision_prices(decision, TI_301220, PL_301220, CLOSE_301220) == []
+
+    def test_production_round2_reasoning_zero_anomalies(self):
+        """301220 round-2（打回重试稿）reasoning 原文（trace b34cdcf75c8692）归零。
+
+        重试空转的直接证据：round-2 保留编号列表行文与 20.67 引用，模型无错可改。
+        """
+        decision = _decision(action="sell", reasoning=REASONING_301220_ROUND2)
+        assert check_decision_prices(decision, TI_301220, PL_301220, CLOSE_301220) == []
