@@ -1727,6 +1727,40 @@ class TestEnumMarkerMultiplySuffixBandSnap:
         assert anomalies[0]["kind"] == "deviation"
         assert anomalies[0]["indicator"] == "布林下轨"
 
+    def test_peg_ratio_not_treated_as_price(self):
+        """#588：「PEG≈2.07」的 2.07 是估值倍数，peg 关键词窗豁免后不按价位校验。
+
+        605033 终裁实证：辩论全程引用的 PEG≈2.07 被归属布林下轨 15.8963、
+        偏差 86.97% 标记，重试打偏后预算耗尽阻断。
+        """
+        decision = _decision(
+            action="watch",
+            reasoning="辩论双方全程在用的 PEG≈2.07 处于历史中枢下方，估值不贵。",
+        )
+        assert check_decision_prices(decision, TI_605033, PL_605033, CLOSE_605033) == []
+
+    def test_real_price_after_peg_marker_still_checked(self):
+        """护栏：peg 仅豁免关键词窗内紧邻的倍数，句内后续真实价位仍校验。"""
+        decision = _decision(
+            action="watch",
+            reasoning="PEG≈2.07 不贵；若收盘跌破 15.0 无条件清仓。",
+        )
+        anomalies = check_decision_prices(decision, TI_605033, PL_605033, CLOSE_605033)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert anomalies[0]["indicator"] == "布林下轨"
+
+    def test_approx_prefix_alone_still_checked(self):
+        """护栏：≈ 本身不入前缀豁免表——「现价≈15.0」是真实价位引用，仍阻断。"""
+        decision = _decision(
+            action="watch",
+            reasoning="现价≈15.0 附近有技术支撑，跌破即离场。",
+        )
+        anomalies = check_decision_prices(decision, TI_605033, PL_605033, CLOSE_605033)
+        assert len(anomalies) == 1
+        assert anomalies[0]["kind"] == "deviation"
+        assert anomalies[0]["indicator"] == "最新收盘价"
+
     def test_production_round1_reasoning_zero_anomalies(self):
         """301220 round-1 risk_judge reasoning 原文（trace 35b1efab5ff3f8）过修复后校验器归零。
 

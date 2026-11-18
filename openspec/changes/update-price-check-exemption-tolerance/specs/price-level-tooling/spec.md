@@ -16,6 +16,8 @@
 
 **× 量纲乘号豁免（update-price-check-exemption-tolerance，605033 实证）**：数值后紧跟（可隔空格）「×」SHALL 与「倍」同策豁免——「约为 2×日波动以上」的 2 是波动倍数，MUST NOT 按价位比对；× 之后的数字不受豁免（无前缀豁免），仍照常校验。
 
+**PEG 估值倍数豁免（update-price-check-exemption-tolerance，#588/605033 同批实证）**：「PEG≈2.07」的 2.07 是估值倍数量纲，SHALL 与 pe/pb 同策经关键词窗豁免，MUST NOT 按价位比对；`≈` 本身 MUST NOT 入前缀豁免表——「现价≈15.0」是真实价位引用，SHALL 照常校验。
+
 anomaly 的处置 SHALL 为门禁语义，准入按恶化判据分层（update-decision-price-gate-admission，owner 终裁已批）：
 
 - risk_judge 校验出非空 anomaly 时，SHALL 携 anomaly 明细（原始文本片段、指标名、已验证值、偏差幅度）**定向打回重试一次**，要求修正文本价位后重新输出完整决策 JSON；
@@ -81,6 +83,16 @@ anomaly 的处置 SHALL 为门禁语义，准入按恶化判据分层（update-d
 - **WHEN** `check_decision_prices` 自身抛出异常（校验器缺陷或 state 形态噪声）
 - **THEN** 管线 SHALL 放行决策（fail-open）并记录告警日志
 - **AND** 决策照常进入审批，MUST NOT 因校验器异常阻断
+
+#### Scenario: PEG 估值倍数不误报（update-price-check-exemption-tolerance）
+
+- **WHEN** reasoning 含「辩论双方全程在用的 PEG≈2.07 处于历史中枢下方，估值不贵」（最新收盘 17.5，布林下轨 15.8963）
+- **THEN** PEG 的 2.07 SHALL 经关键词窗豁免，SHALL NOT 被提为文本价位登记偏差 anomaly（#588 实证：2.07 曾被归属布林下轨、偏差 86.97% 标记）
+
+#### Scenario: ≈ 前缀的真实价位仍校验（护栏）
+
+- **WHEN** reasoning 含「现价≈15.0 附近有技术支撑，跌破即离场」（参考带 [15.9, 22.5]，15.0 带外）
+- **THEN** 15.0 SHALL 照常登记偏差形态 anomaly（`≈` MUST NOT 入前缀豁免表）
 
 #### Scenario: 编号列表记号不误报（update-price-check-exemption-tolerance）
 
