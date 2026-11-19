@@ -187,6 +187,16 @@ class StreamRegistry:
                 stream = self._streams.get(session_id)
                 if stream is not None:
                     stream.terminalPublished = False
+                # SQLite 旁路标记（harden-sqlite-connection-discipline ④）：
+                # 库恢复后由 scripts/repair_terminal_pending.py 补落终态，
+                # 消除「管线完成但终态缺失」的僵尸 running。
+                marker_path = session_store.write_terminal_pending_marker(session_id, event)
+                if marker_path is not None:
+                    _logger.error(
+                        "终态落库重试耗尽，已写 terminal_pending 标记 session=%s path=%s",
+                        session_id,
+                        marker_path,
+                    )
             raise last_exc  # type: ignore[misc]
         event["seq"] = seq
         stream = self._streams.get(session_id)

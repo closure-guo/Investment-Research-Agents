@@ -36,9 +36,17 @@ _EVENT_APPEND_RETRY_SLEEP = 0.05
 # unable to open database file = bind mount 瞬断；locked = busy_timeout 覆盖不到的
 # 连接期锁；disk I/O error = 存储瞬态。非瞬态错误不重试立即抛出。
 _DB_TRANSIENT_PATTERNS = ("unable to open database file", "database is locked", "disk i/o error")
-# 连接重试 6 次：尝试点 t≈0/0.1/0.3/0.7/1.5/3.1（指数退避 0.1s 基数，
-# 末次失败不再 sleep），覆盖 spec 假设的 ~2s bind mount 自愈窗口且留余量
-_DB_CONNECT_MAX_RETRIES = 6
+# 连接重试改为**预算制**（harden-sqlite-connection-discipline ④）：瞬态错误下
+# 指数退避持续重试至累计等待达到预算（默认 120s，env 可覆盖并收敛到
+# [30, 300]），取代旧固定 6 次/≈3.1s——3.1s << 实际停摆窗口（incident 053 的
+# 9p 连接失败动辄分钟级），重试耗尽即留僵尸 running / 丢事件。
+# 单次退避封顶 2s，防止预算被单次超长 sleep 挤占；另有硬顶次数防
+# 「sleep 被打桩为空 + 失败瞬时返回」场景下的无限空转。
+_DB_CONNECT_RETRY_BUDGET_S = min(
+    300.0, max(30.0, float(os.getenv("SESSION_DB_CONNECT_RETRY_BUDGET_S", "120")))
+)
+_DB_CONNECT_RETRY_SLEEP_CAP_S = 2.0
+_DB_CONNECT_MAX_ATTEMPTS = 500
 _DB_CONNECT_RETRY_BASE_SLEEP = 0.1
 
 # created_at 列曾被旧版代码错写为 session_type 的值（'chat' / 'analysis'），
@@ -69,7 +77,8 @@ def _normalize_created_at(ts: str | None) -> str:
 
 def _get_db() -> sqlite3.Connection:
     last_exc: sqlite3.OperationalError | None = None
-    for attempt in range(_DB_CONNECT_MAX_RETRIES):
+    deadline = time.monotonic() + _DB_CONNECT_RETRY_BUDGET_S
+    for attempt in range(_DB_CONNECT_MAX_ATTEMPTS):
         try:
             conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False, timeout=15.0)
             conn.row_factory = sqlite3.Row
@@ -80,10 +89,20 @@ def _get_db() -> sqlite3.Connection:
             if not any(p in str(exc).lower() for p in _DB_TRANSIENT_PATTERNS):
                 raise
             last_exc = exc
-            # 末次尝试失败后不再 sleep（重试耗尽即抛，不做无意义的收尾等待）
-            if attempt < _DB_CONNECT_MAX_RETRIES - 1:
-                time.sleep(_DB_CONNECT_RETRY_BASE_SLEEP * (2**attempt))
-    raise last_exc  # type: ignore[misc]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or attempt == _DB_CONNECT_MAX_ATTEMPTS - 1:
+                # 预算耗尽（或硬顶次数到）：重试放弃即抛，不做无意义的收尾等待
+                if last_exc is None:  # pragma: no cover - last_exc 必已被赋值
+                    raise exc
+                raise last_exc from exc
+            time.sleep(
+                min(
+                    _DB_CONNECT_RETRY_BASE_SLEEP * (2 ** (attempt + 1)),
+                    _DB_CONNECT_RETRY_SLEEP_CAP_S,
+                    remaining,
+                )
+            )
+    raise last_exc  # type: ignore[misc]  # pragma: no cover - 硬顶保护，正常不可达
 
 
 def init_db() -> None:
@@ -505,6 +524,67 @@ def get_terminal_event(session_id: str) -> dict | None:
         except (json.JSONDecodeError, TypeError):
             continue
     return None
+
+
+# ── terminal_pending 旁路标记（harden-sqlite-connection-discipline ④）────────
+# 终态落库重试耗尽时，sessions 库本身往往正是不可用的一环——标记必须走
+# SQLite 旁路（本地文件），供修复工具在库恢复后补落终态、消除僵尸 running。
+
+
+def _terminal_pending_dir() -> Path:
+    """标记目录：默认与 sessions.db 同级 ``terminal_pending/``，env 可覆盖。"""
+    override = os.getenv("TERMINAL_PENDING_DIR")
+    if override:
+        return Path(override)
+    return _DB_PATH.parent / "terminal_pending"
+
+
+def write_terminal_pending_marker(session_id: str, event: dict) -> Path | None:
+    """终态落库失败的旁路标记（best-effort）。
+
+    写 ``<dir>/<session_id>.json``（含事件载荷与标记时间）；写失败只记日志并
+    返回 None——标记是兜底中的兜底，MUST NOT 因标记失败改变调用方 raise 行为。
+    成功返回标记路径。
+    """
+    try:
+        directory = _terminal_pending_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "session_id": session_id,
+            "event": event,
+            "marked_at": datetime.now().isoformat(),
+        }
+        path = directory / f"{session_id}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+    except OSError:
+        logger.exception("terminal_pending 标记写入失败 session=%s", session_id)
+        return None
+
+
+def list_terminal_pending_markers() -> list[Path]:
+    """列出全部待修复标记（按文件名升序；目录缺失 → 空）。"""
+    directory = _terminal_pending_dir()
+    if not directory.exists():
+        return []
+    return sorted(directory.glob("*.json"))
+
+
+def pop_terminal_pending_marker(session_id: str) -> dict | None:
+    """读取并删除单个标记；返回载荷（缺失/损坏 → None，损坏文件就地删除）。"""
+    path = _terminal_pending_dir() / f"{session_id}.json"
+    if not path.exists():
+        return None
+    try:
+        payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        logger.exception("terminal_pending 标记读取失败 session=%s（就地删除）", session_id)
+        with contextlib.suppress(OSError):
+            path.unlink()
+        return None
+    with contextlib.suppress(OSError):
+        path.unlink()
+    return payload
 
 
 def update_session_report(

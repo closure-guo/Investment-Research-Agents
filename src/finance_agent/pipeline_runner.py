@@ -473,6 +473,19 @@ class PipelineRunner:
                     logger.warning(
                         "事件批量投递超时，跳过本批 session=%s n=%d", session_id, len(batch)
                     )
+                except Exception as exc:  # noqa: BLE001 - 落库瞬断回填缓冲（#515 ④）
+                    # 非 Timeout 失败（SQLite 瞬断等）＝数据没丢只是暂时写不进：
+                    # 整批按原序回填 pending 队首，后续 flush/终态路径重试，
+                    # 管线继续推进——旧实现非 Timeout 异常会炸掉整条分析并留
+                    # 僵尸 running（重试预算外的停摆窗口）。
+                    pending[:0] = batch
+                    logger.warning(
+                        "事件批量投递失败，整批回填缓冲 session=%s n=%d err=%s: %s",
+                        session_id,
+                        len(batch),
+                        type(exc).__name__,
+                        exc,
+                    )
 
         def _publish_terminal(ev: dict) -> None:
             """终态发布统一出口（后台线程侧）：走 publish_terminal 获得重试兜底。
@@ -559,6 +572,17 @@ class PipelineRunner:
                                     "事件投递超时，跳过 session=%s type=%s",
                                     session_id,
                                     event.get("type"),
+                                )
+                            except Exception as exc:  # noqa: BLE001 - 落库瞬断回填（#515 ④）
+                                # 非 Timeout 失败与 _flush_pending 同型：单事件回填
+                                # pending 队首（保持 seq 顺序），后续 flush 重试
+                                pending.insert(0, event)
+                                logger.warning(
+                                    "事件投递失败，回填缓冲 session=%s type=%s err=%s: %s",
+                                    session_id,
+                                    event.get("type"),
+                                    type(exc).__name__,
+                                    exc,
                                 )
                 elif state is not None:
                     with state.lock:
