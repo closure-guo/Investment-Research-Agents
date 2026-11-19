@@ -28,16 +28,18 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from finance_agent.data.snapshot import (
+    SnapshotEmptyError,
     _connect,  # noqa: PLC2701 - 私有跨模块导入与 snapshot_job 同先例（连接纪律单一来源）
     _parse_date_param,  # noqa: PLC2701
     latest_snapshot_date,
-    read_universe,
+    read_universe_range,
 )
 from finance_agent.factors.constraints import (
     DECAY_ICIR_FLOOR,
@@ -46,7 +48,6 @@ from finance_agent.factors.constraints import (
 )
 from finance_agent.factors.dsl import parse
 from finance_agent.factors.eval_engine import (
-    PANEL_FIELDS,
     MarketPanel,
     build_panel_from_rows,
     evaluate,
@@ -67,6 +68,10 @@ logger = logging.getLogger(__name__)
 _PANEL_LOOKBACK_DAYS = DECAY_WINDOW + 30
 # 滚动判定所需 IC 点数：DECAY_WINDOW 个点起才有一个滚动点，20 个滚动点需 60+19
 _REQUIRED_IC_POINTS = DECAY_WINDOW + DECAY_NEGATIVE_DAYS - 1
+# 面板进程内缓存（③）：键 (dates 元组, 库 mtime_ns, size)，LRU 上限 4——
+# 同批多次 query_factor_library（incident 053 的 50 倍塌陷根因）复用同一面板
+_PANEL_CACHE: OrderedDict[tuple[Any, ...], MarketPanel] = OrderedDict()
+_PANEL_CACHE_MAX = 4
 
 
 def _finite_or_none(value: float) -> float | None:
@@ -274,25 +279,39 @@ def _recent_trade_dates(
 
 
 def _load_panel(snapshot_db_path: str | Path | None, *, dates: list[str]) -> MarketPanel:
-    """逐日读快照行 → 逐日构面板 → 按字段纵向拼接（内存有界；口径单一来源）。"""
-    chunks = [
-        build_panel_from_rows(pd.DataFrame(read_universe(trade_date, db_path=snapshot_db_path)))
-        for trade_date in dates
-    ]
-    return MarketPanel(
-        fields={
-            name: pd.concat([chunk.fields[name] for chunk in chunks]).sort_index()
-            for name in PANEL_FIELDS
-        },
-        # 逐日 presence 帧纵向拼接（#512 闸①分母「当日有行」的数据面）；
-        # 跨日列并集会把「该日无此码」的格变 NaN——收敛回 bool（False=无行）
-        rows_present=(
-            pd.concat([chunk.rows_present for chunk in chunks])
-            .sort_index()
-            .fillna(False)
-            .astype(bool)
-        ),
-    )
+    """区间一次读取快照行 → 单次构面板（harden-sqlite-connection-discipline ③）。
+
+    逐日 N 连接收敛为单连接（60 日 180 / 500 日 1500 → 1）；并按
+    ``(dates, 库 mtime_ns, size)`` 键控 LRU 缓存（``_PANEL_CACHE``，上限
+    ``_PANEL_CACHE_MAX``），同键重复加载零连接直返同一实例。消费者约定只读
+    （缓存实例共享，调用方不得原地变异 fields）。语义与逐日读取逐值等价：
+    任一请求日期无行 → ``SnapshotEmptyError``（保留逐日 fail-loud）。
+    """
+    if not dates:
+        raise SnapshotEmptyError("面板日期序列为空")
+    cache_key: tuple[Any, ...] = (tuple(dates), None, None)
+    if snapshot_db_path is not None:
+        try:
+            stat = Path(snapshot_db_path).stat()
+            cache_key = (tuple(dates), stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            cache_key = (tuple(dates), None, None)
+    cached = _PANEL_CACHE.get(cache_key)
+    if cached is not None:
+        _PANEL_CACHE.move_to_end(cache_key)
+        return cached
+    rows = read_universe_range(dates[0], dates[-1], db_path=snapshot_db_path)
+    frame = pd.DataFrame(rows)
+    present_dates = set(frame["trade_date"].astype(str))
+    missing = [d for d in dates if d not in present_dates]
+    if missing:
+        # 逐日语义锚点：read_universe 对无行日期 fail-loud，不静默跳过
+        raise SnapshotEmptyError(f"该日期无快照记录: {missing[0]}")
+    panel = build_panel_from_rows(frame)
+    _PANEL_CACHE[cache_key] = panel
+    while len(_PANEL_CACHE) > _PANEL_CACHE_MAX:
+        _PANEL_CACHE.popitem(last=False)
+    return panel
 
 
 def run_factor_decay_monitor(

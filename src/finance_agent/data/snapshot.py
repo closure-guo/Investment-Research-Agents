@@ -488,6 +488,57 @@ def read_universe(
     return rows
 
 
+def read_universe_range(
+    start: str,
+    end: str,
+    *,
+    include_suspended: bool = True,
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """``[start, end]`` 区间全市场快照行（harden-sqlite-connection-discipline ③）。
+
+    单次 ``WHERE trade_date BETWEEN ? AND ?`` 查询取齐多日行（面板加载由逐日
+    N 连接收敛为单连接）。口径与 ``read_universe`` 同源：日期经
+    ``_parse_date_param`` 严格解析（非规范 → ``SnapshotError``）；``end`` 晚于
+    库内最新快照日期 → ``SnapshotNotFreshError``（防前视）；``end < start`` →
+    ``SnapshotError``。缺库/缺表 → ``SnapshotEmptyError``（既有空语义，
+    MUST NOT 建库建表）；区间内无任何行 → 同样 ``SnapshotEmptyError``。
+    ``include_suspended=False`` 剔除停牌行（语义同 ``read_universe``）。
+    返回按 ``(trade_date, code)`` 升序，行含 ``trade_date`` 键。
+    """
+    start_date = _parse_date_param(start, param="start")
+    end_date = _parse_date_param(end, param="end")
+    if end_date < start_date:
+        raise SnapshotError(f"区间非法: end {end} 早于 start {start}")
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        raise SnapshotEmptyError(f"区间无快照记录: [{start}, {end}]") from None
+    try:
+        # 防前视与区间查询共用同一条只读连接（latest 单独连一次会翻倍连接数）
+        latest_row = conn.execute("SELECT MAX(trade_date) FROM market_snapshot").fetchone()
+        latest = latest_row[0] if latest_row else None
+        if latest is not None:
+            latest_date = _parse_date_param(latest, param="latest_snapshot_date")
+            if end_date > latest_date:
+                raise SnapshotNotFreshError(f"快照最新数据日期为 {latest}，不接受 end={end}")
+        sql = "SELECT * FROM market_snapshot WHERE trade_date BETWEEN ? AND ?"
+        params: list[Any] = [start_date.isoformat(), end_date.isoformat()]
+        if not include_suspended:
+            sql += " AND is_suspended = 0"
+        sql += " ORDER BY trade_date, code"
+        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            raise SnapshotEmptyError(f"区间无快照记录: [{start}, {end}]") from None
+        raise
+    finally:
+        conn.close()
+    if not rows:
+        raise SnapshotEmptyError(f"区间无快照记录: [{start}, {end}]")
+    return rows
+
+
 def read_bars(
     codes: list[str],
     start: str,
