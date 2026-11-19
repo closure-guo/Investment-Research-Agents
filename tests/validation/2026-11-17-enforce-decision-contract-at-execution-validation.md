@@ -1,6 +1,6 @@
 # 人工验证报告: enforce-decision-contract-at-execution（T7 生产实跑）
 
-**日期**: 2026-11-17（首夜，部分验证）/ 待补：2026-11-18
+**日期**: 2026-11-17（首夜，部分验证）/ 补验：2026-11-20（基于 11-18/11-19 生产批，见文末）
 **验证人**: Closure（agent 辅助取证）
 **关联 delta**: openspec/changes/enforce-decision-contract-at-execution/
 **关联 issue**: #593
@@ -31,11 +31,32 @@ screening 因 11-16 快照缺失失败，回填中）。本报告记录 22:15 �
 
 ## 结论
 
-- [ ] 全部通过，可 archive（**待 11-18 16:10 批补验 R2/R3 后再勾**）
-- [x] 部分通过：R4/R5/兼容性 ✅；R2/R3 ⏳；伴生缺陷 #596 已立案
+- [x] 全部通过（R2/R3 按降档结论核关，见文末补验），可 archive
+- [x] 部分通过（首夜）：R4/R5/兼容性 ✅；R2/R3 ⏳；伴生缺陷 #596 已立案
 
 ## 待办（2026-11-18）
 
 1. 16:10 执行批后：查 summary——新契约信号是否按触发门/档位执行（核对 `skipped_details`/`plan_deviation` 与前夜决策的 declared_contract）
 2. 补验通过 → 勾 delta tasks.md T7 → 核关 #593 → openspec sync + archive
 3. 若新决策仍无 buy（全 sell/watch），R2/R3 无生产样本：以触发门/档位的单测 + legacy 退化路径生产行为为准，报告改判「R2/R3 生产样本未产生，单测覆盖 + 退化路径生产通过」，仍可核关（降档结论，如实标注）
+
+---
+
+## 补验（2026-11-20，基于 11-18/11-19 生产批）
+
+**生产版本**: 41587067（#595）+ 6d963d34（#597 freshness，11-18 08:56 镜像重建入栈）；镜像含两者，11-19 22:07 重启复用同镜像。
+
+**生产决策面核查**（execution.db / sessions.db 只读拷贝取证）：
+
+| 核查项 | 证据 | 结果 |
+|---|---|---|
+| 部署后决策方向分布 | predictions `created_at>=2026-11-14`：neutral 16 + short 39，**buy = 0**（两 lane，含 11-18 与 11-19 两晚批） | R2/R3 无生产样本成立 |
+| R2 触发门单测覆盖 | `tests/execution/test_driver.py` test_trigger_not_met / test_trigger_met 等 | ✅（2026-11-20 新鲜复跑 270 passed） |
+| R3 档位锚单测覆盖 | test_trigger_met_enters_with_tier_weight（light=10% 下沿锚）等 | ✅（同上） |
+| R4 legacy 退化生产 | 11-17 22:15 批 600780 全额退出 + `schedule_unparsed`（首夜已录） | ✅ |
+| R5 对账键生产 | `plan_deviation` 键在 11-18 16:12 / 11-19 22:34 microcap 批 summary 中持续出现（值 `[]`，零偏差）；`skipped_details` 持续出现 | ✅ |
+| 兼容性 | `skipped_symbols=[]` / `orders_placed` 键格式与既有契约一致（11-18/11-19 四个执行批） | ✅ |
+
+**降档结论（预批准路径第 3 条）**：部署后生产决策面 11-18、11-19 两晚均零 buy（全 short/neutral），触发门与档位权重无生产样本产生。R2/R3 以单测覆盖 + legacy 退化路径生产通过为准核关；下一执行日批若出现 buy 决策，触发门/档位行为仍受 `skipped_details`（`TRIGGER_NOT_MET`）/`plan_deviation`（档位偏差）对账面持续监督。
+
+**回归证据（2026-11-20 01:2x 新鲜）**：`uv run pytest tests/execution/` 270 passed；ruff check 全过；format 986 files 已格式化；mypy 98 errors in 30 files = 基线零新增。
