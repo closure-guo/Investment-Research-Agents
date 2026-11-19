@@ -362,12 +362,20 @@ def list_foreign_sentiment(
         rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
     finally:
         conn.close()
-    counts = {"total": len(rows), "by_action": {}, "by_direction": {}, "by_broker": {}}
+    by_action: dict[str, int] = {}
+    by_direction: dict[str, int] = {}
+    by_broker: dict[str, int] = {}
+    counts = {
+        "total": len(rows),
+        "by_action": by_action,
+        "by_direction": by_direction,
+        "by_broker": by_broker,
+    }
     for row in rows:
         for key, bucket in (
-            ("action", counts["by_action"]),
-            ("direction", counts["by_direction"]),
-            ("broker", counts["by_broker"]),
+            ("action", by_action),
+            ("direction", by_direction),
+            ("broker", by_broker),
         ):
             value = str(row.get(key) or "unknown")
             bucket[value] = bucket.get(value, 0) + 1

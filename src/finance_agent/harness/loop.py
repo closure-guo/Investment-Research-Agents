@@ -34,7 +34,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 from finance_agent.harness.context import ContextBudget, ContextManager
@@ -309,7 +309,9 @@ class Agent:
         self.usage_total_tokens += total
         self.usage_max_prompt_tokens = max(self.usage_max_prompt_tokens, prompt)
 
-    async def run(self, user_input: str, force_tool: bool = False) -> AsyncIterator[StreamEvent]:
+    async def run(
+        self, user_input: str, force_tool: bool = False
+    ) -> AsyncGenerator[StreamEvent, None]:
         """
         运行 Agent -- 核心入口
 

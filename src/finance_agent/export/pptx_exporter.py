@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pptx import Presentation
 from pptx.enum.text import PP_ALIGN
+from pptx.presentation import Presentation as PptxPresentation
 from pptx.util import Inches, Pt
 
 from finance_agent.export.parser import Section, parse_markdown, split_by_chapters, strip_md_inline
@@ -51,7 +52,7 @@ def markdown_to_pptx(markdown_text: str, output_path: str, stock_name: str = "")
     return output_path
 
 
-def _add_cover_slide(prs: Presentation, title_text: str) -> None:  # pyrefly: ignore[not-a-type]
+def _add_cover_slide(prs: PptxPresentation, title_text: str) -> None:
     slide_layout = prs.slide_layouts[6]  # Blank
     slide = prs.slides.add_slide(slide_layout)
 
@@ -75,7 +76,7 @@ def _add_cover_slide(prs: Presentation, title_text: str) -> None:  # pyrefly: ig
     p2.alignment = PP_ALIGN.CENTER
 
 
-def _add_chapter_slide(prs: Presentation, title: str, sections: list[Section]) -> None:  # pyrefly: ignore[not-a-type]
+def _add_chapter_slide(prs: PptxPresentation, title: str, sections: list[Section]) -> None:
     slide_layout = prs.slide_layouts[1]  # Title and Content
     slide = prs.slides.add_slide(slide_layout)
 

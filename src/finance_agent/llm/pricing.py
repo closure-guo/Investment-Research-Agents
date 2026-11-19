@@ -66,9 +66,13 @@ def parse_prices(raw: str | None) -> list[ModelPrice]:
             continue
         if not isinstance(spec, dict):
             continue
+        inp_raw = spec.get("input")
+        outp_raw = spec.get("output")
+        if inp_raw is None or outp_raw is None:
+            continue
         try:
-            inp = float(spec.get("input"))
-            outp = float(spec.get("output"))
+            inp = float(inp_raw)
+            outp = float(outp_raw)
         except (TypeError, ValueError):
             continue
         if inp < 0 or outp < 0 or not (inp or outp):
