@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from docx import Document
+from docx.document import Document as DocxDocument
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
@@ -69,7 +70,7 @@ def markdown_to_docx(markdown_text: str, output_path: str, stock_name: str = "")
     return output_path
 
 
-def _set_default_font(doc: Document) -> None:  # pyrefly: ignore[not-a-type]
+def _set_default_font(doc: DocxDocument) -> None:
     """Set default font for the document."""
     style = doc.styles["Normal"]
     font = style.font
@@ -92,7 +93,7 @@ def _heading_font_size(level: int) -> int:
     return {0: 18, 1: 16, 2: 14, 3: 12}.get(level, 12)
 
 
-def _add_table(doc: Document, rows: list[list[str]]) -> None:  # pyrefly: ignore[not-a-type]
+def _add_table(doc: DocxDocument, rows: list[list[str]]) -> None:
     if not rows:
         return
     num_cols = max(len(r) for r in rows)
@@ -109,7 +110,7 @@ def _add_table(doc: Document, rows: list[list[str]]) -> None:  # pyrefly: ignore
                 _set_run_font(run, bold=(i == 0), size=9)
 
 
-def _add_paragraph(doc: Document, text: str) -> None:  # pyrefly: ignore[not-a-type]
+def _add_paragraph(doc: DocxDocument, text: str) -> None:
     """Add a paragraph with inline bold/italic formatting."""
     p = doc.add_paragraph()
     _add_runs_with_inline(p, text)
@@ -137,7 +138,7 @@ def _add_runs_with_inline(p, text: str) -> None:  # noqa: ANN001 - python-docx p
             _set_run_font(run)
 
 
-def _add_image(doc: Document, image_path: str, alt_text: str) -> None:  # pyrefly: ignore[not-a-type]
+def _add_image(doc: DocxDocument, image_path: str, alt_text: str) -> None:
     """Add an image to the document, centered, max width 6 inches."""
     import os
 

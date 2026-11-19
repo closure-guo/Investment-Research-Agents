@@ -312,7 +312,7 @@ def _parse_context_length(value: Any, source: str) -> int:
         value = int(value.strip())
     if value <= 0:
         raise IncompleteLLMConfigError(f"{source} 必须为正整数，收到 {value!r}")
-    return value
+    return int(value)
 
 
 def _apply_context_length_override(

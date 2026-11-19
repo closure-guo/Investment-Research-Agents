@@ -17,9 +17,12 @@ import logging
 import os
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from finance_agent.harness.types import ToolCallRequest, ToolSchema
+
+if TYPE_CHECKING:
+    import httpx
 
 logger = logging.getLogger("finance_agent.harness.llm")
 
@@ -196,7 +199,7 @@ class LLMClient:
         self.base_url = base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
         self.max_retries = max_retries
         self.retry_delay = retry_delay
-        self._http_client = None  # 延迟初始化
+        self._http_client: httpx.AsyncClient | None = None  # 延迟初始化
 
     async def _get_client(self):
         """延迟初始化 httpx 客户端"""

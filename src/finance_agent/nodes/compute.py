@@ -46,7 +46,7 @@ def compute_metrics(state: AnalysisState) -> dict[str, Any]:
     # 保留 source 标注，但 all_metrics 只含数值指标
     efficiency_numeric = {k: v for k, v in efficiency.items() if not k.endswith("_source")}
 
-    all_metrics = {
+    all_metrics: dict[str, dict[str, dict[str, Any]]] = {
         "solvency": solvency,
         "profitability": profitability,
         "efficiency": efficiency_numeric,
