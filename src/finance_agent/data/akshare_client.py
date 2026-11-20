@@ -1379,15 +1379,20 @@ class AKShareClient:
     def fetch_kline(self, stock_code: str, days: int = 250, *, adjust: str = "qfq") -> pd.DataFrame:
         """拉取个股日 K 线，返回最近 N 个交易日。
 
-        `adjust`：复权口径，透传三源（东财/新浪/腾讯）。
+        `adjust`：复权口径。
         - 默认 ``"qfq"``（前复权）= 管线分析输入口径，向后兼容不变。
         - 结算/回测路径显式传 ``SETTLEMENT_ADJUST``（后复权 hfq）——as-of 保真：
           后复权历史价 = 当时真实成交价，前复权会随最新除权事件重算历史价而引入未来信息。
+          **hfq 只走新浪**（见 ``_fetch_kline_hfq``）：东财/腾讯的 hfq 复权因子
+          逐日漂移、收益率与 qfq 不一致，会把 ±2% 判定带压向 0。
 
-        优先使用 stock_zh_a_hist（东方财富），失败时回退 stock_zh_a_daily（新浪），
-        再回退 stock_zh_a_hist_tx（腾讯）。
+        非 hfq 口径优先使用 stock_zh_a_hist（东方财富），失败时回退
+        stock_zh_a_daily（新浪），再回退 stock_zh_a_hist_tx（腾讯）。
         返回统一中文列名：日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额, 换手率
         """
+        if adjust == "hfq":
+            return self._fetch_kline_hfq(stock_code, days)
+
         from datetime import datetime, timedelta
 
         end_date = datetime.now().strftime("%Y%m%d")
@@ -1445,6 +1450,43 @@ class AKShareClient:
 
         logger.error("K线拉取均失败: %s", stock_code)
         return pd.DataFrame()
+
+    def _fetch_kline_hfq(self, stock_code: str, days: int) -> pd.DataFrame:
+        """结算/回测 hfq：只采信新浪源，失败返回空（fail-closed，不降级）。
+
+        实测（2026-11-20，同一窗口同一标的）：
+
+        - 600015：真实/qfq +10.03%，新浪 hfq +10.03% ✅，腾讯 hfq +5.63% ❌
+        - 600519：真实/qfq +18.31%，新浪 hfq +18.31% ✅，腾讯 hfq +14.59% ❌
+
+        东财/腾讯的 hfq 复权因子逐日漂移（hfq/raw 比值持续下滑），收益率被
+        系统性压向 0——直接污染结算的 ±2% 中性带、超额收益与回避判定。
+        新浪 hfq = raw × 常数因子（除权日为台阶），收益率与 qfq 逐位一致，
+        北交所 92 号段亦覆盖（bj920xxx）。
+        故 hfq 路径不再回退东财/腾讯：宁可本次跳过结算（下批重试），不写错读数。
+        """
+        sina_symbol = self._to_sina_symbol(stock_code)
+        df = _call_ak(ak.stock_zh_a_daily, symbol=sina_symbol, adjust="hfq")
+        if df is None or df.empty:
+            logger.warning(
+                "hfq 取数失败（仅新浪源，不降级东财/腾讯——其 hfq 收益率失真）: %s",
+                stock_code,
+            )
+            return pd.DataFrame()
+        rename_map = {
+            "date": "日期",
+            "open": "开盘",
+            "close": "收盘",
+            "high": "最高",
+            "low": "最低",
+            "volume": "成交量",
+            "amount": "成交额",
+            "turnover": "换手率",
+        }
+        df = df.rename(columns=rename_map)
+        df = df.sort_values("日期").reset_index(drop=True)
+        out: pd.DataFrame = df.tail(days).reset_index(drop=True)
+        return out
 
     @staticmethod
     def _to_sina_symbol(stock_code: str) -> str:

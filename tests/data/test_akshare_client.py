@@ -440,30 +440,32 @@ class TestFetchKlineAdjustCaliber:
         assert kwargs.get("adjust") == "qfq"
 
     @patch("finance_agent.data.akshare_client.ak")
-    def test_fetch_kline_hfq_passthrough_all_sources(self, mock_ak, client, monkeypatch):
-        """显式 adjust="hfq" → 东财/新浪/腾讯三源 kwargs 均收到 hfq（逐级回退均透传）。"""
+    def test_fetch_kline_hfq_uses_sina_only(self, mock_ak, client, monkeypatch):
+        """结算/回测 hfq 只采信新浪源。
+
+        实测（2026-11-20）：东财/腾讯 hfq 的复权因子逐日漂移——600015 同窗口
+        hfq 收益 +5.63%/东财、+5.63% 腾讯 vs 真实 +10.03%；600519 +14.59% vs
+        +18.31%。收益率被系统性压向 0，会让 ±2% 判定带失真。新浪 hfq 与 qfq
+        收益率逐位一致（同一 raw × 常数因子），故 hfq 路径固定走新浪。
+        """
         monkeypatch.setattr("finance_agent.data.akshare_client._AK_MAX_RETRIES", 1)
         monkeypatch.setattr("finance_agent.data.akshare_client._AK_RETRY_DELAY", 0)
-
-        # 方案1 东财
-        mock_ak.stock_zh_a_hist.return_value = self._em_df()
-        client.fetch_kline("600519", days=2, adjust="hfq")
-        _, em_kwargs = mock_ak.stock_zh_a_hist.call_args
-        assert em_kwargs.get("adjust") == "hfq"
-
-        # 方案2 新浪（东财空 → 回退）
-        mock_ak.stock_zh_a_hist.return_value = pd.DataFrame()
         mock_ak.stock_zh_a_daily.return_value = self._sina_df()
         client.fetch_kline("600519", days=2, adjust="hfq")
         _, sina_kwargs = mock_ak.stock_zh_a_daily.call_args
         assert sina_kwargs.get("adjust") == "hfq"
+        mock_ak.stock_zh_a_hist.assert_not_called()
+        mock_ak.stock_zh_a_hist_tx.assert_not_called()
 
-        # 方案3 腾讯（东财+新浪均空 → 二级回退）
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_fetch_kline_hfq_fail_closed(self, mock_ak, client, monkeypatch):
+        """新浪 hfq 失败 → 返回空（宁可跳过结算，也不降级到失真源）。"""
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_MAX_RETRIES", 1)
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_RETRY_DELAY", 0)
         mock_ak.stock_zh_a_daily.return_value = pd.DataFrame()
-        mock_ak.stock_zh_a_hist_tx.return_value = self._tx_df()
-        client.fetch_kline("600519", days=2, adjust="hfq")
-        _, tx_kwargs = mock_ak.stock_zh_a_hist_tx.call_args
-        assert tx_kwargs.get("adjust") == "hfq"
+        result = client.fetch_kline("600519", days=2, adjust="hfq")
+        assert result.empty
+        mock_ak.stock_zh_a_hist_tx.assert_not_called()
 
 
 class TestDataGapLogging:
