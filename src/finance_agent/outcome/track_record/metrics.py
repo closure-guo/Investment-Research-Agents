@@ -11,12 +11,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 RISK_FREE_RATE = float(os.getenv("TRACK_RISK_FREE_RATE", "0.02"))
 
@@ -149,6 +152,42 @@ def _benchmark_returns(marks: list[dict[str, Any]]) -> dict[str, float]:
     return out
 
 
+def _benchmark_curve(
+    dates: list[str], benchmark_by_date: Mapping[str, float]
+) -> tuple[dict[str, float], dict[str, float]]:
+    """基准净值与日收益（calendar 口径）。
+
+    - 净值：缺口日用前值填充（图线不断点，§1.12④）；
+    - 日收益：只在「当日与前一**交易日**都有真实收盘」时产出。缺日当天与其后
+      一日都不配对——把前值填充当 0 收益、或让次日产出跨两日收益，都会与组合
+      单日收益错配（2026-11-20 事故：基准停在 11-19，当日被记 0 收益，组合
+      +3.44% 全额进 α）。
+    """
+    cum: dict[str, float] = {}
+    ret: dict[str, float] = {}
+    base: float | None = None
+    last: float | None = None
+    prev_real_index: int | None = None
+    for i, d in enumerate(dates):
+        close = benchmark_by_date.get(d)
+        has_real = close is not None and close > 0
+        if has_real and close is not None:
+            value = float(close)
+            if base is None:
+                base = value
+                last = 1.0
+            else:
+                last = value / base
+            if prev_real_index == i - 1 and last is not None:
+                prev_level = cum.get(dates[i - 1])
+                if prev_level:
+                    ret[d] = last / prev_level - 1.0
+            prev_real_index = i
+        if last is not None:
+            cum[d] = last
+    return cum, ret
+
+
 def _cum_nav(daily_returns: dict[str, float]) -> dict[str, float]:
     nav = 1.0
     out: dict[str, float] = {}
@@ -233,25 +272,15 @@ def compute_metrics_from_marks(
     bench_cum: dict[str, float] = {}
     bench_ret: dict[str, float] = {}
     if benchmark_by_date:
-        base: float | None = None
-        last: float | None = None
-        for d in dates:
-            close = benchmark_by_date.get(d)
-            if close is not None and close > 0:
-                if base is None:
-                    base = close
-                    last = 1.0
-                else:
-                    last = close / base
-            # 基准收盘缺失的交易日沿用前值持平（净值不倒退、图线不断点）
-            if last is not None:
-                bench_cum[d] = last
-        # β/α（add-portfolio-beta-alpha）需要逐日基准收益：由日历推进的基准净值差分
-        prev_nav: float | None = None
-        for d in dates:
-            if d in bench_cum:
-                bench_ret[d] = bench_cum[d] / prev_nav - 1.0 if prev_nav else 0.0
-                prev_nav = bench_cum[d]
+        # 净值缺口前值填充（图线）；β/α 只用相邻两日都有真实收盘的配对
+        bench_cum, bench_ret = _benchmark_curve(dates, benchmark_by_date)
+        bench_last = max(benchmark_by_date) if benchmark_by_date else None
+        if bench_last is not None and bench_last < dates[-1]:
+            logger.warning(
+                "基准序列末日 %s 落后于组合末日 %s：β/α 跳过未覆盖日历日的配对",
+                bench_last,
+                dates[-1],
+            )
     else:
         bench_ret = _benchmark_returns(marks)
         bench_cum = _cum_nav(bench_ret) if bench_ret else {}

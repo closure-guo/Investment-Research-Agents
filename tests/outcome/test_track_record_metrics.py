@@ -680,6 +680,47 @@ class TestBetaAlpha:
         assert "beta" in snap and "jensen_alpha" in snap
 
 
+class TestBenchmarkStaleness:
+    """基准序列缺日：β/α 只能用「相邻两日都有真实收盘」的配对。
+
+    生产事故（2026-11-20）：16:35 指标快照重拉基准时日 K 尚停在 11-19，
+    前值填充把当日基准收益记成 0，而组合当日 +3.44% 全额进 α——
+    β 由 −0.36 变 −0.27、α 由 +4.1% 变 +12.6%。
+    """
+
+    def test_missing_last_benchmark_day_excluded_from_beta(self):
+        from finance_agent.outcome.track_record.metrics import compute_metrics_from_marks
+
+        marks = TestBetaAlpha()._marks_linear(25, beta=0.8)
+        bench = {m["mark_date"]: m["benchmark_price"] for m in marks}
+        bench.pop(marks[-1]["mark_date"])  # 基准日 K 缺当日收盘
+        pm = compute_metrics_from_marks(marks, benchmark_by_date=bench)
+        assert pm.beta == pytest.approx(0.8, abs=1e-9)
+        assert pm.jensen_alpha == pytest.approx(-0.2 * TestBetaAlpha.RF, abs=1e-9)
+
+    def test_middle_gap_skips_spanning_pair(self):
+        """基准中间缺一天：缺日与下一日（跨两日收益）都不得进回归。"""
+        from finance_agent.outcome.track_record.metrics import compute_metrics_from_marks
+
+        marks = TestBetaAlpha()._marks_linear(25, beta=0.8)
+        bench = {m["mark_date"]: m["benchmark_price"] for m in marks}
+        bench.pop(marks[9]["mark_date"])
+        pm = compute_metrics_from_marks(marks, benchmark_by_date=bench)
+        assert pm.beta == pytest.approx(0.8, abs=1e-9)
+
+    def test_benchmark_nav_still_carried_forward_for_chart(self):
+        """图表口径不变：缺日仍前值填充（图线不断点），只是不进 β/α 配对。"""
+        from finance_agent.outcome.track_record.metrics import compute_metrics_from_marks
+
+        marks = TestBetaAlpha()._marks_linear(25, beta=0.8)
+        bench = {m["mark_date"]: m["benchmark_price"] for m in marks}
+        last_date = marks[-1]["mark_date"]
+        bench.pop(last_date)
+        pm = compute_metrics_from_marks(marks, benchmark_by_date=bench)
+        navs = {p["date"]: p["benchmark_nav"] for p in pm.nav_points}
+        assert navs[last_date] == pytest.approx(navs[marks[-2]["mark_date"]])
+
+
 class TestSchedulerJobs:
     def test_start_registers_marking_and_metrics(self):
         import os

@@ -95,6 +95,7 @@
 - [004](004-data-accuracy-20260604.md) efficiency.py 年份错位 bug、ROE 口径差异、LLM 自算未提供指标
 - [011](011-akshare-ar-turnover-nan-20260604.md) AKShare 预计算字段缺失（应收账款周转率 NaN），降级为自算
 - [033](033-stale-financials-valuation-chain-break-20260929.md) 财报论据结构性过时（只取年报+季度只取净利，中报毛利率回升/负债率腰斩系统性失明）+ 估值链路断裂（PE 缺失被兜底文案伪装成「PE≥行业平均」，市值从不进 LLM 上下文）+ 阈值无行业覆盖三因叠加；非分析师幻觉，数字全部可溯源 → 修复 delta update-financial-freshness-and-valuation
+- [054](054-track-record-settlement-hfq-and-beta-alpha-20261120.md) 历史战绩两处口径硬错：结算 hfq 三源回退（东财/腾讯复权因子逐日漂移，600015 同窗 +5.63% vs 真实 +10.03%）；β/α 把「基准缺日前值填充」当 0 收益参与回归（11-20 β −0.27 vs −0.36、α +12.6% vs +3.8%）。修复=hfq 固定新浪 fail-closed + 基准收益仅相邻真实收盘配对；已结算行按 spec 不重算
 - ADR-0005 `docs/adr/0005-validate-financials.md` 勾稽校验（4条规则）
 
 ### 流式事件与会话链路
