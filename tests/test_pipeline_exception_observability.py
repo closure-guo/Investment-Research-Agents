@@ -54,13 +54,13 @@ class TestPipelineExceptionTerminalObservability:
         assert "<traceback object at" not in tb
 
     def test_session_marked_failed_with_reason(self, req):
-        """except 分支 update_session_status MUST 带 failure_reason。"""
+        """except 分支状态流转 MUST 带 failure_reason（C5 后经 lifecycle.mark_failed）。"""
         sentinel = RuntimeError("boom")
 
         with (
             patch("finance_agent.api.graph") as mock_graph,
             patch("finance_agent.api.create_session", return_value="sess-test"),
-            patch("finance_agent.api.update_session_status") as spy_status,
+            patch("finance_agent.sessions.lifecycle.update_session_status") as spy_status,
         ):
             mock_graph.stream.side_effect = sentinel
             list(_run_graph_streaming("600519", "贵州茅台", req, "a1", start_time=0.0))

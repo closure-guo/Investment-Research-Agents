@@ -125,11 +125,10 @@ from finance_agent.session_store import (  # noqa: E402
     rename_session,
     session_stats,
     set_pipeline_anchor,
-    update_session_for_clarify,
     update_session_report,
-    update_session_status,
     upsert_chat,
 )
+from finance_agent.sessions import lifecycle  # noqa: E402
 from finance_agent.stream_registry import registry  # noqa: E402
 from finance_agent.timeline_builder import apply_chat_event  # noqa: E402
 
@@ -1384,7 +1383,7 @@ def _run_graph_streaming(
         # MUST NOT 停留 running 等超时兜底
         if not report_sent:
             reason, node_id = _blocked_failure_reason(accumulated)
-            update_session_status(session_id, "failed", failure_reason=reason)
+            lifecycle.mark_failed(session_id, failure_reason=reason)
             yield _sse(
                 {
                     "type": "error",
@@ -1402,8 +1401,8 @@ def _run_graph_streaming(
         # DataFrame truth value ambiguous）完全无法定位
         import traceback as _tb
 
-        update_session_status(
-            session_id, "failed", failure_reason=failure_reason_text(e, context="管线事件流")
+        lifecycle.mark_failed(
+            session_id, failure_reason=failure_reason_text(e, context="管线事件流")
         )
         yield _sse(
             {
@@ -1654,7 +1653,7 @@ async def _run_chat_task(
         # user 消息在任务内落库：409（single-flight 拒绝）时不追加，避免污染历史
         await asyncio.to_thread(append_chat, session_id, "user", req.message)
         # 状态置 running：恢复端点与前端运行指示依赖
-        await asyncio.to_thread(update_session_status, session_id, "running")
+        await asyncio.to_thread(lifecycle.mark_running, session_id)
 
         # 模式推断：analysis 会话 -> follow-up（报告追问）；chat 会话 -> quick
         session = await asyncio.to_thread(get_session, session_id) or {}
@@ -1688,20 +1687,19 @@ async def _run_chat_task(
         # 正常完成：最终持久化 + 状态流转 + done 终态（收拢到 publish_terminal
         # 重试兜底；registry._run_task 的自动 done 被终态 CAS 拒绝）
         await asyncio.to_thread(_upsert_assistant_chat, session_id, collector)
-        await asyncio.to_thread(update_session_status, session_id, "completed")
+        await asyncio.to_thread(lifecycle.mark_complete, session_id)
         await registry.publish_terminal(
             session_id, {"type": "done", "session_id": session_id, "timestamp": _now()}
         )
     except asyncio.CancelledError:
         await asyncio.to_thread(_persist_interrupted, session_id, collector)
-        await asyncio.to_thread(update_session_status, session_id, "interrupted")
+        await asyncio.to_thread(lifecycle.mark_interrupted, session_id)
         raise
     except Exception as exc:
         await asyncio.to_thread(_upsert_assistant_chat, session_id, collector)
         await asyncio.to_thread(
-            update_session_status,
+            lifecycle.mark_failed,
             session_id,
-            "failed",
             failure_reason=failure_reason_text(exc, context="聊天分析事件流"),
         )
         # error 终态显式发布（收拢到 publish_terminal 重试兜底，与
@@ -1766,7 +1764,7 @@ async def _run_react_analysis(
                 },
             )
         await asyncio.to_thread(append_chat, session_id, "user", req.query)
-        await asyncio.to_thread(update_session_status, session_id, "running")
+        await asyncio.to_thread(lifecycle.mark_running, session_id)
 
         # 从 session 恢复 focus，与用户输入合并
         session = await asyncio.to_thread(get_session, session_id) or {}
@@ -1796,7 +1794,7 @@ async def _run_react_analysis(
             """股票代码解析完成回调 -- 更新 session。"""
             asyncio.create_task(
                 asyncio.to_thread(
-                    update_session_for_clarify,
+                    lifecycle.update_clarify,
                     session_id,
                     stock_code=sc,
                     stock_name=sn,
@@ -1865,14 +1863,14 @@ async def _run_react_analysis(
             if _session_now.get("status") != "failed":
                 if currentFocus:
                     await asyncio.to_thread(
-                        update_session_for_clarify,
+                        lifecycle.update_clarify,
                         session_id,
                         focus=accumulatedFocus,
                         status="clarifying",
                     )
                 else:
                     await asyncio.to_thread(
-                        update_session_for_clarify, session_id, status="clarifying"
+                        lifecycle.update_clarify, session_id, status="clarifying"
                     )
                 await registry.publish(
                     session_id,
@@ -1906,14 +1904,13 @@ async def _run_react_analysis(
         )
     except asyncio.CancelledError:
         await asyncio.to_thread(_persist_interrupted, session_id, collector)
-        await asyncio.to_thread(update_session_status, session_id, "interrupted")
+        await asyncio.to_thread(lifecycle.mark_interrupted, session_id)
         raise
     except Exception as exc:
         await asyncio.to_thread(_upsert_assistant_chat, session_id, collector)
         await asyncio.to_thread(
-            update_session_status,
+            lifecycle.mark_failed,
             session_id,
-            "failed",
             failure_reason=failure_reason_text(exc, context="分析事件流"),
         )
         # error 终态显式发布（收拢到 publish_terminal 重试兜底，发布前冲刷残余
@@ -1956,7 +1953,7 @@ async def _start_fast_path_pipeline(
     # 持久化管线触发锚点：fast path 下 chat_history 仅一条 user，锚点 = 1
     await asyncio.to_thread(set_pipeline_anchor, session_id)
     await asyncio.to_thread(
-        update_session_for_clarify,
+        lifecycle.update_clarify,
         session_id,
         stock_code=stock_code,
         stock_name=stock_name,
@@ -2046,9 +2043,8 @@ async def start_analysis_session_for_operator(
     except Exception as exc:
         # 派单失败不留「clarifying/running 但无管线」的僵尸会话
         await asyncio.to_thread(
-            update_session_status,
+            lifecycle.mark_failed,
             session_id,
-            "failed",
             failure_reason=f"operator dispatch failed: {type(exc).__name__}: {exc}",
         )
         raise
@@ -3540,7 +3536,7 @@ async def screening_analyze() -> Any:
     - 入队前**以最新可得快照状态重校验**（spec「信号时效性校验」）：停牌/一字
       涨跌停/新事件标的不入队（``removed`` 返回 + 审计落库），其余标的照常；
     - 每个标的经 ``create_session`` + ``append_chat`` + ``set_pipeline_anchor`` +
-      ``update_session_for_clarify``（与 ``/api/analyze`` 新会话路径同款）建独立
+      ``lifecycle.update_clarify``（与 ``/api/analyze`` 新会话路径同款）建独立
       session 并入队；**补位者才真正启动**（``PipelineRunner.start`` 由队列的
       starter 在空位时调用——并发上限约束真实在跑的分析数，事件仍经既有
       journal/subscribe SSE 通道，本端点不改流式纪律）；
@@ -3568,30 +3564,10 @@ async def screening_analyze() -> Any:
             continue  # 时效性校验不通过：本次不移入深度分析（原因见 removed/审计行）
         display_name = f"{symbol} 选股分析"
         session_id = await asyncio.to_thread(
-            create_session,
-            stock_code="",
-            stock_name="",
+            lifecycle.begin_analysis,
             display_name=display_name,
-            status="clarifying",
-            session_type="analysis",
-        )
-        await asyncio.to_thread(append_chat, session_id, "user", f"对 {symbol} 进行深度分析")
-        await asyncio.to_thread(set_pipeline_anchor, session_id)
-        await asyncio.to_thread(
-            update_session_for_clarify,
-            session_id,
+            user_message=f"对 {symbol} 进行深度分析",
             stock_code=symbol,
-            stock_name="",
-            status="running",
-        )
-        append_session_event(
-            session_id,
-            {
-                "type": "session_created",
-                "session_id": session_id,
-                "display_name": display_name,
-                "timestamp": _now(),
-            },
         )
         queue.enqueue(symbol, session_id)
     snapshot = queue.snapshot()
@@ -3694,7 +3670,7 @@ async def events_watchlist_analyze(item_id: int) -> Any:
     """发起深度分析（复用既有筛选队列，`source=event` 语义）：
 
     - 建会话段与 ``/api/screening/analyze`` **逐字同款**（create_session +
-      append_chat + set_pipeline_anchor + update_session_for_clarify +
+      append_chat + set_pipeline_anchor + lifecycle.update_clarify +
       append_session_event + ``queue.enqueue``）——复用 ``_get_analyze_queue()``
       单例，同并发上限，MUST NOT 另建分析/并发通道；
     - 重复点击（条已有 ``session_id``）→ 幂等返回既有状态（``already_started=true``），
@@ -3738,7 +3714,7 @@ async def events_watchlist_analyze(item_id: int) -> Any:
     await asyncio.to_thread(append_chat, session_id, "user", f"对 {symbol} 进行深度分析")
     await asyncio.to_thread(set_pipeline_anchor, session_id)
     await asyncio.to_thread(
-        update_session_for_clarify,
+        lifecycle.update_clarify,
         session_id,
         stock_code=symbol,
         stock_name="",
