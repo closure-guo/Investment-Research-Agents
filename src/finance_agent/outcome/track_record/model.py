@@ -1209,9 +1209,29 @@ def list_predictions(
         marks = _latest_marks_for(open_ids, db_path)
         for d in result:
             d["latest_mark"] = marks.get(d["prediction_id"]) if d.get("status") == "open" else None
+            # 极性声明读侧提取（add-price-polarity-contract，#606）：前端按声明解释
+            # stop/target；存量行无该键 → None（「口径未声明」，不追溯）。
+            d["declared_polarity"] = _declared_polarity_of(d.get("rationale_snapshot"))
         return result
     finally:
         conn.close()
+
+
+def _declared_polarity_of(snapshot: Any) -> str | None:
+    """快照 ``declared_prices.polarity`` 提取（读侧宽松）：非法 JSON / 非 dict /
+    缺键 / 非字符串 → None（口径未声明）。列表接口消费，MUST NOT 崩。"""
+    if isinstance(snapshot, str) and snapshot.strip():
+        try:
+            snapshot = json.loads(snapshot)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(snapshot, dict):
+        return None
+    prices = snapshot.get("declared_prices")
+    polarity = prices.get("polarity") if isinstance(prices, dict) else None
+    if isinstance(polarity, str) and polarity.strip():
+        return polarity
+    return None
 
 
 def count_predictions(
@@ -1288,7 +1308,13 @@ def get_prediction(prediction_id: str, db_path: str | Path | None = None) -> dic
         row = conn.execute(
             "SELECT * FROM predictions WHERE prediction_id=?", (prediction_id,)
         ).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        result = dict(row)
+        # 极性声明读侧提取（add-price-polarity-contract，#606）：与 list_predictions
+        # 同一提取源，详情页按声明极性解释 stop/target。
+        result["declared_polarity"] = _declared_polarity_of(result.get("rationale_snapshot"))
+        return result
     finally:
         conn.close()
 

@@ -111,3 +111,99 @@ describe('观点详情页（add-track-record-stage-c）', () => {
     expect(await screen.findByText(/数据加载失败/)).toBeInTheDocument()
   })
 })
+// ── 三价极性契约（add-price-polarity-contract，#606）─────────────────────────
+
+const SELL_EXIT_DETAIL = {
+  ...DETAIL,
+  prediction: {
+    ...DETAIL.prediction,
+    prediction_id: 'p2',
+    direction: 'short',
+    status: 'open',
+    entry_price: 5.12,
+    target_price: 5.3971,
+    settled: null,
+    declared_polarity: 'exit',
+    rationale_snapshot: JSON.stringify({
+      action: 'sell',
+      sell_type: 'exit',
+      declared_prices: { entry_price: 5.12, stop_loss: 4.9, target_price: 5.3971, polarity: 'exit' },
+    }),
+  },
+}
+
+const LEGACY_SELL_DETAIL = {
+  ...DETAIL,
+  prediction: {
+    ...DETAIL.prediction,
+    prediction_id: 'p3',
+    direction: 'short',
+    status: 'open',
+    entry_price: 11.8,
+    target_price: 10.954,
+    declared_polarity: null,
+    rationale_snapshot: JSON.stringify({
+      action: 'sell',
+      declared_prices: { entry_price: 11.8, stop_loss: 12.223, target_price: 10.954 },
+    }),
+  },
+}
+
+const SELL_SHORT_DETAIL = {
+  ...DETAIL,
+  prediction: {
+    ...DETAIL.prediction,
+    prediction_id: 'p4',
+    direction: 'short',
+    status: 'open',
+    entry_price: 100,
+    target_price: 92,
+    declared_polarity: 'short',
+    rationale_snapshot: JSON.stringify({
+      action: 'sell',
+      sell_type: 'short',
+      declared_prices: { entry_price: 100, stop_loss: 106, target_price: 92, polarity: 'short' },
+    }),
+  },
+}
+
+describe('观点详情页：三价极性契约（add-price-polarity-contract，#606）', () => {
+  beforeEach(() => vi.spyOn(window, 'scrollTo').mockImplementation(() => {}))
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
+
+  it('exit 极性：止损/目标带清仓惯例语义标注，展示快照止损价', async () => {
+    mockFetch(SELL_EXIT_DETAIL)
+    renderPage()
+    const card = await screen.findByTestId('prediction-decision')
+    expect(card.textContent).toContain('止损价（清仓位·跌破清出）')
+    expect(card.textContent).toContain('目标价（反弹减仓带）')
+    expect(card.textContent).toContain('4.90')
+    expect(card.textContent).not.toContain('口径未声明')
+  })
+
+  it('short 极性：失效位/兑现位语义标注', async () => {
+    mockFetch(SELL_SHORT_DETAIL)
+    renderPage()
+    const card = await screen.findByTestId('prediction-decision')
+    expect(card.textContent).toContain('止损价（失效位·观点失效）')
+    expect(card.textContent).toContain('目标价（兑现位·下行兑现）')
+    expect(card.textContent).toContain('106.00')
+  })
+
+  it('存量无极性声明：标注「口径未声明」，不虚构惯例语义', async () => {
+    mockFetch(LEGACY_SELL_DETAIL)
+    renderPage()
+    const card = await screen.findByTestId('prediction-decision')
+    expect(card.textContent).toContain('口径未声明')
+    expect(card.textContent).toContain('12.22')
+    expect(card.textContent).not.toContain('清仓位')
+  })
+
+  it('快照缺失（无申报价位）：止损/目标显示 —，不标口径未声明', async () => {
+    mockFetch() // DETAIL：buy，快照无 declared_prices
+    renderPage()
+    const card = await screen.findByTestId('prediction-decision')
+    expect(card.textContent).toContain('止损价')
+    expect(card.textContent).not.toContain('口径未声明')
+  })
+})

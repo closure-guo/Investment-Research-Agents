@@ -5,7 +5,13 @@ import type { PredictionDetail } from '../../types'
 import { Button } from '../../components/ui/button'
 import { cssVar } from '../../Charts'
 import { PREDICTION_STATUS_LABEL } from './predictionStatus'
-import { DIRECTION_LABEL, RESOLUTION_RULE_LABEL } from './predictionDisplay'
+import {
+  DIRECTION_LABEL,
+  POLARITY_STOP_LABEL,
+  POLARITY_TARGET_LABEL,
+  RESOLUTION_RULE_LABEL,
+  readDeclaredPrices,
+} from './predictionDisplay'
 
 function fmt(v: number | null, digits = 2) {
   return v === null ? '—' : v.toFixed(digits)
@@ -52,6 +58,13 @@ export function PredictionDetailPage({ predictionId, onBack }: { predictionId: s
   const p = detail?.prediction
   const marks = detail?.marks ?? []
   const audit = detail?.audit ?? []
+  // 三价极性契约（add-price-polarity-contract，#606）：按声明极性取惯例语义标注；
+  // 存量无声明且有申报价 → 「口径未声明」（不虚构惯例）
+  const declared = p ? readDeclaredPrices(p) : null
+  const stopLabel = declared?.polarity ? POLARITY_STOP_LABEL[declared.polarity] : undefined
+  const targetLabel = declared?.polarity ? POLARITY_TARGET_LABEL[declared.polarity] : undefined
+  const undeclared =
+    declared != null && !declared.polarity && (declared.stopLoss != null || declared.targetPrice != null)
 
   // 预测 vs 实际叠加：mark_price 序列 + entry/target 水平线
   const chartOption = {
@@ -90,9 +103,16 @@ export function PredictionDetailPage({ predictionId, onBack }: { predictionId: s
             <Field label="方向"><span title={p.direction}>{DIRECTION_LABEL[p.direction] ?? p.direction}</span></Field>
             <Field label="置信度">{fmt(p.confidence, 2)}</Field>
             {/* 价格三格口径标注（update-track-record-settle-price-display）：
-                参考价=决策时点盘面口径；结算入场价/结算价=hfq 后复权，两者同口径可比 */}
+                参考价=决策时点盘面口径；结算入场价/结算价=hfq 后复权，两者同口径可比。
+                极性契约（add-price-polarity-contract，#606）：止损/目标按声明极性
+                标注惯例语义；存量无声明 → 「口径未声明」（不虚构惯例） */}
             <Field label="参考价（盘面）">{fmt(p.entry_price)}</Field>
-            <Field label="目标价">{fmt(p.target_price)}</Field>
+            <Field label={stopLabel ? `止损价（${stopLabel}）` : undeclared ? '止损价（口径未声明）' : '止损价'}>
+              {fmt(declared?.stopLoss ?? null)}
+            </Field>
+            <Field label={targetLabel ? `目标价（${targetLabel}）` : undeclared ? '目标价（口径未声明）' : '目标价'}>
+              {fmt(declared?.targetPrice ?? p.target_price)}
+            </Field>
             <Field label="结算入场价（后复权）">{fmt(p.settle_entry_price)}</Field>
             <Field label="结算价（后复权）">{fmt(p.exit_price)}</Field>
             <Field label="区间收益"><Delta value={p.raw_return} /></Field>

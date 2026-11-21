@@ -504,6 +504,8 @@ export interface PredictionRecord {
   // update-track-record-display-clarity:open 行最新盯市（浮动收益展示）；非 open 行为 null
   latest_mark?: { mark_date: string; cum_return: number | null; cum_excess: number | null } | null
   rationale_snapshot?: unknown
+  // 极性声明（add-price-polarity-contract，#606）：服务端从快照提取；存量无键 → null
+  declared_polarity?: string | null
 }
 
 // 战绩总览（GET /api/v1/track-record/overview 返回项）
