@@ -54,6 +54,8 @@ _AK_RETRY_DELAY = 1.5  # 重试退避秒数
 # 前复权（qfq，fetch_kline 默认）随最新除权事件整体重算历史价，回填历史时点会引入
 # 未来信息（as-of 不保真）；后复权（hfq）历史价 = 当时真实成交价，故结算与回测
 # 统一显式传 hfq。管线分析输入（nodes/fetch.py）保持默认 qfq 不动。
+# 结算口径消费 seam：outcome 域一律经 data/market_caliber.settlement_series 取数
+# （C3：口径决策从调用方收回），本常量保留为 hfq 值的单一字面源
 SETTLEMENT_ADJUST = "hfq"
 
 
