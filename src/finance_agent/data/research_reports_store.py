@@ -25,6 +25,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from finance_agent.data.conn import init_wal, open_hot
+
 DEFAULT_DB_PATH = "data/research_reports.db"
 # 断更判定阈值：曾有覆盖但 N 天无新报 → stale（先验值，暴露在覆盖状态输出里）
 STALE_DAYS = 90
@@ -232,18 +234,20 @@ def _default_db_path() -> Path:
 
 
 def _connect(db_path: str | Path | None) -> sqlite3.Connection:
-    path = Path(db_path) if db_path else _default_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    """连接纪律统一走 data/conn.open_hot（C4 收编，timeout/busy/check_same_thread 值不变）。"""
+    return open_hot(
+        db_path,
+        default=_default_db_path(),
+        timeout=30.0,
+        busy_timeout_ms=5000,
+        check_same_thread=True,
+    )
 
 
 def init_db(db_path: str | Path | None = None) -> Path:
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
-    conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
+    init_wal(conn)  # 连接纪律：journal 只在 init 设置（#515）
     try:
         conn.executescript(RESEARCH_REPORTS_DDL)
         _ensure_columns(conn)

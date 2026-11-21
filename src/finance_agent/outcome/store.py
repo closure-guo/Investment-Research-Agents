@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from finance_agent.data.conn import init_wal, open_hot
+
 logger = logging.getLogger(__name__)
 
 
@@ -83,18 +85,14 @@ def _default_db_path() -> Path:
 
 
 def _connect(db_path: str | Path | None) -> sqlite3.Connection:
-    path = Path(db_path) if db_path else _default_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False, timeout=15.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=15000")
-    return conn
+    """连接纪律统一走 data/conn.open_hot（C4 收编，timeout/busy 值不变）。"""
+    return open_hot(db_path, default=_default_db_path())
 
 
 def init_decision_log(db_path: str | Path | None = None) -> None:
     """幂等建表 + 索引(session_store 同款 CREATE IF NOT EXISTS 风格)。"""
     conn = _connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
+    init_wal(conn)  # 连接纪律：journal 只在 init 设置（#515）
     try:
         conn.executescript(DECISION_LOG_DDL)
         conn.commit()

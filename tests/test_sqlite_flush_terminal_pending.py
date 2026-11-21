@@ -13,6 +13,7 @@ import time
 import pytest
 
 from finance_agent import session_store as ss
+from finance_agent.data import conn as _conn
 from finance_agent.stream_registry import SessionStream, StreamRegistry
 
 # ── 连接重试预算制 ──────────────────────────────────────────────────────────
@@ -51,7 +52,7 @@ class TestGetDbRetryBudget:
         with pytest.raises(sqlite3.OperationalError):
             ss._get_db()
         assert recorded, "预算未耗尽前必须持续退避"
-        assert max(recorded) <= ss._DB_CONNECT_RETRY_SLEEP_CAP_S + 1e-9
+        assert max(recorded) <= _conn._RETRY_SLEEP_CAP_S + 1e-9
 
     def test_recovery_within_budget(self, tmp_path, monkeypatch):
         """预算内自愈：前 N 次瞬断后成功，正常返回连接。"""
