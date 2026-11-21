@@ -3,7 +3,6 @@
 无 LANGFUSE key 跳过（与 @live 惯例一致）；报告落 reports/。
 """
 
-import os
 from pathlib import Path
 
 import pytest
@@ -14,15 +13,11 @@ pytestmark = pytest.mark.live
 
 @pytest.fixture(scope="module")
 def live_langfuse() -> bool:
-    try:
-        from dotenv import load_dotenv
+    # @live 统一门禁（issue #605）：显式 opt-in（RUN_LIVE=1）优先，凭据在场不激活；
+    # 纯 key 判据在全量套件中被 src.api import 时 load_dotenv 的 .env 键绕过
+    from tests.evals._live_guard import require_live_opt_in
 
-        load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
-    except Exception:  # noqa: BLE001, S110
-        pass
-    if not (os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY")):
-        pytest.skip("LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY 未设置，跳过 @live 用例")
-    return True
+    return require_live_opt_in()
 
 
 def test_perf_live_report(live_langfuse: bool):

@@ -21,19 +21,10 @@ pytestmark = pytest.mark.live
 
 @pytest.fixture(scope="module")
 def live_env() -> bool:
-    # 第一道判据：显式 opt-in 开关。全量跑批时前序用例/加载器可能把凭据带入
-    # 进程环境（#158），凭据在场 ≠ 用户想跑 @live。
-    if os.environ.get("RUN_LIVE") != "1":
-        pytest.skip("RUN_LIVE 未开启（@live 为显式 opt-in），跳过")
-    try:
-        from dotenv import load_dotenv
+    # @live 统一门禁（issue #605）：原 #158 内联实现收编到 _live_guard
+    from tests.evals._live_guard import require_live_opt_in
 
-        load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
-    except Exception:  # noqa: BLE001, S110
-        pass
-    if not (os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY")):
-        pytest.skip("LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY 未设置，跳过 @live 用例")
-    return True
+    return require_live_opt_in()
 
 
 def _factual_llm():
