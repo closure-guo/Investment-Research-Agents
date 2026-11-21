@@ -25,7 +25,7 @@ from typing import Any
 
 import pandas as pd
 
-from finance_agent.data.akshare_client import SETTLEMENT_ADJUST
+from finance_agent.data.market_caliber import normalize_dates, settlement_series
 from finance_agent.outcome.track_record.judgment import (
     AVOIDANCE_STATUSES,
     TERMINAL_AVOIDANCE_STATUS,
@@ -87,12 +87,6 @@ def _code(symbol: str) -> str:
     return symbol.split(".")[0]
 
 
-def _normalize_dates(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["日期"] = df["日期"].astype(str).str[:10]
-    return df
-
-
 def _is_stale(kline: pd.DataFrame | None, benchmark: pd.DataFrame | None) -> bool:
     if kline is None or kline.empty or benchmark is None or benchmark.empty:
         return False
@@ -144,9 +138,9 @@ def settle_open_predictions(
         benchmark = client.fetch_index_kline(BENCHMARK_CODE, days=kline_days)
         if benchmark is not None and not benchmark.empty:
             # 日主判定(day_master_ids)假定交易日历升序——fetch_index_kline 内部已按
-            # 「日期」sort_values 升序返回,_normalize_dates 仅规范化字符串不改顺序,
+            # 「日期」sort_values 升序返回,normalize_dates 仅规范化字符串不改顺序,
             # 此前提在此锚定(勿改用倒序/无序取数源)
-            benchmark = _normalize_dates(benchmark)
+            benchmark = normalize_dates(benchmark)
     except Exception as e:  # noqa: BLE001
         logger.warning("基准行情拉取失败,本批按无基准降级: %s", e)
         benchmark = None
@@ -164,11 +158,9 @@ def settle_open_predictions(
                 new = group[-1]
                 if should_supersede(old, new):
                     try:
-                        kline = client.fetch_kline(
-                            _code(sym), days=kline_days, adjust=SETTLEMENT_ADJUST
-                        )
+                        kline = settlement_series(client, _code(sym), days=kline_days)
                         if kline is not None and not kline.empty:
-                            kline = _normalize_dates(kline)
+                            kline = normalize_dates(kline)
                         exit_price = (
                             float(kline.iloc[-1]["收盘"])
                             if kline is not None and not kline.empty
@@ -259,11 +251,9 @@ def settle_open_predictions(
     # 剩余 open 观点:horizon 到点判定 / 长期无行情 unresolvable
     for p in remaining:
         try:
-            kline = client.fetch_kline(
-                _code(p["symbol"]), days=kline_days, adjust=SETTLEMENT_ADJUST
-            )
+            kline = settlement_series(client, _code(p["symbol"]), days=kline_days)
             if kline is not None and not kline.empty:
-                kline = _normalize_dates(kline)
+                kline = normalize_dates(kline)
             created = str(p["created_at"])[:10]
             has_new_rows = (
                 kline is not None and not kline.empty and not kline[kline["日期"] > created].empty

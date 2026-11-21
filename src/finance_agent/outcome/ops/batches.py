@@ -60,7 +60,7 @@ from evals.outcome.health import (
     collect_outcome_health,
 )
 
-from finance_agent.data.akshare_client import SETTLEMENT_ADJUST
+from finance_agent.data.market_caliber import settlement_series
 from finance_agent.outcome.track_record.job import BENCHMARK_CODE
 
 logger = logging.getLogger(__name__)
@@ -229,7 +229,7 @@ def run_backtest_task(
         raise ValueError("抽样结果为空:无样本可回放(不得产出空批报告)")
     # 逐标的 K 线:结算/基线同源后复权(hfq),与 CLI 一致
     klines = {
-        str(code): data_client.fetch_kline(str(code), days=KLINE_DAYS, adjust=SETTLEMENT_ADJUST)
+        str(code): settlement_series(data_client, str(code), days=KLINE_DAYS)
         for code in plan["codes"]
     }
     probe = None

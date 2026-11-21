@@ -13,6 +13,10 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from finance_agent.data.market_caliber import (
+    benchmark_close_on_or_before as _bench_close_on_or_before,
+)
+
 MAX_HORIZON_DAYS = 252
 DEFAULT_NEUTRAL_BAND = 0.02
 # outcome 评估默认判定窗口（delta update-decision-settlement-contract；口径 metrics.md §1.9）
@@ -41,14 +45,6 @@ class Resolution:
 
 def _effective_horizon(prediction: dict) -> int:
     return max(1, min(int(prediction.get("horizon_days", MAX_HORIZON_DAYS)), MAX_HORIZON_DAYS))
-
-
-def _bench_close_on_or_before(benchmark: pd.DataFrame, date: str) -> float | None:
-    # #57:入口排序防御——不隐式依赖调用方升序,乱序输入按日期取最后收盘
-    eligible = benchmark[benchmark["日期"] <= date].sort_values("日期")
-    if eligible.empty:
-        return None
-    return float(eligible.iloc[-1]["收盘"])
 
 
 def direction_for_action(action: str) -> str:

@@ -4,7 +4,7 @@
 
 - **入场**：对 ``verdict='outperform'`` 且未入场者，在**可得时点（``available_at``，
   缺省回落 ``announce_date``）次一交易日开盘价**入场（kline 取数显式
-  ``adjust=SETTLEMENT_ADJUST``（hfq 后复权），与执行链同口径）；
+  经 data/market_caliber.settlement_series 取 hfq 后复权序列，与执行链同口径）；
 - **不可成交顺延**：入场候选日读当日快照行（``read_universe(as_of=entry_date)``）——
   ``is_suspended=1`` 或 ``limit_up_sealed=1`` 顺延至下一交易日并留痕
   ``note=deferred:<原因>@<日期>``。涨停一字板挡买沿用执行链**买入侧**门禁语义
@@ -37,7 +37,7 @@ from typing import Any
 
 import pandas as pd
 
-from finance_agent.data.akshare_client import SETTLEMENT_ADJUST
+from finance_agent.data.market_caliber import settlement_series
 from finance_agent.execution.matching import sealed_flags_from_ohlc
 from finance_agent.outcome.events.model import (
     forecast_key,
@@ -116,7 +116,7 @@ def _kline_days(span_days: int) -> int:
 def _fetch_kline(client: Any, code: str, span_days: int) -> pd.DataFrame | None:
     """取 kline（结算口径 hfq）；异常/空 → None（调用方按缺失留痕，不编造）。"""
     try:
-        frame = client.fetch_kline(code, days=_kline_days(span_days), adjust=SETTLEMENT_ADJUST)
+        frame = settlement_series(client, code, days=_kline_days(span_days))
     except Exception:  # noqa: BLE001 -- 取数失败按缺失处置（保持 open + 留痕）
         logger.warning("kline 取数失败，本标的按缺失处置: %s", code, exc_info=True)
         return None

@@ -22,6 +22,7 @@ from typing import Any
 
 import pandas as pd
 
+from finance_agent.data.market_caliber import monitor_series, normalize_dates
 from finance_agent.outcome.track_record.model import (
     init_track_record_tables,
     insert_daily_mark,
@@ -38,12 +39,6 @@ BENCHMARK_CODE = "000300"
 
 def _code(symbol: str) -> str:
     return symbol.split(".")[0]
-
-
-def _normalize_dates(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["日期"] = df["日期"].astype(str).str[:10]
-    return df
 
 
 def _bench_by_date(benchmark: pd.DataFrame | None) -> dict[str, float]:
@@ -65,7 +60,7 @@ def _fetch_benchmark(client: Any, kline_days: int) -> pd.DataFrame | None:
     try:
         benchmark = client.fetch_index_kline(BENCHMARK_CODE, days=kline_days)
         if benchmark is not None and not benchmark.empty:
-            return _normalize_dates(benchmark)
+            return normalize_dates(benchmark)
         logger.warning("基准行情返回空,按无基准降级")
     except Exception as e:  # noqa: BLE001
         logger.warning("基准行情拉取失败,超额收益字段置空: %s", e)
@@ -128,11 +123,11 @@ def mark_open_predictions(
             continue
         try:
             # 盯市口径 = 参考价口径：不传 adjust（默认 qfq），与存储的 entry_price 同尺度。
-            kline = client.fetch_kline(_code(p["symbol"]), days=kline_days)
+            kline = monitor_series(client, _code(p["symbol"]), days=kline_days)
             if kline is None or kline.empty:
                 result["skipped"] += 1
                 continue
-            kline = _normalize_dates(kline)
+            kline = normalize_dates(kline)
             rows = kline[kline["日期"] > created]
         except Exception as e:  # noqa: BLE001
             logger.warning("行情拉取失败,本次跳过 %s: %s", p["prediction_id"], e)

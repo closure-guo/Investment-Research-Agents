@@ -298,7 +298,8 @@ def _fetch_stock_closes(
     import logging
     import time
 
-    from finance_agent.data.akshare_client import SETTLEMENT_ADJUST, AKShareClient
+    from finance_agent.data.akshare_client import AKShareClient
+    from finance_agent.data.market_caliber import settlement_series
 
     logger = logging.getLogger(__name__)
     client = AKShareClient()
@@ -309,13 +310,13 @@ def _fetch_stock_closes(
             time.sleep(MARKET_SLEEP_SECONDS)
         df = None
         try:
-            df = client.fetch_kline(ticker, days=days, adjust=SETTLEMENT_ADJUST)
+            df = settlement_series(client, ticker, days=days)
         except Exception as exc:  # 网络异常不中断整批，该股走降级路径
             logger.warning("report CLI: %s 行情拉取异常（%s）", ticker, exc)
         if df is None or df.empty:
             time.sleep(MARKET_SLEEP_SECONDS)
             try:  # 失败重试 1 次
-                df = client.fetch_kline(ticker, days=days, adjust=SETTLEMENT_ADJUST)
+                df = settlement_series(client, ticker, days=days)
             except Exception as exc:
                 logger.warning("report CLI: %s 重试仍异常（%s）", ticker, exc)
         if df is None or df.empty:
