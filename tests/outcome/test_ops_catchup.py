@@ -88,7 +88,7 @@ class TestPlanCatchUp:
             "regime_daily",
             "screening_daily",
         ]
-        assert plan[0]["late_seconds"] == 119 * 60  # 15:30 → 17:29
+        assert plan[0]["late_seconds"] == 118 * 60  # 15:31 → 17:29
 
     def test_successful_run_is_not_replayed(self):
         statuses = {"regime_daily": ["ok"]}
@@ -145,7 +145,7 @@ class TestPlanCatchUp:
             now=_at(THURSDAY, 17, 29),
             statuses_of=lambda _jid: [],
             schedules={
-                "market_snapshot_daily": {"hour": 15, "minute": 30, "day_of_week": "mon-fri"}
+                "market_snapshot_daily": {"hour": 15, "minute": 31, "day_of_week": "mon-fri"}
             },
         )
         assert [item["job_id"] for item in plan] == ["market_snapshot_daily"]

@@ -765,16 +765,16 @@ class TestRescheduleCohort:
 
 
 class TestSnapshotJobRegistration:
-    """add-market-snapshot T7：行情快照日批（15:30 mon-fri）注册与重试包装。"""
+    """add-market-snapshot T7：行情快照日批（15:31 mon-fri，#602 错峰）注册与重试包装。"""
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})
     @patch("finance_agent.outcome.scheduler.BackgroundScheduler")
-    def test_registers_1530_monfri_cron(self, mock_sched_cls):
+    def test_registers_1531_monfri_cron(self, mock_sched_cls):
         sched = MagicMock()
         mock_sched_cls.return_value = sched
         start_scheduler()
         assert _job_field(sched, "market_snapshot_daily", "hour") == ["15"]
-        assert _job_field(sched, "market_snapshot_daily", "minute") == ["30"]
+        assert _job_field(sched, "market_snapshot_daily", "minute") == ["31"]
         assert "mon-fri" in _job_field(sched, "market_snapshot_daily", "day_of_week")
 
     @patch.dict(os.environ, {"TESTING": "", "DECISION_SETTLE_ENABLED": "1"})

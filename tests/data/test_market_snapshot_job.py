@@ -283,9 +283,22 @@ _D3 = "2026-10-13"  # 周二（默认批日）
 
 
 class FakeSnapshotClient:
-    """日批 stub 客户端：取数方法的假实现（不触碰 akshare）。"""
+    """日批 stub 客户端：取数方法的假实现（不触碰 akshare）。
 
-    def __init__(self, *, calendar=None, spot=None, listing=None, delist=None):
+    ``spot`` 传 list 时按调用次序逐个返回（末位重复）——供同 run 重试用例
+    构造「首轮 None → 重试命中」与「重试后仍 None」序列；
+    ``spot_failure`` 预置 ``last_spot_failure``（真客户端由 fetch_market_spot 留痕）。
+    """
+
+    def __init__(
+        self,
+        *,
+        calendar=None,
+        spot=None,
+        listing=None,
+        delist=None,
+        spot_failure=None,
+    ):
         self.calendar = calendar
         self.spot = spot
         self.listing = listing
@@ -294,6 +307,8 @@ class FakeSnapshotClient:
         self.spot_calls = 0
         self.listing_calls = 0
         self.delist_calls = 0
+        self._spot_sequence = spot if isinstance(spot, list) else None
+        self.last_spot_failure = dict(spot_failure) if spot_failure else {}
 
     def fetch_trade_calendar(self):
         self.calendar_calls += 1
@@ -301,6 +316,9 @@ class FakeSnapshotClient:
 
     def fetch_market_spot(self):
         self.spot_calls += 1
+        if self._spot_sequence is not None:
+            index = min(self.spot_calls - 1, len(self._spot_sequence) - 1)
+            return self._spot_sequence[index]
         return self.spot
 
     def fetch_listing_info(self):
@@ -376,12 +394,16 @@ def _today_beijing() -> str:
 
 
 class TestMarketSnapshotScheduleConstant:
-    def test_schedule_constant_is_1530_monfri(self):
-        """T7 注册表消费的 cron 规格（逐字：mon-fri 15:30 Asia/Shanghai）。"""
+    def test_schedule_constant_is_1531_monfri(self):
+        """T7 注册表消费的 cron 规格（逐字：mon-fri 15:31 Asia/Shanghai）。
+
+        issue #602 错峰裁定：15:30 整点全市场拉取峰值（新浪限频首跑五连败），
+        catchup 五例 15:31+ 全成 = 实证时槽；级联约束最坏完成 < regime 15:35。
+        """
         assert MARKET_SNAPSHOT_SCHEDULE == {
             "day_of_week": "mon-fri",
             "hour": 15,
-            "minute": 30,
+            "minute": 31,
             "timezone": "Asia/Shanghai",
         }
 
@@ -536,18 +558,27 @@ class TestMarketSnapshotBatch:
         assert client.spot_calls == 0
         assert get_all_meta(db)["last_error_date"] == _today_beijing()
 
-    def test_batch_failure_marks_meta_and_reraises(self, tmp_path):
-        """spot 拉取失败 → 标记 last_error/last_error_date 后重抛（交 ops 记录重试）。"""
+    def test_batch_failure_marks_meta_and_reraises(self, tmp_path, monkeypatch):
+        """spot 双轮皆败 → 标记 last_error/last_error_date 后重抛（交 ops 记录重试）。"""
+        import finance_agent.data.snapshot_job as snapshot_job_module
+
+        sleeps: list[float] = []
+        monkeypatch.setattr(snapshot_job_module, "_SPOT_RETRY_DELAY_S", 0)
+        monkeypatch.setattr(snapshot_job_module.time, "sleep", lambda s: sleeps.append(s))
         db = tmp_path / "snap.db"
         client = FakeSnapshotClient(calendar=[_D3], spot=None, listing=None)
 
         with pytest.raises(SnapshotError, match="全市场行情拉取失败"):
             run_market_snapshot_batch(_D3, client=client, db_path=db)
 
+        assert client.spot_calls == 2  # 同 run 有界重试一轮
+        assert sleeps == [0]
         meta = get_all_meta(db)
         # 契约：失败标记取北京「今天」，与批参数 trade_date 无关（D5 按当日告警）
         assert meta["last_error_date"] == _today_beijing()
-        assert meta["last_error"] == "SnapshotError: 全市场行情拉取失败"
+        assert meta["last_error"] == (
+            "SnapshotError: 全市场行情拉取失败（同 run 重试 1 轮后仍双源皆败；明细不可得）"
+        )
         assert "last_attempt_at" in meta
         assert "last_success_date" not in meta
 
@@ -703,3 +734,154 @@ class TestMarketSnapshotBatch:
 
         assert out["master"] == "skipped"
         assert client.delist_calls == 0
+
+
+class TestSpotFirstRunRetry:
+    """spot 双源失败后同 run 有界重试一轮（issue #602 候选②）。"""
+
+    @staticmethod
+    def _arm_retry(monkeypatch, sleeps: list[float]) -> None:
+        import finance_agent.data.snapshot_job as snapshot_job_module
+
+        monkeypatch.setattr(snapshot_job_module, "_SPOT_RETRY_DELAY_S", 0)
+        monkeypatch.setattr(snapshot_job_module.time, "sleep", lambda s: sleeps.append(s))
+
+    def test_retry_round_recovers_and_marks_summary(self, tmp_path, monkeypatch):
+        """首轮双源失败 → 65s 冷却重试命中 → 批次成功且 spot_retry=true。"""
+        sleeps: list[float] = []
+        self._arm_retry(monkeypatch, sleeps)
+        db = tmp_path / "snap.db"
+        client = FakeSnapshotClient(calendar=[_D3], spot=[None, _spot(10.5, 10.0)], listing=None)
+
+        out = run_market_snapshot_batch(_D3, client=client, db_path=db)
+
+        assert out["written"] == 1
+        assert out["spot_retry"] is True
+        assert client.spot_calls == 2
+        assert sleeps == [0]
+
+    def test_first_round_success_no_sleep(self, tmp_path, monkeypatch):
+        """首轮即成功 → spot_retry=false 且零冷却等待。"""
+        sleeps: list[float] = []
+        self._arm_retry(monkeypatch, sleeps)
+        db = tmp_path / "snap.db"
+        client = FakeSnapshotClient(calendar=[_D3], spot=_spot(10.5, 10.0), listing=None)
+
+        out = run_market_snapshot_batch(_D3, client=client, db_path=db)
+
+        assert out["spot_retry"] is False
+        assert client.spot_calls == 1
+        assert sleeps == []
+
+    def test_retry_exhausted_raises_with_source_detail(self, tmp_path, monkeypatch):
+        """重试后仍失败 → SnapshotError 内嵌源级明细（源名/失败形态/尝试次数）。"""
+        sleeps: list[float] = []
+        self._arm_retry(monkeypatch, sleeps)
+        db = tmp_path / "snap.db"
+        client = FakeSnapshotClient(
+            calendar=[_D3],
+            spot=[None, None],
+            listing=None,
+            spot_failure={
+                "eastmoney": {"error": "RemoteDisconnected", "attempts": 3},
+                "sina": {"error": "TimeoutError", "attempts": 3},
+            },
+        )
+
+        with pytest.raises(SnapshotError, match="东财: RemoteDisconnected×3"):
+            run_market_snapshot_batch(_D3, client=client, db_path=db)
+        with pytest.raises(SnapshotError, match="新浪: TimeoutError×3"):
+            run_market_snapshot_batch(_D3, client=client, db_path=db)
+
+        assert client.spot_calls == 4  # 两轮批各 2 次（每 run 有界一轮，无循环重试）
+        meta = get_all_meta(db)
+        assert "东财: RemoteDisconnected×3" in meta["last_error"]
+        assert "新浪: TimeoutError×3" in meta["last_error"]
+
+
+class TestSpotFailureTrace:
+    """fetch_market_spot 双源失败时留痕各源末次失败明细（issue #602 候选③）。"""
+
+    def test_dual_exception_records_both_sources(self, client, monkeypatch):
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_MAX_RETRIES", 2)
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_RETRY_DELAY", 0)
+        with patch("finance_agent.data.akshare_client.ak") as mock_ak:
+            mock_ak.stock_zh_a_spot_em.side_effect = ConnectionError("boom")
+            mock_ak.stock_zh_a_spot.side_effect = TimeoutError("slow")
+
+            assert client.fetch_market_spot() is None
+
+        trace = client.last_spot_failure
+        assert trace["eastmoney"]["error"] == "ConnectionError"
+        assert trace["eastmoney"]["attempts"] == 2
+        assert trace["sina"]["error"] == "TimeoutError"
+        assert trace["sina"]["attempts"] == 2
+
+    def test_empty_table_recorded_as_source_failure(self, client):
+        with patch("finance_agent.data.akshare_client.ak") as mock_ak:
+            mock_ak.stock_zh_a_spot_em.return_value = pd.DataFrame()
+            mock_ak.stock_zh_a_spot.return_value = pd.DataFrame()
+
+            assert client.fetch_market_spot() is None
+
+        trace = client.last_spot_failure
+        assert trace["eastmoney"]["error"] == "空表/缺「代码」列"
+        assert trace["eastmoney"]["attempts"] == 1
+        assert trace["sina"]["error"] == "空表/缺「代码」列"
+
+    def test_trace_resets_on_success(self, client, monkeypatch):
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_MAX_RETRIES", 1)
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_RETRY_DELAY", 0)
+        with patch("finance_agent.data.akshare_client.ak") as mock_ak:
+            mock_ak.stock_zh_a_spot_em.return_value = pd.DataFrame()
+            mock_ak.stock_zh_a_spot.return_value = pd.DataFrame()
+            assert client.fetch_market_spot() is None
+            assert client.last_spot_failure
+
+            spot = pd.DataFrame({"代码": ["600519"], "名称": ["贵州茅台"], "最新价": [10.0]})
+            mock_ak.stock_zh_a_spot_em.return_value = spot
+            out = client.fetch_market_spot()
+
+        assert out is not None
+        assert client.last_spot_failure == {}
+
+
+class TestCallAkFailureSink:
+    """_call_ak 可选 failure_sink：末次失败（函数名/异常类型/尝试次数）上报。"""
+
+    @staticmethod
+    def _boom(*args, **kwargs):
+        raise ConnectionError("boom")
+
+    @staticmethod
+    def _unreachable(*args, **kwargs):
+        raise OSError("Network is unreachable")
+
+    def test_sink_records_last_attempt_error(self, monkeypatch):
+        from finance_agent.data import akshare_client as ac
+
+        monkeypatch.setattr(ac, "_AK_MAX_RETRIES", 2)
+        monkeypatch.setattr(ac, "_AK_RETRY_DELAY", 0)
+        sink: dict = {}
+        # 用真函数而非 MagicMock：sink 记录 func.__name__，MagicMock 无 __name__
+        assert ac._call_ak(self._boom, failure_sink=sink) is None
+
+        assert sink == {"func": "_boom", "error": "ConnectionError", "attempts": 2}
+
+    def test_unreachable_records_single_attempt(self, monkeypatch):
+        from finance_agent.data import akshare_client as ac
+
+        monkeypatch.setattr(ac, "_AK_MAX_RETRIES", 3)
+        monkeypatch.setattr(ac, "_AK_RETRY_DELAY", 0)
+        sink: dict = {}
+        assert ac._call_ak(self._unreachable, failure_sink=sink) is None
+
+        assert sink == {"func": "_unreachable", "error": "OSError", "attempts": 1}
+
+    def test_sink_absent_keeps_legacy_behavior(self, monkeypatch):
+        """不传 sink 时行为不变（向后兼容：现有全部调用点零改动）。"""
+        from finance_agent.data import akshare_client as ac
+
+        monkeypatch.setattr(ac, "_AK_MAX_RETRIES", 1)
+        monkeypatch.setattr(ac, "_AK_RETRY_DELAY", 0)
+        assert ac._call_ak(self._boom) is None

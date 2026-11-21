@@ -6,7 +6,9 @@
 2. 日历守卫（D4）：拉全历史交易日历；``trade_date`` 不在日历内 → 返回
    ``{"skipped": "non_trading_day", ...}`` 且**不触碰 meta**；日历不可得时，
    显式传入日期 → 继续跑（摘要 ``calendar="unavailable"``），未显式传入 → 抛错；
-3. spot 拉取（``fetch_market_spot``，一次全市场，禁止逐票循环）：None → 抛错；
+3. spot 拉取（``fetch_market_spot``，一次全市场，禁止逐票循环）：双源皆败 →
+   65s 冷却后同 run 重试一轮（有界，issue #602）；仍败 → 抛错（消息含源级
+   失败明细：源名/形态/尝试次数，流入 job_runs.error 与 meta.last_error）；
 4. 读上一交易日行（``latest_snapshot_date(before=trade_date)``）与证券主表。
    同日重跑必须取**严格早于**当日的行：拿当日已写行当 rebase 基准会把
    ``k = 昨收 / 当日收盘`` 误判成复权事件，二次复权整段历史 qfq；
@@ -31,6 +33,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -59,13 +63,40 @@ _BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 # 成功路径一次删清的失败标记键（D5 靠 last_error_date 判定当日告警）
 _ERROR_META_KEYS: tuple[str, ...] = ("last_error", "last_error_date")
 
-# ops 注册表 / scheduler 共用的 cron 规格：工作日 15:30（A 股收盘后），逐字钉死
+# ops 注册表 / scheduler 共用的 cron 规格：工作日 15:31（A 股收盘后），逐字钉死。
+# 错峰裁定（issue #602）：15:30:00 整点为全市场拉取峰值（东财封禁后恒走新浪，
+# 新浪限频致首跑五连败），catchup 五例「15:31+ 必成」= 实证成功时槽。选 15:31
+# 而非 issue 候选的 15:33/抖动，因级联约束：首轮失败 + 同 run 65s 重试最坏完成
+# ~15:34，MUST 早于 regime_daily（15:35 读快照库）；15:33 起跑最坏 ~15:35:40
+# 会撞上。抖动会破坏确定性，不取。
 MARKET_SNAPSHOT_SCHEDULE: dict[str, Any] = {
     "day_of_week": "mon-fri",
     "hour": 15,
-    "minute": 30,
+    "minute": 31,
     "timezone": "Asia/Shanghai",
 }
+
+# spot 双源皆败后的同 run 重试冷却秒数（issue #602 候选②：复用 catchup 已证
+# 有效的 60s 冷却节奏 + 余量，把自愈从「下一跳 catchup」提前到「同 run 内」；
+# 每 run 有界一轮）。env 可覆盖（测试置 0；生产调参不必重启式改码）。
+_SPOT_RETRY_DELAY_S = float(os.getenv("MARKET_SNAPSHOT_SPOT_RETRY_DELAY_S", "65"))
+
+
+def _spot_failure_detail(client: Any) -> str:
+    """源级失败明细 → 错误消息片段（issue #602 候选③）。
+
+    读 ``client.last_spot_failure``（fetch_market_spot 双源皆败时留痕），拼成
+    「东财: <形态>×<次数>；新浪: <形态>×<次数>」；客户端无留痕（旧 stub 等）
+    降级为「明细不可得」。该消息经 run_job 落 ``job_runs.error``、经批失败
+    路径落 ``meta.last_error``——两者均为 D5 告警读取面。
+    """
+    trace = getattr(client, "last_spot_failure", None) or {}
+    parts = []
+    for source, label in (("eastmoney", "东财"), ("sina", "新浪")):
+        entry = trace.get(source)
+        if entry:
+            parts.append(f"{label}: {entry.get('error', '未知')}×{entry.get('attempts', '?')}")
+    return "；".join(parts) if parts else "明细不可得"
 
 
 def run_market_snapshot_batch(
@@ -79,7 +110,8 @@ def run_market_snapshot_batch(
     摘要键：``trade_date`` / ``written`` / ``rebased``（发生复权的票数）/
     ``suspended``（合成停牌行数）/ ``master``（``refreshed``|``skipped``）/
     ``calendar``（``ok``|``unavailable``）/ ``spot_source``（实际生效 spot 源
-    ``eastmoney``|``sina``；客户端未上报 → None）；非交易日返回
+    ``eastmoney``|``sina``；客户端未上报 → None）/ ``spot_retry``（spot 双源
+    失败后同 run 重试命中 → true；首轮成功 → false）；非交易日返回
     ``{"trade_date", "skipped": "non_trading_day", "written": 0, "rebased": 0,
     "suspended": 0}``。
     """
@@ -109,8 +141,22 @@ def run_market_snapshot_batch(
                 }
 
         spot = client.fetch_market_spot()
+        spot_retry = False
         if spot is None:
-            raise SnapshotError("全市场行情拉取失败")
+            # issue #602 候选②：双源皆败不立即 fail——65s 冷却（catchup 已证节奏
+            # + 余量）后同 run 重试一轮，把自愈从「下一跳 catchup」提前进来
+            logger.warning(
+                "全市场 spot 首轮失败，%.0fs 冷却后同 run 内重试一轮",
+                _SPOT_RETRY_DELAY_S,
+            )
+            time.sleep(_SPOT_RETRY_DELAY_S)
+            spot_retry = True
+            spot = client.fetch_market_spot()
+        if spot is None:
+            raise SnapshotError(
+                "全市场行情拉取失败（同 run 重试 1 轮后仍双源皆败；"
+                f"{_spot_failure_detail(client)}）"
+            )
         # add-market-data-fallback：实际生效源如实入摘要（eastmoney|sina；客户端未上报 → None）
         spot_source = getattr(client, "last_spot_source", None)
 
@@ -176,6 +222,7 @@ def run_market_snapshot_batch(
             "delist_master": delist_state,
             "calendar": calendar_state,
             "spot_source": spot_source,
+            "spot_retry": spot_retry,
         }
     except Exception as exc:  # noqa: BLE001 - 失败标记后重抛，交 ops/scheduler 处置
         try:

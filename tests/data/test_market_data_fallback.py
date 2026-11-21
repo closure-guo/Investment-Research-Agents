@@ -515,8 +515,14 @@ class TestBatchSummarySpotSource:
         assert out["written"] == 2
 
     @patch("finance_agent.data.akshare_client.ak")
-    def test_batch_raises_and_marks_error_when_both_sources_down(self, mock_ak, tmp_path):
-        """spec 场景：两源皆失败 → 日批抛 SnapshotError + 写失败标记，MUST NOT 写空快照。"""
+    def test_batch_raises_and_marks_error_when_both_sources_down(
+        self, mock_ak, tmp_path, monkeypatch
+    ):
+        """spec 场景：两源皆失败（含同 run 重试轮）→ 日批抛 SnapshotError（消息含
+        源级明细）+ 写失败标记，MUST NOT 写空快照。"""
+        import finance_agent.data.snapshot_job as snapshot_job_module
+
+        monkeypatch.setattr(snapshot_job_module, "_SPOT_RETRY_DELAY_S", 0)
         db = tmp_path / "snap.db"
         mock_ak.stock_zh_a_spot_em.return_value = pd.DataFrame()
         mock_ak.stock_zh_a_spot.return_value = pd.DataFrame()
@@ -529,7 +535,10 @@ class TestBatchSummarySpotSource:
             run_market_snapshot_batch("2026-10-15", client=client, db_path=db)
 
         meta = get_all_meta(db)
-        assert meta["last_error"] == "SnapshotError: 全市场行情拉取失败"
+        assert meta["last_error"] == (
+            "SnapshotError: 全市场行情拉取失败（同 run 重试 1 轮后仍双源皆败；"
+            "东财: 空表/缺「代码」列×1；新浪: 空表/缺「代码」列×1）"
+        )
         assert meta["last_error_date"] == _today_beijing()
         conn = sqlite3.connect(db)
         try:
