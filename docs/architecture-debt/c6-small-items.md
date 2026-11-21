@@ -47,3 +47,9 @@
 - 删 `evaluate_decision` 前**先核 `evals/golden/gates.py` 的用法**——复算语义要原样切到 judgment。
 - `test_seed` 搬家要同步 E2E 里的调用路径（E2E seed 用它造数），别把 E2E 弄红。
 - 小件①搬门控时注意：evals 侧真相源保持单一——生产立常量后，evals 反过来引用生产常量，别两边各留一份。
+
+## 实施记录（2026-11-21，PR 见 main）
+
+- **小件①**：`outcome/track_record/readout.py`（MIN_SETTLED_FOR_WINRATE + gate_rate）立生产侧真相源；api×2 / segments / report / significance 五处收编；evals caliber 反向 re-export。openspec settlement-significance-stats 确认「10 样本红线」为 §1.9 单一总纲（三站同源）。
+- **小件②**：`evaluate_decision` 原样迁 `evals/golden/settle_legacy.py`（golden 判例锚 stop/target 交易纪律语义，与 horizon 语义并存不变——「改判 judgment」否决，ADR-0018 D3）；settle.py + job.py 生产删除；ADR-0018 文末追加修订记录。
+- **小件③ 偏差说明**：test_seed 实现迁 `src/finance_agent/testing_seed.py`（609 行）而非档案原文的 tests/e2e fixtures 层——理由：打包 API（TESTING 镜像）拿不到 tests/，且 api→tests 的 import 方向倒置；api.py 5584→5013（−571 行），端点薄壳 + TESTING 门控不变，E2E 全链验证过（track-record 套件 22 passed）。
