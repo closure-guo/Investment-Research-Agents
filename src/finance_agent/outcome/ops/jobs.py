@@ -231,7 +231,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
 # 每 job 的 cron 规格:结算链任务时刻固定(16:00/16:20/16:30/16:35/16:40,工作日);
 # paper 仿真执行 16:10(decision settle 之后、paper 结算之前,add-execution-chain-driver)
 # → 当日成交当日入结算;paper 仿真结算 16:20(decision settle 之后、daily marking 之前,
-# add-paper-broker);行情快照日批 15:30(收盘后,add-market-snapshot);
+# add-paper-broker);行情快照日批 15:31(收盘后,add-market-snapshot);
 # 拥挤度日批 15:35(快照之后、选股之前,add-crowding-regime-positioning);
 # 选股日批 15:40(快照之后、因子监控之前,add-screening-batch-scheduling);
 # 因子衰减监控 15:45(快照之后、结算链之前,add-factor-library-and-monitor);
@@ -243,7 +243,7 @@ JOB_FUNCS: dict[str, Callable[[], Any]] = {
 # 状态接口共用的时刻快照。
 SCHEDULES: dict[str, dict[str, Any]] = {
     "market_snapshot_daily": MARKET_SNAPSHOT_SCHEDULE,
-    # 拥挤度日批（add-crowding-regime-positioning）：15:35——快照（15:30）之后、
+    # 拥挤度日批（add-crowding-regime-positioning）：15:35——快照（15:31）之后、
     # 选股（15:40）之前；读快照库 + 一次 spot 抓取（流通市值），零 LLM 调用
     "regime_daily": {
         "day_of_week": "mon-fri",

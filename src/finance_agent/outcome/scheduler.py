@@ -36,7 +36,7 @@ paper 仿真执行(add-execution-chain-driver):工作日 16:10 触发 ``run_exec
 抓取失败上抛 → 记 failed（不静默），结算参考价缺失在 job 内保持 open + 留痕。
 
 拥挤度日批(add-crowding-regime-positioning):工作日 15:35 触发 ``run_regime_daily``
-(快照 15:30 之后、选股 15:40 之前;读快照库 + 一次 spot 抓取建流通市值 caps →
+(快照 15:31 之后、选股 15:40 之前;读快照库 + 一次 spot 抓取建流通市值 caps →
 四指标 + 历史分位落 ``data/regime.db``,同日重跑幂等),经同一 ``_with_retry``
 入口;快照/caps 不可用时返回跳过摘要(job 记 ok)不产伪行,执行链据此降级。
 
@@ -195,7 +195,7 @@ def _mark_retries(outcome: dict[str, Any] | None) -> None:
 
 
 def _snapshot_job() -> None:
-    """add-market-snapshot：全市场行情快照日批（15:30，收盘后；次日开盘前可读）。"""
+    """add-market-snapshot：全市场行情快照日批（15:31，收盘后；次日开盘前可读）。"""
     _with_retry("market_snapshot_daily", "market snapshot", run_market_snapshot_batch)
 
 
@@ -211,7 +211,7 @@ def _regime_daily_job() -> None:
 def _screening_job() -> None:
     """add-screening-batch-scheduling：选股日批（15:40，快照之后、因子监控之前）。
 
-    快照 15:30 先落库，选股据此跑 L1→L2→L3 产出精选池；批次 failed 时任务上抛
+    快照 15:31 先落库，选股据此跑 L1→L2→L3 产出精选池；批次 failed 时任务上抛
     （run_job 记 failed），运维界面可见。快照缺失时快照守卫 fail loud，不产残缺池。
     """
     _with_retry("screening_daily", "screening batch", run_screening_daily)
@@ -220,7 +220,7 @@ def _screening_job() -> None:
 def _factor_monitor_job() -> None:
     """add-factor-library-and-monitor：因子衰减监控日批（15:45，快照之后）。
 
-    快照 15:30 先落库，监控据此构造面板记录上一交易日 IC 并判定滚动降级；
+    快照 15:31 先落库，监控据此构造面板记录上一交易日 IC 并判定滚动降级；
     job 幂等（同日重跑覆盖同一 ``(factor, date)``），重试安全。
     """
     _with_retry("factor_decay_monitor", "factor decay monitor", run_factor_decay_monitor)
@@ -546,7 +546,7 @@ def start_scheduler() -> BackgroundScheduler | None:
             replace_existing=True,
             **_JOB_MISFIRE_KW,
         )
-    # add-market-snapshot：行情快照日批（15:30）先跑——结算/盯市链（16:00 起）
+    # add-market-snapshot：行情快照日批（15:31）先跑——结算/盯市链（16:00 起）
     # 与快照解耦，互不阻塞；job 幂等（同日重跑不二次复权）。
     scheduler.add_job(
         _snapshot_job,
@@ -555,7 +555,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
-    # add-crowding-regime-positioning：拥挤度日批（15:35）——快照（15:30）之后、
+    # add-crowding-regime-positioning：拥挤度日批（15:35）——快照（15:31）之后、
     # 选股（15:40）之前；读快照库 + 一次 spot 抓取（流通市值），零 LLM 调用；
     # 快照/caps 不可用返回跳过摘要（job 记 ok），不产伪行。
     scheduler.add_job(
@@ -565,7 +565,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
-    # add-screening-batch-scheduling：选股日批（15:40）——快照（15:30）之后、
+    # add-screening-batch-scheduling：选股日批（15:40）——快照（15:31）之后、
     # 因子监控（15:45）与结算链（16:00 起）之前；读快照库，L3 走 quick LLM。
     scheduler.add_job(
         _screening_job,
@@ -574,7 +574,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
-    # add-factor-library-and-monitor：因子衰减监控（15:45）——快照（15:30）之后、
+    # add-factor-library-and-monitor：因子衰减监控（15:45）——快照（15:31）之后、
     # 结算链（16:00 起）之前；读快照库 + 因子库，无 LLM 调用。
     scheduler.add_job(
         _factor_monitor_job,
@@ -583,7 +583,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         **_JOB_MISFIRE_KW,
     )
-    # wire-builtin-factor-registration：内置因子注册（15:50）——快照（15:30）与因子
+    # wire-builtin-factor-registration：内置因子注册（15:50）——快照（15:31）与因子
     # 衰减监控（15:45）之后、结算链之前；存在性幂等，库空/缺条目时次日自愈。
     scheduler.add_job(
         _factor_builtin_register_job,
@@ -802,7 +802,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         **_JOB_MISFIRE_KW,
     )
     # add-monthly-batch-scheduling：两月批任务（每月 1 日 09:00 记忆提炼 / 10:00
-    # 因子提案）——盘前错峰，互不竞争 LLM 网关；排期与日批链（15:30 起）也错开。
+    # 因子提案）——盘前错峰，互不竞争 LLM 网关；排期与日批链（15:31 起）也错开。
     # 注册位置在 cohort 之前（cohort 仍是末位注册，既有断言不变）。
     scheduler.add_job(
         _memory_extract_job,
@@ -840,7 +840,7 @@ def start_scheduler() -> BackgroundScheduler | None:
     scheduler.start()
     _scheduler = scheduler
     logger.info(
-        "decision settle scheduler 已启动(market snapshot 15:30;regime 15:35;"
+        "decision settle scheduler 已启动(market snapshot 15:31;regime 15:35;"
         "factor decay monitor 15:45;"
         "factor builtin register 15:50;factor harvest 15:55;"
         "decision settle 16:00;earnings fetch 16:05;paper execute 16:10;"

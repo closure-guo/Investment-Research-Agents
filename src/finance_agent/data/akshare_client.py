@@ -22,7 +22,7 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import date, datetime, timedelta
-from typing import TypeGuard
+from typing import Any, TypeGuard
 
 import akshare as ak
 import pandas as pd
@@ -57,7 +57,7 @@ _AK_RETRY_DELAY = 1.5  # 重试退避秒数
 SETTLEMENT_ADJUST = "hfq"
 
 
-def _call_ak(func, *args, **kwargs):
+def _call_ak(func, *args, failure_sink: dict[str, Any] | None = None, **kwargs):
     """带超时 + 重试的 AKShare 调用包装。
 
     超时或连接异常（含 RemoteDisconnected 限频）时重试，全部失败返回 None。
@@ -65,6 +65,11 @@ def _call_ak(func, *args, **kwargs):
     该类错误在单次调用的秒级窗口内不会自愈，重试只产生纯等待与日志噪声
     （CI 断网窗口曾 60 次 Errno 101 × 线性退避把 stub 套件拖过 25m 墙钟，
     issue #246）；跨调用的恢复由调用方冷却（60s）承担。
+
+    ``failure_sink``（可选）：失败时上报末次失败明细 ``{func, error, attempts}``
+    （每轮 attempt 覆盖，最终态=末次尝试）；成功不写——调用方据此拼装可判读
+    的错误消息（issue #602：快照双源皆败时 D5 告警须能读到源级明细）。
+    不传 sink 时行为与旧版完全一致（现有调用点零改动）。
 
     注意：不能用 `with ThreadPoolExecutor(...) as pool`（退出时 shutdown(wait=True)
     会无限等待卡死的 AKShare 线程，超时形同虚设，泄漏线程打满 executor 池）。
@@ -87,8 +92,24 @@ def _call_ak(func, *args, **kwargs):
                 attempt,
                 _AK_MAX_RETRIES,
             )
+            if failure_sink is not None:
+                failure_sink.update(
+                    {
+                        "func": getattr(func, "__name__", str(func)),
+                        "error": "TimeoutError",
+                        "attempts": attempt,
+                    }
+                )
         except Exception as e:
             pool.shutdown(wait=False, cancel_futures=True)
+            if failure_sink is not None:
+                failure_sink.update(
+                    {
+                        "func": getattr(func, "__name__", str(func)),
+                        "error": type(e).__name__,
+                        "attempts": attempt,
+                    }
+                )
             if _is_connection_unreachable(e):
                 logger.error(
                     "AKShare 连接不可达（不重试）: %s: %s",
@@ -697,6 +718,9 @@ class AKShareClient:
         }
         # 全市场 spot 最近一次实际生效源（日批成功摘要 spot_source 消费；未尝试/双源失败 → None）
         self.last_spot_source: str | None = None
+        # 全市场 spot 最近一次调用的双源失败明细（issue #602：{源: {func, error, attempts}}；
+        # 每次调用重置——成功即清空，双源皆败填充，日批据此拼装可判读的 SnapshotError）
+        self.last_spot_failure: dict[str, dict[str, Any]] = {}
         # 逐代码下修抓取最近一次调用成败（逐代码循环的失败判据；未调用 → None）
         self.last_cb_adj_failed: bool | None = None
 
@@ -2191,23 +2215,51 @@ class AKShareClient:
         （代码列全空）均按源失败处理，继续下一源；两源皆失败 → None 并留 ERROR
         （调用方按既有失败语义告警/重试，MUST NOT 静默写空快照）。实际生效源
         记入 ``sources_seen["market_spot"]`` 与 ``last_spot_source``（日批摘要）。
+
+        issue #602：两源皆失败时按源留痕末次失败明细（``last_spot_failure``，
+        形态 ``{源: {func, error, attempts}}``，空表/缺代码列以
+        ``空表/缺「代码」列`` 记形态、attempt=1）；任一源成功即清空——日批
+        据此拼装带源级明细的 ``SnapshotError``（流入 job_runs.error 与
+        meta.last_error，D5 告警可判读）。
         """
-        df = _call_ak(ak.stock_zh_a_spot_em)
+        self.last_spot_failure = {}
+        em_fail: dict[str, Any] = {}
+        df = _call_ak(ak.stock_zh_a_spot_em, failure_sink=em_fail)
         if _has_usable_codes(df):
             self.sources_seen["market_spot"].add("eastmoney")
             self.last_spot_source = "eastmoney"
             return df
+        if df is not None:
+            # 拉到了表但不可用（空表/缺「代码」列/空壳表）：sink 无异常记录，补形态
+            em_fail.setdefault("func", "stock_zh_a_spot_em")
+            em_fail.setdefault("error", "空表/缺「代码」列")
+            em_fail.setdefault("attempts", 1)
+        elif not em_fail:
+            em_fail = {
+                "func": "stock_zh_a_spot_em",
+                "error": "返回 None",
+                "attempts": _AK_MAX_RETRIES,
+            }
         logger.warning("东财全市场 spot 不可用（失败/空表/缺「代码」列），回退新浪源")
-        sina = _call_ak(ak.stock_zh_a_spot)
+        sina_fail: dict[str, Any] = {}
+        sina = _call_ak(ak.stock_zh_a_spot, failure_sink=sina_fail)
         if isinstance(sina, pd.DataFrame) and not sina.empty:
             mapped = _map_sina_spot_to_em(sina)
             if _has_usable_codes(mapped):
                 self.sources_seen["market_spot"].add("sina")
                 self.last_spot_source = "sina"
                 return mapped
+        if not sina_fail:
+            # 无异常留痕 = 拉到了表但不可用（None / 空表 / 映射后仍缺「代码」列）
+            sina_fail = {
+                "func": "stock_zh_a_spot",
+                "error": "返回 None" if sina is None else "空表/缺「代码」列",
+                "attempts": _AK_MAX_RETRIES if sina is None else 1,
+            }
         logger.error("全市场 spot 双源均失败（东财 + 新浪），返回 None")
         self.sources_seen["market_spot"].add("none")
         self.last_spot_source = None
+        self.last_spot_failure = {"eastmoney": em_fail, "sina": sina_fail}
         return None
 
     def fetch_market_caps_bulk(self, codes: Sequence[str]) -> dict[str, float] | None:

@@ -86,7 +86,7 @@ class TestRegimeDailyRegistration:
         }
         snapshot = SCHEDULES["market_snapshot_daily"]
         screening = SCHEDULES["screening_daily"]
-        assert (snapshot["hour"], snapshot["minute"]) == (15, 30)
+        assert (snapshot["hour"], snapshot["minute"]) == (15, 31)
         assert (screening["hour"], screening["minute"]) == (15, 40)
 
 
@@ -194,15 +194,18 @@ class TestScreeningDailyRegistration:
         }
         assert JOB_LABELS["paper_settle_daily"] == "paper 结算"
 
-    def test_market_snapshot_schedule_spec_is_1530_monfri(self):
-        """add-market-snapshot：行情快照日批 15:30（mon-fri，Asia/Shanghai）逐字钉死。"""
+    def test_market_snapshot_schedule_spec_is_1531_monfri(self):
+        """add-market-snapshot：行情快照日批 15:31（mon-fri，Asia/Shanghai）逐字钉死。
+
+        issue #602 错峰裁定：15:31 = catchup 五例实证成功时槽，最坏完成 < regime 15:35。
+        """
         assert SCHEDULES["market_snapshot_daily"] == {
             "day_of_week": "mon-fri",
             "hour": 15,
-            "minute": 30,
+            "minute": 31,
             "timezone": "Asia/Shanghai",
         }
-        assert JOB_IDS[0] == "market_snapshot_daily"  # 展示顺序 = 时刻顺序（15:30 最早）
+        assert JOB_IDS[0] == "market_snapshot_daily"  # 展示顺序 = 时刻顺序（15:31 最早）
         assert JOB_LABELS["market_snapshot_daily"] == "行情快照"
 
     def test_settlement_chain_schedules_unchanged(self):
