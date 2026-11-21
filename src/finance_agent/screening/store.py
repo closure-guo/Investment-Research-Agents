@@ -55,6 +55,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from finance_agent.data.conn import init_wal, open_hot
 from finance_agent.screening.candidate_llm import VERDICTS, TriageDecision
 from finance_agent.screening.ranker import Candidate
 
@@ -148,13 +149,8 @@ def _default_db_path() -> Path:
 
 
 def _connect(db_path: str | Path | None) -> sqlite3.Connection:
-    """短连接（snapshot.py 同款纪律）：WAL + busy_timeout，row_factory=Row。"""
-    path = Path(db_path) if db_path else _default_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False, timeout=15.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=15000")
-    return conn
+    """短连接：连接纪律统一走 data/conn.open_hot（C4 收编，timeout/busy 值不变）。"""
+    return open_hot(db_path, default=_default_db_path())
 
 
 def _table_pk_columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -397,7 +393,7 @@ def init_screening_db(db_path: str | Path | None = None) -> Path:
     """
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
-    conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
+    init_wal(conn)  # 连接纪律：journal 只在 init 设置（#515）
     try:
         conn.executescript(SCREENING_DDL)
         for table in (

@@ -12,6 +12,7 @@ import sqlite3
 import pytest
 
 from finance_agent import session_store as ss
+from finance_agent.data import conn as _conn
 
 
 @pytest.fixture
@@ -82,7 +83,8 @@ class TestGetDbTransientRetry:
         harden-sqlite-connection-discipline ④ 改判（#515）：固定 6 次/≈3.1s →
         预算制（默认 120s，单次退避封顶 2s，硬顶次数防 sleep 打桩后的空转）。
         sleep 打桩为空收集器时真实时钟不推进、预算到不了——按硬顶次数
-        ``_DB_CONNECT_MAX_ATTEMPTS`` 耗尽即抛（同为 spec 契约的一部分）。
+        ``conn._RETRY_MAX_ATTEMPTS`` 耗尽即抛（同为 spec 契约的一部分；
+        C4 后重试循环收编在 data/conn，常量随实现走）。
         """
         calls = {"n": 0}
         sleeps: list[float] = []
@@ -95,9 +97,9 @@ class TestGetDbTransientRetry:
         monkeypatch.setattr("time.sleep", sleeps.append)
         with pytest.raises(sqlite3.OperationalError):
             ss._get_db()
-        assert calls["n"] == ss._DB_CONNECT_MAX_ATTEMPTS
+        assert calls["n"] == _conn._RETRY_MAX_ATTEMPTS
         assert len(sleeps) == calls["n"] - 1, "末次尝试失败后不再 sleep"
-        assert all(s <= ss._DB_CONNECT_RETRY_SLEEP_CAP_S for s in sleeps)
+        assert all(s <= _conn._RETRY_SLEEP_CAP_S for s in sleeps)
 
     def test_non_transient_error_not_retried(self, isolated_db, monkeypatch):
         """非瞬态错误（如 no such table）不重试，立即 raise。"""

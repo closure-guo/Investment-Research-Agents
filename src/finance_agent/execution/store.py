@@ -31,6 +31,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from finance_agent.data.conn import init_wal, open_hot
+
 if TYPE_CHECKING:
     from finance_agent.execution.brokers.base import OrderRecord
     from finance_agent.execution.risk_gate import OrderIntent
@@ -164,20 +166,15 @@ def _default_db_path() -> Path:
 
 
 def _connect(db_path: str | Path | None) -> sqlite3.Connection:
-    """短连接（snapshot 同款纪律）：WAL + busy_timeout，row_factory=Row。"""
-    path = Path(db_path) if db_path else _default_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False, timeout=15.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=15000")
-    return conn
+    """短连接：连接纪律统一走 data/conn.open_hot（C4 收编，timeout/busy 值不变）。"""
+    return open_hot(db_path, default=_default_db_path())
 
 
 def init_execution_db(db_path: str | Path | None = None) -> Path:
     """幂等建 signals + hysteresis_events 两表与索引，返回实际使用的库路径。"""
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
-    conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
+    init_wal(conn)  # 连接纪律：journal 只在 init 设置（#515）
     try:
         conn.executescript(EXECUTION_DDL)
         _migrate_signal_columns(conn)

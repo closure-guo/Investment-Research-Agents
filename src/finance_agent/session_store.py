@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from finance_agent.data.conn import connect_retry_budget, init_wal, open_hot
+
 logger = logging.getLogger(__name__)
 
 # DB 路径支持 SESSIONS_DB_PATH 覆盖，默认 data/sessions.db。
@@ -32,22 +34,12 @@ _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 _EVENT_APPEND_MAX_RETRIES = 5
 _EVENT_APPEND_RETRY_SLEEP = 0.05
 
-# 瞬态 SQLite 错误模式（delta add-event-delivery-resilience spec「SQLite 瞬态错误重试」）：
-# unable to open database file = bind mount 瞬断；locked = busy_timeout 覆盖不到的
-# 连接期锁；disk I/O error = 存储瞬态。非瞬态错误不重试立即抛出。
-_DB_TRANSIENT_PATTERNS = ("unable to open database file", "database is locked", "disk i/o error")
-# 连接重试改为**预算制**（harden-sqlite-connection-discipline ④）：瞬态错误下
-# 指数退避持续重试至累计等待达到预算（默认 120s，env 可覆盖并收敛到
-# [30, 300]），取代旧固定 6 次/≈3.1s——3.1s << 实际停摆窗口（incident 053 的
-# 9p 连接失败动辄分钟级），重试耗尽即留僵尸 running / 丢事件。
-# 单次退避封顶 2s，防止预算被单次超长 sleep 挤占；另有硬顶次数防
-# 「sleep 被打桩为空 + 失败瞬时返回」场景下的无限空转。
-_DB_CONNECT_RETRY_BUDGET_S = min(
-    300.0, max(30.0, float(os.getenv("SESSION_DB_CONNECT_RETRY_BUDGET_S", "120")))
-)
-_DB_CONNECT_RETRY_SLEEP_CAP_S = 2.0
-_DB_CONNECT_MAX_ATTEMPTS = 500
-_DB_CONNECT_RETRY_BASE_SLEEP = 0.1
+# 连接重试**预算制**（harden-sqlite-connection-discipline ④）已收编到
+# data/conn.open_hot（C4 连接 seam）：瞬态错误（unable to open / locked /
+# disk i/o error）指数退避持续重试至累计等待达到预算（默认 120s，env 可覆盖
+# 并 clamp [30, 300]），重试循环、单次退避封顶 2s 与硬顶次数全部在 conn 内
+# 实现；这里只保留预算值供测试 monkeypatch（契约见 test_session_store_retry）。
+_DB_CONNECT_RETRY_BUDGET_S = connect_retry_budget("SESSION_DB_CONNECT_RETRY_BUDGET_S")
 
 # created_at 列曾被旧版代码错写为 session_type 的值（'chat' / 'analysis'），
 # 这些值无法被 Date 解析，前端显示 "Invalid Date"。这里集中兜底。
@@ -76,39 +68,18 @@ def _normalize_created_at(ts: str | None) -> str:
 
 
 def _get_db() -> sqlite3.Connection:
-    last_exc: sqlite3.OperationalError | None = None
-    deadline = time.monotonic() + _DB_CONNECT_RETRY_BUDGET_S
-    for attempt in range(_DB_CONNECT_MAX_ATTEMPTS):
-        try:
-            conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False, timeout=15.0)
-            conn.row_factory = sqlite3.Row
-            # 并发写等待锁而非立即抛 "database is locked"（流式 token 高频落库场景必需）
-            conn.execute("PRAGMA busy_timeout=15000")
-            return conn
-        except sqlite3.OperationalError as exc:
-            if not any(p in str(exc).lower() for p in _DB_TRANSIENT_PATTERNS):
-                raise
-            last_exc = exc
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or attempt == _DB_CONNECT_MAX_ATTEMPTS - 1:
-                # 预算耗尽（或硬顶次数到）：重试放弃即抛，不做无意义的收尾等待
-                if last_exc is None:  # pragma: no cover - last_exc 必已被赋值
-                    raise exc
-                raise last_exc from exc
-            time.sleep(
-                min(
-                    _DB_CONNECT_RETRY_BASE_SLEEP * (2 ** (attempt + 1)),
-                    _DB_CONNECT_RETRY_SLEEP_CAP_S,
-                    remaining,
-                )
-            )
-    raise last_exc  # type: ignore[misc]  # pragma: no cover - 硬顶保护，正常不可达
+    """连接走 data/conn.open_hot（C4 收编）：Row + busy_timeout + 瞬态预算重试。
+
+    预算值经模块常量传入（调用期读取），测试可 monkeypatch
+    ``_DB_CONNECT_RETRY_BUDGET_S``（test_sqlite_flush_terminal_pending 契约）。
+    """
+    return open_hot(_DB_PATH, retry_budget_s=_DB_CONNECT_RETRY_BUDGET_S)
 
 
 def init_db() -> None:
     """Initialize sessions table and migrate schema."""
     conn = _get_db()
-    conn.execute("PRAGMA journal_mode=WAL")  # 连接纪律：journal 只在 init 设置（#515）
+    init_wal(conn)  # 连接纪律：journal 只在 init 设置（#515）
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS sessions (
