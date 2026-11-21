@@ -561,11 +561,44 @@ class TestApplyIllegalPrice:
         }
 
     def test_short_plan_gets_stop_below_entry(self):
+        """显式申报 sell_type=short → short_factor 污染（stop 推到 entry 下方）。"""
+        snapshot = _snapshot()
+        snapshot["trader_plan"] = {
+            "action": "sell",
+            "sell_type": "short",
+            "entry_price": 100.0,
+            "stop_loss": 105.0,
+        }
+        out, effect = apply_injection(snapshot, _case("illegal_price"))
+        assert effect.applied is True
+        assert out["trader_plan"]["stop_loss"] < out["trader_plan"]["entry_price"]
+
+    def test_exit_polarity_follows_price_contract(self):
+        """add-price-polarity-contract（#606）：exit 分型计划按 long_factor 污染。
+
+        Previously：注入经 _plan_direction（sell→short）定向——exit 计划被
+        short_factor 污染出 stop<entry，在新契约下那恰是合法形状、污染静默失效。
+        现在 exit（含未申报默认）按 long_factor 推 stop 到 entry 上方 → 落入非法
+        关系、可审计。
+        """
+        snapshot = _snapshot()
+        snapshot["trader_plan"] = {
+            "action": "sell",
+            "sell_type": "exit",
+            "entry_price": 100.0,
+            "stop_loss": 105.0,
+        }
+        out, effect = apply_injection(snapshot, _case("illegal_price"))
+        assert effect.applied is True
+        assert out["trader_plan"]["stop_loss"] > out["trader_plan"]["entry_price"]
+
+    def test_undeclared_sell_defaults_exit_polarity(self):
+        """未申报分型的 sell → exit 默认（可执行默认），与价位校验同一口径。"""
         snapshot = _snapshot()
         snapshot["trader_plan"] = {"action": "sell", "entry_price": 100.0, "stop_loss": 105.0}
         out, effect = apply_injection(snapshot, _case("illegal_price"))
         assert effect.applied is True
-        assert out["trader_plan"]["stop_loss"] < out["trader_plan"]["entry_price"]
+        assert out["trader_plan"]["stop_loss"] > out["trader_plan"]["entry_price"]
 
     def test_falls_back_to_final_trade_decision(self):
         snapshot = _snapshot()
