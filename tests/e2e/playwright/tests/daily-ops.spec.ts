@@ -11,9 +11,9 @@ import { expect, test, type APIRequestContext } from '@playwright/test'
  *
  * 时间线断言依赖冻结的 ops 状态时钟（issue #503）：「今日漏跑」覆盖层（#472）由服务器
  * 时钟判定（当天计划时刻已过且当天无运行行），真实时钟下 CI 落在 UTC 15:30 后
- * （runner naive UTC 被 scheduled_fire_time 按上海时区解读）15:30 行情快照必判漏跑，
+ * （runner naive UTC 被 scheduled_fire_time 按上海时区解读）15:31 行情快照必判漏跑，
  * 徽章文本五态白名单必红——#496/#501 的 stub 红均为此 flake（main 同红实证）。
- * beforeAll 经 /api/test/seed ``ops.now`` 冻结到周二 09:00（早于全部日批排程 15:30+；
+ * beforeAll 经 /api/test/seed ``ops.now`` 冻结到周二 09:00（早于全部日批排程 15:31+；
  * 月批非排程日 → fire=None），missed_today 恒 false，五态不变量确定性成立；
  * afterAll 解除冻结 + 清运行行，不污染共享后端上的其他 spec（本文件是默认套件唯一
  * 打 /api/v1/ops 的 spec）。注册表项与排程时刻仍来自后端 SCHEDULES（数据驱动载荷）；
@@ -31,7 +31,7 @@ const OK_DATE = '2026-10-13'
 const FAILED_DATE = '2026-10-14'
 
 /** ops 状态时钟冻结面（issue #503，机制同 ops-missed-badge.spec 的 FROZEN_THURSDAY_1610）：
- *  周二 09:00 早于全部日批排程（15:30+），月批（每月 1 日）非排程日 → missed_today 恒
+ *  周二 09:00 早于全部日批排程（15:31+），月批（每月 1 日）非排程日 → missed_today 恒
  *  false，时间线徽章恒五态。「今日漏跑」的确定性覆盖由 ops-missed-badge.spec 承担。 */
 const FROZEN_TUESDAY_0900 = '2026-10-13T09:00:00'
 
@@ -148,7 +148,7 @@ test('当日时间线：注册表全部任务按排程时刻升序渲染，每�
   const items = page.locator('[data-testid^="page-shell-batch-"]')
   await expect(items).toHaveCount(33)
 
-  // 排程升序（数据驱动）：09:00/10:00 月批 → 15:30 行情快照 → 15:35 拥挤度 →
+  // 排程升序（数据驱动）：09:00/10:00 月批 → 15:31 行情快照（#602 错峰）→ 15:35 拥挤度 →
   // 15:40 选股 → 15:45 因子衰减监控 → 15:50 内置因子注册 → 15:55 因子收割 →
   // 16:00 判定 → 16:05 预告抓取 → 16:10 仿真执行 → 16:12 小票执行 → 16:15 预告分诊 → 16:20 paper 结算
   // → 16:22 自动选股分析 → 16:24 小票结算 → 16:25 事件结算 → … → 16:45 小票通道 → 16:47 小票池自动分析 → 16:50 转债日批 →
@@ -159,7 +159,7 @@ test('当日时间线：注册表全部任务按排程时刻升序渲染，每�
   await expect(items.nth(0)).toContainText('记忆提炼')
   await expect(items.nth(1)).toContainText('每月 1 日 10:00')
   await expect(items.nth(1)).toContainText('因子提案')
-  await expect(items.nth(2)).toContainText('15:30')
+  await expect(items.nth(2)).toContainText('15:31')
   await expect(items.nth(2)).toContainText('行情快照')
   await expect(items.nth(3)).toContainText('15:35')
   await expect(items.nth(3)).toContainText('市场拥挤度')
