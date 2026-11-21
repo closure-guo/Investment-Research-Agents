@@ -95,11 +95,10 @@ def judge_settlement(
 ) -> dict:
     """结算规则 golden 判例：复用 production 的 evaluate_decision 复算，对照人工裁决。
 
-    唯一来源：结算逻辑仅在 finance_agent.outcome.settle 一处实现（构造性一致防御）。
+    唯一来源：结算复算逻辑仅在 evals/golden/settle_legacy.py 一处实现（C6② 自 outcome/settle.py 原样迁移；构造性一致防御）。
     """
     import pandas as pd
-
-    from finance_agent.outcome.settle import evaluate_decision
+    from evals.golden.settle_legacy import evaluate_decision
 
     df = pd.DataFrame(kline_rows)
     result = evaluate_decision(decision, df, None, max_hold_days=max_hold_days)

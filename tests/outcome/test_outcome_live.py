@@ -15,8 +15,9 @@ pytestmark = [
 
 def test_live_settle_with_real_kline():
     """真实 600519 日 K + 合成决策,结算逻辑产出合法结果(防 AKShare 列名/接口漂移)。"""
-    from finance_agent.data.akshare_client import AKShareClient
     from finance_agent.outcome.settle import evaluate_decision
+
+    from finance_agent.data.akshare_client import AKShareClient
 
     client = AKShareClient()
     kline = client.fetch_kline("600519", days=60)

@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from finance_agent.outcome.track_record import readout
 from finance_agent.outcome.track_record.judgment import (
     day_master_ids,
     derive_attribution_date,
@@ -30,7 +31,8 @@ from finance_agent.outcome.track_record.significance import (
 
 logger = logging.getLogger(__name__)
 
-SETTLED_MC_MIN_SAMPLE = 10  # §1.9-v2：可判定日主样本 < 10 → 零模型 SHALL NOT 产出
+# §1.9-v2 红线唯一真相源在 readout（C6① 归一）：可判定日主样本 < 10 → 零模型 SHALL NOT 产出
+SETTLED_MC_MIN_SAMPLE = readout.MIN_SETTLED_FOR_WINRATE
 
 
 def collect_settled_day_masters(db_path: str | Path | None = None) -> list[dict[str, Any]]:

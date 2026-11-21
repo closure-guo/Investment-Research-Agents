@@ -1,11 +1,13 @@
-"""结算纯函数(design 决策 2/3/4/5)。全部合成 DataFrame 可测,不调 LLM/网络。
+"""旧 stop/target/expired 结算引擎的 evals 侧复算副本（C6②：c6-small-items.md 小件②）。
 
-[已废弃] 生产判定已切到 finance_agent.outcome.track_record.judgment.resolve_prediction
-(horizon + 区间超额 + ±2% 中性带;delta update-decision-settlement-contract),
-本模块仅供两类只读消费方:
-  1. GET /api/decisions* 读取存量 decision_log 的历史 settlement 字段;
-  2. evals/golden/gates.py 的 settlement_rule 判例复算(语义独立,不在本次切换范围)。
-新代码不得再调用 evaluate_decision;evaluate_decision 首次调用打一次 WARN。
+生产判定已切 track_record.judgment.resolve_prediction（horizon + 区间超额 + ±2% 中性
+带，ADR-0018 D3 两套语义并存）。本模块是 outcome/settle.py 原实现的原样迁移：
+唯一消费方是 evals/golden/gates.py 的 settlement_rule 判例复算（golden 判例锚定
+stop/target 交易纪律语义，与 horizon 语义不同源，ADR-0018 D3 有意并存）。
+
+原模块 2026-11-21 从生产删除（C6② 死代码清理：生产消费链 job.py 未接线 +
+deprecation WARN 自 2026-09 起零生产调用；复活路径=git 历史 + 本副本语义参照）。
+判例复算语义 MUST NOT 变更——本文件与原实现逐行等价（deprecation WARN 除外）。
 
 结算优先级:止损 > 目标 > 超期(expired);同日触及两者按止损(保守)。
 一字板(open==high==low==close)触及 → 递延至打开首日开盘价,hold_days 含等待日。
@@ -20,18 +22,12 @@
 
 from __future__ import annotations
 
-import logging
 import math
 import os
 from dataclasses import dataclass
 from typing import cast
 
 import pandas as pd
-
-logger = logging.getLogger(__name__)
-
-# 废弃提示只打一次(模块级标志):避免批处理/测试对每次调用重复告警刷屏
-_DEPRECATION_WARNED = False
 
 MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", "20"))
 STALE_DAYS = int(os.getenv("DECISION_STALE_DAYS", "5"))
@@ -101,20 +97,16 @@ def evaluate_decision(
 ) -> Settlement | None:
     """评估单个 open 决策是否结算。未触发返回 None。
 
-    [已废弃] 见模块 docstring:生产判定走 track_record.judgment.resolve_prediction。
+    evals/golden settlement_rule 判例复算专用（生产判定走
+    track_record.judgment.resolve_prediction，本副本不进生产）。
     entry_price 非正(数据损坏)→ WARN 并返回 None:保持 open 等待,
     不产出符号错乱的结算;持续无行情时由 job 层 data_stale 机制标记告警。
     """
-    global _DEPRECATION_WARNED
-    if not _DEPRECATION_WARNED:
-        _DEPRECATION_WARNED = True
-        logger.warning(
-            "outcome.settle.evaluate_decision 已废弃:生产判定走 "
-            "track_record.judgment.resolve_prediction(horizon + 超额 + ±2% 带)"
-        )
     entry_price = float(decision["entry_price"])
     if entry_price <= 0:
-        logger.warning(
+        import logging
+
+        logging.getLogger(__name__).warning(
             "entry_price 非正(%s),本批跳过结算: %s",
             entry_price,
             decision.get("decision_id"),

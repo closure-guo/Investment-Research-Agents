@@ -19,7 +19,7 @@
 - **结算**：结算日 = 入场日之后第 ``horizon`` 个交易日（交易日历取快照 meta
   ``trade_calendar`` 容错版；不可得时退化为该标的 kline 交易日序列）；结算价 = 该日
   **收盘价**，``raw_return = 结算价 / 入场价 − 1``（round 6——与判定链同款浮点噪声处置）；
-  该日无行（停牌）→ 递延至复牌首日收盘（行驱动顺延，同 ``outcome/settle.py`` 纪律）
+  该日无行（停牌）→ 递延至复牌首日收盘（行驱动顺延，同 evals/golden/settle_legacy.py 前身 outcome/settle.py 的纪律）
   并留痕 ``note=deferred:<复牌日>@<原结算日>``；
 - **参考价缺失**（kline 取数失败 / 窗口未覆盖）→ 保持 ``open`` + 留痕
   ``note=settle_pending:<原因>``，MUST NOT 以 0 或估算值结算；

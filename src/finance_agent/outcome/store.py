@@ -1,6 +1,6 @@
 """decision_log 存储(design 决策 1:与 session_store 同库 SQLite,幂等 DDL)。
 
-旁路铁律:本模块任何失败由调用方(api.py 落库挂点 / outcome.job)try/except
+旁路铁律:本模块任何失败由调用方(api.py 落库挂点)try/except（旧 outcome.job 已随 C6② 删除）
 兜底,不阻断业务。连接管理与 session_store 同款(WAL + busy_timeout 短连接),
 但默认 DB 路径在调用期读取(不在 import 期),测试经 db_path 显式注入。
 """
