@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from finance_agent.outcome.track_record import readout
+
 # 静态行业映射（覆盖常用标的，未知标的落「未知」桶；可扩展）
 INDUSTRY_MAP: dict[str, str] = {
     "600519": "白酒",
@@ -103,7 +105,7 @@ def _bucket_metrics(items: list[dict[str, Any]]) -> SegmentBucket:
         sample_size=n,
         win_rate=win_rate,
         avg_excess=avg_excess,
-        insufficient=n < 10,
+        insufficient=n < readout.MIN_SETTLED_FOR_WINRATE,
     )
 
 

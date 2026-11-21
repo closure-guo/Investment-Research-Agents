@@ -10,9 +10,12 @@ from __future__ import annotations
 import logging
 import random
 
+from finance_agent.outcome.track_record import readout
+
 logger = logging.getLogger(__name__)
 
-IC_MIN_SAMPLE = 10  # 单期可判定样本 < 10 → 该期「样本不足」，不进 ICIR
+# §1.9 红线唯一真相源在 readout（C6① 归一）：单期可判定样本 < 10 → 该期「样本不足」，不进 ICIR
+IC_MIN_SAMPLE = readout.MIN_SETTLED_FOR_WINRATE
 ICIR_MIN_PERIODS = 6  # 有效期数 < 6 → ICIR 不展示
 MC_DEFAULT_N = 10_000  # 零模型抽样次数
 

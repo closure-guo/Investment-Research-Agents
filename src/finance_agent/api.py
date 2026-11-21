@@ -239,6 +239,7 @@ from finance_agent.outcome.store import (  # noqa: E402
 from finance_agent.outcome.track_record.calibration import calibration_table  # noqa: E402
 
 # predictions 战绩体系(add-track-record):全量观点记录取代 decision_log 写入
+from finance_agent.outcome.track_record import readout  # noqa: E402
 from finance_agent.outcome.track_record.ingest import (  # noqa: E402
     persist_prediction_from_accumulated,
 )
@@ -3143,7 +3144,7 @@ async def track_record_overview(
         horizon_days=DEFAULT_HORIZON_DAYS,
     )
     settled = stats["settled"]
-    insufficient = settled < 10
+    insufficient = settled < readout.MIN_SETTLED_FOR_WINRATE  # §1.9 红线唯一真相源（C6① 归一）
     avoidance = await asyncio.to_thread(avoidance_stats, source, None, version)
     legacy_all = await asyncio.to_thread(prediction_stats, source, None, version)
     metrics = await asyncio.to_thread(get_latest_metrics)
@@ -3174,11 +3175,11 @@ async def track_record_overview(
         "version_seq": version,
         "versions": await asyncio.to_thread(list_agents),
         # Δ2 口径字段：回避正确率独立（门控同胜率）+ 头条窗口 + 跨口径存量披露
-        # 门槛 10 = evals/outcome/caliber.MIN_SETTLED_FOR_WINRATE（生产侧不可 import evals，
-        # 故此处按字面同步；口径变更先改 metrics.md §1.9④ 再同步本常量与 evals 侧）。
+        # 门槛 10 唯一真相源：outcome/track_record/readout.MIN_SETTLED_FOR_WINRATE（C6① 归一；
+        # evals/outcome/caliber 反向 re-export，口径变更只改 readout 与 metrics.md §1.9④）。
         "avoidance": {
             **avoidance,
-            "avoidance_rate": None if avoidance["settled"] < 10 else avoidance["avoidance_rate"],
+            "avoidance_rate": readout.gate_rate(avoidance["avoidance_rate"], avoidance["settled"]),
         },
         "caliber_horizon": DEFAULT_HORIZON_DAYS,
         "legacy_settled": legacy_all["settled"] - stats["settled"],

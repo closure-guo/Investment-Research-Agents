@@ -14,6 +14,10 @@ from finance_agent.outcome.track_record.judgment import (  # noqa: F401  别名�
 
 AUX_WINDOWS: tuple[int, ...] = (5, 10)  # 辅助观测窗（daily_marks 派生，只观测不判定）
 BENCHMARK_CODE = "000300.SH"  # 沪深300
-MIN_SETTLED_FOR_WINRATE = 10  # settled < 10 不报胜率（红线）
+# §1.9 红线唯一真相源在 outcome/track_record/readout（C6① 归一，生产侧）：
+# evals 侧别名再导出（先例：下方 NEUTRAL_BAND 对 judgment 的 re-export）
+from finance_agent.outcome.track_record.readout import (  # noqa: F401  别名再导出
+    MIN_SETTLED_FOR_WINRATE,
+)
 FULL_CONCLUSION_SAMPLE = 30  # 完整结论门槛（n≥30）
 LEAKAGE_PROBE_THRESHOLD = 0.60  # 回测腿探针降级阈值（预登记默认）
