@@ -1,8 +1,7 @@
 """结算纯函数:止损/目标/同日/超期/方向符号化/一字板递延/停牌顺延/基准缺失。"""
 
 import pandas as pd
-
-from finance_agent.outcome.settle import _bench_close_on_or_before, evaluate_decision
+from evals.golden.settle_legacy import _bench_close_on_or_before, evaluate_decision
 
 
 def _kline(rows: list[dict]) -> pd.DataFrame:

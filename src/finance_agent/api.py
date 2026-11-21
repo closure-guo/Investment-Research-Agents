@@ -236,10 +236,10 @@ from finance_agent.outcome.store import (  # noqa: E402
     init_decision_log,
     list_decisions,
 )
-from finance_agent.outcome.track_record.calibration import calibration_table  # noqa: E402
 
 # predictions 战绩体系(add-track-record):全量观点记录取代 decision_log 写入
 from finance_agent.outcome.track_record import readout  # noqa: E402
+from finance_agent.outcome.track_record.calibration import calibration_table  # noqa: E402
 from finance_agent.outcome.track_record.ingest import (  # noqa: E402
     persist_prediction_from_accumulated,
 )

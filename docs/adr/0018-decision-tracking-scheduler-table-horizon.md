@@ -61,3 +61,13 @@
 
 - delta 提案：openspec/changes/archive 下 decision-outcome-tracking、add-track-record 系列
 - 实现：`src/finance_agent/outcome/scheduler.py`、`settle.py`、`outcome/track_record/`（job/marking/judgment/model）
+
+---
+
+## Revision 2026-11-21: 旧结算死链删除（C6②）
+
+D2 演进说明中「outcome/settle.py + outcome/job.py 保留在仓内」的表述于 2026-11-21 终止：两模块为未接线死码（调度器只注册 track_record horizon 判定；deprecation WARN 自 2026-09 起零生产调用；生产消费链唯一活引用是 evals/golden 判例复算）。C6②（docs/architecture-debt/c6-small-items.md 小件②）执行：
+
+- `evaluate_decision` 及其依赖**原样迁移**至 `evals/golden/settle_legacy.py`（判例复算唯一来源；golden 判例锚定 stop/target 交易纪律语义，与 horizon 语义并存不受影响）；
+- `outcome/settle.py` 与 `outcome/job.py` 从生产删除（复活路径：git 历史 + settle_legacy 语义参照）；
+- D3「两套结算语义并存」的裁决不变——本修订只改变旧引擎的存放位置，不改任何结算语义。
