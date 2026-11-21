@@ -365,6 +365,20 @@ class HoldingsContext(BaseModel):
     holds: bool | None = None
 
 
+class PriceCorrection(BaseModel):
+    """FM 记账口径更正申报（add-price-polarity-contract，#606）。
+
+    FM 以「三价字段方向错置作废、按文字口径执行」类理由 approve 时申报——
+    终稿 declared_prices 按文字口径重设并标注修正来源，错置值不再作为
+    展示/消费口径（南方航空实证：FM 自曝作废仍原样入库）。
+    """
+
+    reason: str = Field(..., min_length=1)
+    entry_price: float | None = None
+    stop_loss: float | None = None
+    target_price: float | None = None
+
+
 class FundManagerDecision(BaseModel):
     """Layer V Fund Manager 的审批决策。
 
@@ -381,6 +395,25 @@ class FundManagerDecision(BaseModel):
     # （reject 是终止无操作可定，return 方案将重做定性无意义）。
     action: str | None = None
     confidence: float | None = None
+    # 记账口径更正申报（add-price-polarity-contract，#606）：approve 时可申报——
+    # 终稿 declared_prices 按文字口径重写并标注修正来源（fund_manager 节点消费）。
+    # 宽松清洗：非 dict / 缺 reason / 全价缺省 → None（可选增强非审批必要条件，
+    # 噪声不炸管线，同 evidence_refs 清洗哲学）。
+    price_correction: PriceCorrection | None = None
+
+    @field_validator("price_correction", mode="before")
+    @classmethod
+    def _scrub_price_correction(cls, value: object) -> object:
+        if isinstance(value, PriceCorrection):
+            return value
+        if isinstance(value, dict):
+            reason = value.get("reason")
+            has_price = any(
+                value.get(k) is not None for k in ("entry_price", "stop_loss", "target_price")
+            )
+            if isinstance(reason, str) and reason.strip() and has_price:
+                return value
+        return None
 
     @field_validator("reasoning")
     @classmethod

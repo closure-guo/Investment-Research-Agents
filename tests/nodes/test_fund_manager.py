@@ -378,3 +378,101 @@ class TestFMPromptPreApprovalClause:
         assert "辩论锚点告警" in prompt
         assert "数据口径披露" in prompt
         assert "仲裁权" in prompt  # 条款不得禁止 approve
+
+
+class TestPriceCorrectionWriteBack:
+    """add-price-polarity-contract（#606）Task 4：FM 记账口径更正回写。
+
+    FM 以「三价字段方向错置作废、按文字口径执行」类理由 approve 时，结构化申报
+    ``price_correction`` → 终稿 declared_prices 按文字口径重写 + 复用
+    price_level_corrected 语义标注修正来源；错置值 SHALL NOT 原样入库（#606 南方
+    航空实证：FM 自曝作废仍原样入库）。reject/return 无操作对象，更正不生效。
+    """
+
+    def _correction_payload(self) -> str:
+        return json.dumps(
+            {
+                "decision": "approve",
+                "action": "sell",
+                "confidence": 0.6,
+                "reasoning": "三价字段方向错置整体作废、按文字口径执行",
+                "price_correction": {
+                    "reason": "三价字段方向错置整体作废、按文字口径执行",
+                    "entry_price": 5.12,
+                    "stop_loss": 4.90,
+                    "target_price": 5.3971,
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
+    def test_approve_with_correction_rewrites_final_decision(self, mock_llm):
+        mock_llm.return_value = self._correction_payload()
+        state = _base_state()
+        state["final_trade_decision"] = {
+            "action": "sell",
+            "confidence": 0.75,
+            "reasoning": "r",
+            "sell_type": "exit",
+            # 广誉远 600771 A 型错置：exit 分型 + short 惯例价位
+            "entry_price": 11.80,
+            "stop_loss": 12.223,
+            "target_price": 10.954,
+        }
+        result = fund_manager(state)
+        fixed = result["final_trade_decision"]
+        assert fixed["entry_price"] == 5.12
+        assert fixed["stop_loss"] == 4.90
+        assert fixed["target_price"] == 5.3971
+        assert fixed["price_level_corrected"] is True
+        assert "FM 记账口径更正" in (fixed["price_level_correction_reason"] or "")
+        assert fixed["stop_loss"] != 12.223, "原错置值不再作为终稿口径"
+
+    @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
+    def test_correction_applies_to_pydantic_decision(self, mock_llm):
+        """state 携带 pydantic TradeDecision 时同样回写（真实管线形态）。"""
+        mock_llm.return_value = self._correction_payload()
+        state = _base_state()
+        state["final_trade_decision"] = TradeDecision(
+            action="sell",
+            confidence=0.75,
+            reasoning="r",
+            sell_type="exit",
+            entry_price=11.80,
+            stop_loss=12.223,
+            target_price=10.954,
+        )
+        result = fund_manager(state)
+        fixed = result["final_trade_decision"]
+        assert fixed["stop_loss"] == 4.90
+        assert fixed["price_level_corrected"] is True
+
+    @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
+    def test_no_correction_leaves_state_untouched(self, mock_llm):
+        """未申报更正：不写 final_trade_decision 键（避免冗余 state 写）。"""
+        mock_llm.return_value = _mock_response("approve")
+        result = fund_manager(_base_state())
+        assert "final_trade_decision" not in result
+        assert result["fund_manager_decision"] == "approve"
+
+    @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
+    def test_correction_ignored_on_reject(self, mock_llm):
+        """reject/return 无操作对象：更正申报被忽略，不写终稿。"""
+        payload = json.dumps(
+            {
+                "decision": "reject",
+                "reasoning": "方向本身不成立",
+                "price_correction": {
+                    "reason": "顺手改价",
+                    "entry_price": 1.0,
+                    "stop_loss": 2.0,
+                    "target_price": 3.0,
+                },
+            },
+            ensure_ascii=False,
+        )
+        mock_llm.return_value = payload
+        result = fund_manager(_base_state())
+        assert result["fund_manager_decision"] == "reject"
+        assert "final_trade_decision" not in result

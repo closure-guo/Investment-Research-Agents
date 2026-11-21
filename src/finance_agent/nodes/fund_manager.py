@@ -6,7 +6,7 @@ import json
 import logging
 
 from finance_agent.langfuse_tracing import get_langfuse
-from finance_agent.models import FundManagerDecision
+from finance_agent.models import FundManagerDecision, PriceCorrection
 from finance_agent.nodes._llm_utils import call_llm_for_json, focus_hint
 from finance_agent.prompts.loader import load_prompt_with_meta
 
@@ -79,6 +79,18 @@ def fund_manager(state: dict) -> dict:
         "fund_manager_action": parsed.action,
         "fund_manager_confidence": parsed.confidence,
     }
+    # 记账口径更正回写（add-price-polarity-contract，#606）：approve 时 FM 可申报
+    # price_correction——终稿 declared_prices 按文字口径重写并标注修正来源，
+    # 错置值不再作为展示/消费口径（ingest 冻结 / 报告渲染 / 执行消费读回写后的终稿）。
+    if decision == "approve" and parsed.price_correction is not None:
+        source = state.get("final_trade_decision")
+        has_body = hasattr(source, "model_dump") or (isinstance(source, dict) and bool(source))
+        if not has_body:
+            logger.warning("FM price_correction 已申报但终稿缺失，更正未生效")
+        else:
+            result["final_trade_decision"] = _apply_price_correction(
+                source, parsed.price_correction
+            )
     if decision == "return":
         result["return_count"] = state.get("return_count", 0) + 1
     if decision == "approve":
@@ -92,6 +104,23 @@ def fund_manager(state: dict) -> dict:
             logger.warning("trace_id 捕获失败,decision_log 将无 trace 关联", exc_info=True)
 
     return result
+
+
+def _apply_price_correction(decision: object, correction: PriceCorrection) -> dict:
+    """FM 记账口径更正回写：终稿三价按文字口径重写 + 复用 price_level_corrected 语义。
+
+    pydantic 终稿归一为 dict 返回（state 消费方两种形态都兼容，同 ingest 先例）；
+    修正来源标注进 ``price_level_correction_reason``（报告/审计可见）。
+    """
+    if decision is not None and hasattr(decision, "model_dump"):
+        decision = decision.model_dump()
+    plan = dict(decision) if isinstance(decision, dict) else {}
+    plan["entry_price"] = correction.entry_price
+    plan["stop_loss"] = correction.stop_loss
+    plan["target_price"] = correction.target_price
+    plan["price_level_corrected"] = True
+    plan["price_level_correction_reason"] = f"FM 记账口径更正：{correction.reason}"
+    return plan
 
 
 def _anchor_warning_summary(checks: list[dict]) -> str | None:
