@@ -329,6 +329,28 @@ class TradeDecision(BaseModel):
         return self
 
 
+def price_polarity(action: str, sell_type: str | None) -> str | None:
+    """申报三价（entry/stop/target）的极性惯例（add-price-polarity-contract，#606）。
+
+    - ``long``：stop < entry < target（多头观点）
+    - ``exit``：清仓离场惯例——stop=entry 下方清仓位、target=entry 上方反弹减仓带
+      （关系式与 long 相同，语义不同：#606 B 型叙事）
+    - ``short``：做空惯例——stop=entry 上方失效位、target=entry 下方兑现位
+    - ``None``：hold/watch 无三价极性语义
+
+    sell_type=None 的 sell 默认 exit（TradeDecision 可执行默认：校验层打回后仍缺
+    分型按 exit 处理，add-holdings-context）。唯一权威源：validate 价位校验与
+    track_record 落库冻结都从这里取极性，SHALL NOT 各自重映射。
+    """
+    if action == "buy":
+        return "long"
+    if action == "sell":
+        if sell_type == "short":
+            return "short"
+        return "exit"  # 含 sell_type=None（可执行默认）
+    return None
+
+
 class HoldingsContext(BaseModel):
     """受众持仓上下文（add-holdings-context 预留框架）。
 

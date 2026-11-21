@@ -9,6 +9,7 @@ import re
 from typing import cast
 
 from finance_agent.metrics.validate import validate_financials
+from finance_agent.models import price_polarity
 
 
 def validate_node(state: dict) -> dict:
@@ -39,15 +40,6 @@ def validate_node(state: dict) -> dict:
 # ── toolize-price-levels：交易价位 sanity 校验（确定性，LLM 不参与）──
 
 _ENTRY_DEVIATION_LIMIT = 0.15  # entry 距最新收盘偏差上限（防 LLM 报无关价位）
-
-
-def _plan_direction(action: str) -> str | None:
-    """buy→long / sell→short；hold/watch 无价位要求。"""
-    if action == "buy":
-        return "long"
-    if action == "sell":
-        return "short"
-    return None
 
 
 def _is_missing_price(v: object) -> bool:
@@ -243,8 +235,10 @@ def _validate_price_levels(state: dict) -> dict:
         plan = plan.model_dump()
 
     action = str(plan.get("action") or "")
-    direction = _plan_direction(action)
-    if direction is None:
+    # 极性契约（add-price-polarity-contract，#606）：sell 按 sell_type 分型取极性，
+    # 不再一律按 short 校验——exit 叙事（stop<entry<target）不再被镜像改写。
+    polarity = price_polarity(action, plan.get("sell_type"))
+    if polarity is None:
         return {"price_check": {"result": "pass", "note": "hold/watch 无价位要求"}}
 
     entry = plan.get("entry_price")
@@ -302,15 +296,16 @@ def _validate_price_levels(state: dict) -> dict:
 
     reasons: list[str] = []
 
-    # 1. 价格关系（三者齐备才校验关系）
+    # 1. 价格关系（三者齐备才校验关系；exit 与 long 同关系式，short 反向）
     if stop is not None and target is not None:
-        if direction == "long" and not (stop < entry < target):
+        if polarity == "short":
+            if not (stop > entry > target):
+                reasons.append(
+                    f"价格关系违规（short 要求 stop>entry>target，实际 {stop}/{entry}/{target}）"
+                )
+        elif not (stop < entry < target):
             reasons.append(
-                f"价格关系违规（long 要求 stop<entry<target，实际 {stop}/{entry}/{target}）"
-            )
-        if direction == "short" and not (stop > entry > target):
-            reasons.append(
-                f"价格关系违规（short 要求 stop>entry>target，实际 {stop}/{entry}/{target}）"
+                f"价格关系违规（{polarity} 要求 stop<entry<target，实际 {stop}/{entry}/{target}）"
             )
 
     # 2. entry 距最新收盘偏差
@@ -339,7 +334,7 @@ def _validate_price_levels(state: dict) -> dict:
             f"请参考价位参考带重出（entry_ref={levels.get('entry_ref')}，"
             f"stop_band_long={levels.get('stop_band_long')}，"
             f"target_band_long={levels.get('target_band_long')}，"
-            f"{'long: stop<entry<target' if direction == 'long' else 'short: stop>entry>target'}）"
+            f"{polarity + ': stop<entry<target' if polarity != 'short' else 'short: stop>entry>target'}）"
         )
         return {
             "price_check": {"result": "fail", "reason": reason},
@@ -414,10 +409,11 @@ def _compute_derived_metrics(action: str, entry: object, stop: object, target: o
 def correct_prices(plan: dict, levels: dict, action: str) -> dict:
     """按工具参考带修正价位（确定性）：entry=entry_ref，stop/target=参考带中值。
 
-    short 镜像：stop=close±ATR 带中值对称外推，target 反向。返回新 dict，
+    极性分派（add-price-polarity-contract）：exit/long 用 long 参考带；
+    short 镜像——stop=close±ATR 带中值对称外推，target 反向。返回新 dict，
     不修改原 plan（trader_plan 整体替换进 state）。
     """
-    direction = _plan_direction(action) or "long"
+    polarity = price_polarity(str(plan.get("action") or action), plan.get("sell_type")) or "long"
     close = float(levels.get("entry_ref") or 0)
     atr = float(levels.get("atr") or 0)
     stop_band = levels.get("stop_band_long") or {}
@@ -425,7 +421,7 @@ def correct_prices(plan: dict, levels: dict, action: str) -> dict:
 
     corrected = dict(plan)
     corrected["entry_price"] = close
-    if direction == "long":
+    if polarity != "short":
         corrected["stop_loss"] = (
             (float(stop_band["low"]) + float(stop_band["high"])) / 2
             if stop_band
