@@ -817,3 +817,55 @@ def test_delete_all_track_record_state_clears_seed_surface(db):
     assert count_predictions(db_path=db) == 0
     # 二跑幂等：全 0，不报错
     assert set(delete_all_track_record_state(db_path=db).values()) == {0}
+
+
+def test_list_predictions_extracts_declared_polarity(db):
+    """add-price-polarity-contract（#606）：行装饰 declared_polarity——从快照
+    declared_prices.polarity 提取；存量无该键 → None（口径未声明，不追溯）。"""
+    _insert(
+        db,
+        symbol="600519.SH",
+        rationale_snapshot={
+            "action": "sell",
+            "declared_prices": {
+                "entry_price": 5.12,
+                "stop_loss": 4.90,
+                "target_price": 5.3971,
+                "polarity": "exit",
+            },
+        },
+    )
+    _insert(db, symbol="600029.SH", rationale_snapshot={"action": "buy"})
+    rows = {r["symbol"]: r for r in list_predictions(db_path=db)}
+    assert rows["600519.SH"]["declared_polarity"] == "exit"
+    assert rows["600029.SH"]["declared_polarity"] is None
+
+
+def test_list_predictions_declared_polarity_survives_bad_snapshot(db):
+    """快照非法 JSON / 非法形态 → None（读侧宽松，MUST NOT 崩列表）。"""
+    _insert(db, symbol="600519.SH", rationale_snapshot="not-json{")
+    _insert(db, symbol="600029.SH", rationale_snapshot=["not", "a", "dict"])
+    rows = {r["symbol"]: r for r in list_predictions(db_path=db)}
+    assert rows["600519.SH"]["declared_polarity"] is None
+    assert rows["600029.SH"]["declared_polarity"] is None
+
+
+def test_get_prediction_extracts_declared_polarity(db):
+    """详情端点（get_prediction）同样携带 declared_polarity（与列表同一提取源）。"""
+    from finance_agent.outcome.track_record.model import get_prediction
+
+    pid = _insert(
+        db,
+        symbol="600519.SH",
+        rationale_snapshot={
+            "action": "sell",
+            "declared_prices": {"entry_price": 5.12, "stop_loss": 4.90, "polarity": "exit"},
+        },
+    )
+    row = get_prediction(str(pid), db_path=db)
+    assert row is not None
+    assert row["declared_polarity"] == "exit"
+    legacy_pid = _insert(db, symbol="600029.SH", rationale_snapshot={"action": "buy"})
+    legacy = get_prediction(str(legacy_pid), db_path=db)
+    assert legacy is not None
+    assert legacy["declared_polarity"] is None

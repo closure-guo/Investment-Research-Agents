@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from finance_agent.models import price_polarity
 from finance_agent.outcome.track_record.judgment import (
     DEFAULT_HORIZON_DAYS,
     direction_for_action,
@@ -104,6 +105,9 @@ def persist_prediction_from_accumulated(
                         "entry_price": decision.get("entry_price"),
                         "stop_loss": decision.get("stop_loss"),
                         "target_price": decision.get("target_price"),
+                        # 极性声明（add-price-polarity-contract，#606）：随快照冻结，
+                        # 前端/执行消费按声明解释 stop/target；存量行无该键=口径未声明。
+                        "polarity": price_polarity(action, decision.get("sell_type")),
                     },
                     "declared_contract": _declared_contract(decision, action),
                 },

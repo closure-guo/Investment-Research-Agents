@@ -66,17 +66,40 @@ class TestValidateTradePrices:
         out = validate_trade_prices(_state(_plan(entry=100.0, stop=95.0, target=220.0)))
         assert out["price_check"]["result"] == "fail"
 
-    def test_short_symmetry(self):
-        # short：stop > entry > target 合法
+    def test_sell_polarity_matrix(self):
+        """add-price-polarity-contract（#606）：sell 按 sell_type 分型校验极性。
+
+        Previously：一切 sell 按 short 关系校验（_plan_direction sell→short），
+        exit 叙事价位被镜像改写（#606 A 型错置的制度性来源之一）。
+        """
+        # exit（含未申报默认 exit）：stop < entry < target 合法——南方航空 600029 B 型
+        # （行情尺度随价：entry_ref/参考带按 5 元量纲构造，atr=0.13 使申报价落带内）
         out = validate_trade_prices(
-            _state(_plan(action="sell", entry=100.0, stop=106.0, target=92.0))
+            _state(
+                _plan(action="sell", entry=5.12, stop=4.90, target=5.3971),
+                levels=_levels(base=5.12, atr=0.13),
+                close=5.12,
+            )
         )
         assert out["price_check"]["result"] == "pass"
-        # short 关系倒置 → fail
-        out2 = validate_trade_prices(
-            _state(_plan(action="sell", entry=100.0, stop=92.0, target=106.0))
+        # short（显式申报）：stop > entry > target 合法
+        plan_short = TradeDecision(
+            action="sell",
+            confidence=0.8,
+            reasoning="r",
+            sell_type="short",
+            entry_price=100.0,
+            stop_loss=106.0,
+            target_price=92.0,
         )
-        assert out2["price_check"]["result"] == "fail"
+        out2 = validate_trade_prices(_state(plan_short))
+        assert out2["price_check"]["result"] == "pass"
+        # 未申报 sell 的 short 形状 → 极性错置 fail（#606 A 型：广誉远 600771）
+        out3 = validate_trade_prices(
+            _state(_plan(action="sell", entry=11.80, stop=12.223, target=10.954))
+        )
+        assert out3["price_check"]["result"] == "fail"
+        assert "exit" in (out3.get("price_check_feedback") or "")
 
     def test_hold_watch_passes(self):
         plan = TradeDecision(action="hold", confidence=0.5, reasoning="r")
@@ -166,10 +189,33 @@ class TestCorrectPrices:
         assert corrected["target_price"] == pytest.approx((104.0 + 108.0) / 2)  # target_band 中值
         assert corrected["price_level_corrected"] is True
 
-    def test_short_correction_mirrored(self):
+    def test_exit_correction_uses_long_bands(self):
+        """add-price-polarity-contract（#606）：exit（含未申报默认）极性错置修正
+        用 long 参考带（stop 落 entry 下方），SHALL NOT short 镜像外推。
+
+        Previously：一切 sell 一律 short 镜像（stop=close+1.5ATR）——exit 叙事被
+        镜像成做空价位，报告与执行叙事反向。"""
         corrected = correct_prices(
             _plan(action="sell", entry=50.0, stop=45.0, target=60.0).model_dump(), _levels(), "sell"
         )
+        assert corrected["stop_loss"] == pytest.approx((96.0 + 98.0) / 2)
+        assert corrected["target_price"] == pytest.approx((104.0 + 108.0) / 2)
+        assert corrected["stop_loss"] < corrected["entry_price"] < corrected["target_price"]
+
+    def test_short_correction_mirrored(self):
+        """显式申报 sell_type=short 的极性错置（long 形状）→ short 镜像修正保留。"""
+        plan = TradeDecision(
+            action="sell",
+            confidence=0.8,
+            reasoning="r",
+            sell_type="short",
+            entry_price=50.0,
+            stop_loss=45.0,
+            target_price=60.0,
+        )
+        corrected = correct_prices(plan.model_dump(), _levels(), "sell")
+        assert corrected["stop_loss"] == pytest.approx(103.0)  # close+1.5*atr
+        assert corrected["target_price"] == pytest.approx(94.0)  # close-3*atr
         assert corrected["stop_loss"] > corrected["entry_price"] > corrected["target_price"]
 
 

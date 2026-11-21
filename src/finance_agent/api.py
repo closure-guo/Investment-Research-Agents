@@ -1040,7 +1040,9 @@ if TESTING:
                             "target_price": row.get("target_price"),
                             "horizon_days": row.get("horizon_days", 20),
                             "confidence": row.get("confidence", 0.6),
-                            "rationale_snapshot": {},
+                            # 快照透传（add-price-polarity-contract，#606）：极性标注
+                            # E2E 需造带 declared_prices.polarity 的行；缺省维持 {}
+                            "rationale_snapshot": row.get("rationale_snapshot", {}),
                             "langfuse_trace_id": None,
                             "created_at": row["created_at"],
                             "resolution_rule": None,

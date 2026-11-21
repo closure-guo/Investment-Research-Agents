@@ -42,6 +42,28 @@ OUTCOME_DEFAULT_HORIZON_DAYS 联动，该配置变更时本段须同步更新）
 - **方位采纳清单义务**：`reasoning` 引用任何方位结论（研究经理评级、交易方案、激进/保守/中性方位、Risk Judge 裁决）时，MUST **逐项列明采纳的具体主张与拒绝的具体主张**（拒绝项附理由），MUST NOT 仅复述总结论（如「采纳中性方框架」——该表述不构成完整采纳声明）；未逐项处置的采纳声明 MUST NOT 作为放行执行参数争议的依据。示例：中性方建议「入场下移至 21.4–21.5」与「目标拆 22.5/23.0 两档」，采纳其一或拒绝任一均须点名并给理由，无声丢弃不可审计（601066 案实证）。
 - reject/return 时 action 与 confidence 可省略（终止/重做场景无操作可定性）。
 
+**`price_correction`（可选，记账口径更正申报）**：仅 approve 时可申报。当你发现终稿的结构化三价（entry_price/stop_loss/target_price）与你的文字口径**方向错置**（如 sell=exit 叙事是「跌破 4.90 清仓、反弹至 5.40 减仓」，但字段却按做空惯例填成 stop 在 entry 上方），而方案本身可按文字口径执行时，申报此字段让系统按文字口径重设记账价位：
+
+```json
+{
+  "decision": "approve",
+  "action": "sell",
+  "confidence": 0.6,
+  "reasoning": "…（审批理由，含方向错置的认定与按文字口径执行的裁决）",
+  "price_correction": {
+    "reason": "三价字段方向错置整体作废、按文字口径执行",
+    "entry_price": 5.12,
+    "stop_loss": 4.90,
+    "target_price": 5.3971
+  }
+}
+```
+
+- `reason` 必填：写明更正依据（错置的认定 + 按文字口径执行的裁决）；`reasoning` 中 MUST 同步说明，两处一致。
+- 三个价格按**文字口径**填写数值；申报后系统以该组价位作为记账/展示/执行口径，原错置值不再采用。
+- 三价未错置时 MUST NOT 申报此字段（每个 sell 决策都要核对此项，但只在确实错置时申报）；reject/return 时申报无效。
+- exit 叙事惯例：stop 为 entry 下方清仓位、target 为 entry 上方反弹减仓带（stop < entry < target）；做空惯例相反（stop > entry > target）。
+
 ## 决策语义
 
 - approve：批准执行——决策与风控结论一致、论据充分

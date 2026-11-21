@@ -132,6 +132,49 @@ def test_ingest_writes_horizon_and_declared_prices(tmp_path, monkeypatch):
         "entry_price": 101.5,
         "stop_loss": 95.0,
         "target_price": 120.0,
+        "polarity": "long",
+    }
+
+
+def test_ingest_declared_prices_polarity_for_sell_variants(tmp_path, monkeypatch):
+    """add-price-polarity-contract（#606）：declared_prices 冻结带 polarity 声明。
+
+    sell_type=exit → exit；sell_type=short → short；未申报 sell → exit（可执行
+    默认）；hold/watch → None（无三价极性语义）。存量行无该键 → 展示层
+    「口径未声明」标注（不追溯）。
+    """
+    db = tmp_path / "p.db"
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(db))
+    init_track_record_tables(db)
+    cases = [
+        ({"action": "sell", "sell_type": "exit", "confidence": 0.7}, "exit"),
+        ({"action": "sell", "sell_type": "short", "confidence": 0.7}, "short"),
+        ({"action": "sell", "confidence": 0.7}, "exit"),
+        ({"action": "hold", "confidence": 0.7}, None),
+    ]
+    for i, (decision, _expected_polarity) in enumerate(cases):
+        persist_prediction_from_accumulated(
+            {
+                "fund_manager_decision": "approve",
+                "final_trade_decision": decision,
+                "stock_quote": {"price": 100.0},
+            },
+            f"sess-pol-{i}",
+            "600519",
+            "贵州茅台",
+        )
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT session_id, rationale_snapshot FROM predictions").fetchall()
+    got = {
+        r["session_id"]: json.loads(r["rationale_snapshot"])["declared_prices"]["polarity"]
+        for r in rows
+    }
+    assert got == {
+        "sess-pol-0": "exit",
+        "sess-pol-1": "short",
+        "sess-pol-2": "exit",
+        "sess-pol-3": None,
     }
 
 

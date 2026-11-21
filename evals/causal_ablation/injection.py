@@ -518,7 +518,7 @@ def _apply_decision_price(out: dict[str, Any], payload: dict[str, Any]) -> Injec
         if not isinstance(plan, dict):
             blocked.append(f"{key} 非 dict 形态（真实结构为决策 dict）")
             continue
-        direction = _plan_direction(str(plan.get("action") or ""))
+        direction = _plan_direction(str(plan.get("action") or ""), plan.get("sell_type"))
         if direction is None:
             blocked.append(f"{key} 的 action={plan.get('action')!r} 无价位要求（hold/watch 豁免）")
             continue
@@ -526,7 +526,10 @@ def _apply_decision_price(out: dict[str, Any], payload: dict[str, Any]) -> Injec
         if not _is_number(entry):
             blocked.append(f"{key} 缺数值 entry_price（无价位关系可破）")
             continue
-        factor = long_factor if direction == "long" else short_factor
+        # 极性分派（#606）：short 用 short_factor，long/exit 用 long_factor——
+        # exit 计划按 short_factor 污染出的 stop<entry 在新契约下是合法形状，
+        # 污染会静默失效（可审计性破功）
+        factor = short_factor if direction == "short" else long_factor
         polluted = round(float(entry) * factor, 4)  # type: ignore[arg-type]
         plan["stop_loss"] = polluted  # 只破 stop：其余字段原样保留
         return InjectionEffect(
@@ -590,11 +593,12 @@ def _last_number(values: Sequence[Any]) -> float | None:
     return None
 
 
-def _plan_direction(action: str) -> str | None:
-    """action→方向复用决策层单一实现（口径不得复制：finance_agent.nodes.validate）。"""
-    from finance_agent.nodes.validate import _plan_direction as validate_plan_direction
+def _plan_direction(action: str, sell_type: str | None = None) -> str | None:
+    """action→极性复用决策层单一实现（C2 后单一实现在 models.price_polarity；
+    sell 不再一律 short——exit 分型返回 exit，与价位校验同一口径，#606）。"""
+    from finance_agent.models import price_polarity
 
-    return validate_plan_direction(action)
+    return price_polarity(action, sell_type)
 
 
 def _declared(base_values: dict[str, Any], key: str) -> float | None:
