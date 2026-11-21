@@ -4,7 +4,6 @@
 nightly（pytest -m live）跑真实数据，防 stub 漂移。报告落 reports/。
 """
 
-import os
 from pathlib import Path
 
 import pytest
@@ -15,16 +14,11 @@ pytestmark = pytest.mark.live
 
 @pytest.fixture(scope="module")
 def live_langfuse() -> bool:
-    # run.py 的 _load_env 会加载项目 .env；本地开发 key 常挂在 .env 而非 shell
-    try:
-        from dotenv import load_dotenv
+    # @live 统一门禁（issue #605）：显式 opt-in（RUN_LIVE=1）优先，凭据在场不激活；
+    # 原「load .env 后查 key」判据在全量套件中被 src.api import 时 load_dotenv 绕过
+    from tests.evals._live_guard import require_live_opt_in
 
-        load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
-    except Exception:  # noqa: BLE001, S110 - dotenv 缺失时跳过
-        pass
-    if not (os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY")):
-        pytest.skip("LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY 未设置，跳过 @live 用例")
-    return True
+    return require_live_opt_in()
 
 
 def test_fm_decision_live_report(live_langfuse: bool):
@@ -47,7 +41,6 @@ def test_fm_decision_live_report(live_langfuse: bool):
 
     # 产物落盘
     from datetime import datetime
-    from pathlib import Path
 
     out = Path("reports") / f"fm-decision-report-{datetime.now():%Y%m%d}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
