@@ -59,7 +59,6 @@ from finance_agent.execution.brokers.base import ORDER_STATUSES, STATUS_REJECTED
 from finance_agent.factors.builtin import BUILTIN_FACTORS  # noqa: E402
 from finance_agent.factors.harvest import DEFAULT_MAX_BATCHES_PER_RUN  # noqa: E402
 from finance_agent.factors.library import (  # noqa: E402
-    FACTOR_STATES,
     get_factor_diagnostics,
     list_events,
     list_factors,
@@ -126,12 +125,9 @@ from finance_agent.session_store import (  # noqa: E402
     rename_session,
     session_stats,
     set_pipeline_anchor,
-    update_pipeline_snapshot,
-    update_pipeline_timelines,
     update_session_for_clarify,
     update_session_report,
     update_session_status,
-    update_session_usage,
     upsert_chat,
 )
 from finance_agent.stream_registry import registry  # noqa: E402
