@@ -312,7 +312,7 @@ class TestCjkEmbeddedAliasesAndTrailingEnumerators:
 
     def test_ascii_prefix_still_rejects_alias(self):
         """守卫本意保留：「EMA5」「XMA60」前邻 ASCII 字母数字仍不得读作别名。"""
-        from finance_agent.metrics.decision_price_check import _alias_occurrences
+        from finance_agent.metrics.price_text import alias_occurrences as _alias_occurrences
 
         assert _alias_occurrences("ema5金叉") == []
         assert _alias_occurrences("xma60压力") == []
