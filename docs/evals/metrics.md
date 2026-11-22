@@ -208,6 +208,14 @@ Spearman / MAE / 方向一致率（>3 分界）/ Cohen's κ；阈值 Spearman≥
 
 ### §1.9-v2 结算显著性与信号一致性口径（预登记 2026-10-06，首批 T+20 结算前冻结）
 
+> **v2.1（2026-11-22，update-exit-avoidance-semantics / #606 影响 3 根除）**：direction
+> 映射变更——`sell_type=exit` → **neutral（回避判定语义）**，切换时点后落库的 exit
+> 观点按回避语义判定（离场后标的跑输 = 离场正确），不再按 short 符号结算。变更原因 =
+> exit 叙事的反弹减仓带在 entry 上方（价格上涨获益），与做空结算方向相反——执行叙事
+> 成功与记分卡系统性反向（深南电路实证：反弹减仓最优执行被记 short −13.6%）。**存量
+> 读数不追溯**（按产出时版本解释）；切换后 IC/ICIR 的 short 桶不再混入 exit 观点
+> （回避判定单独成列，IC 纯度提升）。实现：`judgment.direction_for_action(action, sell_type)`。
+
 **样本口径**：全部读数仅消费日主观点（add-prediction-pool-integrity：同 (symbol, 决策归属日)
 取 created_at 最晚者；duplicate_of_day 行永不进入任何分子分母）。归属日派生与
 settle_entry_price 同源（收盘前→当日；收盘后/非交易日→次一交易日）。

@@ -45,7 +45,10 @@ def persist_prediction_from_accumulated(
         if not decision.get("action"):
             return
         action = decision["action"]
-        direction = direction_for_action(action)
+        # 方向映射带 sell_type 分型（update-exit-avoidance-semantics，#606 影响 3）：
+        # sell+exit → neutral 走回避判定（离场后跑输 = 离场正确），根除记分卡与
+        # 执行叙事反向；short 型与未申报维持 short
+        direction = direction_for_action(action, decision.get("sell_type"))
         # 参考价护栏（incident 032 根因 B）：quote 与最近 K 线收盘交叉校验，
         # 偏离超阈值 → 拒绝采信 quote、降级 K 线收盘；K 线缺失无法校验 → 保留 quote + WARN。
         quote_price = (accumulated.get("stock_quote") or {}).get("price")

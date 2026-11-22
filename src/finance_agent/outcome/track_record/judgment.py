@@ -47,17 +47,29 @@ def _effective_horizon(prediction: dict) -> int:
     return max(1, min(int(prediction.get("horizon_days", MAX_HORIZON_DAYS)), MAX_HORIZON_DAYS))
 
 
-def direction_for_action(action: str) -> str:
-    """action → direction：buy→long、sell→short、其余（含 hold/watch/空）→neutral。
+def direction_for_action(action: str, sell_type: str | None = None) -> str:
+    """action（+sell_type 分型）→ direction：buy→long、sell+exit→neutral（回避语义）、
+    sell+short→short、sell 未申报→short（回测腿/历史形态）、其余→neutral。
 
     单一来源：ingest（落库）/ model（decision_log 迁移）/ evals.backtest.replay
     （回测预测量构造）三处共用，禁止各自再写三目拷贝。
-    update-sell-action-typing（#188）：sell 分 exit/short 两型后本映射零改动——
-    exit（持有者减仓）与 short（做空建仓）的结算数学一致（均「价格下跌获益」，
-    direction=short 的收益语义对两型同样成立），差异仅在执行结构（渲染/校验层
-    已分型），结算层不感知 sell_type。
+
+    update-exit-avoidance-semantics（#606 影响 3，2026-11-22 拍板）：此前「exit 与
+    short 结算数学一致」的论断被 #606 影响 3 推翻——exit 叙事的反弹减仓带在
+    entry 上方（价格上涨获益），与做空（价格下跌获益）方向相反；horizon 做空
+    结算对 exit 系统性反向（深南电路实证：反弹减仓最优执行被记 short −13.6%）。
+    exit 改落 neutral 走回避判定（离场后标的跑输 = 离场正确，与 watch/hold 数学
+    同构），复用回避统计全套；未申报分型维持 short（回测腿语义不变、存量读数
+    不追溯——§1.9 预登记纪律，历史读数按产出时版本解释）。
     """
-    return {"buy": "long", "sell": "short"}.get(str(action or ""), "neutral")
+    action = str(action or "")
+    if action == "buy":
+        return "long"
+    if action == "sell":
+        if sell_type == "exit":
+            return "neutral"
+        return "short"  # short 型 + 未申报（历史/回测形态）
+    return "neutral"
 
 
 def should_supersede(old: dict, new: dict) -> bool:
