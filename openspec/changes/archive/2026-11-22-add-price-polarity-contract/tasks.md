@@ -6,4 +6,4 @@
 - [x] FM 记账口径更正回写：price_correction 结构化申报 → 终稿重写 + 修正来源标注（复用 price_level_corrected 语义），prompt 已 deploy（导入 1）
 - [x] 前端 track-record：详情页止损/目标按声明极性解释展示（清仓位/失效位/兑现位）+ 存量行「口径未声明」标注；读侧 list/get_prediction 装饰 declared_polarity
 - [x] E2E spec 已覆盖核心交互场景（track-record-polarity.spec.ts：exit 极性标注 + 存量未声明两态，seed 快照透传打通；详情页直达路由避开当前观点区同名行歧义）
-- [ ] 人工验证报告落 tests/validation/（含 #606 存量 30 条展示辨识抽查；部署后执行）
+- [x] 人工验证报告落 tests/validation/2026-11-21-add-price-polarity-contract-validation.md（存量辨识 playwright 5/5 + 实机 exit 样本 600519 价位一致性核验）
