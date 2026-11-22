@@ -157,8 +157,6 @@ unreadable database does not mark the whole container unhealthy without an actio
 - THEN the probe returns within its configured timeout
 - AND it reports the database as `unavailable` rather than hanging the request
 
-
-
 ### Requirement: SQLite 连接纪律
 
 SQLite store 家族 SHALL 收敛连接层开销：journal 模式 MUST 只在模块初始化（DDL 前）设置一次，
@@ -184,7 +182,6 @@ SQLite store 家族 SHALL 收敛连接层开销：journal 模式 MUST 只在模�
 - **GIVEN** 全新库文件
 - **WHEN** 模块 `init_*`（或首个写入路径经 init）执行
 - **THEN** DDL 前设置 `journal_mode=WAL` 且持久化到库头
-
 
 ### Requirement: 连接重试预算与终态落库缓冲
 
@@ -218,3 +215,14 @@ SQLite store 家族 SHALL 收敛连接层开销：journal 模式 MUST 只在模�
   标记本身写失败只记日志不改变 raise 行为）
 - **AND** 修复脚本 `scripts/repair_terminal_pending.py` 逐个读取标记、
   经正常落库路径补写终态，成功即删除标记文件
+
+### Requirement: 分析启动流程单一实现
+
+多入口分析的启动编排（create_session → append_chat → set_pipeline_anchor → clarify→running → session_created 事件）SHALL 为单一实现（`sessions/lifecycle.begin_analysis`），各入口 SHALL NOT 保留逐行拷贝。入口差异（来源标注、队列注册）SHALL 以参数表达。落库语义（SESSIONS_DB_PATH、append-only 事件流、状态冻结字段）SHALL 不变。
+
+#### Scenario: 两个自动分析入口共享同一启动实现
+
+- **GIVEN** screening_analyze 与 events_watchlist_analyze 发起分析
+- **WHEN** 各自调用 `begin_analysis`
+- **THEN** 落库与会话状态结果 SHALL 与各自原有逐行实现完全一致（行为不变，实现归一）
+

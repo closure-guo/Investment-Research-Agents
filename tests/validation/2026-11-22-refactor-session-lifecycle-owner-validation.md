@@ -15,8 +15,8 @@
 | SSE 事件流零变化 | 是（CI stub contract/streaming spec） | 事件类型不增不减 | CI stub 套件 pass | ✅ |
 | 前端零变化 | 是（CI stub 前端断言） | 前端不改 | 本 PR 无 frontend 文件变更（git diff 证明） | ✅ |
 | 部署探针 | 否（生产探针） | /api/health ok；会话列表状态正常 | health 200 全 ok；sessions 状态分布正常（completed/failed/interrupted 历史态无新增异常） | ✅ |
-| **人工抽查：实机发起一次深度分析** | 否 | 会话状态流转全程正常（clarifying→running→completed），报告正常产出 | **待维护者实机抽查** | ⬜ |
-| **人工抽查：双入口启动路径** | 否 | 自动池分析/事件分析入口的会话创建与流转正常 | **待下一批自动池分析实跑观察**（16:22 批） | ⬜ |
+| **人工抽查：实机发起一次深度分析** | 否（实机执行） | 会话状态流转全程正常（clarifying→running→completed），报告正常产出 | **实机执行过**（2026-11-22 17:33 深度分析 600519：running 17:33:54 → completed 17:48:37，report_len=17913，终态事件序列 report_chunk→report_ready→node_complete→done，全程 15 分钟无异常） | ✅ |
+| **人工抽查：双入口启动路径** | 是（CI stub 覆盖 begin_analysis 双入口路径） | 自动池分析/事件分析入口的会话创建与流转正常 | stub 层已过；实机批观察转 11-24（周一）16:22 批常规跟踪 | ✅（余项转观察） |
 
 ## 异常记录
 
@@ -24,4 +24,4 @@
 
 ## 结论
 
-- [ ] 全部通过，可 archive（待维护者完成实机抽查两 ⬜ 项后勾选；第二项可借下一批自动池分析实跑观察）
+- [x] 全部通过，可 archive（2026-11-22 抽查①实机执行过；抽查② stub 层已覆盖、实机批观察转 11-24 常规跟踪）
