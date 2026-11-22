@@ -268,11 +268,24 @@ def test_default_horizon_days_env_override():
 
 
 def test_direction_for_action_mapping():
-    """action → direction 单一来源:buy→long、sell→short、其余(hold/watch/空/None)→neutral。"""
+    """action → direction 单一来源:buy→long、sell(未申报)→short、其余(hold/watch/空/None)→neutral。"""
     assert direction_for_action("buy") == "long"
     assert direction_for_action("sell") == "short"
     for action in ("hold", "watch", "", None, "unknown"):
         assert direction_for_action(action) == "neutral"
+
+
+def test_direction_for_action_sell_exit_is_neutral():
+    """update-exit-avoidance-semantics（#606 影响 3）：sell+exit → neutral 走回避判定。
+
+    Previously：sell 一律 short——exit 叙事的反弹减仓带在 entry 上方（价格上涨
+    获益），与做空（价格下跌获益）方向相反，horizon 做空结算对 exit 系统性反向
+    （深南电路实证：反弹减仓最优执行被记 short −13.6%）。离场后标的跑输 = 离场
+    正确，与 watch/hold 回避语义数学同构。
+    """
+    assert direction_for_action("sell", "exit") == "neutral"
+    assert direction_for_action("sell", "short") == "short"
+    assert direction_for_action("sell", None) == "short"  # 未申报：回测腿/历史形态不变
 
 
 def test_direction_for_action_single_source_across_consumers():
