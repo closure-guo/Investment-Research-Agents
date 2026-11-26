@@ -1591,3 +1591,65 @@ class TestSnapshotCreditImpairment:
         )
         snap = client.fetch_latest_period_snapshot("601818")
         assert "信用减值损失同比(%)" not in snap
+
+
+class TestFetchKlineLastBarAttr:
+    """issue #623：fetch_kline 成功帧 MUST 携带末根 bar 日期（attrs）。
+
+    消费方是 nodes/fetch 的新鲜度守卫——回退源静默陈旧（688297 2026-11-24
+    实证：新浪回退帧止于昨收）必须留下可判定的标记。
+    """
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_eastmoney_path_sets_last_bar_attr(self, mock_ak, client):
+        mock_ak.stock_zh_a_hist.return_value = pd.DataFrame(
+            {
+                "日期": pd.to_datetime(["2026-08-01", "2026-08-02", "2026-08-03"]),
+                "开盘": [4500.0] * 3,
+                "收盘": [4510.0, 4530.0, 4540.0],
+                "最高": [4520.0] * 3,
+                "最低": [4490.0] * 3,
+                "成交量": [100.0] * 3,
+            }
+        )
+        result = client.fetch_kline("600519", days=3)
+        assert result.attrs["last_bar_date"] == "2026-08-03"
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_sina_fallback_path_sets_last_bar_attr(self, mock_ak, client, monkeypatch):
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_MAX_RETRIES", 1)
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_RETRY_DELAY", 0)
+        mock_ak.stock_zh_a_hist.side_effect = ConnectionError("RST")
+        mock_ak.stock_zh_a_daily.return_value = pd.DataFrame(
+            {
+                "date": ["2026-08-01", "2026-08-02"],
+                "open": [4500.0, 4520.0],
+                "high": [4520.0, 4540.0],
+                "low": [4490.0, 4510.0],
+                "close": [4510.0, 4530.0],
+                "volume": [100.0, 110.0],
+            }
+        )
+        result = client.fetch_kline("600519", days=2)
+        assert result.attrs["last_bar_date"] == "2026-08-02"
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_tx_fallback_path_sets_last_bar_attr(self, mock_ak, client, monkeypatch):
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_MAX_RETRIES", 1)
+        monkeypatch.setattr("finance_agent.data.akshare_client._AK_RETRY_DELAY", 0)
+        mock_ak.stock_zh_a_hist.side_effect = ConnectionError("RST")
+        mock_ak.stock_zh_a_daily.return_value = pd.DataFrame()
+        mock_ak.stock_zh_a_hist_tx.return_value = pd.DataFrame(
+            {
+                "date": ["2026-08-01", "2026-08-02", "2026-08-03"],
+                "open": [4500.0] * 3,
+                "high": [4520.0] * 3,
+                "low": [4490.0] * 3,
+                "close": [4510.0, 4530.0, 4540.0],
+                "volume": [100.0] * 3,
+                "amount": [1e8] * 3,
+                "turnover": [0.01] * 3,
+            }
+        )
+        result = client.fetch_kline("600519", days=3)
+        assert result.attrs["last_bar_date"] == "2026-08-03"

@@ -111,7 +111,8 @@ def run_market_snapshot_batch(
     ``suspended``（合成停牌行数）/ ``master``（``refreshed``|``skipped``）/
     ``calendar``（``ok``|``unavailable``）/ ``spot_source``（实际生效 spot 源
     ``eastmoney``|``sina``；客户端未上报 → None）/ ``spot_retry``（spot 双源
-    失败后同 run 重试命中 → true；首轮成功 → false）；非交易日返回
+    失败后同 run 重试命中 → true；首轮成功 → false）/ ``rebase_skipped_gap``
+    （#624：历史行非上一交易日 → 整体跳过复权重算，宁漏不腐）；非交易日返回
     ``{"trade_date", "skipped": "non_trading_day", "written": 0, "rebased": 0,
     "suspended": 0}``。
     """
@@ -168,7 +169,26 @@ def run_market_snapshot_batch(
         )
         master = get_security_master(db_path)
 
-        factors = compute_rebase_factors(spot, prev_rows)
+        # issue #624：跨交易日缺口补跑守卫——上一交易日的行不在库时，昨收与
+        # 「最近一条历史行」的价格差是**跨日涨跌**而非除权信号。2026-11-16 漏跑、
+        # 11-17 补跑曾把 k=昨收/11-13 行误判为除权，≤11-13 全部历史被乘当日涨跌
+        # （全市场 5522 只零反例）。契约：日历可得且 last_date ≠ 上一交易日 →
+        # 整体跳过 rebase（宁漏不腐，真实除权漏计只影响单票且可由后续源修复）；
+        # 日历不可得（显式日期路径）时无法判定，保持现行为并在摘要留痕
+        # calendar=unavailable。
+        rebase_gap_skipped = False
+        if calendar and last_date:
+            prior_days = [day for day in calendar if day < trade_date]
+            expected_prev = prior_days[-1] if prior_days else None
+            if expected_prev is not None and last_date != expected_prev:
+                rebase_gap_skipped = True
+                logger.warning(
+                    "快照历史存在缺口（last_snapshot=%s ≠ 上一交易日 %s）："
+                    "跳过本轮 rebase（跨缺口价格差不是除权信号，#624）",
+                    last_date,
+                    expected_prev,
+                )
+        factors = {} if rebase_gap_skipped else compute_rebase_factors(spot, prev_rows)
         for code, factor in factors.items():
             apply_rebase(code, factor, trade_date, db_path=db_path)
             prev = prev_rows[code]
@@ -223,6 +243,7 @@ def run_market_snapshot_batch(
             "calendar": calendar_state,
             "spot_source": spot_source,
             "spot_retry": spot_retry,
+            "rebase_skipped_gap": rebase_gap_skipped,
         }
     except Exception as exc:  # noqa: BLE001 - 失败标记后重抛，交 ops/scheduler 处置
         try:

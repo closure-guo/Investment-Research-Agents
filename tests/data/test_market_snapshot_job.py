@@ -885,3 +885,61 @@ class TestCallAkFailureSink:
         monkeypatch.setattr(ac, "_AK_MAX_RETRIES", 1)
         monkeypatch.setattr(ac, "_AK_RETRY_DELAY", 0)
         assert ac._call_ak(self._boom) is None
+
+
+class TestRebaseGapGuard:
+    """issue #624：跨交易日缺口补跑 MUST NOT 把隔日价格差当除权因子。
+
+    2026-11-16 漏跑、11-17 补跑时 last_date=11-13，``k = 昨收(11-16 收盘) /
+    close_qfq(11-13 行)`` 被误判为除权，≤11-13 全部历史被乘 k（5522 只零反例）。
+    契约：日历可得且 ``last_date != 上一交易日`` → 整体跳过 rebase（宁漏不腐），
+    摘要 ``rebase_skipped_gap=True``；日历不可得（显式日期路径）→ 无法判定，
+    保持现行为。
+    """
+
+    def test_gap_day_skips_rebase_and_flags_summary(self, tmp_path):
+        """D1(周五) 有行、D2(周一) 漏跑、D3 补跑：历史不得被乘 D2 涨跌。"""
+        db = tmp_path / "snap.db"
+        _seed_day_row(db, _D1, 10.0)
+        client = FakeSnapshotClient(
+            calendar=[_D1, _D2, _D3],  # D2 在日历中 → 上一交易日应为 D2，而 last=D1
+            spot=_spot(10.2, 9.7),  # 昨收 9.7 = D2 收盘：旧逻辑会算出 k=0.97 当除权
+            listing=None,
+        )
+
+        out = run_market_snapshot_batch(_D3, client=client, db_path=db)
+
+        assert out["written"] == 1
+        assert out["rebased"] == 0
+        assert out["rebase_skipped_gap"] is True
+        assert _day_rows(db, _D1)["600519"]["close_qfq"] == 10.0  # 历史未被误乘
+        day3 = _day_rows(db, _D3)["600519"]
+        assert day3["close_qfq"] == day3["close_raw"] == 10.2
+
+    def test_adjacent_day_real_div_rebase_unaffected(self, tmp_path):
+        """控制组：邻接日 + 真除权 → rebase 照常（守卫不得误伤正常路径）。"""
+        db = tmp_path / "snap.db"
+        _seed_day_row(db, _D1, 10.0)
+        client = FakeSnapshotClient(
+            calendar=[_D1, _D2],  # last=D1 恰为 D2 的上一交易日
+            spot=_spot(9.5, 9.0),
+            listing=None,
+        )
+
+        out = run_market_snapshot_batch(_D2, client=client, db_path=db)
+
+        assert out["rebased"] == 1
+        assert out["rebase_skipped_gap"] is False
+        assert _day_rows(db, _D1)["600519"]["close_qfq"] == 9.0
+
+    def test_calendar_unavailable_keeps_rebase(self, tmp_path):
+        """日历不可得（显式日期路径）→ 无法判定缺口，保持现行为（不误伤回填）。"""
+        db = tmp_path / "snap.db"
+        _seed_day_row(db, _D1, 10.0)
+        client = FakeSnapshotClient(calendar=None, spot=_spot(10.2, 9.7), listing=None)
+
+        out = run_market_snapshot_batch(_D3, client=client, db_path=db)
+
+        assert out["calendar"] == "unavailable"
+        assert out["rebased"] == 1
+        assert out["rebase_skipped_gap"] is False

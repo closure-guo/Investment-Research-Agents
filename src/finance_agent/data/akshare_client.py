@@ -59,6 +59,23 @@ _AK_RETRY_DELAY = 1.5  # 重试退避秒数
 SETTLEMENT_ADJUST = "hfq"
 
 
+def _tag_last_bar(df: pd.DataFrame) -> pd.DataFrame:
+    """把末根 bar 日期写入 ``df.attrs["last_bar_date"]``（issue #623）。
+
+    K 线回退链（东财→新浪→腾讯）任一源成功即返回，逐股出 bar 有先后，回退
+    帧可能止于昨收（2026-11-24 688297 实证）。消费方（``nodes/fetch`` 的新鲜度
+    守卫）需要可判定的末根日期标记。在列名归一化**之后**调用，rename/排序不
+    影响结果；缺日期列/空帧/任何异常静默跳过——标注失败不得影响取数主链。
+    """
+    try:
+        series = df.get("日期")
+        if series is not None and len(series):
+            df.attrs["last_bar_date"] = str(series.iloc[-1])[:10]
+    except Exception:  # noqa: BLE001 - 标注是旁路信息，不干扰取数
+        logger.debug("末根 bar 日期标注失败（忽略）", exc_info=True)
+    return df
+
+
 def _call_ak(func, *args, failure_sink: dict[str, Any] | None = None, **kwargs):
     """带超时 + 重试的 AKShare 调用包装。
 
@@ -1435,7 +1452,7 @@ class AKShareClient:
         )
         if df is not None and not df.empty:
             df = df.sort_values("日期").reset_index(drop=True)
-            return df.tail(days).reset_index(drop=True)
+            return _tag_last_bar(df.tail(days).reset_index(drop=True))
 
         # ── 方案2: 新浪 stock_zh_a_daily（回退，仅 1 次重试） ──
         logger.info("东财K线拉取失败，尝试新浪源: %s", stock_code)
@@ -1454,7 +1471,7 @@ class AKShareClient:
             }
             df = df.rename(columns=rename_map)
             df = df.sort_values("日期").reset_index(drop=True)
-            return df.tail(days).reset_index(drop=True)
+            return _tag_last_bar(df.tail(days).reset_index(drop=True))
 
         # ── 方案3: 腾讯 stock_zh_a_hist_tx（二级回退，独立链路） ──
         logger.info("新浪K线拉取失败，尝试腾讯源: %s", stock_code)
@@ -1472,7 +1489,7 @@ class AKShareClient:
             }
             df = df.rename(columns=rename_map)
             df = df.sort_values("日期").reset_index(drop=True)
-            return df.tail(days).reset_index(drop=True)
+            return _tag_last_bar(df.tail(days).reset_index(drop=True))
 
         logger.error("K线拉取均失败: %s", stock_code)
         return pd.DataFrame()
@@ -1561,7 +1578,7 @@ class AKShareClient:
         )
         if df is not None and not df.empty:
             df = df.sort_values("日期").reset_index(drop=True)
-            return df.tail(days).reset_index(drop=True)
+            return _tag_last_bar(df.tail(days).reset_index(drop=True))
 
         # ── 方案2: 新浪 stock_zh_index_daily（回退） ──
         logger.info("东财指数K线拉取失败，尝试新浪源: %s", index_code)
@@ -1578,7 +1595,7 @@ class AKShareClient:
             }
             df = df.rename(columns=rename_map)
             df = df.sort_values("日期").reset_index(drop=True)
-            return df.tail(days).reset_index(drop=True)
+            return _tag_last_bar(df.tail(days).reset_index(drop=True))
 
         logger.error("指数 K线拉取均失败: %s", index_code)
         return pd.DataFrame()

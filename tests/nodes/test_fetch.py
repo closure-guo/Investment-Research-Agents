@@ -8,7 +8,9 @@ fetch_data 职责：
 """
 
 from contextlib import contextmanager
+from datetime import datetime
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -413,3 +415,75 @@ class TestFetchPeersGuard:
             _fetch_peers(_Ak(), "688072", {"peer_codes": ["688012"]}, {"industry": "半导体设备"})
             is None
         )
+
+
+class TestFetchKlineFreshnessGuard:
+    """issue #623：回退源静默陈旧守卫（K 线末根 bar 新鲜度）。
+
+    硬陈旧（缺 >1 个交易日）→ KlineStaleError → 走既有 optional 降级路径
+    （kline 缺席、缓存不写）；软陈旧（收盘后缺当日 bar）→ 告警 + ``kline_as_of``
+    注记；盘中缺当日 bar / 无日历可判 / 帧无日期列 → 零行为变化。
+    """
+
+    _CAL = ["2026-11-20", "2026-11-21", "2026-11-24", "2026-11-25"]
+    _NOW = datetime(2026, 11, 25, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    @staticmethod
+    def _client_with_kline(frame):
+        mock = _setup_client()
+        mock.fetch_kline.return_value = frame
+        return mock
+
+    def _patch_env(self, monkeypatch):
+        monkeypatch.setattr(fetch_mod.kf, "load_trade_calendar_days", lambda: list(self._CAL))
+        monkeypatch.setattr(fetch_mod.kf, "now_beijing", lambda: self._NOW)
+
+    def test_stale_hard_kline_degrades_without_cache_write(self, monkeypatch):
+        """末根停在 11-21（缺 11-24+11-25 两日）→ kline 缺席 + 缓存零写入。"""
+        self._patch_env(monkeypatch)
+        frame = pd.DataFrame({"日期": ["2026-11-20", "2026-11-21"], "收盘": [10.0, 10.1]})
+        mock_cache = MagicMock()
+        result = fetch_data(
+            {"stock_code": "600519"}, cache=mock_cache, client=self._client_with_kline(frame)
+        )
+        assert result.get("kline") is None  # optional 降级契约：键在、值为 None
+        assert "kline_as_of" not in result
+        written = [call[0][0] for call in mock_cache.set.call_args_list]
+        assert "600519:kline" not in written
+
+    def test_stale_soft_kline_annotates_kline_as_of(self, monkeypatch):
+        """收盘后末根为昨日（缺 11-25 一日）→ kline 保留 + kline_as_of 注记。"""
+        self._patch_env(monkeypatch)
+        frame = pd.DataFrame({"日期": ["2026-11-21", "2026-11-24"], "收盘": [10.0, 10.1]})
+        result = fetch_data(
+            {"stock_code": "600519"},
+            cache=MagicMock(),
+            client=self._client_with_kline(frame),
+        )
+        assert result["kline"] is frame
+        assert result["kline_as_of"] == "2026-11-24"
+
+    def test_fresh_kline_no_annotation(self, monkeypatch):
+        """末根即期望交易日 → 正常入库，无注记。"""
+        self._patch_env(monkeypatch)
+        frame = pd.DataFrame({"日期": ["2026-11-24", "2026-11-25"], "收盘": [10.0, 10.1]})
+        result = fetch_data(
+            {"stock_code": "600519"},
+            cache=MagicMock(),
+            client=self._client_with_kline(frame),
+        )
+        assert result["kline"] is frame
+        assert "kline_as_of" not in result
+
+    def test_frame_without_date_column_unaffected(self, monkeypatch):
+        """无日期列（历史桩形态）→ 守卫零行为变化（回归保护）。"""
+        monkeypatch.setattr(fetch_mod.kf, "load_trade_calendar_days", lambda: list(self._CAL))
+        monkeypatch.setattr(fetch_mod.kf, "now_beijing", lambda: self._NOW)
+        frame = pd.DataFrame({"收盘": [1.0]})
+        result = fetch_data(
+            {"stock_code": "600519"},
+            cache=MagicMock(),
+            client=self._client_with_kline(frame),
+        )
+        assert result["kline"] is frame
+        assert "kline_as_of" not in result
