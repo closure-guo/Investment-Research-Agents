@@ -22,6 +22,7 @@ from typing import Any
 
 import pandas as pd
 
+from finance_agent.data import kline_freshness as kf
 from finance_agent.data.akshare_client import AKShareClient
 from finance_agent.data.cache import DataCache
 from finance_agent.data.monitoring import get_monitor
@@ -244,6 +245,31 @@ def _attach_report_digests(result: dict, code: str) -> None:
     )
 
 
+def _check_kline_freshness(frame: pd.DataFrame) -> str | None:
+    """K 线末根新鲜度守卫（issue #623）→ 软陈旧时的 ``kline_as_of`` 注记。
+
+    硬陈旧（末根早于上一交易日）抛 ``KlineStaleError``：走既有 optional 降级
+    路径（该源缺失、缓存不写），不给下游递旧价算参考带；软陈旧（收盘后仍缺
+    当日 bar）只告警并返回末根日期，由 ``fetch_data`` 在结果里注记
+    ``kline_as_of`` 供下游可见。日历不可得/帧无日期列/盘中缺当日 bar → None。
+    """
+    last_bar = kf.extract_last_bar_date(frame)
+    verdict = kf.classify_kline_freshness(
+        last_bar, now=kf.now_beijing(), calendar=kf.load_trade_calendar_days()
+    )
+    if verdict == "stale_hard":
+        raise kf.KlineStaleError(
+            f"K 线末根 {last_bar} 早于上一交易日：回退源静默陈旧，拒绝当新鲜数据使用"
+        )
+    if verdict == "stale_soft":
+        logger.warning(
+            "K 线末根 %s 缺最新交易日 bar（软陈旧）：分析价位可能锚在昨收，#623",
+            last_bar,
+        )
+        return last_bar
+    return None
+
+
 def fetch_data(state: dict, cache=None, client=None, *, kline_days: int = 250) -> dict:
     # TESTING=1：确定性 stub（不触 AKShare/网络），供管线 E2E 使用
     if os.getenv("TESTING") == "1":
@@ -290,6 +316,8 @@ def fetch_data(state: dict, cache=None, client=None, *, kline_days: int = 250) -
             with open_span(span_name, input={"code": code, "label": label}) as obs:
                 try:
                     value = future.result()
+                    if label == "kline" and isinstance(value, pd.DataFrame):
+                        kline_as_of = _check_kline_freshness(value)
                     if obs:
                         obs.update(output=_summarize_success_output(value))
                 except Exception as e:
@@ -334,6 +362,8 @@ def fetch_data(state: dict, cache=None, client=None, *, kline_days: int = 250) -
                 if not value.empty:
                     c.set(f"{code}:kline", value, ttl_seconds=3600)
                     result["kline"] = value
+                    if kline_as_of:
+                        result["kline_as_of"] = kline_as_of
                 else:
                     logger.warning("K线数据为空: %s", code)
             elif label == "benchmark_kline":
