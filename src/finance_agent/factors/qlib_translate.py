@@ -143,16 +143,39 @@ OPERATOR_MAPPINGS: dict[str, OperatorMapping] = {
     "Var": OperatorMapping(
         "Var", None, "missing", "滚动方差——本 DSL 无（ts_std 为平方根形态，无 var 算子）"
     ),
-    "Skew": OperatorMapping("Skew", None, "missing", "滚动偏度——本 DSL 无"),
-    "Kurt": OperatorMapping("Kurt", None, "missing", "滚动峰度——本 DSL 无"),
-    "Quantile": OperatorMapping("Quantile", None, "missing", "滚动分位数——本 DSL 无"),
-    "Med": OperatorMapping("Med", None, "missing", "滚动中位数——本 DSL 无"),
+    # extend-factor-library-coverage：六条时序统计 missing → equivalent
+    # （formulation 等价：pyqlib Rolling 子类与 pandas rolling 同一定义；热身期口径差见 _WARMUP）
+    "Skew": OperatorMapping(
+        "Skew", "ts_skew", "equivalent", f"滚动样本偏度（窗口含当日）；{_WARMUP}"
+    ),
+    "Kurt": OperatorMapping(
+        "Kurt", "ts_kurt", "equivalent", f"滚动超额峰度（窗口含当日、正态为 0）；{_WARMUP}"
+    ),
+    "Quantile": OperatorMapping(
+        "Quantile",
+        "ts_quantile",
+        "equivalent",
+        f"滚动分位数（q 直传，[0,1] 内数字字面量；线性插值两侧一致）；{_WARMUP}",
+    ),
+    "Med": OperatorMapping(
+        "Med", "ts_median", "equivalent", f"滚动中位数（窗口含当日）；{_WARMUP}"
+    ),
     "Mad": OperatorMapping("Mad", None, "missing", "滚动平均绝对偏差——本 DSL 无"),
-    "Count": OperatorMapping("Count", None, "missing", "滚动非空计数——本 DSL 无"),
+    "Count": OperatorMapping(
+        "Count",
+        "ts_count",
+        "equivalent",
+        f"滚动非空计数；{_WARMUP}；全 NaN 窗口：pyqlib 0 vs 本系统 NaN（边界口径声明）",
+    ),
     "Slope": OperatorMapping("Slope", None, "missing", "滚动回归斜率——本 DSL 无"),
     "Rsquare": OperatorMapping("Rsquare", None, "missing", "滚动回归 R²——本 DSL 无"),
     "Resi": OperatorMapping("Resi", None, "missing", "滚动回归残差——本 DSL 无"),
-    "WMA": OperatorMapping("WMA", None, "missing", "加权移动平均——本 DSL 无"),
+    "WMA": OperatorMapping(
+        "WMA",
+        "ts_decay_linear",
+        "equivalent",
+        f"线性加权移动平均（权重 1..N、最近一期最重，两侧归一化分母 N(N+1)/2）；{_WARMUP}",
+    ),
     "EMA": OperatorMapping("EMA", None, "missing", "指数移动平均——本 DSL 无"),
     "Cov": OperatorMapping("Cov", None, "missing", "滚动协方差——本 DSL 无"),
     # extend-factor-dsl-sign-extremes：missing → equivalent

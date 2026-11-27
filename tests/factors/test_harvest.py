@@ -161,7 +161,7 @@ class TestRunFactorHarvest:
         candidates = [
             _candidate("tsmean", description="5 日均价", formulation="mean(C,5)"),
             _candidate("rollmax", description="20 日滚动最大", formulation="max_i(C)"),
-            _candidate("badop", description="滚动偏度 qlib 形态", formulation="skew"),
+            _candidate("badop", description="指数移动平均 qlib 形态", formulation="ema"),
         ]
         cand_path = self._write_candidates(tmp_path, candidates)
         state_path = tmp_path / "harvest_state.json"
@@ -170,8 +170,9 @@ class TestRunFactorHarvest:
                 "tsmean": {"qlib_expression": "Mean($close, 5)"},
                 "rollmax": {"untranslatable": True, "reason": "公式需要滚动回归，本系统无对应算子"},
                 # Max/Min 自 extend-factor-dsl-sign-extremes 起可映射（ts_max/ts_min）；
-                # 翻译器拒译样本改用仍缺的滚动偏度
-                "badop": {"qlib_expression": "Skew($close, 20)"},
+                # Skew 等六条自 extend-factor-library-coverage 起可映射——翻译器拒译
+                # 样本改用仍缺的指数移动平均 EMA
+                "badop": {"qlib_expression": "EMA($close, 20)"},
             }
         )
         summary = run_factor_harvest(
@@ -793,7 +794,7 @@ def test_errors_breakdown_splits_placeholders_from_real(tmp_path):
         {
             "tsmean": {"qlib_expression": "Mean($close, 5)"},
             "dup1": {"untranslatable": True, "reason": "缺算子"},
-            "dup2": {"qlib_expression": "Skew($close, 20)"},
+            "dup2": {"qlib_expression": "EMA($close, 20)"},
         }
     )
     summary = run_factor_harvest(

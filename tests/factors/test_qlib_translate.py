@@ -130,16 +130,17 @@ class TestUntranslatable:
         assert any("Quantile" in blocker for blocker in result.blockers)
 
     def test_missing_operator_refuses_guess(self):
-        """映射表无对应算子（Skew）→ 拒收并留档差异说明。
+        """映射表无对应算子（EMA）→ 拒收并留档差异说明。
 
         Max/Min 曾是「同名不同义」拒收面（本 DSL max/min 为逐元素二元）；
         extend-factor-dsl-sign-extremes 起 ts_max/ts_min 落地、映射翻转（见下例），
-        拒收纪律由 missing 族继续钉住。
+        extend-factor-library-coverage 起 Skew/Kurt/Quantile/Med/Count/WMA 六条翻转，
+        拒收纪律由 missing 族（EMA/Slope/Cov 等）继续钉住。
         """
-        result = translate_qlib_expression("Skew($close, 20)")
+        result = translate_qlib_expression("EMA($close, 20)")
         assert not result.translatable
         assert result.dsl_expression is None
-        assert any("Skew" in blocker for blocker in result.blockers)
+        assert any("EMA" in blocker for blocker in result.blockers)
 
     def test_rolling_extremes_and_sign_strict_equivalence(self):
         """extend-factor-dsl-sign-extremes：Max/Min→ts_max/ts_min、Sign→sign（映射翻转）。"""
@@ -419,3 +420,43 @@ class TestComparisonConditionalMapping:
             translate_qlib_expression("-1 * ($close / Ref($close, 1) - 1)").dsl_expression
             == "sub(0,sub(div(close,ref(close,1)),1))"
         )
+
+
+class TestTimeSeriesStatsMapping:
+    """extend-factor-library-coverage：Med/Quantile/Count/Skew/Kurt/WMA 六映射 missing→equivalent。"""
+
+    def test_stats_operator_mappings_flipped(self):
+        expected = {
+            "Med": "ts_median",
+            "Skew": "ts_skew",
+            "Kurt": "ts_kurt",
+            "Quantile": "ts_quantile",
+            "Count": "ts_count",
+            "WMA": "ts_decay_linear",
+        }
+        for qlib_name, dsl_name in expected.items():
+            mapping = OPERATOR_MAPPINGS[qlib_name]
+            assert mapping.status == "equivalent", qlib_name
+            assert mapping.dsl_name == dsl_name, qlib_name
+
+    def test_stats_translations(self):
+        assert translate_qlib_expression("Med($close, 5)").dsl_expression == "ts_median(close,5)"
+        assert translate_qlib_expression("Skew($close, 20)").dsl_expression == "ts_skew(close,20)"
+        assert translate_qlib_expression("Kurt($close, 20)").dsl_expression == "ts_kurt(close,20)"
+        assert (
+            translate_qlib_expression("Quantile($close, 20, 0.9)").dsl_expression
+            == "ts_quantile(close,20,0.9)"
+        )
+        assert translate_qlib_expression("Count($close, 20)").dsl_expression == "ts_count(close,20)"
+        assert (
+            translate_qlib_expression("WMA($close, 5)").dsl_expression == "ts_decay_linear(close,5)"
+        )
+
+    def test_stats_boundary_notes_declared(self):
+        for name in ("Med", "Skew", "Kurt", "Quantile", "Count", "WMA"):
+            assert OPERATOR_MAPPINGS[name].note, name
+
+    def test_quantile_out_of_range_still_refused(self):
+        # qlib 侧 q 越界 → DSL 解析期拒收（翻译裁决为不可翻译）
+        result = translate_qlib_expression("Quantile($close, 20, 1.5)")
+        assert not result.translatable

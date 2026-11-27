@@ -74,6 +74,15 @@ OPS: frozenset[str] = frozenset(
         "eq",
         "ne",
         "if_else",
+        # extend-factor-library-coverage：时序统计与计数（高阶矩/分位/衰减/极值位置族）
+        "ts_median",
+        "ts_skew",
+        "ts_kurt",
+        "ts_quantile",
+        "ts_count",
+        "ts_decay_linear",
+        "ts_arg_max",
+        "ts_arg_min",
     }
 )
 
@@ -109,6 +118,14 @@ ARITY: dict[str, int] = {
     "eq": 2,
     "ne": 2,
     "if_else": 3,
+    "ts_median": 2,
+    "ts_skew": 2,
+    "ts_kurt": 2,
+    "ts_quantile": 3,
+    "ts_count": 2,
+    "ts_decay_linear": 2,
+    "ts_arg_max": 2,
+    "ts_arg_min": 2,
 }
 
 # window 参数所在位置（D2）：必须为正整数数字字面量
@@ -122,6 +139,14 @@ WINDOW_ARG_INDEX: dict[str, int] = {
     "ts_sum": 1,
     "ts_max": 1,
     "ts_min": 1,
+    "ts_median": 1,
+    "ts_skew": 1,
+    "ts_kurt": 1,
+    "ts_quantile": 1,
+    "ts_count": 1,
+    "ts_decay_linear": 1,
+    "ts_arg_max": 1,
+    "ts_arg_min": 1,
 }
 
 # 复杂度上限（解析期硬约束；默认路径超限即拒收）
@@ -403,6 +428,19 @@ class _Parser:
                 raise DSLParseError(
                     f"算子 {op!r} 的 window 参数必须是正整数数字字面量",
                     arg_positions[window_index],
+                )
+        if op == "ts_quantile":
+            # extend-factor-library-coverage：q 须为 [0,1] 内数字字面量（第 3 参）
+            q_node = args[2]
+            if not (
+                isinstance(q_node, Number)
+                and isinstance(q_node.value, (int, float))
+                and not isinstance(q_node.value, bool)
+                and 0.0 <= float(q_node.value) <= 1.0
+            ):
+                raise DSLParseError(
+                    "算子 'ts_quantile' 的 q 参数必须是 [0,1] 内数字字面量",
+                    arg_positions[2],
                 )
         return Call(op=op, args=tuple(args)), op_token.pos
 

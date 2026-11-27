@@ -111,6 +111,12 @@ def evaluate(node: AstNode, panel: MarketPanel) -> pd.DataFrame:
 
 def _evaluate_call(node: Call, panel: MarketPanel) -> pd.DataFrame:
     """算子调用求值：时序算子按窗口参数分派，其余为逐元素算子。"""
+    if node.op == "ts_quantile":
+        window = _window_of(node)
+        q_node = node.args[2]
+        if not isinstance(q_node, Number):
+            raise ValueError("算子 'ts_quantile' 的 q 参数必须是数字字面量")
+        return _ts_quantile(evaluate(node.args[0], panel), window, float(q_node.value))
     window_op = _WINDOW_OPS.get(node.op)
     if window_op is not None:
         window = _window_of(node)
@@ -209,6 +215,79 @@ def _ts_min(frame: pd.DataFrame, window: int) -> pd.DataFrame:
     return frame.rolling(window, min_periods=window).min()
 
 
+# ── extend-factor-library-coverage：时序统计与计数 ──────────────────────────
+
+
+def _ts_median(frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    """滚动中位数（窗口含当日；min_periods=window：窗口不足或含 NaN → NaN）。"""
+    return frame.rolling(window, min_periods=window).median()
+
+
+def _ts_skew(frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    """滚动样本偏度（与 pandas ``rolling(N, min_periods=N).skew()`` 逐值一致）。"""
+    return frame.rolling(window, min_periods=window).skew()
+
+
+def _ts_kurt(frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    """滚动超额峰度（与 pandas ``rolling(N, min_periods=N).kurt()`` 逐值一致；
+    窗口内全相等 → NaN——pandas 口径）。"""
+    return frame.rolling(window, min_periods=window).kurt()
+
+
+def _ts_quantile(frame: pd.DataFrame, window: int, q: float) -> pd.DataFrame:
+    """滚动分位数（窗口含当日；线性插值口径同 pandas 默认；q ∈ [0,1] 由解析期保证）。"""
+    return frame.rolling(window, min_periods=window).quantile(q)
+
+
+def _ts_count(frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    """窗口内非 NaN 值个数——唯一容忍窗口内 NaN 的时序算子。
+
+    窗口不足（前 N−1 行）或窗口内全 NaN → NaN；其余为 1..N 的计数。
+    """
+    counts = frame.notna().astype("float64").rolling(window, min_periods=window).sum()
+    return counts.where(counts > 0)
+
+
+def _ts_decay_linear(frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    """线性加权移动平均：窗口内最早权重 1、最近权重 N（归一化分母 N(N+1)/2）。
+
+    窗口含 NaN → NaN（逐偏移权重帧相加的 NaN 传播）。
+    """
+    if window < 1:
+        raise ValueError(f"window 必须是正整数: {window!r}")
+    total = frame.shift(window - 1)  # k=1：窗口最早一格权重 1
+    for k in range(2, window + 1):
+        total = total + frame.shift(window - k) * k
+    return total / (window * (window + 1) / 2.0)
+
+
+def _ts_arg_extreme(frame: pd.DataFrame, window: int, *, largest: bool) -> pd.DataFrame:
+    """窗口内极值距当日的期数（0 = 当日；并列取最近一期；窗口含 NaN → NaN）。
+
+    向量化实现（与 ts_rank 同款按偏移量全帧比较，无逐格 Python 回调）：
+    ``extreme`` 为滚动极值帧；自 offset=0 起升序扫描，首个命中即最近一期。
+    """
+    values = frame.to_numpy(dtype="float64")
+    n_rows = values.shape[0]
+    rolling = frame.rolling(window, min_periods=window)
+    extreme = (rolling.max() if largest else rolling.min()).to_numpy(dtype="float64")
+    result = np.full(values.shape, np.nan)
+    if n_rows >= window:
+        any_nan = np.zeros(values.shape, dtype=bool)
+        for offset in range(window):  # 窗口完整性：任一格 NaN → 该行 NaN（统一口径）
+            any_nan[offset:, :] |= np.isnan(values[: n_rows - offset, :])
+        for offset in range(window):  # offset 升序：首中即最近一期（并列口径）
+            # 目标行 t 的窗口值在 t−offset 处；与 t 的滚动极值对齐比较
+            candidate = values[: n_rows - offset, :]
+            is_hit = (
+                np.isnan(result[offset:, :])
+                & (candidate == extreme[offset:, :])
+                & ~any_nan[offset:, :]
+            )
+            result[offset:, :] = np.where(is_hit, float(offset), result[offset:, :])
+    return _wrap(result, frame)
+
+
 _WINDOW_OPS: dict[str, Callable[[pd.DataFrame, int], pd.DataFrame]] = {
     "ts_mean": _ts_mean,
     "ts_std": _ts_std,
@@ -218,6 +297,13 @@ _WINDOW_OPS: dict[str, Callable[[pd.DataFrame, int], pd.DataFrame]] = {
     "ts_sum": _ts_sum,
     "ts_max": _ts_max,
     "ts_min": _ts_min,
+    "ts_median": _ts_median,
+    "ts_skew": _ts_skew,
+    "ts_kurt": _ts_kurt,
+    "ts_count": _ts_count,
+    "ts_decay_linear": _ts_decay_linear,
+    "ts_arg_max": lambda frame, window: _ts_arg_extreme(frame, window, largest=True),
+    "ts_arg_min": lambda frame, window: _ts_arg_extreme(frame, window, largest=False),
 }
 
 

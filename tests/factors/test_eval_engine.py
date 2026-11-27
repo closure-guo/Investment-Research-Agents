@@ -10,6 +10,8 @@ E2（``forward_returns`` 末日 NaN、``rank_ic_series`` 逐日 Spearman +
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -694,3 +696,143 @@ class TestComparisonConditionalEval:
         got = _eval("ts_sum(ge(sub(div(close,ref(close,1)),1),0.095),3)", _panel(close=close))
         # 日收益 [NaN, 0.10, 0.00, -0.10] → 记 1/0/0；第 4 行窗口 [1, 0, 0] 求和 1
         _assert_frame(got, _frame({"A": [_NAN, _NAN, _NAN, 1.0]}))
+
+
+# ── extend-factor-library-coverage：时序统计与计数算子 ───────────────────────
+
+
+class TestTimeSeriesStatsEval:
+    """ts_median/ts_quantile/ts_count/ts_skew/ts_kurt/ts_decay_linear/ts_arg_max/ts_arg_min。
+
+    期望值逐条独立手写；ts_skew/ts_kurt 锚定 pandas rolling 实现逐值一致。
+    """
+
+    def test_ts_median_and_quantile(self):
+        close = _frame({"A": [10.0, 11.0, 9.0, 12.0]})
+        panel = _panel(close=close)
+        _assert_frame(
+            _eval("ts_median(close,3)", panel),
+            _frame({"A": [_NAN, _NAN, 10.0, 11.0]}),
+        )
+        _assert_frame(
+            _eval("ts_quantile(close,3,0.5)", panel),
+            _frame({"A": [_NAN, _NAN, 10.0, 11.0]}),
+        )
+        # q=0.25 线性插值：窗口 [10,11,9] 排序 [9,10,11] → 9 + 0.25·(10−9)·2 = 9.5
+        _assert_frame(
+            _eval("ts_quantile(close,3,0.25)", panel),
+            _frame({"A": [_NAN, _NAN, 9.5, 10.0]}),
+        )
+        _assert_frame(
+            _eval("ts_quantile(close,3,1)", panel),
+            _frame({"A": [_NAN, _NAN, 11.0, 12.0]}),
+        )
+
+    def test_ts_count_tolerates_window_nans(self):
+        close = _frame({"A": [10.0, _NAN, 9.0, 12.0, _NAN]})
+        _assert_frame(
+            _eval("ts_count(close,3)", _panel(close=close)),
+            _frame({"A": [_NAN, _NAN, 2.0, 2.0, 2.0]}),
+        )
+
+    def test_ts_count_all_nan_window_is_nan(self):
+        close = _frame({"A": [_NAN, _NAN, _NAN, 1.0, 2.0]})
+        _assert_frame(
+            _eval("ts_count(close,3)", _panel(close=close)),
+            _frame({"A": [_NAN, _NAN, _NAN, 1.0, 2.0]}),
+        )
+
+    def test_ts_skew_kurt_anchor_pandas(self):
+        values = [10.0, 11.0, 12.0, 16.0]
+        ref = pd.Series(values).rolling(4, min_periods=4)
+        panel = _panel(close=_frame({"A": values}))
+        skew = _eval("ts_skew(close,4)", panel)["A"]
+        kurt = _eval("ts_kurt(close,4)", panel)["A"]
+        assert skew.iloc[3] == pytest.approx(ref.skew().iloc[3])
+        assert kurt.iloc[3] == pytest.approx(ref.kurt().iloc[3])
+        assert np.isnan(skew.iloc[2]) and np.isnan(kurt.iloc[2])
+        assert skew.iloc[3] > 0  # 右偏
+
+    def test_ts_decay_linear(self):
+        close = _frame({"A": [10.0, 11.0, 12.0]})
+        got = _eval("ts_decay_linear(close,3)", _panel(close=close))
+        # 权重 1/2/3（最近最重）：(10·1 + 11·2 + 12·3) / 6 = 68/6
+        _assert_frame(got, _frame({"A": [_NAN, _NAN, 68.0 / 6.0]}))
+
+    def test_ts_arg_max_min(self):
+        panel = _panel(
+            close=_frame(
+                {
+                    "A": [10.0, 11.0, 9.0, 9.0],
+                    "B": [11.0, 11.0, 9.0, 9.0],
+                    "C": [9.0, 11.0, 11.0, 11.0],
+                }
+            )
+        )
+        # A: 行3窗口 [10,11,9] 极大 11 在偏移 1；行4窗口 [11,9,9] 极大 11 在偏移 2
+        # B: 行3窗口 [11,11,9] 极大 11 并列偏移 1/2 → 取最近 1；行4窗口 [11,9,9] → 2
+        # C: 行3窗口 [9,11,11] 极大 11 含当日（偏移 0/1 并列）→ 0；行4 [11,11,11] → 0
+        _assert_frame(
+            _eval("ts_arg_max(close,3)", panel),
+            _frame(
+                {
+                    "A": [_NAN, _NAN, 1.0, 2.0],
+                    "B": [_NAN, _NAN, 1.0, 2.0],
+                    "C": [_NAN, _NAN, 0.0, 0.0],
+                }
+            ),
+        )
+        # A: 极小 9 含当日（行3 9/行4 9）→ 0；B 同行；C: 行3窗口 [9,11,11] 极小 9 在偏移 2；行4 [11,11,11] → 0
+        _assert_frame(
+            _eval("ts_arg_min(close,3)", panel),
+            _frame(
+                {
+                    "A": [_NAN, _NAN, 0.0, 0.0],
+                    "B": [_NAN, _NAN, 0.0, 0.0],
+                    "C": [_NAN, _NAN, 2.0, 0.0],
+                }
+            ),
+        )
+
+    def test_window_nan_propagation_for_new_stats(self):
+        close = _frame({"A": [10.0, 11.0, _NAN, 12.0]})
+        panel = _panel(close=close)
+        for expr in (
+            "ts_median(close,3)",
+            "ts_skew(close,3)",
+            "ts_kurt(close,3)",
+            "ts_decay_linear(close,3)",
+            "ts_arg_max(close,3)",
+            "ts_arg_min(close,3)",
+        ):
+            assert np.isnan(_eval(expr, panel)["A"].iloc[2]), expr
+
+
+def test_new_ops_perf_budget():
+    """预算护栏（extend-factor-library-coverage delta §4.4）：500×5500 面板上每个
+    新时序算子单次求值 ≤ max(4× ts_rank, 1.0s)——窗口扫描族与 ts_rank 同量级。
+
+    实测基线（2026-11-27，本机）：ts_rank 0.27s、ts_arg_max 0.48s、ts_median 0.76s、
+    ts_skew/ts_count 0.10s、ts_decay_linear 0.18s。
+    """
+    rng = np.random.default_rng(42)
+    values = rng.standard_normal((500, 5500)).cumsum(axis=0)
+    panel = _panel(close=pd.DataFrame(values))
+    t0 = time.perf_counter()
+    _eval("ts_rank(close,20)", panel)
+    rank_s = time.perf_counter() - t0
+    budget = max(rank_s * 4.0, 1.0)
+    for expr in (
+        "ts_median(close,20)",
+        "ts_skew(close,20)",
+        "ts_kurt(close,20)",
+        "ts_quantile(close,20,0.9)",
+        "ts_count(close,20)",
+        "ts_decay_linear(close,20)",
+        "ts_arg_max(close,20)",
+        "ts_arg_min(close,20)",
+    ):
+        t = time.perf_counter()
+        _eval(expr, panel)
+        elapsed = time.perf_counter() - t
+        assert elapsed <= budget, f"{expr} 超时 {elapsed:.2f}s > {budget:.2f}s"
