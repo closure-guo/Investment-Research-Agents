@@ -66,6 +66,14 @@ SPEC_OPS = {
     "sign",
     "ts_max",
     "ts_min",
+    # extend-factor-library-coverage：比较与条件
+    "gt",
+    "lt",
+    "ge",
+    "le",
+    "eq",
+    "ne",
+    "if_else",
 }
 SPEC_FIELDS = {"open", "high", "low", "close", "volume", "amount"}
 SPEC_ARITY = {
@@ -90,6 +98,13 @@ SPEC_ARITY = {
     "sign": 1,
     "ts_max": 2,
     "ts_min": 2,
+    "gt": 2,
+    "lt": 2,
+    "ge": 2,
+    "le": 2,
+    "eq": 2,
+    "ne": 2,
+    "if_else": 3,
 }
 # 每个算子一份合法样例（window 位置一律正整数数字字面量）
 _WINDOW_OPS = {
@@ -125,6 +140,13 @@ _OP_SAMPLES = {
     "sign": "sign(close)",
     "ts_max": "ts_max(close, 5)",
     "ts_min": "ts_min(close, 5)",
+    "gt": "gt(close, volume)",
+    "lt": "lt(close, volume)",
+    "ge": "ge(close, volume)",
+    "le": "le(close, volume)",
+    "eq": "eq(close, volume)",
+    "ne": "ne(close, volume)",
+    "if_else": "if_else(gt(close, volume), close, open)",
 }
 
 
@@ -144,10 +166,11 @@ def _assert_parse_error(expr: str, *, contains: Sequence[str] = (), pos: int | N
 # ── Task 1: 枚举逐字 ─────────────────────────────────────────────────────────
 
 
-def test_ops_enumeration_verbatim_21_names():
-    """算子枚举逐字（spec 列表：初版 15 + ref/ts_sum/sqrt + sign/ts_max/ts_min）；元数表与 D2 逐条一致。"""
+def test_ops_enumeration_verbatim_28_names():
+    """算子枚举逐字（spec 列表：初版 15 + ref/ts_sum/sqrt + sign/ts_max/ts_min
+    + gt/lt/ge/le/eq/ne/if_else——extend-factor-library-coverage）；元数表与 D2 逐条一致。"""
     assert OPS == SPEC_OPS
-    assert len(OPS) == 21
+    assert len(OPS) == 28
     assert ARITY == SPEC_ARITY
     assert FIELDS == SPEC_FIELDS
     assert len(FIELDS) == 6
@@ -731,3 +754,26 @@ class TestFreeParamsDedup:
         )
         assert count_free_params(node) == 3
         assert parse(serialize(node)) == node
+
+
+# ── extend-factor-library-coverage：比较与条件算子 ───────────────────────────
+
+
+class TestComparisonConditionalParse:
+    """比较（gt/lt/ge/le/eq/ne，2 参）与条件（if_else，3 参）：解析 + round-trip + 错误形态。"""
+
+    def test_parse_and_roundtrip(self):
+        for expr in (
+            "gt(close, 10)",
+            "if_else(gt(close, 10), volume, 0)",
+            "if_else(eq(sub(high, low), 0), 0, div(sub(close, low), sub(high, low)))",
+        ):
+            node = parse(expr)
+            assert parse(serialize(node)) == node
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["gt(close)", "if_else(close, high, low, open)", "ne(volume)"],
+    )
+    def test_arity_refused(self, bad: str):
+        _assert_parse_error(bad)

@@ -62,6 +62,9 @@ _WARMUP = (
     "（热身期 NaN）——差异仅限各票前 N−1 日（口径声明）"
 )
 
+# 比较族 NaN 边界（extend-factor-library-coverage；映射表备注共用）
+_COMPARE_BOUNDARY_NOTE = "NaN 比较：pyqlib False vs 本系统 NaN（边界口径声明）"
+
 
 @dataclass(frozen=True)
 class OperatorMapping:
@@ -163,15 +166,30 @@ OPERATOR_MAPPINGS: dict[str, OperatorMapping] = {
         "幂运算（NpPairOperator，L338，可变指数）——本 DSL 无；特例 Power(x,0.5) ≡ sqrt(x) "
         "（0.5 次幂 = 平方根）由 _build_call 特例分支映射，其余指数拒绝",
     ),
-    "Greater": OperatorMapping("Greater", None, "missing", "比较算子——本 DSL 无"),
-    "Less": OperatorMapping("Less", None, "missing", "比较算子——本 DSL 无"),
-    "Gt": OperatorMapping("Gt", None, "missing", "比较算子——本 DSL 无"),
-    "Ge": OperatorMapping("Ge", None, "missing", "比较算子——本 DSL 无"),
-    "Lt": OperatorMapping("Lt", None, "missing", "比较算子——本 DSL 无"),
-    "Le": OperatorMapping("Le", None, "missing", "比较算子——本 DSL 无"),
-    "Eq": OperatorMapping("Eq", None, "missing", "比较算子——本 DSL 无"),
-    "Ne": OperatorMapping("Ne", None, "missing", "比较算子——本 DSL 无"),
-    "If": OperatorMapping("If", None, "missing", "条件算子——本 DSL 无"),
+    # extend-factor-library-coverage：比较/条件九算子 missing → equivalent
+    # （NaN 边界口径声明：pyqlib 比较把 NaN 当 False，本系统显式传播 NaN——
+    #   与 Log 除零/对数边界同款「实现级口径差异、不改统计量定义」声明）
+    "Greater": OperatorMapping(
+        "Greater", "gt", "equivalent", f"逐元素大于；{_COMPARE_BOUNDARY_NOTE}"
+    ),
+    "Less": OperatorMapping("Less", "lt", "equivalent", f"逐元素小于；{_COMPARE_BOUNDARY_NOTE}"),
+    "Gt": OperatorMapping(
+        "Gt", "gt", "equivalent", f"逐元素大于（Greater 别名）；{_COMPARE_BOUNDARY_NOTE}"
+    ),
+    "Ge": OperatorMapping("Ge", "ge", "equivalent", f"逐元素大于等于；{_COMPARE_BOUNDARY_NOTE}"),
+    "Lt": OperatorMapping(
+        "Lt", "lt", "equivalent", f"逐元素小于（Less 别名）；{_COMPARE_BOUNDARY_NOTE}"
+    ),
+    "Le": OperatorMapping("Le", "le", "equivalent", f"逐元素小于等于；{_COMPARE_BOUNDARY_NOTE}"),
+    "Eq": OperatorMapping("Eq", "eq", "equivalent", f"逐元素等于；{_COMPARE_BOUNDARY_NOTE}"),
+    "Ne": OperatorMapping("Ne", "ne", "equivalent", f"逐元素不等于；{_COMPARE_BOUNDARY_NOTE}"),
+    "If": OperatorMapping(
+        "If",
+        "if_else",
+        "equivalent",
+        "条件选择：cond 非 0 取第二参、为 0 取第三参；cond 为 NaN：pyqlib 按 False vs 本系统 "
+        "NaN（边界口径声明）",
+    ),
     "And": OperatorMapping("And", None, "missing", "逻辑算子——本 DSL 无"),
     "Or": OperatorMapping("Or", None, "missing", "逻辑算子——本 DSL 无"),
     "Not": OperatorMapping("Not", None, "missing", "逻辑算子——本 DSL 无"),
@@ -380,13 +398,16 @@ class _Parser:
         token = self._peek()
         if token.kind == _OP and token.text == "-":
             self._advance()
-            nxt = self._peek()
-            if nxt.kind == _NUMBER and nxt.value is not None:
-                self._advance()
-                return _NegNumber(-nxt.value, token.pos)
-            raise TranslateSyntaxError(
-                "一元负号仅支持数字字面量（对表达式取反请改用 0 - x 或 Sub(0, x) 形态）", token.pos
-            )
+            operand = self._parse_factor()
+            if isinstance(operand, _Num):
+                # 数字字面量 → 负数字面量（既有路径：-1 * x 走二元重排表）
+                return _NegNumber(-operand.value, token.pos)
+            if isinstance(operand, _NegNumber):
+                # --k ≡ k（双负归一，不落负数字面量）
+                return _Num(abs(operand.value), operand.pos)
+            # 表达式取反 → 严格等价 0 − x（extend-factor-library-coverage；
+            # 此前「一元负号仅支持数字字面量」拒收，20 条 translator 损耗中的 14 条）
+            return _BinOp("-", _Num(0, token.pos), operand, token.pos)
         return self._parse_atom()
 
     def _parse_atom(self) -> _Node:

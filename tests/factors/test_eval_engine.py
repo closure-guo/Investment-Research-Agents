@@ -650,3 +650,47 @@ def test_ts_rank_vectorized_matches_pandas_reference():
         got = _eval(f"ts_rank(close,{window})", _panel(close=close))
         want = _reference(close, window)
         pd.testing.assert_frame_equal(got, want, check_exact=True)
+
+
+# ── extend-factor-library-coverage：比较与条件算子 ───────────────────────────
+
+
+class TestComparisonConditionalEval:
+    """gt/lt/ge/le/eq/ne（1.0/0.0 浮点帧，NaN 传播）与 if_else（非 0 取 a、0 取 b、NaN 条件 → NaN）。"""
+
+    def test_comparison_nan_propagation(self):
+        close = _frame({"A": [10.0, 11.0, _NAN, 9.0]})
+        got = _eval("gt(close,10)", _panel(close=close))
+        _assert_frame(got, _frame({"A": [0.0, 1.0, _NAN, 0.0]}))
+        assert got["A"].dtype == "float64"
+
+    def test_comparison_all_six_operators(self):
+        close = _frame({"A": [1.0, 2.0, 2.0, _NAN]})
+        panel = _panel(close=close)
+        _assert_frame(_eval("ge(close,2)", panel), _frame({"A": [0.0, 1.0, 1.0, _NAN]}))
+        _assert_frame(_eval("le(close,2)", panel), _frame({"A": [1.0, 1.0, 1.0, _NAN]}))
+        _assert_frame(_eval("lt(close,2)", panel), _frame({"A": [1.0, 0.0, 0.0, _NAN]}))
+        _assert_frame(_eval("eq(close,2)", panel), _frame({"A": [0.0, 1.0, 1.0, _NAN]}))
+        _assert_frame(_eval("ne(close,2)", panel), _frame({"A": [1.0, 0.0, 0.0, _NAN]}))
+
+    def test_if_else_branches_and_nan_cond(self):
+        close = _frame({"A": [10.0, 11.0, _NAN, 9.0]})
+        volume = _frame({"A": [100.0, 200.0, 300.0, 400.0]})
+        got = _eval("if_else(gt(close,10),volume,0)", _panel(close=close, volume=volume))
+        _assert_frame(got, _frame({"A": [0.0, 200.0, _NAN, 0.0]}))
+
+    def test_zero_denominator_guard(self):
+        panel = _panel(
+            close=_frame({"A": [10.0, 10.0, 11.0]}),
+            high=_frame({"A": [10.0, 12.0, 13.0]}),
+            low=_frame({"A": [10.0, 10.0, 9.0]}),
+        )
+        got = _eval("if_else(eq(sub(high,low),0),0,div(sub(close,low),sub(high,low)))", panel)
+        # high=low 的行显式取 0（旧写法 div 直接除会得 NaN，无法区分「平盘」与「缺失」）
+        _assert_frame(got, _frame({"A": [0.0, 0.0, 0.5]}))
+
+    def test_event_counting_with_comparison(self):
+        close = _frame({"A": [10.0, 11.0, 11.0, 9.9]})
+        got = _eval("ts_sum(ge(sub(div(close,ref(close,1)),1),0.095),3)", _panel(close=close))
+        # 日收益 [NaN, 0.10, 0.00, -0.10] → 记 1/0/0；第 4 行窗口 [1, 0, 0] 求和 1
+        _assert_frame(got, _frame({"A": [_NAN, _NAN, _NAN, 1.0]}))

@@ -361,3 +361,61 @@ class TestMappingTableAudit:
         assert "ts_mean" in text
         assert "Ref" in text
         assert "$close" in text
+
+
+class TestComparisonConditionalMapping:
+    """extend-factor-library-coverage：比较/条件九算子 missing→equivalent + 一元负号表达式改写。"""
+
+    _COMPARE_BOUNDARY = "NaN 比较：pyqlib False vs 本系统 NaN（边界口径声明）"
+
+    def test_comparison_operator_mappings_flipped(self):
+        expected = {
+            "Greater": "gt",
+            "Less": "lt",
+            "Gt": "gt",
+            "Ge": "ge",
+            "Lt": "lt",
+            "Le": "le",
+            "Eq": "eq",
+            "Ne": "ne",
+            "If": "if_else",
+        }
+        for qlib_name, dsl_name in expected.items():
+            mapping = OPERATOR_MAPPINGS[qlib_name]
+            assert mapping.status == "equivalent", qlib_name
+            assert mapping.dsl_name == dsl_name, qlib_name
+
+    def test_comparison_translations(self):
+        assert translate_qlib_expression("Greater($close, 0)").dsl_expression == "gt(close,0)"
+        assert (
+            translate_qlib_expression("Less(Gt($close, 0), 1)").dsl_expression
+            == "lt(gt(close,0),1)"
+        )
+        result = translate_qlib_expression("If(Gt($close, 0), $volume, 0)")
+        assert result.translatable
+        assert result.dsl_expression == "if_else(gt(close,0),volume,0)"
+
+    def test_comparison_boundary_note_declared(self):
+        for name in ("Greater", "Eq", "If"):
+            assert "NaN" in OPERATOR_MAPPINGS[name].note, name
+
+    def test_unary_minus_on_expression_rewrites_to_sub(self):
+        result = translate_qlib_expression("-($close - 1)")
+        assert result.translatable
+        assert result.dsl_expression == "sub(0,sub(close,1))"
+        result = translate_qlib_expression("-$close")
+        assert result.translatable
+        assert result.dsl_expression == "sub(0,close)"
+
+    def test_double_negation_number_normalizes(self):
+        result = translate_qlib_expression("--3")
+        assert result.translatable
+        assert result.dsl_expression == "3"
+
+    def test_negative_literal_regression(self):
+        # 既有契约场景回归：负数常量重排路径不受影响
+        assert translate_qlib_expression("-1 * $close").dsl_expression == "sub(0,close)"
+        assert (
+            translate_qlib_expression("-1 * ($close / Ref($close, 1) - 1)").dsl_expression
+            == "sub(0,sub(div(close,ref(close,1)),1))"
+        )

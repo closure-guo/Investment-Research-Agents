@@ -66,6 +66,14 @@ OPS: frozenset[str] = frozenset(
         "sign",
         "ts_max",
         "ts_min",
+        # extend-factor-library-coverage：比较与条件（事件计数/零分母保护族）
+        "gt",
+        "lt",
+        "ge",
+        "le",
+        "eq",
+        "ne",
+        "if_else",
     }
 )
 
@@ -94,6 +102,13 @@ ARITY: dict[str, int] = {
     "sign": 1,
     "ts_max": 2,
     "ts_min": 2,
+    "gt": 2,
+    "lt": 2,
+    "ge": 2,
+    "le": 2,
+    "eq": 2,
+    "ne": 2,
+    "if_else": 3,
 }
 
 # window 参数所在位置（D2）：必须为正整数数字字面量

@@ -37,6 +37,7 @@ from __future__ import annotations
 import operator
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -279,6 +280,36 @@ def _minimum(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _compare(
+    op: Callable[[Any, Any], Any],
+) -> Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame]:
+    """比较算子工厂：成立 → 1.0、不成立 → 0.0；任一侧 NaN → NaN（pandas 原生
+    比较把 NaN 当 False，须显式按有效格位掩码回 NaN）。"""
+
+    def _cmp(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
+        left_aligned, right_aligned = left.align(right)
+        raw = cast(pd.DataFrame, op(left_aligned, right_aligned))
+        valid = left_aligned.notna() & right_aligned.notna()
+        return raw.astype("float64").where(valid)
+
+    return _cmp
+
+
+def _if_else(cond: pd.DataFrame, left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
+    """条件选择：cond 非 0 取 left、为 0 取 right；cond 为 NaN → NaN（不猜分支）。"""
+    cond_aligned, left_aligned = cond.align(left)
+    cond_aligned, right_aligned = cond_aligned.align(right)
+    mask = cond_aligned.fillna(0.0).to_numpy(dtype="float64") != 0.0
+    picked = pd.DataFrame(
+        np.where(
+            mask, left_aligned.to_numpy(dtype="float64"), right_aligned.to_numpy(dtype="float64")
+        ),
+        index=cond_aligned.index,
+        columns=cond_aligned.columns,
+    )
+    return picked.where(cond_aligned.notna())
+
+
 _ELEMENTWISE_OPS: dict[str, Callable[..., pd.DataFrame]] = {
     "rank": _cross_section_rank,
     "zscore": cross_section_zscore,
@@ -292,6 +323,14 @@ _ELEMENTWISE_OPS: dict[str, Callable[..., pd.DataFrame]] = {
     "log": _log,
     "sqrt": _sqrt,
     "sign": _sign,
+    # extend-factor-library-coverage：比较与条件
+    "gt": _compare(operator.gt),
+    "lt": _compare(operator.lt),
+    "ge": _compare(operator.ge),
+    "le": _compare(operator.le),
+    "eq": _compare(operator.eq),
+    "ne": _compare(operator.ne),
+    "if_else": _if_else,
 }
 
 
