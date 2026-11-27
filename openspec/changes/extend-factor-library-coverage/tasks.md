@@ -90,7 +90,7 @@
 
 ## 13. 验证与收口
 
-- [ ] 13.1 P1 上线后重放 translator 阶段 `untranslatable`（834 条，零 LLM；`scripts/replay_factor_harvest.py`），按 60 条 / 批分批进闸；解锁条数与各闸去向落 `tests/validation/`
+- [ ] 13.1 P1 上线后执行**离线确定性复译测量**（`tests/scripts/measure_dsl_unlock.py`：对状态文件已记录的 translator 阶段 qlib 表达式重译 + 复杂度复验，零 LLM、零生产写入；生产重放脚本每条都重走 LLM 转译且非确定性，另行确认）；解锁条数与分桶落 `tests/validation/`
 - [ ] 13.2 人工验证报告 `tests/validation/YYYY-MM-DD-extend-factor-library-coverage-validation.md`：回填后真实读数（`float_cap` / `turnover` 覆盖率、与腾讯抽样比对）、两条真实口径基线的过闸结论、L2 缺口披露、存量 12 条 active 读数不变
 - [ ] 13.3 全量门禁：`uv run pytest` / `uv run ruff check` / `uv run ruff format --check` / `uv run mypy`
 - [ ] 13.4 研究笔记回填「已落地」状态

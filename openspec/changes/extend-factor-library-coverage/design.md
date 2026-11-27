@@ -145,7 +145,7 @@
 
 ## Migration Plan
 
-1. **P1（纯代码）**：自由参数去重计数 + 19 个算子。上线后重放 translator 阶段的 834 条 `untranslatable`（零 LLM 调用，`scripts/replay_factor_harvest.py`），记录解锁条数与各闸去向。回滚 = revert，存量表达式不受影响。
+1. **P1（纯代码）**：自由参数去重计数 + 19 个算子。上线后做**离线确定性复译测量**（`tests/scripts/measure_dsl_unlock.py`：对 harvest 状态文件已记录的 834 条 translator 阶段 qlib 表达式重译 + `parse()` 复杂度复验，零 LLM、零生产写入），记录解锁条数；生产重放（`scripts/replay_factor_harvest.py`，写库且每条重走 LLM 转译、非确定性）另行确认。回滚 = revert，存量表达式不受影响。
 2. **P2（数据面）**：侧表 / 读路径 / 面板可选字段 / 闸①预检 / 桶归属 / builtin 七条 / 选股披露一次部署 → 夜间容器内回填参考数据历史 → 行业门类探针与全量回填 → 内置注册日批自动评估两条真实口径基线 → 人工验证读数落 `tests/validation/`。回滚：读路径自带旧库退化，侧表与主表新列保留无害。
 3. **P3（提案侧）**：category 九类 + 提示词模板 + `deploy_prompts.py`，下次月批（每月 1 日 10:00）生效；distro 生成侧补丁的措辞核对在生成器恢复前完成。
 
