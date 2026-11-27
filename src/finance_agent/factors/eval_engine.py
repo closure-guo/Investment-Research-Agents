@@ -27,6 +27,18 @@
 - ``ts_std`` 同为样本标准差（ddof=1）；``ts_rank`` 为窗口内「当前值」的平均秩
   百分比（pandas ``rank(pct=True)`` 口径，含并列平均秩）。
 - ``ts_corr(a,b,w)`` = 滚动皮尔逊相关（两帧逐格对齐）。
+- **extend-factor-library-coverage 增量口径**：比较算子（``gt/lt/ge/le/eq/ne``）
+  产出 1.0/0.0 浮点帧、任一侧 NaN → NaN；``if_else`` 条件非 0 取 a、为 0 取 b、
+  NaN → NaN；``ts_median/ts_skew/ts_kurt/ts_quantile`` 直接委托 pandas rolling
+  （热身期 NaN、窗口含 NaN → NaN；``ts_quantile`` 的 q 由解析期保证 ∈ [0,1] 且
+  线性插值）；``ts_count`` 是唯一**容忍窗口内 NaN** 的时序算子（窗口内全 NaN →
+  NaN、窗口不足 → NaN）；``ts_decay_linear`` 权重 1..N（最近最重、分母 N(N+1)/2）；
+  ``ts_arg_max/ts_arg_min`` 为窗口内极值距当日期数（0 = 当日、并列取最近、窗口含
+  NaN → NaN）；``ts_resid(y,x,w)`` 为滚动 OLS ``y = a + b·x`` 窗口末点残差
+  （``b = cov/var`` ddof=0；x 方差 0 或窗口含 NaN → NaN）；``cs_mean`` 当日全市场
+  等权均值广播（有效样本 < ``MIN_IC_SAMPLES`` → 当日 NaN）；``ind_neutralize`` 行业
+  内去均值（标签缺失或组内有效样本 < ``MIN_GROUP_SAMPLES``=5 → NaN；标签须逐列
+  恒定；面板未携带 ``groups["industry"]`` → ValueError）；``exp`` 结果非有限 → NaN。
 
 复杂度：``ts_rank`` 经 ``rolling.apply`` 实现（窗口内排名无原生向量化算子）；
 其余算子均为原生向量化。
@@ -83,10 +95,16 @@ class MarketPanel:
     ``rows_present``（可选）：date×code 布尔帧，True = 该格有**非停牌**快照行
     （#512 闸①分母口径「当日有行」；停牌合成行与缺行同待遇）。``None`` = 未提供
     （直接构造的测试面板），消费方回退全面板口径。
+
+    ``groups``（可选，extend-factor-library-coverage）：参考分组帧字典（键如
+    ``"industry"``），值与 ``fields`` 同形（date×code 标签帧；缺失格 NaN）。
+    ``None`` = 未携带——引用分组的算子（``ind_neutralize``）求值报错，
+    MUST NOT 退化为全市场口径。
     """
 
     fields: dict[str, pd.DataFrame]
     rows_present: pd.DataFrame | None = None
+    groups: dict[str, pd.DataFrame] | None = None
 
 
 # ── 求值引擎 ────────────────────────────────────────────────────────────────
@@ -126,6 +144,13 @@ def _evaluate_call(node: Call, panel: MarketPanel) -> pd.DataFrame:
         left = evaluate(node.args[0], panel)
         right = evaluate(node.args[1], panel)
         return left.rolling(window, min_periods=window).corr(right)
+    if node.op == "ts_resid":
+        window = _window_of(node)
+        left = evaluate(node.args[0], panel)
+        right = evaluate(node.args[1], panel)
+        return _ts_resid(left, right, window)
+    if node.op == "ind_neutralize":
+        return _ind_neutralize(evaluate(node.args[0], panel), panel)
     elementwise = _ELEMENTWISE_OPS.get(node.op)
     if elementwise is None:
         raise ValueError(f"未知算子 {node.op!r}（evaluate 不支持）")
@@ -288,6 +313,82 @@ def _ts_arg_extreme(frame: pd.DataFrame, window: int, *, largest: bool) -> pd.Da
     return _wrap(result, frame)
 
 
+# ── extend-factor-library-coverage：回归与横截面 ─────────────────────────────
+
+# ind_neutralize 组内有效样本下限（spec 逐字：< 5 → NaN）
+MIN_GROUP_SAMPLES: int = 5
+
+
+def _ts_resid(left: pd.DataFrame, right: pd.DataFrame, window: int) -> pd.DataFrame:
+    """逐标的滚动 OLS ``y = a + b·x`` 在窗口末点的残差。
+
+    闭式向量化：``b = cov/var``（ddof=0 两侧一致）、``a = ȳ − b·x̄``；
+    任一序列窗口含 NaN 或 ``x`` 窗口内方差为 0 → NaN。
+    """
+    y, x = left.align(right)
+    mean_y = y.rolling(window, min_periods=window).mean()
+    mean_x = x.rolling(window, min_periods=window).mean()
+    var_x = x.rolling(window, min_periods=window).var(ddof=0)
+    mean_yx = (y * x).rolling(window, min_periods=window).mean()
+    beta = (mean_yx - mean_y * mean_x) / var_x.where(var_x != 0)
+    alpha = mean_y - beta * mean_x
+    return y - (alpha + beta * x)
+
+
+def cross_section_mean(frame: pd.DataFrame, *, min_samples: int = MIN_IC_SAMPLES) -> pd.DataFrame:
+    """当日全市场等权均值，广播到每只标的（含当日值缺失者）。
+
+    当日有效样本 < ``min_samples`` → 当日 NaN（防止稀疏字段的「全市场均值」
+    被少数几只票决定）。公开命名（后续闸④组合构建可复用，与
+    ``cross_section_zscore`` 同款）。
+    """
+    counts = frame.notna().sum(axis=1)
+    means = frame.mean(axis=1)
+    broadcast = pd.DataFrame(
+        np.tile(means.to_numpy()[:, None], (1, frame.shape[1])),
+        index=frame.index,
+        columns=frame.columns,
+    )
+    return broadcast.where(counts >= min_samples)
+
+
+def _ind_neutralize(values: pd.DataFrame, panel: MarketPanel) -> pd.DataFrame:
+    """行业中性化：当日同行业（面板 ``groups["industry"]``）内去均值。
+
+    行业标签缺失或组内有效样本 < ``MIN_GROUP_SAMPLES`` → NaN；标签须逐列恒定
+    （随日期变化 → ValueError，MUST NOT 静默取首值）；面板未携带分组 → ValueError
+    （MUST NOT 退化为全市场去均值）。
+    """
+    labels = (panel.groups or {}).get("industry")
+    if labels is None:
+        raise ValueError("面板缺少 industry 分组（ind_neutralize 需要行业标签帧）")
+    label_by_col: dict[str, str] = {}
+    for column in values.columns:
+        series = labels[column] if column in labels.columns else None
+        observed: list[object] = list(series.dropna().unique()) if series is not None else []
+        if len(observed) == 0:
+            continue
+        if len(observed) > 1:
+            raise ValueError(f"列 {column!r} 的 industry 标签随日期变化（须逐列恒定）")
+        label_by_col[column] = str(observed[0])
+    by_label: dict[str, list[str]] = {}
+    for column, label in label_by_col.items():
+        by_label.setdefault(label, []).append(column)
+    out = pd.DataFrame(np.nan, index=values.index, columns=values.columns)
+    for columns in by_label.values():
+        sub = values[columns]
+        counts = sub.notna().sum(axis=1)
+        out[columns] = sub.sub(sub.mean(axis=1), axis=0).where(counts >= MIN_GROUP_SAMPLES)
+    return out
+
+
+def _exp(frame: pd.DataFrame) -> pd.DataFrame:
+    """逐元素自然指数；结果非有限（溢出）→ NaN（与 div/log 的「不产 inf」同约定）。"""
+    with np.errstate(over="ignore", invalid="ignore"):
+        values = np.exp(frame.to_numpy(dtype="float64"))
+    return _wrap(np.where(np.isfinite(values), values, np.nan), frame)
+
+
 _WINDOW_OPS: dict[str, Callable[[pd.DataFrame, int], pd.DataFrame]] = {
     "ts_mean": _ts_mean,
     "ts_std": _ts_std,
@@ -417,6 +518,10 @@ _ELEMENTWISE_OPS: dict[str, Callable[..., pd.DataFrame]] = {
     "eq": _compare(operator.eq),
     "ne": _compare(operator.ne),
     "if_else": _if_else,
+    # extend-factor-library-coverage：回归与横截面（ind_neutralize/ts_resid 走
+    # _evaluate_call 特判分支——需要面板分组 / 双序列窗口，不进本表）
+    "cs_mean": cross_section_mean,
+    "exp": _exp,
 }
 
 

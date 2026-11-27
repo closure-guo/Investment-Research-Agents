@@ -83,6 +83,11 @@ SPEC_OPS = {
     "ts_decay_linear",
     "ts_arg_max",
     "ts_arg_min",
+    # extend-factor-library-coverage：回归与横截面
+    "ts_resid",
+    "cs_mean",
+    "ind_neutralize",
+    "exp",
 }
 SPEC_FIELDS = {"open", "high", "low", "close", "volume", "amount"}
 SPEC_ARITY = {
@@ -122,6 +127,10 @@ SPEC_ARITY = {
     "ts_decay_linear": 2,
     "ts_arg_max": 2,
     "ts_arg_min": 2,
+    "ts_resid": 3,
+    "cs_mean": 1,
+    "ind_neutralize": 1,
+    "exp": 1,
 }
 # 每个算子一份合法样例（window 位置一律正整数数字字面量）
 _WINDOW_OPS = {
@@ -143,6 +152,7 @@ _WINDOW_OPS = {
     "ts_decay_linear",
     "ts_arg_max",
     "ts_arg_min",
+    "ts_resid",
 }
 _OP_SAMPLES = {
     "ts_mean": "ts_mean(close, 5)",
@@ -181,6 +191,10 @@ _OP_SAMPLES = {
     "ts_decay_linear": "ts_decay_linear(close, 5)",
     "ts_arg_max": "ts_arg_max(close, 5)",
     "ts_arg_min": "ts_arg_min(close, 5)",
+    "ts_resid": "ts_resid(close, volume, 5)",
+    "cs_mean": "cs_mean(close)",
+    "ind_neutralize": "ind_neutralize(close)",
+    "exp": "exp(close)",
 }
 
 
@@ -200,12 +214,12 @@ def _assert_parse_error(expr: str, *, contains: Sequence[str] = (), pos: int | N
 # ── Task 1: 枚举逐字 ─────────────────────────────────────────────────────────
 
 
-def test_ops_enumeration_verbatim_36_names():
+def test_ops_enumeration_verbatim_40_names():
     """算子枚举逐字（spec 列表：初版 15 + ref/ts_sum/sqrt + sign/ts_max/ts_min
-    + gt/lt/ge/le/eq/ne/if_else + 8 个时序统计算子——extend-factor-library-coverage）；
-    元数表与 D2 逐条一致。"""
+    + gt/lt/ge/le/eq/ne/if_else + 8 个时序统计算子 + ts_resid/cs_mean/ind_neutralize/exp
+    ——extend-factor-library-coverage）；元数表与 D2 逐条一致。"""
     assert OPS == SPEC_OPS
-    assert len(OPS) == 36
+    assert len(OPS) == 40
     assert ARITY == SPEC_ARITY
     assert FIELDS == SPEC_FIELDS
     assert len(FIELDS) == 6

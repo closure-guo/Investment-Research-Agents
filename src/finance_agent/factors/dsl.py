@@ -83,6 +83,11 @@ OPS: frozenset[str] = frozenset(
         "ts_decay_linear",
         "ts_arg_max",
         "ts_arg_min",
+        # extend-factor-library-coverage：回归与横截面（残差/市场均值/行业中性化/指数）
+        "ts_resid",
+        "cs_mean",
+        "ind_neutralize",
+        "exp",
     }
 )
 
@@ -126,6 +131,10 @@ ARITY: dict[str, int] = {
     "ts_decay_linear": 2,
     "ts_arg_max": 2,
     "ts_arg_min": 2,
+    "ts_resid": 3,
+    "cs_mean": 1,
+    "ind_neutralize": 1,
+    "exp": 1,
 }
 
 # window 参数所在位置（D2）：必须为正整数数字字面量
@@ -147,6 +156,7 @@ WINDOW_ARG_INDEX: dict[str, int] = {
     "ts_decay_linear": 1,
     "ts_arg_max": 1,
     "ts_arg_min": 1,
+    "ts_resid": 2,
 }
 
 # 复杂度上限（解析期硬约束；默认路径超限即拒收）

@@ -5,36 +5,36 @@
 
 ## 1. 前置与基线
 
-- [ ] 1.1 冻结基线读数并落 `tests/validation/`：库实态（12 active 的表达式与 60 日 IC）、漏斗（2444 → 1772 不可译 → 653 进闸 → 12 入库）、不可译分桶、最近一个成功选股批次的 Top-100 排序
-- [ ] 1.2 `docs/factor-governance.md` 追加修订记录：自由参数计数口径由「Number 节点总数」改为「去重数值个数」，上限 3 不变（D4 裁决三的口径修订，附 398 条实测依据）
-- [ ] 1.3 确认 `update-harvest-factor-category` 的生产迁移已执行（§10 桶归属的前提；未执行则先执行其遗留任务）
+- [x] 1.1 冻结基线读数并落 `tests/validation/`：库实态（12 active 的表达式与 60 日 IC）、漏斗（2444 → 1772 不可译 → 653 进闸 → 12 入库）、不可译分桶、最近一个成功选股批次的 Top-100 排序
+- [x] 1.2 `docs/factor-governance.md` 追加修订记录：自由参数计数口径由「Number 节点总数」改为「去重数值个数」，上限 3 不变（D4 裁决三的口径修订，附 398 条实测依据）
+- [x] 1.3 确认 `update-harvest-factor-category` 的生产迁移已执行（§10 桶归属的前提；未执行则先执行其遗留任务）——复核：**未执行**（category 仍为 `外部×12`，见基线文档 §5）；执行随 §10 前移（P2）
 
 ## 2. DSL：自由参数去重计数（P1）
 
-- [ ] 2.1 失败测试（`tests/factors/test_dsl.py`）：同取值重复出现的表达式解析成功、去重后仍超上限拒收、`1` 与 `1.0` 计一次、错误消息格式不变
-- [ ] 2.2 实现 `count_free_params` 按去重取值计数；`docs`/docstring 的 D4 口径同步
-- [ ] 2.3 四目录 grep 计数口径的全部消费方并同步（提示词模板、契约块措辞、既有断言）
-- [ ] 2.4 `tests/factors` 全绿 + ruff + mypy
+- [x] 2.1 失败测试（`tests/factors/test_dsl.py`）：同取值重复出现的表达式解析成功、去重后仍超上限拒收、`1` 与 `1.0` 计一次、错误消息格式不变
+- [x] 2.2 实现 `count_free_params` 按去重取值计数；`docs`/docstring 的 D4 口径同步
+- [x] 2.3 四目录 grep 计数口径的全部消费方并同步（提示词模板、契约块措辞、既有断言）——契约块数值 import 自真相源无需改；**提示词模板措辞随 §12.2 统一改并一次 deploy**（P1 不动 Langfuse 快照，避免双次发布）
+- [x] 2.4 `tests/factors` 全绿 + ruff + mypy
 
 ## 3. DSL：比较与条件算子（P1）
 
-- [ ] 3.1 失败测试：六个比较算子与 `if_else` 的解析、求值、NaN 传播、事件计数与零分母保护两个场景
-- [ ] 3.2 实现算子表（`ARITY`）与求值（比较结果为 1/0 浮点帧，NaN 显式传播）
-- [ ] 3.3 `qlib_translate` 补 `Greater/Less/Gt/Ge/Lt/Le/Eq/Ne/If` 映射，逐值等价核对，既有映射回归全绿
-- [ ] 3.4 翻译器支持对括号表达式的一元负号（严格等价改写 `sub(0,x)`），既有负数字面量规则回归不变
+- [x] 3.1 失败测试：六个比较算子与 `if_else` 的解析、求值、NaN 传播、事件计数与零分母保护两个场景
+- [x] 3.2 实现算子表（`ARITY`）与求值（比较结果为 1/0 浮点帧，NaN 显式传播）
+- [x] 3.3 `qlib_translate` 补 `Greater/Less/Gt/Ge/Lt/Le/Eq/Ne/If` 映射，逐值等价核对，既有映射回归全绿
+- [x] 3.4 翻译器支持对括号表达式的一元负号（严格等价改写 `sub(0,x)`），既有负数字面量规则回归不变
 
 ## 4. DSL：时序统计与计数算子（P1）
 
-- [ ] 4.1 失败测试：`ts_median` / `ts_quantile`（含 q 越界解析期拒收）/ `ts_count` / `ts_skew` / `ts_kurt` / `ts_decay_linear` / `ts_arg_max` / `ts_arg_min` 的规范场景
-- [ ] 4.2 实现各算子（向量化；`ts_skew` / `ts_kurt` 与 pandas rolling 逐值一致；`ts_arg_*` 按行分块控内存）
-- [ ] 4.3 `qlib_translate` 补 `Med/Quantile/Count/Skew/Kurt/WMA` 映射，既有映射回归全绿
-- [ ] 4.4 性能预算测试：500 × 5500 面板上各新算子单次求值不超过 `ts_rank` 同量级（断言上限）
+- [x] 4.1 失败测试：`ts_median` / `ts_quantile`（含 q 越界解析期拒收）/ `ts_count` / `ts_skew` / `ts_kurt` / `ts_decay_linear` / `ts_arg_max` / `ts_arg_min` 的规范场景
+- [x] 4.2 实现各算子（向量化；`ts_skew` / `ts_kurt` 与 pandas rolling 逐值一致；`ts_arg_*` 按行分块控内存）
+- [x] 4.3 `qlib_translate` 补 `Med/Quantile/Count/Skew/Kurt/WMA` 映射，既有映射回归全绿
+- [x] 4.4 性能预算测试：500 × 5500 面板上各新算子单次求值不超过 `ts_rank` 同量级（断言上限）
 
 ## 5. DSL：回归与横截面算子（P1）
 
-- [ ] 5.1 失败测试：`ts_resid` / `cs_mean` / `ind_neutralize` / `exp` 的规范场景（含面板未携带 `industry` 分组时求值报错）
-- [ ] 5.2 实现 `ts_resid`（滚动均值 / 协方差闭式）、`cs_mean`、`ind_neutralize`、`exp`
-- [ ] 5.3 `dsl.py` / `eval_engine.py` 模块文档的算子枚举与口径说明同步
+- [x] 5.1 失败测试：`ts_resid` / `cs_mean` / `ind_neutralize` / `exp` 的规范场景（含面板未携带 `industry` 分组时求值报错）
+- [x] 5.2 实现 `ts_resid`（滚动均值 / 协方差闭式）、`cs_mean`、`ind_neutralize`、`exp`
+- [x] 5.3 `dsl.py` / `eval_engine.py` 模块文档的算子枚举与口径说明同步
 
 ## 6. 参考数据面：侧表与读路径（P2）
 

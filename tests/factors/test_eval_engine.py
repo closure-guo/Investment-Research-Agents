@@ -808,6 +808,108 @@ class TestTimeSeriesStatsEval:
             assert np.isnan(_eval(expr, panel)["A"].iloc[2]), expr
 
 
+# ── extend-factor-library-coverage：回归与横截面算子 ─────────────────────────
+
+
+class TestRegressionCrossSectionOps:
+    """ts_resid（滚动 OLS 残差）/ cs_mean（全市场均值广播）/ ind_neutralize（行业去均值）/
+    exp（自然指数，溢出 → NaN）。期望值逐条独立手写。"""
+
+    def test_ts_resid_closed_form(self):
+        panel = _panel(
+            close=_frame({"A": [3.0, 5.0, 8.0, 9.0]}),  # y
+            volume=_frame({"A": [1.0, 2.0, 3.0, 4.0]}),  # x
+        )
+        # 行3窗口 (1,3)(2,5)(3,8)：拟合 y=1/3+2.5x → 残差 8−47/6 = 1/6
+        # 行4窗口 (2,5)(3,8)(4,9)：拟合 y=4/3+2x → 残差 9−28/3 = −1/3
+        _assert_frame(
+            _eval("ts_resid(close,volume,3)", panel),
+            _frame({"A": [_NAN, _NAN, 1.0 / 6.0, -1.0 / 3.0]}),
+        )
+
+    def test_ts_resid_perfect_fit_and_constant_x(self):
+        panel = _panel(
+            close=_frame({"A": [3.0, 5.0, 7.0, 9.0]}),  # y = 2x + 1
+            volume=_frame({"A": [1.0, 2.0, 3.0, 4.0]}),
+        )
+        got = _eval("ts_resid(close,volume,3)", panel)["A"]
+        assert got.iloc[2] == pytest.approx(0.0, abs=1e-12)
+        assert got.iloc[3] == pytest.approx(0.0, abs=1e-12)
+        const_x = _panel(
+            close=_frame({"A": [3.0, 5.0, 8.0, 9.0]}),
+            volume=_frame({"A": [1.0, 1.0, 1.0, 1.0]}),
+        )
+        got = _eval("ts_resid(close,volume,3)", const_x)["A"]
+        assert np.isnan(got.iloc[2]) and np.isnan(got.iloc[3])  # x 方差 0 → NaN
+
+    def test_ts_resid_window_nan(self):
+        panel = _panel(
+            close=_frame({"A": [3.0, 5.0, _NAN, 9.0]}),
+            volume=_frame({"A": [1.0, 2.0, 3.0, 4.0]}),
+        )
+        got = _eval("ts_resid(close,volume,3)", panel)["A"]
+        assert np.isnan(got.iloc[2]) and np.isnan(got.iloc[3])
+
+    def test_cs_mean_broadcast_and_min_samples(self):
+        frame = _frame({f"C{i:03d}": [float(i + 1)] * 2 for i in range(30)})
+        extra = _frame({"CX": [_NAN, _NAN]})
+        panel = _panel(close=pd.concat([frame, extra], axis=1))
+        got = _eval("cs_mean(close)", panel)
+        # 1..30 等权均值 15.5，广播到含 NaN 的列
+        assert got.iloc[0].round(6).nunique() == 1
+        assert got.iloc[0]["CX"] == pytest.approx(15.5)
+        assert got.iloc[1]["C000"] == pytest.approx(15.5)
+        panel29 = _panel(close=frame.iloc[:, :29])
+        assert _eval("cs_mean(close)", panel29).iloc[0].isna().all()  # 29 < MIN_IC_SAMPLES
+
+    def test_ind_neutralize(self):
+        labels = pd.DataFrame(
+            {
+                "A": ["G1", "G1"],
+                "B": ["G1", "G1"],
+                "C": ["G1", "G1"],
+                "D": ["G1", "G1"],
+                "E": ["G1", "G1"],
+                "F": ["G2", "G2"],
+                "G": [_NAN, _NAN],
+            },
+            index=_dates(2),
+        )
+        close = _frame(
+            {
+                "A": [1.0, 1.0],
+                "B": [2.0, 2.0],
+                "C": [3.0, 3.0],
+                "D": [4.0, 4.0],
+                "E": [5.0, 5.0],
+                "F": [9.0, 9.0],
+                "G": [7.0, 7.0],
+            }
+        )
+        panel = MarketPanel(fields={"close": close}, groups={"industry": labels})
+        got = _eval("ind_neutralize(close)", panel)
+        row = got.iloc[0]
+        assert row[["A", "B", "C", "D", "E"]].round(6).tolist() == [-2.0, -1.0, 0.0, 1.0, 2.0]
+        assert np.isnan(row["F"])  # 组内有效样本 1 < 5
+        assert np.isnan(row["G"])  # 无行业标签
+
+    def test_ind_neutralize_requires_group(self):
+        panel = _panel(close=_frame({"A": [1.0, 2.0]}))
+        with pytest.raises(ValueError, match="industry"):
+            _eval("ind_neutralize(close)", panel)
+
+    def test_exp_overflow_and_nan(self):
+        panel = _panel(close=_frame({"A": [0.0, 1.0, 1e308]}))
+        got = _eval("exp(close)", panel)["A"]
+        assert got.iloc[0] == pytest.approx(1.0)
+        assert got.iloc[1] == pytest.approx(np.e)
+        assert np.isnan(got.iloc[2])  # exp(1e308) → inf → NaN（不泄漏 inf）
+        log_panel = _panel(close=_frame({"A": [10.0, -1.0]}))
+        got2 = _eval("exp(log(close))", log_panel)["A"]
+        assert got2.iloc[0] == pytest.approx(10.0)
+        assert np.isnan(got2.iloc[1])  # log 非正 → NaN
+
+
 def test_new_ops_perf_budget():
     """预算护栏（extend-factor-library-coverage delta §4.4）：500×5500 面板上每个
     新时序算子单次求值 ≤ max(4× ts_rank, 1.0s)——窗口扫描族与 ts_rank 同量级。
