@@ -5,7 +5,8 @@
   括号不配对 / 空参数 / 多余字符 → ``DSLParseError``（消息必须含字符位置）；
 - D2 元数表：window 位置必须是正整数数字字面量（``10.5`` / ``0`` / 非常量 → 报错）；
 - D3 深度口径：叶子（Field/Number）深度 1；Call = 1 + max(子节点深度)；
-- D4 自由参数 = Number 节点总数（含 window）；字段种类 = 去重后的 Field 名数量；
+- D4 自由参数 = Number 节点**去重取值**个数（1 与 1.0 同值；治理 D5，2026-11-27）；
+  字段种类 = 去重后的 Field 名数量；
 - D5 规范化：结合律展平（add/mul/max/min）+ 交换律排序 + 幂等；serialize 紧凑形态；
 - D6 同构：同 op/同元数/字段名位置对应、数字只按「有」匹配（取值忽略），规范化后比较；
 - D7 ``parse(enforce_complexity=False)`` 仅供工具/验证（Alpha101 round-trip 旁路），
@@ -65,6 +66,28 @@ SPEC_OPS = {
     "sign",
     "ts_max",
     "ts_min",
+    # extend-factor-library-coverage：比较与条件
+    "gt",
+    "lt",
+    "ge",
+    "le",
+    "eq",
+    "ne",
+    "if_else",
+    # extend-factor-library-coverage：时序统计与计数
+    "ts_median",
+    "ts_skew",
+    "ts_kurt",
+    "ts_quantile",
+    "ts_count",
+    "ts_decay_linear",
+    "ts_arg_max",
+    "ts_arg_min",
+    # extend-factor-library-coverage：回归与横截面
+    "ts_resid",
+    "cs_mean",
+    "ind_neutralize",
+    "exp",
 }
 SPEC_FIELDS = {"open", "high", "low", "close", "volume", "amount"}
 SPEC_ARITY = {
@@ -89,6 +112,25 @@ SPEC_ARITY = {
     "sign": 1,
     "ts_max": 2,
     "ts_min": 2,
+    "gt": 2,
+    "lt": 2,
+    "ge": 2,
+    "le": 2,
+    "eq": 2,
+    "ne": 2,
+    "if_else": 3,
+    "ts_median": 2,
+    "ts_skew": 2,
+    "ts_kurt": 2,
+    "ts_quantile": 3,
+    "ts_count": 2,
+    "ts_decay_linear": 2,
+    "ts_arg_max": 2,
+    "ts_arg_min": 2,
+    "ts_resid": 3,
+    "cs_mean": 1,
+    "ind_neutralize": 1,
+    "exp": 1,
 }
 # 每个算子一份合法样例（window 位置一律正整数数字字面量）
 _WINDOW_OPS = {
@@ -101,6 +143,16 @@ _WINDOW_OPS = {
     "ts_sum",
     "ts_max",
     "ts_min",
+    # extend-factor-library-coverage：时序统计与计数（窗口位 1；ts_quantile 的 q 为第 3 参）
+    "ts_median",
+    "ts_skew",
+    "ts_kurt",
+    "ts_quantile",
+    "ts_count",
+    "ts_decay_linear",
+    "ts_arg_max",
+    "ts_arg_min",
+    "ts_resid",
 }
 _OP_SAMPLES = {
     "ts_mean": "ts_mean(close, 5)",
@@ -124,6 +176,25 @@ _OP_SAMPLES = {
     "sign": "sign(close)",
     "ts_max": "ts_max(close, 5)",
     "ts_min": "ts_min(close, 5)",
+    "gt": "gt(close, volume)",
+    "lt": "lt(close, volume)",
+    "ge": "ge(close, volume)",
+    "le": "le(close, volume)",
+    "eq": "eq(close, volume)",
+    "ne": "ne(close, volume)",
+    "if_else": "if_else(gt(close, volume), close, open)",
+    "ts_median": "ts_median(close, 5)",
+    "ts_skew": "ts_skew(close, 5)",
+    "ts_kurt": "ts_kurt(close, 5)",
+    "ts_quantile": "ts_quantile(close, 5, 0.5)",
+    "ts_count": "ts_count(close, 5)",
+    "ts_decay_linear": "ts_decay_linear(close, 5)",
+    "ts_arg_max": "ts_arg_max(close, 5)",
+    "ts_arg_min": "ts_arg_min(close, 5)",
+    "ts_resid": "ts_resid(close, volume, 5)",
+    "cs_mean": "cs_mean(close)",
+    "ind_neutralize": "ind_neutralize(close)",
+    "exp": "exp(close)",
 }
 
 
@@ -143,10 +214,12 @@ def _assert_parse_error(expr: str, *, contains: Sequence[str] = (), pos: int | N
 # ── Task 1: 枚举逐字 ─────────────────────────────────────────────────────────
 
 
-def test_ops_enumeration_verbatim_21_names():
-    """算子枚举逐字（spec 列表：初版 15 + ref/ts_sum/sqrt + sign/ts_max/ts_min）；元数表与 D2 逐条一致。"""
+def test_ops_enumeration_verbatim_40_names():
+    """算子枚举逐字（spec 列表：初版 15 + ref/ts_sum/sqrt + sign/ts_max/ts_min
+    + gt/lt/ge/le/eq/ne/if_else + 8 个时序统计算子 + ts_resid/cs_mean/ind_neutralize/exp
+    ——extend-factor-library-coverage）；元数表与 D2 逐条一致。"""
     assert OPS == SPEC_OPS
-    assert len(OPS) == 21
+    assert len(OPS) == 40
     assert ARITY == SPEC_ARITY
     assert FIELDS == SPEC_FIELDS
     assert len(FIELDS) == 6
@@ -688,3 +761,115 @@ def test_new_ops_window_and_arity_forms_refused(bad: str):
     """窗口形态（正整数数字字面量）与元数照旧硬校验。"""
     with pytest.raises(DSLParseError):
         parse(bad)
+
+
+# ── extend-factor-library-coverage：自由参数按去重取值计数 ───────────────────
+
+
+class TestFreeParamsDedup:
+    """治理 D5（2026-11-27）：自由参数 = Number 节点去重取值个数，上限 3 不变。
+
+    依据：存量复杂度拒译 814 条中 398 条「Number 节点 >3、去重后 ≤3」（同一窗口
+    数字重复出现被重复计数）；重复出现的相同常数不是独立拟合自由度。
+    """
+
+    def test_repeated_values_count_once(self):
+        # Number 节点 6 个（1×4、20×2），去重后 {1, 20} = 2 ≤ 3 → 合法（旧口径 6 → 拒收）
+        node = parse(
+            "div(ts_mean(sub(div(close,ref(close,1)),1),20),"
+            "ts_std(sub(div(close,ref(close,1)),1),20))"
+        )
+        assert count_free_params(node) == 2
+
+    def test_int_and_float_same_value(self):
+        node = parse("sub(mul(close,1),mul(close,1.0))")
+        assert count_free_params(node) == 1
+
+    def test_distinct_values_still_rejected(self):
+        # 去重后 {5, 10, 20, 0.5} = 4 > 3 → 拒收，消息格式逐字
+        with pytest.raises(FactorComplexityError) as excinfo:
+            parse("sub(div(ts_mean(close,5),add(ts_std(close,10),ts_max(close,20))),0.5)")
+        assert "自由参数 4 > 上限 3" in str(excinfo.value)
+
+    def test_window_counts_and_field_free(self):
+        assert count_free_params(parse("ts_mean(close,20)")) == 1
+        assert count_free_params(parse("close")) == 0
+
+    def test_repeated_value_form_now_admitted_shape(self):
+        # 生产实测被拒形态 retvol20 族：Mean(ret,20)/Std(ret,20)+ε——去重后 {1, 20, 1e-12} = 3 → 合法
+        node = parse(
+            "div(ts_mean(sub(div(close,ref(close,1)),1),20),"
+            "add(ts_std(sub(div(close,ref(close,1)),1),20),0.000000000001))"
+        )
+        assert count_free_params(node) == 3
+        assert parse(serialize(node)) == node
+
+
+# ── extend-factor-library-coverage：比较与条件算子 ───────────────────────────
+
+
+class TestComparisonConditionalParse:
+    """比较（gt/lt/ge/le/eq/ne，2 参）与条件（if_else，3 参）：解析 + round-trip + 错误形态。"""
+
+    def test_parse_and_roundtrip(self):
+        for expr in (
+            "gt(close, 10)",
+            "if_else(gt(close, 10), volume, 0)",
+            "if_else(eq(sub(high, low), 0), 0, div(sub(close, low), sub(high, low)))",
+        ):
+            node = parse(expr)
+            assert parse(serialize(node)) == node
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["gt(close)", "if_else(close, high, low, open)", "ne(volume)"],
+    )
+    def test_arity_refused(self, bad: str):
+        _assert_parse_error(bad)
+
+
+# ── extend-factor-library-coverage：时序统计与计数算子 ───────────────────────
+
+
+class TestTimeSeriesStatsParse:
+    """ts_median/ts_skew/ts_kurt/ts_count/ts_decay_linear/ts_arg_max/ts_arg_min（2 参）
+    与 ts_quantile（3 参，q ∈ [0,1] 数字字面量，解析期校验）。"""
+
+    def test_parse_and_roundtrip(self):
+        for expr in (
+            "ts_median(close, 5)",
+            "ts_skew(close, 5)",
+            "ts_kurt(close, 5)",
+            "ts_quantile(close, 5, 0.5)",
+            "ts_quantile(close, 5, 1)",
+            "ts_count(close, 5)",
+            "ts_decay_linear(close, 5)",
+            "ts_arg_max(close, 5)",
+            "ts_arg_min(close, 5)",
+        ):
+            node = parse(expr)
+            assert parse(serialize(node)) == node
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "ts_quantile(close, 5, 1.5)",  # q 越界
+            "ts_quantile(close, 5, 0.5, 1)",  # 元数 4
+            "ts_quantile(close, 5)",  # 元数 2
+            "ts_median(close)",  # 元数 1
+            "ts_median(close, 0)",  # window 须正整数
+        ],
+    )
+    def test_invalid_forms_refused(self, bad: str):
+        _assert_parse_error(bad)
+
+    def test_quantile_q_must_be_numeric_literal(self):
+        # close 是合法字段表达式但非数字字面量 → 命中 q 校验（未知标识符 x 在参数解析期即拒收，另测）
+        _assert_parse_error("ts_quantile(close, 5, close)", contains=["q 参数"])
+        _assert_parse_error("ts_quantile(close, 5, x)")
+
+    def test_window_position_is_index_one(self):
+        node = parse("ts_quantile(close, 5, 0.25)")
+        assert isinstance(node, Call)
+        assert node.args[1] == Number(5)
+        assert node.args[2] == Number(0.25)

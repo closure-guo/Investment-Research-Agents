@@ -11,8 +11,8 @@
   字面量**（``ts_mean(close, 10.5)`` / ``ts_mean(close, 0)`` / ``ts_mean(close, x)``
   → ``DSLParseError``）；其余位置数字允许整数或小数（D1：非负）。
 - **D3 深度口径**：叶子（Field/Number）深度 1；Call 深度 = 1 + max(子节点深度)。
-- **D4 自由参数** = AST 中 Number 节点总数（含 window）；字段种类 = 去重后的
-  Field 名数量。
+- **D4 自由参数** = Number 节点**去重取值**个数（``1`` 与 ``1.0`` 同值；含 window；
+  治理 D5 口径修订，2026-11-27）；字段种类 = 去重后的 Field 名数量。
 - **D5 规范化**：① 结合律展平（同 op 且 op ∈ {add, mul, max, min}）；② 交换律排序
   （对 commutative op 的子节点按规范序列化字符串排序）；③ 幂等；④
   ``serialize`` 输出紧凑形态 ``op(a,b)``（整数无小数点，小数去尾零）。
@@ -66,6 +66,28 @@ OPS: frozenset[str] = frozenset(
         "sign",
         "ts_max",
         "ts_min",
+        # extend-factor-library-coverage：比较与条件（事件计数/零分母保护族）
+        "gt",
+        "lt",
+        "ge",
+        "le",
+        "eq",
+        "ne",
+        "if_else",
+        # extend-factor-library-coverage：时序统计与计数（高阶矩/分位/衰减/极值位置族）
+        "ts_median",
+        "ts_skew",
+        "ts_kurt",
+        "ts_quantile",
+        "ts_count",
+        "ts_decay_linear",
+        "ts_arg_max",
+        "ts_arg_min",
+        # extend-factor-library-coverage：回归与横截面（残差/市场均值/行业中性化/指数）
+        "ts_resid",
+        "cs_mean",
+        "ind_neutralize",
+        "exp",
     }
 )
 
@@ -94,6 +116,25 @@ ARITY: dict[str, int] = {
     "sign": 1,
     "ts_max": 2,
     "ts_min": 2,
+    "gt": 2,
+    "lt": 2,
+    "ge": 2,
+    "le": 2,
+    "eq": 2,
+    "ne": 2,
+    "if_else": 3,
+    "ts_median": 2,
+    "ts_skew": 2,
+    "ts_kurt": 2,
+    "ts_quantile": 3,
+    "ts_count": 2,
+    "ts_decay_linear": 2,
+    "ts_arg_max": 2,
+    "ts_arg_min": 2,
+    "ts_resid": 3,
+    "cs_mean": 1,
+    "ind_neutralize": 1,
+    "exp": 1,
 }
 
 # window 参数所在位置（D2）：必须为正整数数字字面量
@@ -107,6 +148,15 @@ WINDOW_ARG_INDEX: dict[str, int] = {
     "ts_sum": 1,
     "ts_max": 1,
     "ts_min": 1,
+    "ts_median": 1,
+    "ts_skew": 1,
+    "ts_kurt": 1,
+    "ts_quantile": 1,
+    "ts_count": 1,
+    "ts_decay_linear": 1,
+    "ts_arg_max": 1,
+    "ts_arg_min": 1,
+    "ts_resid": 2,
 }
 
 # 复杂度上限（解析期硬约束；默认路径超限即拒收）
@@ -188,13 +238,26 @@ def ast_depth(node: AstNode) -> int:
     return 1
 
 
-def count_free_params(node: AstNode) -> int:
-    """D4 自由参数计数 = AST 中 Number 节点总数（含 window 数字）。"""
+def _number_values(node: AstNode, values: set[int | float]) -> None:
+    """收集子树中全部 Number 取值（``1`` 与 ``1.0`` 同值：Python 相等且同哈希）。"""
     if isinstance(node, Number):
-        return 1
-    if isinstance(node, Call):
-        return sum(count_free_params(arg) for arg in node.args)
-    return 0
+        values.add(node.value)
+    elif isinstance(node, Call):
+        for arg in node.args:
+            _number_values(arg, values)
+
+
+def count_free_params(node: AstNode) -> int:
+    """D4 自由参数计数 = Number 节点**去重取值**个数（含 window）。
+
+    Previously: Number 节点总数——同一取值重复出现被重复计数（
+    ``Mean(ret,20)/Std(ret,20)`` 形态使 ``1``/``20`` 各计两次）。上限 3 不变；
+    重复出现的相同常数不是独立拟合自由度（治理 D5，2026-11-27 口径修订，
+    ``docs/factor-governance.md``；存量复杂度拒译 814 条中 398 条据此解锁）。
+    """
+    values: set[int | float] = set()
+    _number_values(node, values)
+    return len(values)
 
 
 def count_fields(node: AstNode) -> int:
@@ -375,6 +438,19 @@ class _Parser:
                 raise DSLParseError(
                     f"算子 {op!r} 的 window 参数必须是正整数数字字面量",
                     arg_positions[window_index],
+                )
+        if op == "ts_quantile":
+            # extend-factor-library-coverage：q 须为 [0,1] 内数字字面量（第 3 参）
+            q_node = args[2]
+            if not (
+                isinstance(q_node, Number)
+                and isinstance(q_node.value, (int, float))
+                and not isinstance(q_node.value, bool)
+                and 0.0 <= float(q_node.value) <= 1.0
+            ):
+                raise DSLParseError(
+                    "算子 'ts_quantile' 的 q 参数必须是 [0,1] 内数字字面量",
+                    arg_positions[2],
                 )
         return Call(op=op, args=tuple(args)), op_token.pos
 
