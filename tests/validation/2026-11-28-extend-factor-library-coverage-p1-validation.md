@@ -53,6 +53,16 @@ P1 代码全部落地且测试全绿；对生产收割状态文件做**离线确
 3. **P2/P3 未实施**：参考数据面、builtin 5→7、选股缺口披露、提案枚举与模板（tasks §6–§13 未勾）。提示词模板措辞随 P3 一次发布。
 4. 存量 12 条 active 因子的表达式与读数按设计「只放宽不收紧」——新口径下全部仍合法（`tests/factors` 回归覆盖），但生产库未做任何写操作。
 
-## 全量结果
+## 全量结果（`[实测]` 2026-11-28）
 
-（见 PR #629 的 CI 与本地全量 pytest 输出）
+- 本地全量 `uv run pytest`：**7546 passed / 15 skipped / 3 failed / 25 errors**（1048.6s）。
+- **归因：28 项失败/错误全部是宿主环境性，与本次改动无关（已做正控）**——
+  - 3 个 failed：`test_deploy_script.py::TestScriptModeCli::test_help_runs_in_script_mode`、
+    `test_prompt_history.py::TestScriptModeImports::test_help_runs_in_script_mode[sync_prompts.py|deploy_prompts.py]`；
+  - 25 个 errors：全在 `tests/test_deploy_script.py`（同一 fixture 链）。
+  - 共同原因：测试内 `uv run python scripts/*.py` 子进程起不来——
+    `Failed to initialize cache at C:\Users\Administrator\AppData\Local\uv\cache ... 拒绝访问 (os error 5)`
+    （宿主 uv 缓存目录权限，非代码缺陷）。
+  - **正控**：在同一分支基线 `8421efb2`（main 检出，未含本改动）重跑同一批 3 个 failed——
+    逐字复现（3 failed，同一 os error 5）。归因成立：**本变未引入回归**。
+- CI（PR #629 `lint-and-test` + E2E `stub`）：见 PR checks。
