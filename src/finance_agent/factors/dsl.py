@@ -11,8 +11,8 @@
   字面量**（``ts_mean(close, 10.5)`` / ``ts_mean(close, 0)`` / ``ts_mean(close, x)``
   → ``DSLParseError``）；其余位置数字允许整数或小数（D1：非负）。
 - **D3 深度口径**：叶子（Field/Number）深度 1；Call 深度 = 1 + max(子节点深度)。
-- **D4 自由参数** = AST 中 Number 节点总数（含 window）；字段种类 = 去重后的
-  Field 名数量。
+- **D4 自由参数** = Number 节点**去重取值**个数（``1`` 与 ``1.0`` 同值；含 window；
+  治理 D5 口径修订，2026-11-27）；字段种类 = 去重后的 Field 名数量。
 - **D5 规范化**：① 结合律展平（同 op 且 op ∈ {add, mul, max, min}）；② 交换律排序
   （对 commutative op 的子节点按规范序列化字符串排序）；③ 幂等；④
   ``serialize`` 输出紧凑形态 ``op(a,b)``（整数无小数点，小数去尾零）。
@@ -188,13 +188,26 @@ def ast_depth(node: AstNode) -> int:
     return 1
 
 
-def count_free_params(node: AstNode) -> int:
-    """D4 自由参数计数 = AST 中 Number 节点总数（含 window 数字）。"""
+def _number_values(node: AstNode, values: set[int | float]) -> None:
+    """收集子树中全部 Number 取值（``1`` 与 ``1.0`` 同值：Python 相等且同哈希）。"""
     if isinstance(node, Number):
-        return 1
-    if isinstance(node, Call):
-        return sum(count_free_params(arg) for arg in node.args)
-    return 0
+        values.add(node.value)
+    elif isinstance(node, Call):
+        for arg in node.args:
+            _number_values(arg, values)
+
+
+def count_free_params(node: AstNode) -> int:
+    """D4 自由参数计数 = Number 节点**去重取值**个数（含 window）。
+
+    Previously: Number 节点总数——同一取值重复出现被重复计数（
+    ``Mean(ret,20)/Std(ret,20)`` 形态使 ``1``/``20`` 各计两次）。上限 3 不变；
+    重复出现的相同常数不是独立拟合自由度（治理 D5，2026-11-27 口径修订，
+    ``docs/factor-governance.md``；存量复杂度拒译 814 条中 398 条据此解锁）。
+    """
+    values: set[int | float] = set()
+    _number_values(node, values)
+    return len(values)
 
 
 def count_fields(node: AstNode) -> int:

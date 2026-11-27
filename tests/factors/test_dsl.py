@@ -5,7 +5,8 @@
   括号不配对 / 空参数 / 多余字符 → ``DSLParseError``（消息必须含字符位置）；
 - D2 元数表：window 位置必须是正整数数字字面量（``10.5`` / ``0`` / 非常量 → 报错）；
 - D3 深度口径：叶子（Field/Number）深度 1；Call = 1 + max(子节点深度)；
-- D4 自由参数 = Number 节点总数（含 window）；字段种类 = 去重后的 Field 名数量；
+- D4 自由参数 = Number 节点**去重取值**个数（1 与 1.0 同值；治理 D5，2026-11-27）；
+  字段种类 = 去重后的 Field 名数量；
 - D5 规范化：结合律展平（add/mul/max/min）+ 交换律排序 + 幂等；serialize 紧凑形态；
 - D6 同构：同 op/同元数/字段名位置对应、数字只按「有」匹配（取值忽略），规范化后比较；
 - D7 ``parse(enforce_complexity=False)`` 仅供工具/验证（Alpha101 round-trip 旁路），
@@ -688,3 +689,45 @@ def test_new_ops_window_and_arity_forms_refused(bad: str):
     """窗口形态（正整数数字字面量）与元数照旧硬校验。"""
     with pytest.raises(DSLParseError):
         parse(bad)
+
+
+# ── extend-factor-library-coverage：自由参数按去重取值计数 ───────────────────
+
+
+class TestFreeParamsDedup:
+    """治理 D5（2026-11-27）：自由参数 = Number 节点去重取值个数，上限 3 不变。
+
+    依据：存量复杂度拒译 814 条中 398 条「Number 节点 >3、去重后 ≤3」（同一窗口
+    数字重复出现被重复计数）；重复出现的相同常数不是独立拟合自由度。
+    """
+
+    def test_repeated_values_count_once(self):
+        # Number 节点 6 个（1×4、20×2），去重后 {1, 20} = 2 ≤ 3 → 合法（旧口径 6 → 拒收）
+        node = parse(
+            "div(ts_mean(sub(div(close,ref(close,1)),1),20),"
+            "ts_std(sub(div(close,ref(close,1)),1),20))"
+        )
+        assert count_free_params(node) == 2
+
+    def test_int_and_float_same_value(self):
+        node = parse("sub(mul(close,1),mul(close,1.0))")
+        assert count_free_params(node) == 1
+
+    def test_distinct_values_still_rejected(self):
+        # 去重后 {5, 10, 20, 0.5} = 4 > 3 → 拒收，消息格式逐字
+        with pytest.raises(FactorComplexityError) as excinfo:
+            parse("sub(div(ts_mean(close,5),add(ts_std(close,10),ts_max(close,20))),0.5)")
+        assert "自由参数 4 > 上限 3" in str(excinfo.value)
+
+    def test_window_counts_and_field_free(self):
+        assert count_free_params(parse("ts_mean(close,20)")) == 1
+        assert count_free_params(parse("close")) == 0
+
+    def test_repeated_value_form_now_admitted_shape(self):
+        # 生产实测被拒形态 retvol20 族：Mean(ret,20)/Std(ret,20)+ε——去重后 {1, 20, 1e-12} = 3 → 合法
+        node = parse(
+            "div(ts_mean(sub(div(close,ref(close,1)),1),20),"
+            "add(ts_std(sub(div(close,ref(close,1)),1),20),0.000000000001))"
+        )
+        assert count_free_params(node) == 3
+        assert parse(serialize(node)) == node
