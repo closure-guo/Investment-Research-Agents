@@ -68,8 +68,8 @@ _MAX_DESC_UNTRANSLATABLE = 60
 _MAX_DETAIL = 80
 _MAX_DETAIL_UNTRANSLATABLE = 40
 
-#: 表达规则文本（生成侧 prompt 语言=英文；三条对应实测转译损失前三死因：
-#: ε 符号常量无值、横截面运算缺算子、矩阵/回归/ML 流水线超出 DSL 边界）。
+#: 表达规则文本（生成侧 prompt 语言=英文；四条对应实测转译损失前三死因 +
+#: 自由参数去重计数口径：一次重复取值不算新增拟合自由度，也不再按 Number 节点总数计）。
 CONTRACT_RULES: tuple[str, ...] = (
     "Numeric constants must be concrete numbers (e.g. write 1e-12); symbolic constants "
     "such as epsilon are inexpressible and the proposal is rejected.",
@@ -77,6 +77,8 @@ CONTRACT_RULES: tuple[str, ...] = (
     "operations such as cross-sectional percentile rank or market-wide averages are inexpressible.",
     "Matrix operations, rolling regressions, and machine-learning pipelines are outside "
     "the expressible DSL.",
+    "Free parameters are counted as distinct numeric literal values in the expression "
+    "(windows included): a repeated identical value counts once, not once per occurrence.",
 )
 
 _STATUS_ORDER = {"admitted": 0, "rejected": 1, "untranslatable": 2, "transcription_error": 3}
