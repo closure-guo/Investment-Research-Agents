@@ -121,3 +121,11 @@ def test_empty_master_without_symbols_exits_2(tmp_path):
     db = tmp_path / "empty.db"
     init_snapshot_db(db)
     assert main(["--db", str(db)]) == 2
+
+
+def test_missing_pool_excludes_existing_and_limit_applies(tmp_path):
+    """缺省池 = industry_l1 为空的在册代码（按代码升序），供 --limit 截断。"""
+    import scripts.backfill_industry as backfill_module
+
+    db = _seed_db(tmp_path)
+    assert backfill_module._missing_industry_codes(db) == sorted(_CODES)

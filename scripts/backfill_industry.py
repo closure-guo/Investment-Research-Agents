@@ -50,6 +50,15 @@ def _industry_of(info: Any) -> str | None:
     return None
 
 
+def _missing_industry_codes(db_path: str | Path | None) -> list[str]:
+    """缺省回填池：证券主表中 ``industry_l1`` 为空的在册代码（升序）。"""
+    return sorted(
+        code
+        for code, row in get_security_master(db_path=db_path).items()
+        if not str(row.get("industry_l1") or "").strip()
+    )
+
+
 def run_backfill(
     *,
     symbols: list[str] | None = None,
@@ -67,11 +76,8 @@ def run_backfill(
     ``aborted``（探针门禁未过 → true，此时不写库）。
     """
     client = client or AKShareClient()
-    master = get_security_master(db_path=db_path)
     if symbols is None:
-        candidates = sorted(
-            code for code, row in master.items() if not str(row.get("industry_l1") or "").strip()
-        )
+        candidates = _missing_industry_codes(db_path)
     else:
         candidates = [code for raw in symbols if (code := _norm_code(raw))]
 
@@ -180,8 +186,9 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        symbols = None  # 交 run_backfill 取「缺行业」子集
-    if symbols is not None and args.limit is not None:
+        # 显式物化缺省池 → --limit 可截断（探针/小批试跑）
+        symbols = _missing_industry_codes(args.db)
+    if args.limit is not None:
         symbols = symbols[: max(args.limit, 0)]
         if not symbols:
             print("错误：标的池为空（--limit 截断后）", file=sys.stderr)
