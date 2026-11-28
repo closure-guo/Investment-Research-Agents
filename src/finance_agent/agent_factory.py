@@ -755,31 +755,11 @@ def _make_run_deep_analysis(
         # 消费链压出 ~19 分钟滞后，管线本体完成却被误判超时置 failed）。
         graph_done = threading.Event()
 
-        def _persist_pipeline_usage(acc: object) -> None:
-            """把一次 deep 分析的 usage 真值累加到会话（add-composer-stat-pills）。
-
-            旁路：落库失败只记 WARNING，不阻断管线收尾。``calls == 0``（无任何
-            LLM 调用或 stub 路径）时不写库，避免制造「0 但已记账」的假象。
-            """
-            from finance_agent.nodes._llm_utils import UsageAccumulator
-
-            if not session_id or not isinstance(acc, UsageAccumulator) or acc.calls == 0:
-                return
-            try:
-                _session_store.update_session_usage(
-                    session_id,
-                    prompt=acc.prompt_tokens,
-                    completion=acc.completion_tokens,
-                    total=acc.total_tokens,
-                    context_peak=acc.max_prompt_tokens,
-                )
-            except Exception:  # noqa: BLE001 -- 旁路铁律：记账失败不得影响报告产出
-                logger.warning("会话用量落库失败(不阻断): session=%s", session_id, exc_info=True)
-
         def _run_graph():
             # usage_collector 基于 contextvar：必须在真正执行 LLM 调用的本线程内
             # 激活，async 调用方的 with 不会传播进 executor 线程（design D2）。
             from finance_agent.nodes._llm_utils import usage_collector
+            from finance_agent.usage_accounting import persist_session_usage
 
             gen = _stream_graph(initial_state, session_id=session_id)
             with usage_collector() as _usage_acc:
@@ -793,7 +773,8 @@ def _make_run_deep_analysis(
                 finally:
                     with contextlib.suppress(BaseException):
                         gen.close()  # GeneratorExit 传播关闭底层 graph.stream，阻断后续节点
-                    _persist_pipeline_usage(_usage_acc)
+                    # 记账规则（calls==0 不写库）与 api 快路径共用同一实现
+                    persist_session_usage(session_id, _usage_acc)
                     # 先置位图完成信号再投哨兵：保证消费者看到 graph_done 后哨兵
                     # 必然到达（排空 get() 无需超时的正确性前提）。注意 graph_done
                     # 只证明生产者发完流——chunk_queue 中可能仍缓冲未消费 chunk
