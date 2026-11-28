@@ -35,6 +35,7 @@ def trader(state: dict) -> dict:
         data.get("entry_price"),
         data.get("stop_loss"),
         data.get("target_price"),
+        data.get("sell_type"),
     )
     decision = TradeDecision.model_validate(data)
 

@@ -292,6 +292,61 @@ def _downgrade_exit_to_watch(decision: TradeDecision) -> TradeDecision:
     )
 
 
+def _normalize_exit_price_polarity(decision: TradeDecision) -> tuple[TradeDecision, dict]:
+    """sell_type=exit 三价极性归一（#606 终稿残留，2026-11-28）。
+
+    风控席位可能把 exit 叙事写成 short 惯例（stop=失效位在现价上方、target=下行位在
+    现价下方）：spec「三价字段极性契约」要求 exit 为 stop<entry<target，且错置须走
+    修正回路。本节点打回预算已尽（终稿收口），按确定性「按口径修正」处置——交换
+    stop/target（short 的失效位 = exit 的反弹减仓带；short 的兑现位 = exit 的清仓
+    位），置 price_level_corrected 并写 correction_reason，同时回报 state 观测键。
+
+    语义等价性：交换不改变业务含义，只把字段放回 exit 惯例槽位（与 #606 实证样本
+    601808 / 000429 / 688561 的叙事逐条核对一致）。缺价 / 关系不成立 / 非 exit
+    → 零改动（不臆造价位）。
+    """
+    obs: dict = {"result": "pass", "note": ""}
+    if (
+        str(getattr(decision, "action", "")) != "sell"
+        or str(getattr(decision, "sell_type", "") or "") != "exit"
+    ):
+        return decision, obs
+    entry = decision.entry_price
+    stop = decision.stop_loss
+    target = decision.target_price
+    # 显式数值窄化（不用 assert：生产路径禁用 S101；缺价/非数值一律零改动）
+    if not (
+        isinstance(entry, (int, float))
+        and not isinstance(entry, bool)
+        and isinstance(stop, (int, float))
+        and not isinstance(stop, bool)
+        and isinstance(target, (int, float))
+        and not isinstance(target, bool)
+    ):
+        return decision, obs
+    if not (entry > 0 and stop > 0 and target > 0):
+        return decision, obs
+    if not (stop > entry > target):
+        return decision, obs
+    reason = "exit 极性错置（stop>entry>target 为 short 惯例）→ 按 exit 惯例交换 stop/target"
+    if decision.price_level_correction_reason:
+        reason = f"{decision.price_level_correction_reason}；{reason}"
+    updated = decision.model_copy(
+        update={
+            "stop_loss": target,
+            "target_price": stop,
+            "price_level_corrected": True,
+            "price_level_correction_reason": reason,
+        }
+    )
+    return updated, {
+        "result": "corrected",
+        "note": reason,
+        "before": {"stop_loss": stop, "target_price": target},
+        "after": {"stop_loss": target, "target_price": stop},
+    }
+
+
 def risk_judge(state: dict) -> dict:
     """Layer IV Risk Judge — 最终交易决策。"""
     context = _build_risk_context(state)
@@ -555,6 +610,7 @@ def risk_judge(state: dict) -> dict:
         decision.entry_price,
         decision.stop_loss,
         decision.target_price,
+        decision.sell_type,
     )
     if _payout_fixed:
         decision = decision.model_copy(update={"reasoning": _reasoning})
@@ -627,6 +683,7 @@ def risk_judge(state: dict) -> dict:
             decision.entry_price,
             decision.stop_loss,
             decision.target_price,
+            decision.sell_type,
         )
         if _payout_fixed2:
             decision = decision.model_copy(update={"reasoning": _reasoning2})
@@ -754,6 +811,25 @@ def risk_judge(state: dict) -> dict:
                 "终稿复核降级后改为 watch 且触发位缺失（未再次打回，如实标注）"
             )
 
+    # 3) exit 三价极性归一（#606 终稿残留）：风控席位可能写 short 惯例，确定性交换
+    #    并留痕（spec「三价字段极性契约」：exit 惯例 stop<entry<target）
+    decision, final_price_polarity_check = _normalize_exit_price_polarity(decision)
+    if final_price_polarity_check["result"] == "corrected":
+        # 交换换了赔率分母方向：归一前 short 公式下赔率缺失（跳过自检），归一后
+        # 可算——按既有「换代重放 payout self-check」模式补跑，文本不残留旧口径赔率
+        _reasoning3, _payout_fixed3, _payout_skipped3 = _apply_payout_self_check(
+            decision.reasoning,
+            decision.action,
+            decision.entry_price,
+            decision.stop_loss,
+            decision.target_price,
+            decision.sell_type,
+        )
+        if _payout_fixed3:
+            decision = decision.model_copy(update={"reasoning": _reasoning3})
+        _payout_fixed = _payout_fixed or _payout_fixed3
+        _payout_skipped += _payout_skipped3
+
     return {
         "final_trade_decision": decision,
         "payout_ratio_corrected": _payout_fixed,
@@ -766,6 +842,8 @@ def risk_judge(state: dict) -> dict:
         "decision_price_anomalies": decision_price_anomalies,
         "decision_price_gate": decision_price_gate,
         "decision_hysteresis": decision_hysteresis,
+        # exit 三价极性归一判定（#606 终稿残留）：trace 可观测，报告不渲染
+        "final_price_polarity_check": final_price_polarity_check,
         # 未持有受众的 exit 可执行性门禁判定（add-holdings-context）：trace 可观测，
         # 报告不渲染（report.py 不消费本键）
         "holdings_executability_check": holdings_check,
