@@ -90,9 +90,16 @@ SPEC_OPS = {
     "exp",
 }
 SPEC_FIELDS = {
-    "open", "high", "low", "close", "volume", "amount",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
     # extend-factor-library-coverage：可选参考字段（面板按需携带）
-    "float_cap", "turnover", "listed_days",
+    "float_cap",
+    "turnover",
+    "listed_days",
 }
 SPEC_ARITY = {
     "ts_mean": 2,

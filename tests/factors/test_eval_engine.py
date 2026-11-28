@@ -976,8 +976,15 @@ class TestOptionalPanelFields:
             )
         )
         assert set(panel.fields) == {
-            "open", "high", "low", "close", "volume", "amount",
-            "float_cap", "turnover", "listed_days",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "float_cap",
+            "turnover",
+            "listed_days",
         }
         assert panel.fields["float_cap"].loc["2026-11-27", "A"] == pytest.approx(2.1e9)
         assert panel.fields["turnover"].loc["2026-11-26", "A"] == pytest.approx(0.0125)
