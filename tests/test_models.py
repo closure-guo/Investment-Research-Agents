@@ -572,3 +572,52 @@ class TestTradeDecisionTriggerLevels:
         d = self._make()
         assert d.trigger_high is None
         assert d.trigger_low is None
+
+
+class TestTradeDecisionExitScheduleForm:
+    """issue #622：exit_schedule 声明为 str，LLM 输出分步 list 时 MUST 形态归一。
+
+    2026-11-24 600938 主池会话实证：模型把减仓节奏输出成
+    ``["第一步（立即）…", "第二步…"]``，pydantic 直接
+    ``Input should be a valid string`` → 整条会话 failed（同股小票池通道同日完成，
+    证明是输出形态抖动而非必现）。归一哲学与 reeval_triggers / inaction_reason 同源：
+    形态噪声降级，不炸管线。
+    """
+
+    def _make(self, schedule: object) -> TradeDecision:
+        return TradeDecision(
+            action="sell",
+            confidence=0.6,
+            reasoning="r",
+            sell_type="exit",
+            exit_schedule=schedule,  # pyrefly: ignore[bad-argument-type]
+        )
+
+    def test_list_of_strings_joined_in_order(self):
+        d = self._make(["第一步（立即）：减仓一半", "第二步：跌破 9.74 清仓"])
+        assert d.exit_schedule == "第一步（立即）：减仓一半\n第二步：跌破 9.74 清仓"
+
+    def test_list_drops_non_str_and_blank_entries(self):
+        d = self._make(["第一条", 42, None, "  ", "第二条"])
+        assert d.exit_schedule == "第一条\n第二条"
+
+    def test_empty_list_normalized_to_none(self):
+        assert self._make([]).exit_schedule is None
+
+    def test_non_str_non_list_normalized_to_none(self):
+        for raw in (123, {"step": "减半"}, 1.5, True):
+            assert self._make(raw).exit_schedule is None
+
+    def test_string_preserved_verbatim(self):
+        d = self._make("分批：现价减半，跌破 9.74 清仓")
+        assert d.exit_schedule == "分批：现价减半，跌破 9.74 清仓"
+
+    def test_non_sell_action_still_cleared(self):
+        """#188 守卫优先：buy/watch 上的 list 也不得逃逸为字符串。"""
+        d = TradeDecision(
+            action="buy",
+            confidence=0.8,
+            reasoning="r",
+            exit_schedule=["不应保留"],  # pyrefly: ignore[bad-argument-type]
+        )
+        assert d.exit_schedule is None
