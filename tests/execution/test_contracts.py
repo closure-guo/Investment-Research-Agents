@@ -61,6 +61,53 @@ def test_parse_first_batch_ratio_clamps_to_ratio():
     assert parse_first_batch_ratio("首批 100% 清仓") == 1.0
 
 
+def test_parse_first_batch_ratio_covers_production_schedule_forms():
+    """issue #626A：11-24 批 10/11 份可读减仓节奏不可机读，逐种写法钉死。
+
+    这些字符串取自生产决策原文（写法各异但语义都是「首批卖出比例」）；
+    解析失败的后果不是「跳过」而是执行层退化为全额退出（#593 语义）。
+    """
+    cases = {
+        "第一批约50%": 0.50,
+        "第一批减约三分之一": 1 / 3,
+        "先减 1/2": 0.50,
+        "先减 1/3": 1 / 3,
+        "先减约 50%": 0.50,
+        "减仓 3/4": 0.75,
+        "先处置 2/3": 2 / 3,
+        "首批：冲高减半，余下等反弹": 0.50,
+        # 「减至 N」的 N 是剩余比例（原文「首批减至 2/3；余 1/3」），卖出 = 1−N
+        "首批减至 2/3（约 67%）": 1 / 3,
+        "先减至剩余不超过总仓位的三分之一": 2 / 3,
+        "先减至总仓 1/2": 0.50,
+        "先减至原敞口 1/4 以内（减仓不少于 3/4）": 0.75,
+        # 生产实证误读：按「百分比优先」会把 VaR95 3.57% 当成首批比例，取最近读数才对
+        "分三档：现价 6.6 附近先减 2/3 作为主执行（等待期承担日 VaR95 3.57%）：": 2 / 3,
+        "首批减仓三成": 0.30,
+        "首批减仓 3 成": 0.30,
+        # 157 条生产文本回归比对发现的旧口径形态：读数在逗号后（原方案 50%），
+        # 逗号不断句 + 每段取第一个读数 → 0.5，不得从旧解析器回退
+        "首批于现价 7.66 附近限价派发，比例过半（明显高于原方案 50%）；剩余额度挂单": 0.50,
+        # 显式「首批」优先于后续条件动作词（不把两个读数判成歧义）
+        "首批减 30%，若反弹先减 20%": 0.30,
+    }
+    for text, expected in cases.items():
+        got = parse_first_batch_ratio(text)
+        assert got is not None, f"{text!r} 应可解析"
+        assert abs(got - expected) < 0.02, f"{text!r}: {got} != {expected}"
+
+
+def test_parse_first_batch_ratio_takes_first_batch_not_remainder():
+    """「首批 1/3，剩余 2/3」只取首批，不把剩余比例当首批（歧义守卫边界）。"""
+    assert abs(parse_first_batch_ratio("首批减 1/3，剩余 2/3 视反弹分两批") - 1 / 3) < 1e-9
+
+
+def test_parse_first_batch_ratio_conditional_sell_is_not_first_batch():
+    """非首批语境的「减仓」不得当成首批比例（否则执行层会按错误节奏减仓）。"""
+    assert parse_first_batch_ratio("若跌破 9.74 元则减仓 1/2") is None
+    assert parse_first_batch_ratio("反弹至 25 元后减仓 3/4") is None
+
+
 def test_declared_contract_freezes_all_fields_for_buy():
     decision = {
         "sell_type": None,

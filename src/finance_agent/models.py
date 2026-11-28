@@ -319,6 +319,24 @@ class TradeDecision(BaseModel):
             return [v for v in value if isinstance(v, str) and v.strip()]
         return []
 
+    @field_validator("exit_schedule", mode="before")
+    @classmethod
+    def _normalize_exit_schedule(cls, value: object) -> object:
+        """分步 list → 换行拼接（issue #622）；其它非字符串形态归 None。
+
+        LLM 会把减仓节奏输出成 ``["第一步…", "第二步…"]``，而字段声明为
+        ``str | None``——原样交给 pydantic 会抛 ValidationError 中断整条会话
+        （2026-11-24 600938 实证，同股小票池通道同日完成 = 形态抖动非必现）。
+        清洗哲学与 reeval_triggers / inaction_reason 同源：形态噪声降级为可读
+        文本或未申报，不炸管线；必填约束仍由 risk_judge 校验层承担。
+        """
+        if isinstance(value, list):
+            parts = [v.strip() for v in value if isinstance(v, str) and v.strip()]
+            return "\n".join(parts) if parts else None
+        if isinstance(value, str):
+            return value
+        return None
+
     @model_validator(mode="after")
     def _scrub_sell_type_off_sell(self) -> TradeDecision:
         """非 sell 动作上的 sell_type/exit_schedule 一律归 None（#188：防 LLM 在
