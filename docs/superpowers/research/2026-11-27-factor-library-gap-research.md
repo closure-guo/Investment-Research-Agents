@@ -111,6 +111,15 @@
 - 已立 delta `openspec/changes/extend-factor-library-coverage/`（proposal / design / specs ×5 / tasks；`openspec validate --strict` 通过；待 owner 评审，未改代码）。
 - 数据源补测（2026-11-27，容器内只读探测）：两融明细（上交所 `stock_margin_detail_sse`、深交所 `stock_margin_detail_szse`，2025-03-12 的历史可取）、龙虎榜（新浪 `stock_lhb_detail_daily_sina`，历史可取）、新浪财务指标（逐票 86 列，按报告期）均可用；新浪历史日线带 `outstanding_share` 与 `turnover`；腾讯批量行情字段 38 / 44 / 45 给换手率 / 流通市值 / 总市值。行业批量源在本机 AKShare 1.18.63 下函数名与文档不符（只找到 `stock_board_industry_name_ths`、`sw_index_third_cons`），巨潮逐票 `stock_industry_change_cninfo` 可用（带变更日期）。
 
+## 9. 已落地（2026-11-28 收口）
+
+delta `extend-factor-library-coverage` 的 P1/P2 已实施并部署（P1 `ee8faeba` / P2 `32c8d034`）：
+
+- **P1（DSL 表达力）**：自由参数改去重计数（上限 3 不变；离线确定性复译 405/836 解锁）+ 19 个新算子（OPS 21→40）+ 翻译器 15 映射与一元负号改写；治理 D5 落 `docs/factor-governance.md`。
+- **P2（参考数据面）**：`market_ref_daily` 侧表 + `industry_l1` 列 + 读路径 JOIN/旧库退化 + 面板可选字段与 `industry` 分组；拥挤度日批顺手落库；历史回填 2,942,506 行、覆盖率 99.79–99.94%；闸①字段/分组预检；同构重提桶归属（前置 category 迁移 12 条已执行）；builtin 五条→七条（真实口径两条 `size_float` / `turnover_20` 闸①通过、闸② ICIR −0.0664 / −0.2151 拒收）；L2 `factor_value_gaps` 披露（生产快照重放为空列表）；提案 category 九类 + prompt 已发布。
+- **未闭环**：行业门类探针 36/50 = 72% < 90% 门禁 → 全量回填按 spec 不执行，`industry_l1` 仍 0 覆盖（`ind_neutralize` 类因子继续闸①拒收）；需换行业源或提升 cninfo 命中率后重跑探针。
+- 逐项读数与挂账：`tests/validation/2026-11-28-extend-factor-library-coverage-p2-validation.md`。
+
 ## 来源
 
 - 代码：`src/finance_agent/factors/{dsl,builtin,constraints,style_exposure,propose,harvest}.py`；`src/finance_agent/data/{snapshot,research_reports_store}.py`；`src/finance_agent/api.py:3983-3999, 4729-4735`

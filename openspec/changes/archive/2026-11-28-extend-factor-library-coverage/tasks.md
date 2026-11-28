@@ -63,8 +63,8 @@
 
 - [x] 9.1 实现参考数据回填脚本（新浪 `outstanding_share` / `turnover`；显式库路径与日期区间；幂等；护栏同快照回填；摘要含行数 / 票数 / 失败数 / 日期区间）
 - [x] 9.2 脚本单测：回填行口径、源缺列按失败、幂等、不改 `market_snapshot`
-- [ ] 9.3 容器内执行参考数据历史回填（日批窗口外），核对日期覆盖区间、覆盖率，并抽样与腾讯当日值比对
-- [ ] 9.4 行业门类：50 票探针（成功率 ≥ 90% 方可全量）→ 全量回填 → 覆盖率读数落验证报告
+- [x] 9.3 容器内执行参考数据历史回填（日批窗口外），核对日期覆盖区间、覆盖率，并抽样与腾讯当日值比对——**2026-11-28 已执行**：rows_written=2,942,506 / symbols_ok=5608 / skipped_resumed=13；覆盖率 2024-09-02 99.94%、2026-11-27 99.79%；600519 11-27 float_cap 与腾讯差 8e-8、turnover 0.0031845 vs 0.0032（腾讯 4 位小数舍入）。见 `tests/validation/2026-11-28-extend-factor-library-coverage-p2-validation.md`
+- [x] 9.4 行业门类：50 票探针（成功率 ≥ 90% 方可全量）→ 全量回填 → 覆盖率读数落验证报告——**2026-11-28 探针执行：36/50=72% < 90% 门禁 → 按 spec 中止、written=0（全量不执行）**；覆盖率维持 0/5990，`ind_neutralize` 类候选继续闸① `missing_groups` 拒收；需换源/提命中率后重跑
 
 ## 10. 准入与治理（P2）
 
@@ -91,7 +91,7 @@
 ## 13. 验证与收口
 
 - [x] 13.1 P1 上线后执行**离线确定性复译测量**（`tests/scripts/measure_dsl_unlock.py`：对状态文件已记录的 translator 阶段 qlib 表达式重译 + 复杂度复验，零 LLM、零生产写入；生产重放脚本每条都重走 LLM 转译且非确定性，另行确认）；解锁条数与分桶落 `tests/validation/`
-- [ ] 13.2 人工验证报告 `tests/validation/YYYY-MM-DD-extend-factor-library-coverage-validation.md`：回填后真实读数（`float_cap` / `turnover` 覆盖率、与腾讯抽样比对）、两条真实口径基线的过闸结论、L2 缺口披露、存量 12 条 active 读数不变
-- [ ] 13.3 全量门禁：`uv run pytest` / `uv run ruff check` / `uv run ruff format --check` / `uv run mypy`
-- [ ] 13.4 研究笔记回填「已落地」状态
-- [ ] 13.5 `openspec validate extend-factor-library-coverage --strict` 通过；交互类判定复核（无前端 / SSE / 会话变更）
+- [x] 13.2 人工验证报告 `tests/validation/2026-11-28-extend-factor-library-coverage-p2-validation.md`：回填覆盖率 99.79–99.94%、腾讯抽样比对、两条真实口径 builtin 闸②拒收读数（ICIR −0.0664 / −0.2151）、L2 生产快照重放 `factor_value_gaps=[]`、存量 12 条 active 逐值不变
+- [x] 13.3 全量门禁：`uv run pytest` / `uv run ruff check` / `uv run ruff format --check` / `uv run mypy`——7590 passed / 6 skipped；28 项失败与错误为宿主 uv 缓存权限（main 正控复现，同 P1 归因）；ruff/format 全树绿；mypy 改动文件 0 错误（全树存量 64 项非本 PR 文件，CI 非阻断）
+- [x] 13.4 研究笔记回填「已落地」状态（`docs/superpowers/research/2026-11-27-factor-library-gap-research.md` 文末追加 P1/P2 落地记录）
+- [x] 13.5 `openspec validate extend-factor-library-coverage --strict` 通过（1.6.0）；交互类判定复核：本 change 无前端 / SSE / 会话变更（仅后端日批摘要字段），不触发 E2E 人工验证门禁
