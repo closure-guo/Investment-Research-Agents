@@ -2659,3 +2659,35 @@ class AKShareClient:
             .sort_values("日期")
             .reset_index(drop=True)
         )
+
+    def fetch_symbol_share_history(self, code: str, start: str, end: str) -> pd.DataFrame | None:
+        """参考数据回填源（extend-factor-library-coverage §9）：新浪不复权日线的
+        流通股本与换手率。
+
+        输出列 ``[date, close, outstanding_share, turnover]``（数值化、按日期升序）；
+        ``turnover`` 为源值小数口径（不做二次换算）。源失败/空/缺任一必需列 →
+        None（不产出半口径数据；调用方按 ``symbols_failed`` 计数）。
+        """
+        symbol = self._to_sina_symbol(code)
+        df = _call_ak(
+            ak.stock_zh_a_daily,
+            symbol=symbol,
+            start_date=start,
+            end_date=end,
+            adjust="",
+        )
+        required = {"date", "close", "outstanding_share", "turnover"}
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            logger.warning("新浪流通股本历史失败/空: %s", code)
+            return None
+        if not required <= set(df.columns):
+            logger.warning(
+                "新浪流通股本历史缺列（需 %s）: %s",
+                ",".join(sorted(required)),
+                code,
+            )
+            return None
+        out = df[["date", "close", "outstanding_share", "turnover"]].copy()
+        for column in ("close", "outstanding_share", "turnover"):
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+        return out.sort_values("date").reset_index(drop=True)

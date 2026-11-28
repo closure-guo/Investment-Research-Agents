@@ -1697,3 +1697,38 @@ class TestFetchMarketRefBulk:
         )
         caps = client.fetch_market_caps_bulk(["600519"])
         assert caps == {"600519": pytest.approx(16613.58e8)}
+
+
+class TestFetchSymbolShareHistory:
+    """extend-factor-library-coverage §9：新浪不复权日线的流通股本/换手率（回填源）。"""
+
+    @staticmethod
+    def _frame() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "date": ["2026-11-24", "2026-11-25"],
+                "open": [10.0, 10.2],
+                "high": [10.3, 10.4],
+                "low": [9.9, 10.1],
+                "close": [10.2, 10.3],
+                "volume": [1.0e6, 1.1e6],
+                "amount": [1.0e7, 1.1e7],
+                "outstanding_share": [1.0e9, 1.0e9],
+                "turnover": [0.011, 0.012],
+            }
+        )
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_parses_share_history(self, mock_ak, client):
+        mock_ak.stock_zh_a_daily.return_value = self._frame()
+        frame = client.fetch_symbol_share_history("600519", "2026-11-24", "2026-11-25")
+        assert frame is not None
+        assert list(frame.columns) == ["date", "close", "outstanding_share", "turnover"]
+        assert frame.loc[0, "close"] == pytest.approx(10.2)
+        assert frame.loc[0, "outstanding_share"] == pytest.approx(1.0e9)
+        assert frame.loc[0, "turnover"] == pytest.approx(0.011)
+
+    @patch("finance_agent.data.akshare_client.ak")
+    def test_missing_share_column_returns_none(self, mock_ak, client):
+        mock_ak.stock_zh_a_daily.return_value = self._frame().drop(columns=["outstanding_share"])
+        assert client.fetch_symbol_share_history("600519", "2026-11-24", "2026-11-25") is None
