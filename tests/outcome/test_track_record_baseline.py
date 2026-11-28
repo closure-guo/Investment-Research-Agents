@@ -141,8 +141,9 @@ def _write_snapshot(snapshot_db, rows):
 def test_same_window_baseline_io(tmp_path):
     track_db = tmp_path / "track.db"
     init_track_record_tables(track_db)
+    # index_closes 主键是不带后缀的指数代码（生产实测 000300；带 .SH 恒空 → 基准误报不可用）
     upsert_index_closes(
-        [("000300.SH", "2026-09-01", 100.0), ("000300.SH", "2026-09-03", 100.0)],
+        [("000300", "2026-09-01", 100.0), ("000300", "2026-09-03", 100.0)],
         db_path=track_db,
     )
     pid = insert_prediction(

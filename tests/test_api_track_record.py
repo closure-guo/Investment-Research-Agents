@@ -874,7 +874,8 @@ def test_overview_continuous_baseline_and_band(monkeypatch, tmp_path):
             db_path=db,
         )
     upsert_index_closes(
-        [("000300.SH", "2026-09-01", 100.0), ("000300.SH", "2026-09-03", 100.0)],
+        # index_closes 主键不带后缀（生产实测 000300）
+        [("000300", "2026-09-01", 100.0), ("000300", "2026-09-03", 100.0)],
         db_path=db,
     )
     snapshot_db = tmp_path / "snap.db"
