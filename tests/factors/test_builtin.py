@@ -43,7 +43,7 @@ from finance_agent.factors.eval_engine import (
     cross_section_zscore,
     evaluate,
 )
-from finance_agent.factors.library import list_factors
+from finance_agent.factors.library import add_factor, list_factors
 from finance_agent.factors.validate import (
     GATE_COMPUTABILITY,
     GATE_DEDUP,
@@ -59,6 +59,9 @@ _EXPECTED: tuple[tuple[str, str], ...] = (
     ("turnover_proxy", "div(volume,ts_mean(volume,20))"),
     ("volatility_20", "ts_std(delta(close,1),20)"),
     ("size_proxy", "ts_mean(amount,20)"),
+    # extend-factor-library-coverage §10：真实口径两条（可选参考字段）
+    ("size_float", "log(float_cap)"),
+    ("turnover_20", "ts_mean(turnover,20)"),
 )
 _REVERSAL_EXPRESSION = "div(ts_mean(close,5),close)"
 
@@ -75,6 +78,8 @@ _BETAS: tuple[tuple[str, float], ...] = (
     ("turnover_proxy", 0.006),
     ("volatility_20", 0.006),
     ("size_proxy", 0.006),
+    ("size_float", 0.006),
+    ("turnover_20", 0.006),
 )
 
 # 无反转结构（纯噪声）面板参数：固定种子的实测 ICIR ≈ 0.119（≈ spec 场景 0.12）
@@ -95,7 +100,7 @@ def _labels(dates: int, codes: int) -> tuple[list[str], list[str]]:
 
 
 def _strong_panel() -> MarketPanel:
-    """强信号面板：次日收益显式依赖五 builtin 因子当日 zscore（含异质持久波动）。"""
+    """强信号面板：次日收益显式依赖七 builtin 因子当日 zscore（含异质持久波动）。"""
     rng = np.random.default_rng(_STRONG_SEED)
     dates, codes = _labels(_STRONG_DATES, _STRONG_CODES)
     width = _STRONG_CODES
@@ -103,6 +108,13 @@ def _strong_panel() -> MarketPanel:
     volume = np.full((_STRONG_DATES, width), np.nan)
     amount = np.full((_STRONG_DATES, width), np.nan)
     close[0] = 100.0
+    # 参考字段（可选帧）用独立随机流生成：不打乱主 rng 的历史序列
+    ref_rng = np.random.default_rng(_STRONG_SEED + 1)
+    base_cap = np.exp(0.5 * ref_rng.normal(size=width))
+    float_cap = (
+        1.0e9 * base_cap[None, :] * np.exp(0.2 * ref_rng.normal(size=(_STRONG_DATES, width)))
+    )
+    turnover = 0.01 * np.exp(0.5 * ref_rng.normal(size=(_STRONG_DATES, width)))
     shape = np.zeros(width)  # 成交量 AR(1) 状态
     base_vol = np.exp(_VOL_HETEROGENEITY * rng.normal(size=width))  # 持久异质波动
     expressions = dict(_EXPECTED)
@@ -123,6 +135,8 @@ def _strong_panel() -> MarketPanel:
                 "close": frame(close, step),
                 "volume": frame(volume, step),
                 "amount": frame(amount, step),
+                "float_cap": frame(float_cap, step),
+                "turnover": frame(turnover, step),
             }
         )
         signal = np.zeros(width)
@@ -148,6 +162,8 @@ def _strong_panel() -> MarketPanel:
             "close": frame(close, _STRONG_DATES),
             "volume": frame(volume, _STRONG_DATES),
             "amount": frame(amount, _STRONG_DATES),
+            "float_cap": frame(float_cap, _STRONG_DATES),
+            "turnover": frame(turnover, _STRONG_DATES),
         }
     )
 
@@ -180,7 +196,7 @@ def _noise_panel() -> MarketPanel:
 
 
 def test_builtin_catalog_names_and_expressions_are_verbatim() -> None:
-    """五个 builtin 的名称/表达式逐字；hypothesis 为经济学描述（≥30 字）。"""
+    """七个 builtin 的名称/表达式逐字；hypothesis 为经济学描述（≥30 字）。"""
     assert [item.name for item in BUILTIN_FACTORS] == [name for name, _ in _EXPECTED]
     assert [item.expression for item in BUILTIN_FACTORS] == [expr for _, expr in _EXPECTED]
     for item in BUILTIN_FACTORS:
@@ -216,7 +232,14 @@ def test_register_builtins_admits_baseline_on_strong_panel(tmp_path) -> None:
     rejected_gate = next(gate for gate in by_name["reversal_5"].gates if not gate.passed)
     assert str(rejected_gate.reason) == "WEAK_ICIR"
     assert abs(rejected_gate.detail["icir"]) < MIN_ABS_ICIR
-    for name in ("momentum_20", "turnover_proxy", "volatility_20", "size_proxy"):
+    for name in (
+        "momentum_20",
+        "turnover_proxy",
+        "volatility_20",
+        "size_proxy",
+        "size_float",
+        "turnover_20",
+    ):
         assert by_name[name].status == "active", name
     assert sum(1 for result in results if result.status == "active") >= 1
 
@@ -360,3 +383,42 @@ def test_missing_builtins_treats_rejected_row_as_missing(tmp_path):
         db_path=db,
     )
     assert item not in missing_builtins(db_path=db)
+
+
+def test_missing_reference_fields_reject_real_caliber_builtins_at_gate1(tmp_path):
+    """面板未携带可选字段时，真实口径两条在闸①拒收（缺失字段可追溯、次日可重试）。"""
+    db = str(tmp_path / "factor_library.db")
+    items = [item for item in BUILTIN_FACTORS if item.name in {"size_float", "turnover_20"}]
+    assert [item.name for item in items] == ["size_float", "turnover_20"]
+    results = register_builtins(panel=_noise_panel(), seed=_NOISE_SEED, factors=items, db_path=db)
+    assert [result.rejected_gate for result in results] == [
+        GATE_COMPUTABILITY,
+        GATE_COMPUTABILITY,
+    ]
+    assert results[0].gates[-1].detail["missing_fields"] == ["float_cap"]
+    assert results[1].gates[-1].detail["missing_fields"] == ["turnover"]
+    for result in results:
+        assert str(result.gates[-1].reason) == "LOW_COVERAGE"
+    assert list_factors(db_path=db) == []  # 未过闸不落库
+
+
+def test_run_builtin_register_skips_all_seven_when_present(tmp_path):
+    """七条全部在库（任意状态）→ 注册日批幂等空跑：skipped=7、不构造面板。"""
+    from finance_agent.factors.builtin import run_factor_builtin_register
+
+    db = str(tmp_path / "factor_library.db")
+    for item in BUILTIN_FACTORS:
+        add_factor(
+            expression=item.expression,
+            hypothesis=item.hypothesis,
+            category="builtin",
+            status="active",
+            db_path=db,
+        )
+    summary = run_factor_builtin_register(db_path=db)
+    assert summary == {
+        "registered": 0,
+        "rejected": 0,
+        "skipped": len(BUILTIN_FACTORS),
+        "reasons": [],
+    }

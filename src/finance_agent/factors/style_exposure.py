@@ -22,7 +22,7 @@ from typing import Any
 import pandas as pd
 
 from finance_agent.factors.builtin import BUILTIN_FACTORS
-from finance_agent.factors.dsl import parse
+from finance_agent.factors.dsl import collect_fields, parse
 from finance_agent.factors.eval_engine import (
     MarketPanel,
     evaluate,
@@ -74,7 +74,13 @@ def compute_style_exposure(
     dominant_corr: float | None = None
     dominant_days = 0
     for name, expression in style_basket():
-        style_ic = rank_ic_series(evaluate(parse(expression), panel), resolved_fwd).dropna()
+        node = parse(expression)
+        if any(field not in panel.fields for field in collect_fields(node)):
+            # 参考数据面字段（float_cap/turnover）未携带 → 该风格记 None（诊断降级，
+            # MUST NOT 用 0 冒充；见 builtin.py 真实口径两条）
+            correlations[name] = None
+            continue
+        style_ic = rank_ic_series(evaluate(node, panel), resolved_fwd).dropna()
         common = factor_series.index.intersection(style_ic.index)
         if len(common) < min_samples:
             correlations[name] = None

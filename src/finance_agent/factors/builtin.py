@@ -3,8 +3,10 @@
 计划 docs/superpowers/plans/2026-10-13-add-screening-ranker.md Global Constraints 与
 R5（实施者不得自行改口径）：
 
-- 五个 builtin（名称逐字）：``momentum_20`` / ``reversal_5`` / ``turnover_proxy`` /
-  ``volatility_20`` / ``size_proxy``；``category="builtin"``、``source="builtin"``；
+- 七个 builtin（名称逐字）：``momentum_20`` / ``reversal_5`` / ``turnover_proxy`` /
+  ``volatility_20`` / ``size_proxy``（既有五条，名称与表达式逐字不变）+ 真实口径两条
+  ``size_float``（``log(float_cap)``）/ ``turnover_20``（``ts_mean(turnover,20)``，
+  extend-factor-library-coverage §10）；``category="builtin"``、``source="builtin"``；
 - **免 LLM 提案环节，但同样通过五道闸**（``validate.admit_candidates``）方可置为
   active——阈值与 LLM 提案因子完全一致（spec 场景：builtin 反转因子 ICIR=0.12 →
   被拒于闸②）；
@@ -12,20 +14,25 @@ R5（实施者不得自行改口径）：
   （``STRUCTURAL_DUPLICATE``），不重复入库（``find_structural_duplicate`` 覆盖
   candidate/active/degraded，retired 可重提）。
 
-**代理口径的诚实披露（字段集限制）**：因子 DSL 只有价量六字段
-（``open/high/low/close/volume/amount``），**无股本/流通股数据**，故：
+**代理口径的诚实披露（字段集限制）**：因子 DSL 的价量六字段
+（``open/high/low/close/volume/amount``）**无股本/流通股数据**，故既有两条以代理
+表达（名称与表达式保持逐字不变，历史库/对账基线不受影响）：
 
-- 「换手率」不可直接表达 → ``turnover_proxy`` 以**量比**代理：
+- 「换手率」代理 → ``turnover_proxy`` 以**量比**代理：
   ``div(volume, ts_mean(volume, 20))``（当日成交量 / 近 20 日均量；量比与换手率
   在关注度/活跃度维度同向，但量纲与解释不同）；
-- 「市值」不可直接表达 → ``size_proxy`` 以**成交额水平**代理：
+- 「市值」代理 → ``size_proxy`` 以**成交额水平**代理：
   ``ts_mean(amount, 20)``（成交额与市值正相关，但受换手率影响，非市值本身）。
 
-两者均以上述代理表达式的名义注册与展示，报告与后续评估不得把它们当作真实换手率 /
-市值使用。builtin 包同时充当 LLM 因子的结构查重对照与池级增量（闸④）基线。
+extend-factor-library-coverage 引入参考数据面后可表达真实口径，新增两条用**真实
+字段**（``float_cap`` 流通市值 / ``turnover`` 换手率），MUST NOT 以代理表达式顶替：
+面板未携带这些可选字段时登记批在闸①按 ``LOW_COVERAGE`` 拒收（``detail.missing_fields``，
+参考数据回填/日批到位后次日自动重试）。代理两条继续按代理名义注册与展示，报告与
+后续评估不得把它们当作真实换手率 / 市值使用。builtin 包同时充当 LLM 因子的结构查重
+对照与池级增量（闸④）基线。
 
 其余三个因子（20 日动量 ``delta(close,20)``、5 日反转 ``div(ts_mean(close,5),close)``、
-20 日波动率 ``ts_std(delta(close,1),20)``）为教科书经典形态的直译；全部五条表达式
+20 日波动率 ``ts_std(delta(close,1),20)``）为教科书经典形态的直译；全部七条表达式
 均在 DSL 默认复杂度上限内（深度 ≤4、自由参数 ≤3、字段 ≤3，单测逐条钉死）。
 """
 
@@ -100,6 +107,24 @@ BUILTIN_FACTORS: tuple[BuiltinFactor, ...] = (
         hypothesis=(
             "近 20 日平均成交额刻画标的规模与流动性层级（成交额与市值正相关，大市值"
             "与高流动性伴随不同的风险溢价）。DSL 无股本数据，以成交额水平代理市值口径。"
+        ),
+    ),
+    BuiltinFactor(
+        name="size_float",
+        expression="log(float_cap)",
+        hypothesis=(
+            "流通市值（对数）刻画规模风险暴露：小市值溢价与流动性折价使市值层级在截面上"
+            "区分预期收益（真实口径，依赖参考数据面 float_cap；字段缺失时登记批在闸①"
+            "拒收、参考数据到位后次日重试）。"
+        ),
+    ),
+    BuiltinFactor(
+        name="turnover_20",
+        expression="ts_mean(turnover,20)",
+        hypothesis=(
+            "近 20 日平均换手率刻画交易活跃度与市场关注度：换手率抬升伴随的分歧与流动性"
+            "变化在截面上与预期收益相关（真实口径，依赖参考数据面 turnover；字段缺失时"
+            "登记批在闸①拒收、参考数据到位后次日重试）。"
         ),
     ),
 )

@@ -21,6 +21,7 @@ from finance_agent.factors.library import (
     _connect,
     add_factor,
     apply_bucket_quota,
+    find_quota_retired_duplicate,
     find_rejected_duplicate,
     find_structural_duplicate,
     init_library,
@@ -1072,3 +1073,43 @@ class TestRejectedStateAndPool:
         assert len(list_factors(status="rejected", db_path=db)) == 1
         reset_factor_library(db_path=db)
         assert list_factors(include_rejected=True, db_path=db) == []
+
+
+class TestQuotaRetiredDuplicate:
+    """同构 retired 行的配额退役归属（extend-factor-library-coverage §10）。"""
+
+    def _retire(self, db, *, category, reason):
+        factor_id = add_factor(
+            expression="volume",
+            hypothesis="同构退役行（桶归属用例）。",
+            category=category,
+            status="active",
+            db_path=db,
+        )
+        set_status(factor_id, "retired", detail={"reason": reason}, db_path=db)
+        return factor_id
+
+    def test_returns_smallest_quota_retired_isomorph(self, tmp_path):
+        db = _db(tmp_path)
+        first = self._retire(db, category="外部", reason="BUCKET_QUOTA")
+        self._retire(db, category="价量", reason="BUCKET_QUOTA")
+        assert find_quota_retired_duplicate("volume", db_path=db) == {
+            "id": first,
+            "category": "外部",
+        }
+
+    def test_non_quota_retire_returns_none(self, tmp_path):
+        db = _db(tmp_path)
+        self._retire(db, category="外部", reason="DECAY")
+        assert find_quota_retired_duplicate("volume", db_path=db) is None
+
+    def test_ignores_non_retired_isomorphs(self, tmp_path):
+        db = _db(tmp_path)
+        add_factor(
+            expression="volume",
+            hypothesis="active 同构行不参与桶归属查找。",
+            category="外部",
+            status="active",
+            db_path=db,
+        )
+        assert find_quota_retired_duplicate("volume", db_path=db) is None

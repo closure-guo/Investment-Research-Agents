@@ -87,7 +87,7 @@ from finance_agent.factors.constraints import (
     PERMUTATION_N,
     TRAIN_FRACTION,
 )
-from finance_agent.factors.dsl import parse, serialize
+from finance_agent.factors.dsl import Call, collect_fields, parse, serialize
 from finance_agent.factors.eval_engine import (
     MarketPanel,
     cross_section_zscore,
@@ -98,6 +98,7 @@ from finance_agent.factors.eval_engine import (
 from finance_agent.factors.library import (
     add_factor,
     apply_bucket_quota,
+    find_quota_retired_duplicate,
     find_structural_duplicate,
     list_active_factors,
     list_ic_series,
@@ -852,6 +853,37 @@ class _PendingCandidate:
     gates: list[GateResult] = field(default_factory=list)
 
 
+def _ast_uses_group(node: Any) -> bool:
+    """子树是否引用了行业分组算子（``ind_neutralize``）。"""
+    if isinstance(node, Call):
+        if node.op == "ind_neutralize":
+            return True
+        return any(_ast_uses_group(arg) for arg in node.args)
+    return False
+
+
+def _panel_precheck(node: Any, panel: MarketPanel) -> GateResult | None:
+    """闸①求值前预检：可选字段 / 分组缺失 → ``LOW_COVERAGE``（不抛裸 ValueError）。
+
+    - ``float_cap`` / ``turnover`` / ``listed_days`` 等可选字段不在 ``panel.fields``
+      → ``detail.missing_fields``（次日参考数据到位后可重试）；
+    - ``ind_neutralize`` 需要 ``panel.groups["industry"]``，缺失 →
+      ``detail.missing_groups``（MUST NOT 退化为全市场去均值）。
+    """
+    missing_fields = [name for name in collect_fields(node) if name not in panel.fields]
+    missing_groups: list[str] = []
+    if _ast_uses_group(node) and not (panel.groups is not None and "industry" in panel.groups):
+        missing_groups.append("industry")
+    if not missing_fields and not missing_groups:
+        return None
+    detail: dict[str, Any] = {}
+    if missing_fields:
+        detail["missing_fields"] = missing_fields
+    if missing_groups:
+        detail["missing_groups"] = missing_groups
+    return GateResult(GATE_COMPUTABILITY, False, ReasonCode.LOW_COVERAGE, detail)
+
+
 def _dedup_gate(ast_json: str, *, db_path: str | Path | None) -> GateResult:
     """闸 0 结构查重结果（命中记 ``duplicate_of`` = 同构对象 id）。"""
     duplicate_of = find_structural_duplicate(ast_json, db_path=db_path)
@@ -942,6 +974,13 @@ def admit_candidates(
         dedup = _dedup_gate(ast_json, db_path=db_path)
         if not dedup.passed:
             outcomes[position] = AdmissionResult(None, STATUS_REJECTED, (dedup,), GATE_DEDUP)
+            continue
+        precheck = _panel_precheck(node, panel)
+        if precheck is not None:
+            _persist_rejection(candidate, precheck, ast_json=ast_json, db_path=db_path)
+            outcomes[position] = AdmissionResult(
+                None, STATUS_REJECTED, (dedup, precheck), GATE_COMPUTABILITY
+            )
             continue
         values = evaluate(node, panel)
         # 分母口径「当日有行」（#512 拍板 A）；面板未带 presence（测试直构）时回退全面板
@@ -1037,10 +1076,15 @@ def admit_candidates(
                 None, STATUS_REJECTED, (*item.gates, dedup_again), GATE_DEDUP
             )
             continue
+        # 桶归属（extend-factor-library-coverage §10）：同构 retired 行最近一次
+        # active→retired 为 BUCKET_QUOTA → 沿用其 category（桶随结构走，防换标签
+        # 绕过配额）；否则仍按提案自报值。
+        inherited = find_quota_retired_duplicate(item.ast_json, db_path=db_path)
+        category = str(inherited["category"]) if inherited is not None else item.category
         factor_id = add_factor(
             expression=item.expression,
             hypothesis=item.hypothesis,
-            category=item.category,
+            category=category,
             status="candidate",
             ast_json=item.ast_json,
             source=item.source,
@@ -1051,6 +1095,8 @@ def admit_candidates(
         # 无需翻表——存量 NULL 行（incident 家族 #514）的教训落在事件流里
         orientation = gate4.detail.get("orientation")
         admitted_detail: dict[str, Any] = {"reason": "ADMITTED"}
+        if inherited is not None:
+            admitted_detail["inherited_category_from"] = int(inherited["id"])
         if orientation in (-1, 0, 1):
             admitted_detail["orientation"] = int(orientation)
         set_status(factor_id, STATUS_ACTIVE, detail=admitted_detail, db_path=db_path)
@@ -1059,7 +1105,7 @@ def admit_candidates(
             set_pool_increment(factor_id, float(increment), db_path=db_path)
         if orientation in (-1, 0, 1):
             set_orientation(factor_id, int(orientation), db_path=db_path)
-        retired = apply_bucket_quota(item.category, db_path=db_path)
+        retired = apply_bucket_quota(category, db_path=db_path)
         status = STATUS_RETIRED if factor_id in retired else STATUS_ACTIVE
         outcomes[item.position] = AdmissionResult(factor_id, status, tuple(item.gates), None)
 

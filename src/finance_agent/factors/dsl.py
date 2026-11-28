@@ -297,6 +297,21 @@ def _field_names(node: Call) -> set[str]:
     return names
 
 
+def collect_fields(node: AstNode) -> tuple[str, ...]:
+    """子树引用的字段名（去重、按名字升序；叶子 Field → 单元素元组）。
+
+    供准入闸①在**求值前**做「可选数据字段的可计算性」预检（
+    extend-factor-library-coverage §10）：引用面板未携带的 ``float_cap`` /
+    ``turnover`` / ``listed_days`` 时按 ``LOW_COVERAGE`` 拒收，而不是让
+    ``evaluate`` 抛裸 ``ValueError`` 拖垮整批。
+    """
+    if isinstance(node, Field):
+        return (node.name,)
+    if isinstance(node, Call):
+        return tuple(sorted(_field_names(node)))
+    return ()
+
+
 def _check_complexity(node: AstNode) -> None:
     """三条上限逐条检查；**不短路**——一次列出全部违规项（见错误类 docstring）。"""
     violations: list[str] = []
