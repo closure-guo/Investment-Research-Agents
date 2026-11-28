@@ -938,3 +938,63 @@ def test_new_ops_perf_budget():
         _eval(expr, panel)
         elapsed = time.perf_counter() - t
         assert elapsed <= budget, f"{expr} 超时 {elapsed:.2f}s > {budget:.2f}s"
+
+
+# ── extend-factor-library-coverage：面板可选字段与分组（§7） ─────────────────
+
+
+class TestOptionalPanelFields:
+    """build_panel_from_rows：行携带列才构造可选帧与 groups；停牌行 float_cap/turnover 置 NaN。"""
+
+    def _rows(self, **extra):
+        base = {
+            "trade_date": ["2026-11-26", "2026-11-27"],
+            "code": ["A", "A"],
+            "open": [1.0, 2.0],
+            "high": [1.0, 2.0],
+            "low": [1.0, 2.0],
+            "close_raw": [1.0, 2.0],
+            "close_qfq": [1.0, 2.0],
+            "volume": [10.0, 10.0],
+            "amount": [100.0, 100.0],
+        }
+        base.update(extra)
+        return pd.DataFrame(base)
+
+    def test_absent_when_columns_missing(self):
+        panel = build_panel_from_rows(self._rows())
+        assert set(panel.fields) == {"open", "high", "low", "close", "volume", "amount"}
+        assert panel.groups is None
+
+    def test_constructed_when_columns_present(self):
+        panel = build_panel_from_rows(
+            self._rows(
+                float_cap=[2.0e9, 2.1e9],
+                turnover=[0.0125, 0.02],
+                listed_days=[100, 101],
+                industry_l1=["食品饮料", "食品饮料"],
+            )
+        )
+        assert set(panel.fields) == {
+            "open", "high", "low", "close", "volume", "amount",
+            "float_cap", "turnover", "listed_days",
+        }
+        assert panel.fields["float_cap"].loc["2026-11-27", "A"] == pytest.approx(2.1e9)
+        assert panel.fields["turnover"].loc["2026-11-26", "A"] == pytest.approx(0.0125)
+        assert panel.groups is not None
+        assert panel.groups["industry"].loc["2026-11-27", "A"] == "食品饮料"
+
+    def test_suspended_rows_mask_trading_quantities(self):
+        panel = build_panel_from_rows(
+            self._rows(
+                is_suspended=[0, 1],
+                float_cap=[2.0e9, 3.0e9],
+                turnover=[0.0125, 0.03],
+                listed_days=[100, 101],
+            )
+        )
+        # 停牌行：流通市值/换手率置 NaN（交易量口径）；listed_days 保留（静态属性）
+        assert np.isnan(panel.fields["float_cap"].loc["2026-11-27", "A"])
+        assert np.isnan(panel.fields["turnover"].loc["2026-11-27", "A"])
+        assert panel.fields["listed_days"].loc["2026-11-27", "A"] == 101.0
+        assert panel.fields["float_cap"].loc["2026-11-26", "A"] == pytest.approx(2.0e9)

@@ -25,6 +25,9 @@
 
 字段语义：``open/high/low/close/volume/amount`` 均为**前复权口径**（复权由数据层
 在写入快照前完成，DSL 层不感知，也不接受未复权数据）。
+``float_cap``（流通市值，元）/``turnover``（换手率，小数）/``listed_days``（上市
+天数，自然日）为**可选参考字段**（不复权口径）：面板携带时按值求值，未携带时
+求值报错（不静默补 NaN）；字段种类上限把可选字段与价量字段合计计数。
 
 **AST 来源不变量**：所有受支持的 AST 均由 ``parse()`` 产出（或其 ``serialize`` →
 ``parse`` round-trip 结果）；``parse`` 保证 ``Call.args`` 非空（空参数列表在解析期
@@ -91,7 +94,21 @@ OPS: frozenset[str] = frozenset(
     }
 )
 
-FIELDS: frozenset[str] = frozenset({"open", "high", "low", "close", "volume", "amount"})
+FIELDS: frozenset[str] = frozenset(
+    {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        # extend-factor-library-coverage：可选参考字段（不复权口径；面板按需携带，
+        # 由参考数据面构造，见 factor-reference-data）
+        "float_cap",
+        "turnover",
+        "listed_days",
+    }
+)
 
 # 元数表（D2，逐字钉死）
 ARITY: dict[str, int] = {

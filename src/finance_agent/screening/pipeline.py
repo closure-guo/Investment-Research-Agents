@@ -180,7 +180,12 @@ def read_snapshot_calendar(snapshot_db_path: str | Path | None = None) -> list[s
 def _build_default_panel(
     as_of: str, calendar: Sequence[str], snapshot_db_path: str | Path | None
 ) -> MarketPanel:
-    """缺省面板：快照库最近 ``DEFAULT_PANEL_LOOKBACK_DAYS`` 个交易日逐日读取拼装。"""
+    """缺省面板：快照库最近 ``DEFAULT_PANEL_LOOKBACK_DAYS`` 个交易日逐日读取拼装。
+
+    extend-factor-library-coverage：逐日 chunk 携带的可选参考字段（``float_cap`` /
+    ``turnover`` / ``listed_days``）与 ``groups``（行业标签）一并拼装——不拼会在
+    选股面板上静默丢掉参考字段（闸①拒收与 L2 缺口披露都会失真）。
+    """
     dates = [day for day in calendar if day <= as_of][-DEFAULT_PANEL_LOOKBACK_DAYS:]
     if as_of not in dates:
         raise ValueError(
@@ -190,12 +195,19 @@ def _build_default_panel(
         build_panel_from_rows(pd.DataFrame(read_universe(day, db_path=snapshot_db_path)))
         for day in dates
     ]
-    return MarketPanel(
-        fields={
-            name: pd.concat([chunk.fields[name] for chunk in chunks]).sort_index()
-            for name in _PANEL_FIELDS
+    optional_names = [name for name in chunks[0].fields if name not in _PANEL_FIELDS]
+    fields = {
+        name: pd.concat([chunk.fields[name] for chunk in chunks]).sort_index()
+        for name in [*_PANEL_FIELDS, *optional_names]
+    }
+    groups: dict[str, pd.DataFrame] | None = None
+    first_groups = chunks[0].groups
+    if first_groups:
+        groups = {
+            key: pd.concat([chunk.groups[key] for chunk in chunks]).sort_index()
+            for key in first_groups
         }
-    )
+    return MarketPanel(fields=fields, groups=groups)
 
 
 def _amounts_by_code(

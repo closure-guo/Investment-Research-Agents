@@ -89,7 +89,11 @@ SPEC_OPS = {
     "ind_neutralize",
     "exp",
 }
-SPEC_FIELDS = {"open", "high", "low", "close", "volume", "amount"}
+SPEC_FIELDS = {
+    "open", "high", "low", "close", "volume", "amount",
+    # extend-factor-library-coverage：可选参考字段（面板按需携带）
+    "float_cap", "turnover", "listed_days",
+}
 SPEC_ARITY = {
     "ts_mean": 2,
     "ts_std": 2,
@@ -222,7 +226,7 @@ def test_ops_enumeration_verbatim_40_names():
     assert len(OPS) == 40
     assert ARITY == SPEC_ARITY
     assert FIELDS == SPEC_FIELDS
-    assert len(FIELDS) == 6
+    assert len(FIELDS) == 9
 
 
 # ── Task 1: 全算子解析 + 序列化 round-trip ───────────────────────────────────
@@ -873,3 +877,25 @@ class TestTimeSeriesStatsParse:
         assert isinstance(node, Call)
         assert node.args[1] == Number(5)
         assert node.args[2] == Number(0.25)
+
+
+# ── extend-factor-library-coverage：可选参考字段（§7） ───────────────────────
+
+
+class TestOptionalReferenceFields:
+    """float_cap/turnover/listed_days 在字段枚举内、计入字段种类；求值依赖面板携带。"""
+
+    def test_parses_and_counts_as_field_kinds(self):
+        node = parse("add(float_cap, turnover)")
+        assert count_fields(node) == 2
+        assert parse(serialize(node)) == node
+
+    def test_field_kinds_cap_counts_optional(self):
+        # 三字段（价量 + 可选合计）3 通过；4 拒收
+        assert count_fields(parse("add(add(float_cap, open), close)")) == 3
+        with pytest.raises(FactorComplexityError) as excinfo:
+            parse("add(add(add(float_cap, open), close), volume)")
+        assert "字段种类 4 > 上限 3" in str(excinfo.value)
+
+    def test_unknown_optional_like_field_still_refused(self):
+        _assert_parse_error("log(total_cap)", contains=["未知字段"])

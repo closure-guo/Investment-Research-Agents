@@ -99,6 +99,8 @@ def test_init_creates_tables_and_is_idempotent(tmp_path):
             "delist_date",
             "delist_source",
             "updated_at",
+            # extend-factor-library-coverage：行业门类列（§6 迁移补列）
+            "industry_l1",
         }
 
         indexes = {
@@ -846,6 +848,8 @@ def test_security_master_upsert_roundtrip(tmp_path):
         # add-microcap-lane-guardrails：主表形状扩 delist_date/delist_source（存续标的为 None）
         "delist_date": None,
         "delist_source": None,
+        # extend-factor-library-coverage：industry_l1 未回填 = None
+        "industry_l1": None,
     }
     assert _count(db, "security_master") == 2
 
