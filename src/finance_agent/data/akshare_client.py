@@ -634,34 +634,63 @@ def _strip_exchange_prefix(value: object) -> str | None:
     return text or None
 
 
-def _parse_tencent_batch_caps(text: str) -> dict[str, float]:
-    """腾讯批量报价串 → ``{6 位裸码: 流通市值(元)}``（field 44，亿 → ×1e8）。
+def _parse_tencent_batch_ref(text: str) -> dict[str, dict[str, float]]:
+    """腾讯批量报价串 → ``{6 位裸码: {float_cap, total_cap, turnover}}``。
 
-    串形与单标的相同（``v_sh600519="...";`` 逐行，脚本名即交易所前缀符号）；
-    不可解析行（网关错误页/字段不足/市值空或非正）跳过，不抛——整串全部不可解析
-    由调用方按批失败处置（None 而非空 dict，MUST NOT 以空表冒充成功）。
+    字段口径（``_TENCENT_FIELD_IDX``）：流通市值 44 / 总市值 45（亿 → ×1e8，元）；
+    换手率 38 上游为**百分数** → 归一为小数（÷100，与侧表 ``turnover`` 口径一致）。
+    逐字段解析：缺失/空/非数值/非有限值的字段不写入该码的子 dict；市值非正跳过
+    （停牌占位），换手率为负跳过（0 合法）。整串无任何可用值 → 空 dict，由调用方
+    按批失败处置（None 而非空 dict，MUST NOT 以空表冒充成功）。
     """
-    caps: dict[str, float] = {}
-    cap_idx = _TENCENT_FIELD_IDX["float_market_cap"]
     code_idx = _TENCENT_FIELD_IDX["code"]
+    specs: tuple[tuple[str, int, float], ...] = (
+        ("turnover", _TENCENT_FIELD_IDX["turnover_rate"], 1e-2),
+        ("float_cap", _TENCENT_FIELD_IDX["float_market_cap"], 1e8),
+        ("total_cap", _TENCENT_FIELD_IDX["market_cap"], 1e8),
+    )
+    max_idx = max(idx for _, idx, _ in specs)
+    ref: dict[str, dict[str, float]] = {}
     for line in text.split(";"):
         line = line.strip()
         if not line or "=" not in line:
             continue
         _, _, payload = line.partition("=")
         fields = payload.strip().strip('"').split("~")
-        if len(fields) <= cap_idx:
+        if len(fields) <= max_idx:
             continue
         code = _strip_exchange_prefix(fields[code_idx])
-        raw = fields[cap_idx].strip()
-        if not code or not raw:
+        if not code:
             continue
-        try:
-            value = float(raw)
-        except ValueError:
-            continue
-        if value > 0:
-            caps[code] = value * 1e8  # 亿 → 元（口径同 _TENCENT_YI_FIELDS）
+        values: dict[str, float] = {}
+        for name, idx, scale in specs:
+            raw = fields[idx].strip()
+            if not raw:
+                continue
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if value != value or value in (float("inf"), float("-inf")):
+                continue
+            if name == "turnover":
+                if value < 0:
+                    continue
+            elif value <= 0:  # 市值：非正视为占位缺失
+                continue
+            values[name] = value * scale
+        if values:
+            ref[code] = values
+    return ref
+
+
+def _parse_tencent_batch_caps(text: str) -> dict[str, float]:
+    """腾讯批量报价串 → ``{6 位裸码: 流通市值(元)}``（复用参考数据解析后投影 field 44）。"""
+    caps: dict[str, float] = {}
+    for code, values in _parse_tencent_batch_ref(text).items():
+        cap = values.get("float_cap")
+        if cap is not None:
+            caps[code] = cap
     return caps
 
 
@@ -722,6 +751,8 @@ class AKShareClient:
             "constituents": set(),
             "industry": set(),
             "market_cap": set(),
+            # extend-factor-library-coverage §8：参考数据（市值/换手率）实际生效源
+            "market_ref": set(),
             # add-market-data-fallback：全市场 spot 实际生效源（eastmoney|sina|none）
             "market_spot": set(),
             # add-event-driven-lane：业绩预告实际生效源（eastmoney|none）
@@ -2281,28 +2312,17 @@ class AKShareClient:
         self.last_spot_failure = {"eastmoney": em_fail, "sina": sina_fail}
         return None
 
-    def fetch_market_caps_bulk(self, codes: Sequence[str]) -> dict[str, float] | None:
-        """腾讯批量报价取流通市值（design「市值兜底源（腾讯批量）」）：``{裸码: 元}``。
+    def _fetch_tencent_ref_chunks(
+        self, bare_codes: list[str], *, require: str | None, label: str
+    ) -> dict[str, dict[str, float]] | None:
+        """腾讯批量报价分片取数（``fetch_market_caps_bulk``/``fetch_market_ref_bulk`` 共用）。
 
-        spot 无 ``流通市值`` 列（新浪回退列形）时的真实市值兜底源——按
-        「快照同源 spot 优先 → 腾讯批量兜底」链式尝试的第二源，采用时调用方
-        在指标行留痕 ``cap_source=tencent``。≤100 码/批切分、批间小睡防限流；
-        每批最多 ``_TENCENT_BATCH_ATTEMPTS`` 次尝试（瞬时断连/不可解析重试同批），
-        重试耗尽 → ERROR + None（调用方 ``cap_data_missing``，
-        MUST NOT 以成交额等替代口径冒充）；个别码缺失（停牌/退市/市值字段空）→
-        WARNING 并返回已解析子集（覆盖是否够用交调用方判定）。成功记入
-        ``sources_seen["market_cap"]``。
+        ≤100 码/批、批间小睡、每批最多 ``_TENCENT_BATCH_ATTEMPTS`` 次；``require``
+        为批内可用性判据（该键存在才计入，缺键码在批过滤后为空视同整批不可解析
+        触发重试）；``label`` 只用于日志。任一批重试耗尽 → ERROR + None
+        （MUST NOT 以部分批次冒充成功）。
         """
-        bare_codes: list[str] = []
-        for raw in codes:
-            normalized = _strip_exchange_prefix(raw)
-            if normalized and normalized not in bare_codes:
-                bare_codes.append(normalized)
-        if not bare_codes:
-            logger.warning("腾讯批量市值取数：无有效代码（入参 %d 个）", len(codes))
-            return None
-
-        caps: dict[str, float] = {}
+        ref: dict[str, dict[str, float]] = {}
         chunks = [
             bare_codes[position : position + _TENCENT_BATCH_CHUNK]
             for position in range(0, len(bare_codes), _TENCENT_BATCH_CHUNK)
@@ -2311,18 +2331,24 @@ class AKShareClient:
             if batch_no > 1:
                 time.sleep(_TENCENT_BATCH_SLEEP_S)
             symbols = ",".join(self._to_sina_symbol(code) for code in chunk)
-            parsed: dict[str, float] | None = None
+            parsed: dict[str, dict[str, float]] | None = None
             for attempt in range(1, _TENCENT_BATCH_ATTEMPTS + 1):
                 try:
                     resp = requests.get(
                         f"https://qt.gtimg.cn/q={symbols}",
                         timeout=_TENCENT_BATCH_TIMEOUT_S,
                     )
-                    parsed = _parse_tencent_batch_caps(resp.content.decode("gbk"))
+                    raw = _parse_tencent_batch_ref(resp.content.decode("gbk"))
+                    parsed = {
+                        code: values
+                        for code, values in raw.items()
+                        if require is None or require in values
+                    }
                 except Exception as e:
                     parsed = None
                     logger.warning(
-                        "腾讯批量市值取数失败（第 %d/%d 批，第 %d/%d 次）: %s",
+                        "腾讯批量%s取数失败（第 %d/%d 批，第 %d/%d 次）: %s",
+                        label,
                         batch_no,
                         len(chunks),
                         attempt,
@@ -2333,7 +2359,8 @@ class AKShareClient:
                     if parsed:
                         break
                     logger.warning(
-                        "腾讯批量行情整批不可解析（第 %d/%d 批，第 %d/%d 次）",
+                        "腾讯批量%s整批不可解析（第 %d/%d 批，第 %d/%d 次）",
+                        label,
                         batch_no,
                         len(chunks),
                         attempt,
@@ -2343,25 +2370,77 @@ class AKShareClient:
                     time.sleep(_TENCENT_BATCH_RETRY_SLEEP_S)
             if not parsed:
                 logger.error(
-                    "腾讯批量市值取数重试耗尽（第 %d/%d 批，%d 码，%d 次）",
+                    "腾讯批量%s取数重试耗尽（第 %d/%d 批，%d 码，%d 次）",
+                    label,
                     batch_no,
                     len(chunks),
                     len(chunk),
                     _TENCENT_BATCH_ATTEMPTS,
                 )
                 return None
-            caps.update(parsed)
+            ref.update(parsed)
 
-        missing = [code for code in bare_codes if code not in caps]
+        missing = [code for code in bare_codes if code not in ref]
         if missing:
             logger.warning(
-                "腾讯批量行情覆盖不齐：缺失 %d/%d 码（例：%s）",
+                "腾讯批量%s覆盖不齐：缺失 %d/%d 码（例：%s）",
+                label,
                 len(missing),
                 len(bare_codes),
                 missing[:5],
             )
+        return ref
+
+    @staticmethod
+    def _unique_bare_codes(codes: Sequence[str]) -> list[str]:
+        bare_codes: list[str] = []
+        for raw in codes:
+            normalized = _strip_exchange_prefix(raw)
+            if normalized and normalized not in bare_codes:
+                bare_codes.append(normalized)
+        return bare_codes
+
+    def fetch_market_caps_bulk(self, codes: Sequence[str]) -> dict[str, float] | None:
+        """腾讯批量报价取流通市值（design「市值兜底源（腾讯批量）」）：``{裸码: 元}``。
+
+        spot 无 ``流通市值`` 列（新浪回退列形）时的真实市值兜底源——按
+        「快照同源 spot 优先 → 腾讯批量兜底」链式尝试的第二源，采用时调用方
+        在指标行留痕 ``cap_source=tencent``。分片/重试口径见
+        ``_fetch_tencent_ref_chunks``；重试耗尽 → ERROR + None（调用方
+        ``cap_data_missing``，MUST NOT 以成交额等替代口径冒充）；个别码缺失
+        （停牌/退市/市值字段空）→ WARNING 并返回已解析子集（覆盖是否够用交调用方
+        判定）。成功记入 ``sources_seen["market_cap"]``。
+        """
+        bare_codes = self._unique_bare_codes(codes)
+        if not bare_codes:
+            logger.warning("腾讯批量市值取数：无有效代码（入参 %d 个）", len(codes))
+            return None
+
+        ref = self._fetch_tencent_ref_chunks(bare_codes, require="float_cap", label="市值")
+        if ref is None:
+            return None
         self.sources_seen["market_cap"].add("tencent")
-        return caps
+        return {code: values["float_cap"] for code, values in ref.items()}
+
+    def fetch_market_ref_bulk(self, codes: Sequence[str]) -> dict[str, dict[str, float]] | None:
+        """腾讯批量报价取参考数据（extend-factor-library-coverage §8）：
+        ``{裸码: {float_cap, total_cap, turnover}}``。
+
+        口径：市值元（亿 ×1e8），换手率**小数**（上游百分数 ÷100，与
+        ``market_ref_daily.turnover`` 同口径）。分片/重试/覆盖不齐口径同
+        ``fetch_market_caps_bulk``；整批重试耗尽 → None（未披露字段不出现在
+        子 dict 里，不以 0 冒充）。成功记入 ``sources_seen["market_ref"]``。
+        """
+        bare_codes = self._unique_bare_codes(codes)
+        if not bare_codes:
+            logger.warning("腾讯批量参考数据取数：无有效代码（入参 %d 个）", len(codes))
+            return None
+
+        ref = self._fetch_tencent_ref_chunks(bare_codes, require=None, label="参考数据")
+        if ref is None:
+            return None
+        self.sources_seen["market_ref"].add("tencent")
+        return ref
 
     def fetch_trade_calendar(self) -> list[str] | None:
         """全历史交易日历（``tool_trade_date_hist_sina``）→ 升序去重的 ``YYYY-MM-DD``。

@@ -1653,3 +1653,47 @@ class TestFetchKlineLastBarAttr:
         )
         result = client.fetch_kline("600519", days=3)
         assert result.attrs["last_bar_date"] == "2026-08-03"
+
+
+class TestFetchMarketRefBulk:
+    """extend-factor-library-coverage §8：腾讯批量参考数据（流通市值/总市值/换手率）。"""
+
+    @staticmethod
+    def _gbk_response(payload: str):
+        resp = requests.Response()
+        resp.status_code = 200
+        resp._content = payload.encode("gbk")
+        return resp
+
+    def _line(self, symbol: str, code: str, float_cap: str, total_cap: str, turnover: str) -> str:
+        fields = [""] * 88
+        fields[0], fields[1], fields[2], fields[3] = "1", "示例", code, "10.00"
+        fields[38], fields[44], fields[45] = turnover, float_cap, total_cap
+        return f'v_{symbol}="{"~".join(fields)}";'
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_parses_three_fields(self, mock_get, client):
+        mock_get.return_value = self._gbk_response(
+            self._line("sh600519", "600519", "18405.70", "18405.70", "0.32")
+        )
+        ref = client.fetch_market_ref_bulk(["600519"])
+        assert ref is not None
+        got = ref["600519"]
+        assert got["float_cap"] == pytest.approx(18405.70e8)
+        assert got["total_cap"] == pytest.approx(18405.70e8)
+        # 腾讯换手率为百分数（0.32）→ 归一为小数（0.0032）
+        assert got["turnover"] == pytest.approx(0.0032)
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_unparseable_batch_returns_none(self, mock_get, client):
+        mock_get.return_value = self._gbk_response("not-a-quote;")
+        assert client.fetch_market_ref_bulk(["600519"]) is None
+
+    @patch("finance_agent.data.akshare_client.requests.get")
+    def test_caps_bulk_still_returns_float_caps(self, mock_get, client):
+        # 既有接口返回类型不变（dict[str, float]），内部复用 ref 解析
+        mock_get.return_value = self._gbk_response(
+            self._line("sh600519", "600519", "16613.58", "17000.00", "0.50")
+        )
+        caps = client.fetch_market_caps_bulk(["600519"])
+        assert caps == {"600519": pytest.approx(16613.58e8)}

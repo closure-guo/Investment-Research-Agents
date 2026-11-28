@@ -346,3 +346,116 @@ class TestPercentiles:
         self._run(regime_db, snap_db, client)
 
         assert latest_regime(db_path=regime_db)["small_cap_share"] == pytest.approx(1.0)
+
+
+class _RefClient(_FakeClient):
+    """带参考数据批量方法的 stub（三字段）；`ref_fail` 时模拟整批不可用。"""
+
+    def __init__(self, ref, *, spot=None):
+        super().__init__(spot, bulk=None)
+        self._ref = ref
+        self.ref_calls = 0
+
+    def fetch_market_ref_bulk(self, codes):
+        self.ref_calls += 1
+        return self._ref
+
+
+class TestRefRowsPersistence:
+    """extend-factor-library-coverage §8：拥挤度日批取数链顺手落市场参考数据侧表（best-effort）。"""
+
+    def _snap(self, tmp_path):
+        from finance_agent.data.snapshot import init_snapshot_db
+
+        db = tmp_path / "snap.db"
+        init_snapshot_db(db)
+        write_snapshot_rows(_AS_OF, _snapshot_rows(), db_path=db)
+        return db
+
+    def test_tencent_ref_rows_written(self, tmp_path):
+        import sqlite3
+
+        snap = self._snap(tmp_path)
+        ref = {
+            "600001": {"float_cap": 1.0e8, "total_cap": 1.1e8, "turnover": 0.012},
+            "600002": {"float_cap": 2.0e8, "total_cap": 2.1e8, "turnover": 0.02},
+            "600003": {"float_cap": 3.0e8, "total_cap": 3.1e8, "turnover": 0.03},
+        }
+        client = _RefClient(ref)
+        summary = run_regime_daily(
+            _AS_OF, db_path=tmp_path / "regime.db", snapshot_db_path=snap, client=client
+        )
+        assert summary["produced"] is True
+        conn = sqlite3.connect(snap)
+        try:
+            rows = conn.execute(
+                "SELECT code, float_cap, turnover, source FROM market_ref_daily ORDER BY code"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert [r[0] for r in rows] == ["600001", "600002", "600003"]
+        assert rows[0][1] == pytest.approx(1.0e8)
+        assert rows[0][2] == pytest.approx(0.012)
+        assert rows[0][3] == "tencent"
+
+    def test_ref_write_failure_does_not_break_regime(self, tmp_path, monkeypatch):
+        snap = self._snap(tmp_path)
+        ref = {
+            "600001": {"float_cap": 1.0e8},
+            "600002": {"float_cap": 2.0e8},
+            "600003": {"float_cap": 3.0e8},
+        }
+        import finance_agent.outcome.regime.job as job_mod
+
+        def _boom(rows, db_path=None):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(job_mod, "upsert_market_ref_rows", _boom)
+        summary = run_regime_daily(
+            _AS_OF,
+            db_path=tmp_path / "regime.db",
+            snapshot_db_path=snap,
+            client=_RefClient(ref),
+        )
+        assert summary["produced"] is True  # 只 WARN，不拖垮拥挤度行
+
+    def test_old_client_without_ref_method_unchanged(self, tmp_path):
+        snap = self._snap(tmp_path)
+        # 既有 _FakeClient 无 fetch_market_ref_bulk → 走 caps 回退路径、不写侧表行
+        client = _FakeClient(
+            _spot(caps={"600001": 1.0e8, "600002": 2.0e8, "600003": 3.0e8}),
+            bulk={"600001": 1.0e8, "600002": 2.0e8, "600003": 3.0e8},
+        )
+        summary = run_regime_daily(
+            _AS_OF, db_path=tmp_path / "regime.db", snapshot_db_path=snap, client=client
+        )
+        assert summary["produced"] is True
+
+    def test_spot_path_writes_ref_rows(self, tmp_path):
+        import sqlite3
+
+        snap = self._snap(tmp_path)
+        spot = pd.DataFrame(
+            {
+                "代码": ["600001", "600002", "600003"],
+                "流通市值": [1.0e8, 2.0e8, 3.0e8],
+                "总市值": [1.1e8, 2.1e8, 3.1e8],
+                "换手率": [1.2, 2.0, 3.0],  # 百分数 → 0.012/0.02/0.03
+            }
+        )
+        summary = run_regime_daily(
+            _AS_OF,
+            db_path=tmp_path / "regime.db",
+            snapshot_db_path=snap,
+            client=_FakeClient(spot),
+        )
+        assert summary["produced"] is True
+        conn = sqlite3.connect(snap)
+        try:
+            row = conn.execute(
+                "SELECT turnover, source FROM market_ref_daily WHERE code='600001'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row[0] == pytest.approx(0.012)
+        assert row[1] == "spot"

@@ -17,7 +17,9 @@
 6. ``build_snapshot_rows``（D2 合成 + D3 状态位）→ ``write_snapshot_rows``（幂等）；
 7. master 刷新：名单为空或每周一 → ``fetch_listing_info`` + upsert，并在**同一分支**
    同频抓取退市清单（``fetch_delist_lists`` + ``upsert_delisted_masters``，
-   add-microcap-lane-guardrails）；任一拉取失败只 WARN，不失败整批；
+   add-microcap-lane-guardrails）；随后对 ``industry_l1`` 为空的代码增量补抓行业
+   （``_refresh_missing_industry``，≤50 只/次，extend-factor-library-coverage §8）。
+   任一拉取失败只 WARN，不失败整批；
 8. 成功 meta：``last_success_date`` / ``last_attempt_at`` / ``trade_calendar``
    （本次拉到才写）与清 ``last_error``/``last_error_date`` 合并为**一次**
    ``set_meta_many(..., delete_keys=...)``（单事务「先删后写」，无中间态）；
@@ -51,6 +53,7 @@ from finance_agent.data.snapshot import (
     latest_snapshot_date,
     read_universe,
     set_meta_many,
+    update_security_master_industry,
     upsert_delisted_masters,
     upsert_security_master,
     write_snapshot_rows,
@@ -99,6 +102,51 @@ def _spot_failure_detail(client: Any) -> str:
     return "；".join(parts) if parts else "明细不可得"
 
 
+# 行业增量补抓上限（只/次；主表刷新时对 industry_l1 为空的代码补抓，
+# 避免一次性打满东财/cninfo。extend-factor-library-coverage §8）
+_INDUSTRY_REFRESH_LIMIT = 50
+
+
+def _refresh_missing_industry(client: Any, db_path: str | Path | None) -> str:
+    """主表刷新分支：对缺行业（``industry_l1`` 空）的在册代码增量补抓。
+
+    best-effort：单只取数失败只 WARN 并继续；写回失败只 WARN。返回状态供摘要
+    ``industry``：``refreshed``（有写回）/``skipped``（无可补或无行业产出）/
+    ``failed``（取数全败或写回失败）。MUST NOT 因行业缺失让日批失败。
+    """
+    try:
+        master = get_security_master(db_path=db_path)
+    except Exception as e:  # noqa: BLE001 - 旁路数据不可读不拖垮日批
+        logger.warning("行业补抓：主表不可读，本次跳过: %s", e)
+        return "failed"
+    missing = [
+        code for code, row in master.items() if not str(row.get("industry_l1") or "").strip()
+    ][:_INDUSTRY_REFRESH_LIMIT]
+    if not missing:
+        return "skipped"
+
+    mapping: dict[str, str] = {}
+    failures = 0
+    for code in missing:
+        try:
+            info = client.fetch_industry(code) or {}
+        except Exception as e:  # noqa: BLE001 - 单只失败不中断批量
+            failures += 1
+            logger.warning("行业补抓失败(code=%s)：本次跳过: %s", code, e)
+            continue
+        industry = info.get("industry") if isinstance(info, dict) else None
+        if isinstance(industry, str) and industry.strip():
+            mapping[code] = industry.strip()
+    if not mapping:
+        return "failed" if failures else "skipped"
+    try:
+        update_security_master_industry(mapping, db_path=db_path)
+    except Exception as e:  # noqa: BLE001 - 写回失败不拖垮日批
+        logger.warning("行业补抓写回失败：本次跳过: %s", e)
+        return "failed"
+    return "refreshed"
+
+
 def run_market_snapshot_batch(
     trade_date: str | None = None,
     *,
@@ -109,6 +157,8 @@ def run_market_snapshot_batch(
 
     摘要键：``trade_date`` / ``written`` / ``rebased``（发生复权的票数）/
     ``suspended``（合成停牌行数）/ ``master``（``refreshed``|``skipped``）/
+    ``delist_master``（``refreshed``|``skipped``）/ ``industry``（行业补抓
+    ``refreshed``|``skipped``|``failed``）/
     ``calendar``（``ok``|``unavailable``）/ ``spot_source``（实际生效 spot 源
     ``eastmoney``|``sina``；客户端未上报 → None）/ ``spot_retry``（spot 双源
     失败后同 run 重试命中 → true；首轮成功 → false）/ ``rebase_skipped_gap``
@@ -202,6 +252,7 @@ def run_market_snapshot_batch(
 
         master_state = "skipped"
         delist_state = "skipped"
+        industry_state = "skipped"
         if not master or date.fromisoformat(trade_date).weekday() == 0:
             listing = client.fetch_listing_info()
             if listing:
@@ -222,6 +273,8 @@ def run_market_snapshot_batch(
                 delist_state = "refreshed"
             else:
                 logger.warning("退市清单拉取失败/空(trade_date=%s)：沿用既有退市数据", trade_date)
+            # extend-factor-library-coverage §8：行业列增量补抓（best-effort）
+            industry_state = _refresh_missing_industry(client, db_path)
 
         meta = {
             "last_success_date": trade_date,
@@ -240,6 +293,7 @@ def run_market_snapshot_batch(
             "suspended": sum(1 for row in rows if row.get("is_suspended") == 1),
             "master": master_state,
             "delist_master": delist_state,
+            "industry": industry_state,
             "calendar": calendar_state,
             "spot_source": spot_source,
             "spot_retry": spot_retry,
