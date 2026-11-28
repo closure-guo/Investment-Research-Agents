@@ -473,7 +473,28 @@ class TestPromptAssembly:
         prompt = build_broad_prompt(bucket_stats={}, operator_ic={}, n=20)
         assert seen == ["factor_proposal"]
         assert "{{" not in prompt  # 占位符全部替换，无残留
-        assert "价量/反转/动量/流动性/波动率" in prompt
+        assert "价量/反转/动量/流动性/波动率/事件状态/规模/残差/行业相对" in prompt
+
+    def test_template_lists_dsl_ops_fields_and_nine_categories(self):
+        """模板的算子/字段清单与 factors.dsl 真相源逐字一致；类别九选一 + 去重计数口径。"""
+        from finance_agent.factors.dsl import FIELDS, OPS
+
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "finance_agent"
+            / "prompts"
+            / "factor_proposal.md"
+        )
+        text = path.read_text(encoding="utf-8")
+        ops_line = next(line for line in text.splitlines() if "可用算子" in line)
+        listed_ops = {token.strip() for token in ops_line.split("：", 1)[1].split("/")}
+        assert listed_ops == set(OPS)
+        fields_line = next(line for line in text.splitlines() if "可用字段" in line)
+        listed_fields = {token.strip() for token in fields_line.split("：", 1)[1].split("/")}
+        assert listed_fields == set(FIELDS)
+        assert "九选一" in text
+        assert "去重后的数字字面量" in text
 
     def test_broad_prompt_contains_bucket_shares_and_operator_ic(self):
         prompt = build_broad_prompt(
@@ -488,11 +509,11 @@ class TestPromptAssembly:
         assert "不少于 25 条" in prompt
         # 动量占比 70% > 50% → 显式跨桶指令（含占比与「其他桶」枚举）
         assert "70%" in prompt
-        assert "偏向其他桶（价量/反转/流动性/波动率）" in prompt
+        assert "偏向其他桶（价量/反转/流动性/波动率/事件状态/规模/残差/行业相对）" in prompt
 
     def test_dominance_instruction_lists_other_buckets_by_category_order(self):
         prompt = build_broad_prompt(bucket_stats={"反转": 6, "价量": 4}, operator_ic={}, n=20)
-        assert "偏向其他桶（价量/动量/流动性/波动率）" in prompt
+        assert "偏向其他桶（价量/动量/流动性/波动率/事件状态/规模/残差/行业相对）" in prompt
         assert "反转 桶存量占比 60%" in prompt
 
     def test_broad_prompt_without_dominant_bucket_has_no_instruction(self):
@@ -675,3 +696,18 @@ class TestTraceEmission:
         client = StubClient([bad, bad, bad])
         result = propose_broad_batch(n=20, client=client, bucket_stats={}, operator_ic={})
         assert result.trace_metadata["proposal_rejected"] is True
+
+
+def test_categories_are_nine_verbatim():
+    """category 枚举九类逐字（spec factor-proposal：后四类对应新构念）。"""
+    assert CATEGORIES == (
+        "价量",
+        "反转",
+        "动量",
+        "流动性",
+        "波动率",
+        "事件状态",
+        "规模",
+        "残差",
+        "行业相对",
+    )

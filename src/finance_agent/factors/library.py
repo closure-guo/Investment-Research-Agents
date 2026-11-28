@@ -387,6 +387,53 @@ def find_rejected_duplicate(ast_json: str, *, db_path: str | Path | None = None)
     return None
 
 
+def find_quota_retired_duplicate(
+    ast_json: str, *, db_path: str | Path | None = None
+) -> dict[str, Any] | None:
+    """库内同构 ``retired`` 行中「最近一次 ``active → retired`` 原因为 BUCKET_QUOTA」者。
+
+    返回 ``{"id": int, "category": str}``（多条命中取 ``factor_id`` 最小者）；
+    无 → ``None``。语义见 factor-library「同构重提的桶归属」
+    （extend-factor-library-coverage §10）：配额退役的桶随结构走，不随提案自报
+    类别走，防止换标签绕过桶容量。
+    """
+    init_library(db_path)
+    candidate = parse(ast_json, enforce_complexity=False)
+    canonical = serialize(candidate)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, expression, ast_json, category FROM factors "
+            "WHERE status = 'retired' ORDER BY id"
+        ).fetchall()
+        matched: list[tuple[int, str]] = []
+        for row in rows:
+            stored = row["ast_json"] or row["expression"]
+            if stored == canonical or is_subtree_isomorphic(
+                candidate, parse(stored, enforce_complexity=False)
+            ):
+                matched.append((int(row["id"]), str(row["category"])))
+        for factor_id, category in matched:
+            event = conn.execute(
+                "SELECT detail FROM factor_events WHERE factor_id = ? AND event = ? "
+                "AND from_status = 'active' AND to_status = 'retired' "
+                "ORDER BY id DESC LIMIT 1",
+                (factor_id, EVENT_STATUS_CHANGE),
+            ).fetchone()
+            raw = event["detail"] if event is not None else None
+            if not raw:
+                continue
+            try:
+                detail = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(detail, dict) and detail.get("reason") == "BUCKET_QUOTA":
+                return {"id": factor_id, "category": category}
+        return None
+    finally:
+        conn.close()
+
+
 def record_rejected_factor(
     *,
     expression: str,

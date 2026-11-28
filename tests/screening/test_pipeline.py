@@ -865,3 +865,67 @@ def test_fallback_with_l3_gateway_down_still_fails_closed(ws: _Workspace) -> Non
     assert result["status"] == "failed"
     assert "L3" in str(result["error"])
     assert _count(ws.screening_db, "SELECT COUNT(*) FROM selection_pool") == 0
+
+
+# ── 因子当日值缺口披露（extend-factor-library-coverage §11）────────────────
+
+
+def test_factor_value_gaps_disclose_missing_reference_fields(ws: _Workspace) -> None:
+    """as_of 全 NaN 的参考字段因子进 factor_value_gaps；Top-N 排序逐项不变。"""
+    _seed_pool_days(ws)
+    baseline = _run(ws)
+    assert baseline["status"] == "ok"
+    # 小面板（L1 通过 3 只）全部低于 MIN_IC_SAMPLES=30 → 价量因子也按缺口披露
+    assert baseline["factor_value_gaps"] == [
+        {
+            "factor_id": ws.factor_id,
+            "valid_n": 3,
+            "referenced_optional_fields": [],
+        }
+    ]
+    baseline_ranks = [
+        (row["symbol"], row["rank"]) for row in list_l2_candidates(_AS_OF, db_path=ws.screening_db)
+    ]
+
+    cap_id = add_factor(
+        expression="log(float_cap)",
+        hypothesis="测试用经济学假设：流通市值规模与未来收益存在稳定关系（合成）。",
+        category="规模",
+        status="active",
+        db_path=ws.library_db,
+    )
+    for day in _CALENDAR[-60:]:
+        record_ic(cap_id, day, 0.02, db_path=ws.library_db)
+
+    result = _run(ws)
+
+    assert result["status"] == "ok"
+    assert result["factor_value_gaps"] == [
+        {
+            "factor_id": ws.factor_id,
+            "valid_n": 3,
+            "referenced_optional_fields": [],
+        },
+        {
+            "factor_id": cap_id,
+            "valid_n": 0,
+            "referenced_optional_fields": ["float_cap"],
+        },
+    ]
+    after_ranks = [
+        (row["symbol"], row["rank"]) for row in list_l2_candidates(_AS_OF, db_path=ws.screening_db)
+    ]
+    assert after_ranks == baseline_ranks  # 缺口因子不改变排序
+
+
+def test_factor_value_gaps_threshold_and_empty_disclosure() -> None:
+    """无缺口（全部 ≥ MIN_IC_SAMPLES=30）→ []；缺口项附表达式引用的可选字段清单。"""
+    factors = [
+        {"id": 1, "expression": "close"},
+        {"id": 2, "expression": "log(float_cap)"},
+    ]
+    assert pipeline._factor_value_gaps(factors, {1: {"valid_n": 30}, 2: {"valid_n": 31}}) == []
+    assert pipeline._factor_value_gaps(factors, {1: {"valid_n": 29}, 2: {"valid_n": 0}}) == [
+        {"factor_id": 1, "valid_n": 29, "referenced_optional_fields": []},
+        {"factor_id": 2, "valid_n": 0, "referenced_optional_fields": ["float_cap"]},
+    ]

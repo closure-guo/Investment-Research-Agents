@@ -527,6 +527,12 @@ _ELEMENTWISE_OPS: dict[str, Callable[..., pd.DataFrame]] = {
 
 # ── 快照行 → 面板 ───────────────────────────────────────────────────────────
 
+# 参考数据可选字段（extend-factor-library-coverage §7）：行携带对应列时才构造，
+# 未携带 → 面板不含该字段（引用它的表达式求值报「面板缺少字段」）
+OPTIONAL_PANEL_FIELDS: tuple[str, ...] = ("float_cap", "turnover", "listed_days")
+# 可选字段中属「交易量口径」的两个：停牌行（无成交）置 NaN；listed_days 是静态属性、保留
+_OPTIONAL_TRADING_FIELDS: tuple[str, ...] = ("float_cap", "turnover")
+
 
 def build_panel_from_rows(rows: pd.DataFrame) -> MarketPanel:
     """market_snapshot 行 DataFrame → ``MarketPanel``（前复权口径换算）。
@@ -542,6 +548,12 @@ def build_panel_from_rows(rows: pd.DataFrame) -> MarketPanel:
     ``is_suspended`` 列可选（live 日批有、回填区显式 0；列缺失视为无停牌行）：
     停牌合成行（=1）六字段在输入侧置 NaN 且不计入 ``rows_present``——时序算子
     与闸①分母对停牌的语义与回填区「停牌=缺行」统一（issue #513 缺口 2 拍板）。
+
+    **可选参考字段**（extend-factor-library-coverage）：行携带 ``float_cap`` /
+    ``turnover`` / ``listed_days`` 列时构造同名面板帧（不复权口径）；
+    ``industry_l1`` 列构造 ``groups["industry"]`` 标签帧。停牌行 ``float_cap`` /
+    ``turnover`` 置 NaN（无成交日无换手/市值口径），``listed_days`` 保留（静态属性）。
+    列不携带 → 对应帧/分组不构造（直接构造的测试面板与旧库路径）。
     """
     missing = [column for column in _PANEL_ROW_COLUMNS if column not in rows.columns]
     if missing:
@@ -561,17 +573,25 @@ def build_panel_from_rows(rows: pd.DataFrame) -> MarketPanel:
     frame.loc[suspended, list(_PANEL_ROW_NUMERIC)] = np.nan
     factor = frame["close_qfq"] / frame["close_raw"].where(frame["close_raw"] != 0)
     rows_present = _pivot(dates, codes, present.astype(float)).fillna(0.0).astype(bool)
-    return MarketPanel(
-        fields={
-            "open": _pivot(dates, codes, frame["open"] * factor),
-            "high": _pivot(dates, codes, frame["high"] * factor),
-            "low": _pivot(dates, codes, frame["low"] * factor),
-            "close": _pivot(dates, codes, frame["close_qfq"]),
-            "volume": _pivot(dates, codes, frame["volume"]),
-            "amount": _pivot(dates, codes, frame["amount"]),
-        },
-        rows_present=rows_present,
-    )
+    fields: dict[str, pd.DataFrame] = {
+        "open": _pivot(dates, codes, frame["open"] * factor),
+        "high": _pivot(dates, codes, frame["high"] * factor),
+        "low": _pivot(dates, codes, frame["low"] * factor),
+        "close": _pivot(dates, codes, frame["close_qfq"]),
+        "volume": _pivot(dates, codes, frame["volume"]),
+        "amount": _pivot(dates, codes, frame["amount"]),
+    }
+    for column in OPTIONAL_PANEL_FIELDS:
+        if column not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce")
+        if column in _OPTIONAL_TRADING_FIELDS:
+            values = values.mask(suspended)  # 停牌行：无成交 → NaN
+        fields[column] = _pivot(dates, codes, values)
+    groups: dict[str, pd.DataFrame] | None = None
+    if "industry_l1" in frame.columns:
+        groups = {"industry": _pivot(dates, codes, frame["industry_l1"])}
+    return MarketPanel(fields=fields, rows_present=rows_present, groups=groups)
 
 
 def _pivot(dates: pd.Series, codes: pd.Series, values: pd.Series) -> pd.DataFrame:

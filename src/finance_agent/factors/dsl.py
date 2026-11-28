@@ -25,6 +25,9 @@
 
 字段语义：``open/high/low/close/volume/amount`` 均为**前复权口径**（复权由数据层
 在写入快照前完成，DSL 层不感知，也不接受未复权数据）。
+``float_cap``（流通市值，元）/``turnover``（换手率，小数）/``listed_days``（上市
+天数，自然日）为**可选参考字段**（不复权口径）：面板携带时按值求值，未携带时
+求值报错（不静默补 NaN）；字段种类上限把可选字段与价量字段合计计数。
 
 **AST 来源不变量**：所有受支持的 AST 均由 ``parse()`` 产出（或其 ``serialize`` →
 ``parse`` round-trip 结果）；``parse`` 保证 ``Call.args`` 非空（空参数列表在解析期
@@ -91,7 +94,21 @@ OPS: frozenset[str] = frozenset(
     }
 )
 
-FIELDS: frozenset[str] = frozenset({"open", "high", "low", "close", "volume", "amount"})
+FIELDS: frozenset[str] = frozenset(
+    {
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        # extend-factor-library-coverage：可选参考字段（不复权口径；面板按需携带，
+        # 由参考数据面构造，见 factor-reference-data）
+        "float_cap",
+        "turnover",
+        "listed_days",
+    }
+)
 
 # 元数表（D2，逐字钉死）
 ARITY: dict[str, int] = {
@@ -278,6 +295,21 @@ def _field_names(node: Call) -> set[str]:
         elif isinstance(arg, Call):
             names |= _field_names(arg)
     return names
+
+
+def collect_fields(node: AstNode) -> tuple[str, ...]:
+    """子树引用的字段名（去重、按名字升序；叶子 Field → 单元素元组）。
+
+    供准入闸①在**求值前**做「可选数据字段的可计算性」预检（
+    extend-factor-library-coverage §10）：引用面板未携带的 ``float_cap`` /
+    ``turnover`` / ``listed_days`` 时按 ``LOW_COVERAGE`` 拒收，而不是让
+    ``evaluate`` 抛裸 ``ValueError`` 拖垮整批。
+    """
+    if isinstance(node, Field):
+        return (node.name,)
+    if isinstance(node, Call):
+        return tuple(sorted(_field_names(node)))
+    return ()
 
 
 def _check_complexity(node: AstNode) -> None:

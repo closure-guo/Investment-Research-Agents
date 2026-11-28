@@ -874,3 +874,33 @@ def test_spearman_rejects_mismatched_or_degenerate_inputs() -> None:
         spearman_rank_corr([1.0], [2.0])
     with pytest.raises(ValueError, match="常量"):
         spearman_rank_corr([1.0, 1.0, 1.0], [1.0, 2.0, 3.0])
+
+
+def test_stats_out_records_valid_counts_for_gap_disclosure():
+    """stats_out 逐因子写 as_of 截面有效值个数（L1 通过集上，非 NaN 计数）。
+
+    面板未携带的可选参考字段按全 NaN 处理：不抛错、该因子 zscore 全 0（贡献 0），
+    ``valid_n == 0`` 供选股日批披露当日缺口（extend-factor-library-coverage §11）。
+    """
+    panel = _panel(close={"a": 1.0, "b": 2.0, "c": 3.0})
+    factors = [_factor(1, "close"), _factor(2, "log(float_cap)")]
+    stats: dict[int, dict] = {}
+
+    candidates = rank_universe(
+        panel=panel,
+        as_of=_AS_OF,
+        passed_codes=["a", "b", "c"],
+        factors=factors,
+        ic_stats={1: (0.03, 0.50), 2: (0.02, 0.50)},
+        stats_out=stats,
+    )
+
+    assert stats == {1: {"valid_n": 3}, 2: {"valid_n": 0}}
+    # 缺口因子贡献恒 0（NaN → 0 语义）
+    cap_contribs = [
+        contrib
+        for candidate in candidates
+        for contrib in candidate.factor_contribs
+        if contrib.factor_id == 2
+    ]
+    assert cap_contribs and all(contrib.contribution == 0.0 for contrib in cap_contribs)

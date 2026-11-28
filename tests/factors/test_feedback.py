@@ -245,6 +245,8 @@ def test_build_payload_carries_dsl_contract_single_sourced() -> None:
     assert contract["rules"] == list(CONTRACT_RULES)
     joined = " ".join(CONTRACT_RULES).lower()
     assert "epsilon" in joined and "cross-sectional" in joined and "machine" in joined
+    # extend-factor-library-coverage §12：自由参数按去重数值计数的措辞随契约回喂生成侧
+    assert "distinct" in joined and "window" in joined
 
 
 def test_build_payload_gate_rejections_aggregated() -> None:

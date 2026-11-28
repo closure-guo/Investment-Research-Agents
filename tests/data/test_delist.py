@@ -236,6 +236,8 @@ class TestSecurityMasterDelistDate:
             "list_date": "2001-08-27",
             "delist_date": None,
             "delist_source": None,
+            # extend-factor-library-coverage：主表形状扩 industry_l1（未回填 = None）
+            "industry_l1": None,
         }
 
     def test_upsert_security_master_coalesces_delist_fields(self, tmp_path):
@@ -261,6 +263,7 @@ class TestSecurityMasterDelistDate:
             "list_date": "1998-01-01",
             "delist_date": "2009-12-29",
             "delist_source": "sh_suspend",
+            "industry_l1": None,
         }
 
     def test_upsert_delisted_masters_persists_source_for_audit(self, tmp_path):

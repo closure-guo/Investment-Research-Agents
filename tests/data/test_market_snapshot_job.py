@@ -298,15 +298,18 @@ class FakeSnapshotClient:
         listing=None,
         delist=None,
         spot_failure=None,
+        industry=None,
     ):
         self.calendar = calendar
         self.spot = spot
         self.listing = listing
         self.delist = delist
+        self.industry = industry or {}
         self.calendar_calls = 0
         self.spot_calls = 0
         self.listing_calls = 0
         self.delist_calls = 0
+        self.industry_calls = 0
         self._spot_sequence = spot if isinstance(spot, list) else None
         self.last_spot_failure = dict(spot_failure) if spot_failure else {}
 
@@ -328,6 +331,10 @@ class FakeSnapshotClient:
     def fetch_delist_lists(self):
         self.delist_calls += 1
         return self.delist if self.delist is not None else []
+
+    def fetch_industry(self, code):
+        self.industry_calls += 1
+        return self.industry.get(code, {})
 
     def fetch_symbol_history_raw_qfq(self, code, start, end):  # 日批不调用；回填才用
         return None
@@ -943,3 +950,49 @@ class TestRebaseGapGuard:
         assert out["calendar"] == "unavailable"
         assert out["rebased"] == 1
         assert out["rebase_skipped_gap"] is False
+
+
+class TestIndustryRefresh:
+    """extend-factor-library-coverage §8：主表刷新分支对缺行业代码增量补抓（best-effort）。"""
+
+    def test_refresh_writes_missing_industry(self, tmp_path):
+        db = tmp_path / "snap.db"
+        client = FakeSnapshotClient(
+            calendar=[_D3],
+            spot=_spot(10.5, 10.0),
+            listing=[{"code": "600519", "name": "贵州茅台", "list_date": "2001-08-27"}],
+            industry={"600519": {"name": "贵州茅台", "industry": "食品饮料"}},
+        )
+        out = run_market_snapshot_batch(_D3, client=client, db_path=db)
+        assert out["master"] == "refreshed"
+        assert out["industry"] == "refreshed"
+        assert get_security_master(db)["600519"]["industry_l1"] == "食品饮料"
+
+    def test_refresh_skips_when_industry_unavailable(self, tmp_path):
+        db = tmp_path / "snap.db"
+        client = FakeSnapshotClient(
+            calendar=[_D3],
+            spot=_spot(10.5, 10.0),
+            listing=[{"code": "600519", "name": "贵州茅台", "list_date": "2001-08-27"}],
+            industry={},
+        )
+        out = run_market_snapshot_batch(_D3, client=client, db_path=db)
+        assert out["industry"] == "skipped"
+        assert get_security_master(db)["600519"]["industry_l1"] is None
+
+    def test_industry_lookup_failure_does_not_break_batch(self, tmp_path):
+        db = tmp_path / "snap.db"
+
+        class _Failing(FakeSnapshotClient):
+            def fetch_industry(self, code):
+                raise RuntimeError("cninfo down")
+
+        client = _Failing(
+            calendar=[_D3],
+            spot=_spot(10.5, 10.0),
+            listing=[{"code": "600519", "name": "贵州茅台", "list_date": "2001-08-27"}],
+        )
+        out = run_market_snapshot_batch(_D3, client=client, db_path=db)
+        assert out["written"] == 1  # 日批照常成功
+        assert out["industry"] == "failed"
+        assert get_security_master(db)["600519"]["industry_l1"] is None

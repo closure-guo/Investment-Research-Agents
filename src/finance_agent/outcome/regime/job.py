@@ -7,9 +7,11 @@
 2. ``read_universe(as_of)`` 先校验快照新鲜度（as_of 超范围 → ``as_of_not_fresh``；
    当日无行 → ``no_snapshot_data``；校验不过不拉行情）；
 3. 市值取数链：spot（``fetch_market_spot``，与快照任务同源）``流通市值`` 列优先
-   → 缺列/无可用值 → 腾讯批量兜底（``fetch_market_caps_bulk``，``cap_source=tencent``
-   留痕）→ 两源皆无 → 不产行 + ``cap_data_missing``（MUST NOT 以成交额等替代口径
-   冒充市值分组）；
+   → 缺列/无可用值 → 腾讯批量兜底（``fetch_market_ref_bulk`` 优先，旧客户端回退
+   ``fetch_market_caps_bulk``；``cap_source=tencent`` 留痕）→ 两源皆无 → 不产行 +
+   ``cap_data_missing``（MUST NOT 以成交额等替代口径冒充市值分组）；
+   取数成功的市值/总市值/换手率顺手落 ``market_ref_daily`` 侧表（best-effort，
+   写失败只 WARN，不影响拥挤度行；见 delta extend-factor-library-coverage §8）；
 4. ``compute_indicators``（``quantile`` 取自配置，默认 0.3；参与集任一标的
    amount/pct_chg 非有限值亦不可计算 → 同 ``cap_data_missing`` 槽，不产行）；
 5. 历史分位：窗口 = 历史行（严格早于当日，最近 ``history_window - 1`` 条）+ 当日值
@@ -23,6 +25,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -36,13 +39,19 @@ from finance_agent.data.snapshot import (
     latest_snapshot_date,
     norm_code,
     read_universe,
+    upsert_market_ref_rows,
 )
 from finance_agent.outcome.regime.config import load_regime_config
 from finance_agent.outcome.regime.indicators import compute_indicators, percentile_rank
 from finance_agent.outcome.regime.model import list_regime_history, upsert_regime_daily
 
+logger = logging.getLogger(__name__)
+
 # 流通市值列名（EM spot 主源；新浪回退列形无此列 → 腾讯批量兜底）
 _CAP_COLUMN = "流通市值"
+# 参考数据附加列（EM spot 具备；新浪回退列形缺 → 子 dict 只含市值）
+_TOTAL_CAP_COLUMN = "总市值"
+_TURNOVER_COLUMN = "换手率"
 # 快照代码列名（spot 表列形，中文列名「代码」）
 _CODE_COLUMN = "代码"
 # 快照行键名（``read_universe`` 返回 dict 行的 code 键，与 market_snapshot.code 同口径）
@@ -60,18 +69,83 @@ def _finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _caps_from_spot(spot: Any) -> dict[str, float] | None:
-    """spot 表 → ``{6 位裸码: 流通市值}``；缺列/无可用值 → None（不产伪 caps）。"""
+def _ref_from_spot(spot: Any) -> dict[str, dict[str, float]] | None:
+    """spot 表 → ``{6 位裸码: {float_cap[, total_cap, turnover]}}``。
+
+    缺 ``流通市值`` 列 → None（走腾讯批量兜底）。``总市值``/``换手率`` 列存在才
+    附加：换手率上游为百分数 → ÷100 归一为小数（与侧表口径一致）；非正市值与
+    负换手率视为缺失，不写子 dict（不以 0 冒充）。无任何可用码 → None。
+    """
     columns = getattr(spot, "columns", None)
-    if columns is None or _CAP_COLUMN not in list(columns):
+    if columns is None:
         return None
-    caps: dict[str, float] = {}
+    present = {str(column) for column in columns}
+    if _CAP_COLUMN not in present:
+        return None
+    has_total = _TOTAL_CAP_COLUMN in present
+    has_turnover = _TURNOVER_COLUMN in present
+    ref: dict[str, dict[str, float]] = {}
     for _, row in spot.iterrows():
         code = norm_code(row.get(_CODE_COLUMN))
+        if not code:
+            continue
+        values: dict[str, float] = {}
         cap = _finite(row.get(_CAP_COLUMN))
-        if code and cap is not None and cap > 0:
-            caps[code] = cap
+        if cap is not None and cap > 0:
+            values["float_cap"] = cap
+        if has_total:
+            total = _finite(row.get(_TOTAL_CAP_COLUMN))
+            if total is not None and total > 0:
+                values["total_cap"] = total
+        if has_turnover:
+            turnover = _finite(row.get(_TURNOVER_COLUMN))
+            if turnover is not None and turnover >= 0:
+                values["turnover"] = turnover / 100.0
+        if values:
+            ref[code] = values
+    return ref or None
+
+
+def _caps_from_ref(ref: Mapping[str, Mapping[str, float]]) -> dict[str, float] | None:
+    """参考数据 → ``{裸码: 流通市值}``；无任何有效市值 → None。"""
+    caps = {
+        code: float(values["float_cap"])
+        for code, values in ref.items()
+        if values.get("float_cap") is not None and float(values["float_cap"]) > 0
+    }
     return caps or None
+
+
+def _tencent_ref(
+    client: Any, codes: Sequence[str]
+) -> tuple[dict[str, dict[str, float]] | None, dict[str, float] | None]:
+    """腾讯批量兜底：优先三字段参考数据；旧客户端无该方法 → 仅市值接口（不写侧表）。"""
+    fetch_ref = getattr(client, "fetch_market_ref_bulk", None)
+    if callable(fetch_ref):
+        ref = fetch_ref(list(codes))
+        if not ref:
+            return None, None
+        return ref, _caps_from_ref(ref)
+    return None, client.fetch_market_caps_bulk(list(codes))
+
+
+def _persist_ref_rows(
+    trade_date: str,
+    ref: Mapping[str, Mapping[str, float]],
+    source: str,
+    snapshot_db_path: str | Path | None,
+) -> None:
+    """参考数据侧表落库（best-effort：失败只 WARN，绝不拖垮拥挤度行）。"""
+    rows = [
+        {"trade_date": trade_date, "code": code, **values, "source": source}
+        for code, values in ref.items()
+    ]
+    if not rows:
+        return
+    try:
+        upsert_market_ref_rows(rows, db_path=snapshot_db_path)
+    except Exception as e:  # noqa: BLE001 - 旁路数据落库失败不改变拥挤度日批结果
+        logger.warning("参考数据侧表落库失败(trade_date=%s)：本次跳过: %s", trade_date, e)
 
 
 def _universe_codes(universe: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -130,18 +204,23 @@ def run_regime_daily(
         return {"produced": False, "skipped_reason": "no_snapshot_data"}
 
     client = client or AKShareClient()
-    caps = _caps_from_spot(client.fetch_market_spot())
-    cap_source = "spot"
+    ref = _ref_from_spot(client.fetch_market_spot())
+    caps = _caps_from_ref(ref) if ref is not None else None
+    ref_source = "spot"
     if caps is None:
         # 快照同源 spot 无流通市值（新浪回退列形）→ 腾讯批量兜底（真实市值字段）
-        caps = client.fetch_market_caps_bulk(_universe_codes(universe))
-        cap_source = "tencent"
+        ref, caps = _tencent_ref(client, _universe_codes(universe))
+        ref_source = "tencent"
     if caps is None:
         return {
             "produced": False,
             "skipped_reason": "cap_data_missing",
             "trade_date": trade_date,
         }
+    cap_source = "spot" if ref_source == "spot" else "tencent"
+    if ref:
+        # §8：顺手落市场参考数据侧表（市值/换手率日频唯一免费增量的落库点）
+        _persist_ref_rows(trade_date, ref, ref_source, snapshot_db_path)
 
     config = load_regime_config()
     indicators = compute_indicators(universe, caps, quantile=config.small_cap_quantile)

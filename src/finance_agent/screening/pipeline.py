@@ -23,7 +23,8 @@
 - ``seed``：签名保留参数——本管道无随机数（ranker/triage 全确定），当前无消费点。
 
 返回批次结果 dict（同时已落库）：
-``{"trade_date", "status", "error", "l1_passed", "l2_top", "l3_keep", "pool_size"}``。
+``{"trade_date", "status", "error", "l1_passed", "l2_top", "l3_keep", "pool_size",
+"factor_value_gaps"}``（缺口披露见 ``_factor_value_gaps``；fallback 模式为空列表）。
 """
 
 from __future__ import annotations
@@ -44,8 +45,14 @@ from finance_agent.data.snapshot import (
     latest_snapshot_date,
     read_universe,
 )
+from finance_agent.factors import constraints as factor_constraints
+from finance_agent.factors.dsl import collect_fields, parse
+from finance_agent.factors.eval_engine import (
+    OPTIONAL_PANEL_FIELDS,
+    MarketPanel,
+    build_panel_from_rows,
+)
 from finance_agent.factors.eval_engine import PANEL_FIELDS as _PANEL_FIELDS
-from finance_agent.factors.eval_engine import MarketPanel, build_panel_from_rows
 from finance_agent.factors.library import list_active_factors
 from finance_agent.screening import constraints, rules_config
 from finance_agent.screening.candidate_llm import (
@@ -180,7 +187,12 @@ def read_snapshot_calendar(snapshot_db_path: str | Path | None = None) -> list[s
 def _build_default_panel(
     as_of: str, calendar: Sequence[str], snapshot_db_path: str | Path | None
 ) -> MarketPanel:
-    """缺省面板：快照库最近 ``DEFAULT_PANEL_LOOKBACK_DAYS`` 个交易日逐日读取拼装。"""
+    """缺省面板：快照库最近 ``DEFAULT_PANEL_LOOKBACK_DAYS`` 个交易日逐日读取拼装。
+
+    extend-factor-library-coverage：逐日 chunk 携带的可选参考字段（``float_cap`` /
+    ``turnover`` / ``listed_days``）与 ``groups``（行业标签）一并拼装——不拼会在
+    选股面板上静默丢掉参考字段（闸①拒收与 L2 缺口披露都会失真）。
+    """
     dates = [day for day in calendar if day <= as_of][-DEFAULT_PANEL_LOOKBACK_DAYS:]
     if as_of not in dates:
         raise ValueError(
@@ -190,12 +202,24 @@ def _build_default_panel(
         build_panel_from_rows(pd.DataFrame(read_universe(day, db_path=snapshot_db_path)))
         for day in dates
     ]
-    return MarketPanel(
-        fields={
-            name: pd.concat([chunk.fields[name] for chunk in chunks]).sort_index()
-            for name in _PANEL_FIELDS
-        }
-    )
+    optional_names = [name for name in chunks[0].fields if name not in _PANEL_FIELDS]
+    fields = {
+        name: pd.concat([chunk.fields[name] for chunk in chunks]).sort_index()
+        for name in [*_PANEL_FIELDS, *optional_names]
+    }
+    groups: dict[str, pd.DataFrame] | None = None
+    first_groups = chunks[0].groups
+    if first_groups:
+        collected: dict[str, list[pd.DataFrame]] = {}
+        for key in first_groups:
+            frames: list[pd.DataFrame] = []
+            for chunk in chunks:
+                if chunk.groups is None or key not in chunk.groups:
+                    continue
+                frames.append(chunk.groups[key])
+            collected[key] = frames
+        groups = {key: pd.concat(frames).sort_index() for key, frames in collected.items()}
+    return MarketPanel(fields=fields, groups=groups)
 
 
 def _amounts_by_code(
@@ -255,6 +279,34 @@ def _candidate_contribs(candidate: Candidate) -> list[dict[str, Any]]:
 
 
 # ── 日批入口（S1） ──────────────────────────────────────────────────────────
+
+
+def _factor_value_gaps(
+    factors: Sequence[dict], stats: Mapping[int, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """as_of 截面有效值不足的参与因子（extend-factor-library-coverage §11）。
+
+    有效个数 < ``MIN_IC_SAMPLES`` → 逐项 ``{factor_id, valid_n,
+    referenced_optional_fields}``（仅列表达式引用的可选参考字段）；排序 / 权重 /
+    综合分不受披露影响（rank_universe 对缺口因子按全 NaN → 0 贡献处理）。
+    """
+    gaps: list[dict[str, Any]] = []
+    for row in factors:
+        factor_id = int(row["id"])
+        valid_n = int(stats.get(factor_id, {}).get("valid_n", 0))
+        if valid_n >= factor_constraints.MIN_IC_SAMPLES:
+            continue
+        optional = sorted(
+            set(collect_fields(parse(str(row["expression"])))) & set(OPTIONAL_PANEL_FIELDS)
+        )
+        gaps.append(
+            {
+                "factor_id": factor_id,
+                "valid_n": valid_n,
+                "referenced_optional_fields": optional,
+            }
+        )
+    return gaps
 
 
 def run_screening_batch(
@@ -404,9 +456,11 @@ def run_screening_batch(
                 ),
             )
         rank_corr: tuple[float, int] | None = None
+        factor_value_gaps: list[dict[str, Any]] = []
         if has_scorable_factors(scorable_factors, ic_stats):
             # 全量排序后截断 Top-N：截断前榜单用于因子榜/流动性榜秩相关披露
             # （同一 L1 通过集上的只读读数；top_n 下限 1 防 0 值被拒）。
+            stats_out: dict[int, dict[str, Any]] = {}
             ranked_all = rank_universe(
                 panel=active_panel,
                 as_of=trade_date,
@@ -415,7 +469,9 @@ def run_screening_batch(
                 ic_stats=ic_stats,
                 ic_counts=ic_counts,
                 top_n=max(1, len(passed)),
+                stats_out=stats_out,
             )
+            factor_value_gaps = _factor_value_gaps(scorable_factors, stats_out)
             candidates = ranked_all[:l2_top_n]
             liquidity_ranked = liquidity_fallback_rank(
                 amounts_by_code=amounts,
@@ -550,6 +606,7 @@ def run_screening_batch(
             "pool": pool,
             "frontier_gate": frontier_gate,
             "exec_constraints": exec_constraints,
+            "factor_value_gaps": factor_value_gaps,
             **summary_extra,
         }
     except Exception as exc:  # noqa: BLE001 -- fail-closed：任一步失败 → 批次 failed + 零池

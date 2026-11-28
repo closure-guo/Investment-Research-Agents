@@ -46,8 +46,19 @@ _logger = logging.getLogger("finance_agent.factors.propose")
 # 提案用途标签（PolicyRouter 注册名 + trace 用途标签，逐字）
 PURPOSE_TAG: Purpose = "factor_proposal"
 
-# category 枚举（spec 逐字：价量/反转/动量/流动性/波动率）
-CATEGORIES: tuple[str, ...] = ("价量", "反转", "动量", "流动性", "波动率")
+# category 枚举（spec 逐字九类：价量/反转/动量/流动性/波动率/事件状态/规模/残差/行业相对；
+# 后四类对应 extend-factor-library-coverage 的新构念）
+CATEGORIES: tuple[str, ...] = (
+    "价量",
+    "反转",
+    "动量",
+    "流动性",
+    "波动率",
+    "事件状态",
+    "规模",
+    "残差",
+    "行业相对",
+)
 
 # hypothesis 下限（中文按字符数，去首尾空白后计数）
 MIN_HYPOTHESIS_CHARS = 30

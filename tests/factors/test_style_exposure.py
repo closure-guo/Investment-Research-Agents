@@ -63,8 +63,18 @@ def _ic(expression: str, panel: MarketPanel) -> pd.Series:
 def test_style_basket_matches_builtin_package():
     """篮子 = builtin 注册包同一真源（名称与表达式逐字）。"""
     basket = style_basket()
-    assert len(basket) == 5
+    assert len(basket) == 7
     assert dict(basket)["turnover_proxy"] == "div(volume,ts_mean(volume,20))"
+    assert dict(basket)["size_float"] == "log(float_cap)"
+    assert dict(basket)["turnover_20"] == "ts_mean(turnover,20)"
+
+
+def test_missing_optional_field_style_degrades_to_none():
+    """面板未携带可选字段 → 该风格记 None（诊断批不因字段缺失崩溃，不臆造 0）。"""
+    panel = _style_panel()  # 仅价量六字段
+    exposure = compute_style_exposure(_ic("div(volume,ts_mean(volume,20))", panel), panel)
+    assert exposure.correlations["size_float"] is None
+    assert exposure.correlations["turnover_20"] is None
 
 
 def test_same_expression_as_style_is_fully_flagged():

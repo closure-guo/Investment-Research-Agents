@@ -87,6 +87,18 @@ CREATE TABLE IF NOT EXISTS security_master (
   delist_source TEXT,
   updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS market_ref_daily (
+  trade_date TEXT NOT NULL,
+  code       TEXT NOT NULL,
+  float_cap  REAL,
+  total_cap  REAL,
+  turnover   REAL,
+  source     TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (trade_date, code)
+);
+CREATE INDEX IF NOT EXISTS idx_market_ref_code_date
+  ON market_ref_daily (code, trade_date);
 """
 
 # market_snapshot 列顺序（写入/读取共用的唯一序列；列名与 Global Constraints 逐字一致）
@@ -170,12 +182,14 @@ def _connect_ro(db_path: str | Path | None) -> sqlite3.Connection:
 
 
 def init_snapshot_db(db_path: str | Path | None = None) -> Path:
-    """幂等建 3 表 + 2 索引，返回实际使用的库路径。
+    """幂等建表 + 2 索引（含参考数据侧表），返回实际使用的库路径。
 
     增量迁移（add-microcap-lane-guardrails）：旧库 ``security_master`` 缺
     ``delist_date`` / ``delist_source`` 列 → ``ALTER TABLE ADD COLUMN`` 补列
     （旧行保留，该列 NULL = 「未退市/退市日未知」——两者以是否出现在退市清单区分，
     见 metrics.md §1.16；``delist_source`` = 退市日语义来源审计留痕）。
+    增量迁移（extend-factor-library-coverage）：缺 ``industry_l1`` 列 → 补列
+    （NULL = 行业未知；参考数据面回填与周一主表刷新分支写入）。
     """
     path = Path(db_path) if db_path else _default_db_path()
     conn = _connect(path)
@@ -188,6 +202,8 @@ def init_snapshot_db(db_path: str | Path | None = None) -> Path:
             conn.execute("ALTER TABLE security_master ADD COLUMN delist_date TEXT")
         if "delist_source" not in columns:
             conn.execute("ALTER TABLE security_master ADD COLUMN delist_source TEXT")
+        if "industry_l1" not in columns:
+            conn.execute("ALTER TABLE security_master ADD COLUMN industry_l1 TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -446,6 +462,72 @@ def latest_snapshot_date(
         conn.close()
 
 
+# ── 参考数据附加列读取（extend-factor-library-coverage §6）──────────────────
+
+# 旧库缺侧表 / 缺 industry_l1 列 / 缺主表 → 退化为原查询（MUST NOT 误判为空库）
+_REF_AUGMENTATION_LIMITS: tuple[str, ...] = (
+    "no such table: market_ref_daily",
+    "no such column: industry_l1",
+    "no such table: security_master",
+)
+
+
+def _universe_select(augmented: bool) -> str:
+    """快照读选列：增强形态 LEFT JOIN 侧表与主表（附加参考列）；退化形态原查询。"""
+    if not augmented:
+        return "SELECT * FROM market_snapshot"
+    return (
+        "SELECT m.*, r.float_cap AS float_cap, r.total_cap AS total_cap, "
+        "r.turnover AS turnover, s.industry_l1 AS industry_l1, "
+        "COALESCE(m.listed_days, CAST(julianday(m.trade_date) - julianday(s.list_date) "
+        "AS INTEGER)) AS _ref_listed_days "
+        "FROM market_snapshot m "
+        "LEFT JOIN market_ref_daily r "
+        "ON r.trade_date = m.trade_date AND r.code = m.code "
+        "LEFT JOIN security_master s ON s.code = m.code"
+    )
+
+
+def _read_snapshot_rows(
+    conn: sqlite3.Connection,
+    *,
+    where: str,
+    params: list[Any],
+    order_by: str,
+    empty_message: str,
+) -> list[dict[str, Any]]:
+    """单次 SQL 读快照行并附加参考列；旧库缺侧表/列 → 退化为原查询。
+
+    ``where``/``order_by`` 里的 ``{prefix}`` 在增强形态替换为 ``m.``（JOIN 别名），
+    退化形态替换为空串。``listed_days`` 为 NULL 时用 ``_ref_listed_days``（主表
+    ``list_date`` 派生的自然日差）回填。
+    """
+    for augmented in (True, False):
+        prefix = "m." if augmented else ""
+        sql = (
+            _universe_select(augmented)
+            + where.format(prefix=prefix)
+            + " ORDER BY "
+            + order_by.format(prefix=prefix)
+        )
+        try:
+            fetched = [dict(row) for row in conn.execute(sql, params).fetchall()]
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if augmented and any(marker in message for marker in _REF_AUGMENTATION_LIMITS):
+                continue
+            if "no such table" in message:
+                raise SnapshotEmptyError(empty_message) from None
+            raise
+        if augmented:
+            for row in fetched:
+                derived = row.pop("_ref_listed_days", None)
+                if row.get("listed_days") is None:
+                    row["listed_days"] = derived
+        return fetched
+    return []
+
+
 def read_universe(
     as_of: str, *, include_suspended: bool = True, db_path: str | Path | None = None
 ) -> list[dict[str, Any]]:
@@ -471,16 +553,16 @@ def read_universe(
     except sqlite3.OperationalError:
         raise SnapshotEmptyError(f"该日期无快照记录: {as_of}") from None
     try:
-        sql = "SELECT * FROM market_snapshot WHERE trade_date = ?"
-        params: list[Any] = [as_of_date.isoformat()]
+        where = " WHERE {prefix}trade_date = ?"
         if not include_suspended:
-            sql += " AND is_suspended = 0"
-        sql += " ORDER BY code"
-        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
-    except sqlite3.OperationalError as exc:
-        if "no such table" in str(exc).lower():
-            raise SnapshotEmptyError(f"该日期无快照记录: {as_of}") from None
-        raise
+            where += " AND {prefix}is_suspended = 0"
+        rows = _read_snapshot_rows(
+            conn,
+            where=where,
+            params=[as_of_date.isoformat()],
+            order_by="{prefix}code",
+            empty_message=f"该日期无快照记录: {as_of}",
+        )
     finally:
         conn.close()
     if not rows:
@@ -516,22 +598,27 @@ def read_universe_range(
         raise SnapshotEmptyError(f"区间无快照记录: [{start}, {end}]") from None
     try:
         # 防前视与区间查询共用同一条只读连接（latest 单独连一次会翻倍连接数）
-        latest_row = conn.execute("SELECT MAX(trade_date) FROM market_snapshot").fetchone()
+        try:
+            latest_row = conn.execute("SELECT MAX(trade_date) FROM market_snapshot").fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                raise SnapshotEmptyError(f"区间无快照记录: [{start}, {end}]") from None
+            raise
         latest = latest_row[0] if latest_row else None
         if latest is not None:
             latest_date = _parse_date_param(latest, param="latest_snapshot_date")
             if end_date > latest_date:
                 raise SnapshotNotFreshError(f"快照最新数据日期为 {latest}，不接受 end={end}")
-        sql = "SELECT * FROM market_snapshot WHERE trade_date BETWEEN ? AND ?"
-        params: list[Any] = [start_date.isoformat(), end_date.isoformat()]
+        where = " WHERE {prefix}trade_date BETWEEN ? AND ?"
         if not include_suspended:
-            sql += " AND is_suspended = 0"
-        sql += " ORDER BY trade_date, code"
-        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
-    except sqlite3.OperationalError as exc:
-        if "no such table" in str(exc).lower():
-            raise SnapshotEmptyError(f"区间无快照记录: [{start}, {end}]") from None
-        raise
+            where += " AND {prefix}is_suspended = 0"
+        rows = _read_snapshot_rows(
+            conn,
+            where=where,
+            params=[start_date.isoformat(), end_date.isoformat()],
+            order_by="{prefix}trade_date, {prefix}code",
+            empty_message=f"区间无快照记录: [{start}, {end}]",
+        )
     finally:
         conn.close()
     if not rows:
@@ -618,6 +705,7 @@ def upsert_security_master(rows: list[dict], db_path: str | Path | None = None) 
                 _text(row.get("list_date")),
                 _text(row.get("delist_date")),
                 _text(row.get("delist_source")),
+                _text(row.get("industry_l1")),
                 now_iso,
             )
         )
@@ -627,13 +715,94 @@ def upsert_security_master(rows: list[dict], db_path: str | Path | None = None) 
     try:
         conn.executemany(
             "INSERT INTO security_master "
-            "(code, name, list_date, delist_date, delist_source, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "(code, name, list_date, delist_date, delist_source, industry_l1, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(code) DO UPDATE SET "
             "name = COALESCE(excluded.name, security_master.name), "
             "list_date = COALESCE(excluded.list_date, security_master.list_date), "
             "delist_date = COALESCE(excluded.delist_date, security_master.delist_date), "
             "delist_source = COALESCE(excluded.delist_source, security_master.delist_source), "
+            "industry_l1 = COALESCE(excluded.industry_l1, security_master.industry_l1), "
+            "updated_at = excluded.updated_at",
+            payload,
+        )
+        conn.commit()
+        return len(payload)
+    finally:
+        conn.close()
+
+
+def update_security_master_industry(
+    mapping: dict[str, str], db_path: str | Path | None = None
+) -> int:
+    """行业门类写入（extend-factor-library-coverage §6）：``{code: industry_l1}``。
+
+    只写非空值（空串/None 跳过，不覆盖已有行业）；返回实际写入行数。行业来源：
+    巨潮逐票（``AKShareClient.fetch_industry`` 降级链）与周一主表刷新分支。
+    """
+    init_snapshot_db(db_path)
+    now_iso = datetime.now().isoformat()
+    payload: list[tuple[str, str, str]] = []
+    for code, industry in mapping.items():
+        norm = _norm_code(code)
+        value = _text(industry)
+        if not norm or not value:
+            continue
+        payload.append((norm, value, now_iso))
+    if not payload:
+        return 0
+    conn = _connect(db_path)
+    try:
+        before = conn.total_changes
+        conn.executemany(
+            "UPDATE security_master SET industry_l1 = ?, updated_at = ? WHERE code = ?",
+            [(value, now_iso, code) for code, value, now_iso in payload],
+        )
+        conn.commit()
+        return conn.total_changes - before
+    finally:
+        conn.close()
+
+
+def upsert_market_ref_rows(rows: list[dict], db_path: str | Path | None = None) -> int:
+    """参考数据侧表幂等 upsert（extend-factor-library-coverage §6）。
+
+    ``rows`` 每行：``trade_date`` / ``code`` / ``float_cap``（元）/ ``total_cap``（元，
+    可空）/ ``turnover``（小数）/ ``source``。空 code 或空 trade_date 行跳过；
+    同键覆盖（日批重跑幂等）。MUST NOT 修改 ``market_snapshot`` 行。
+    """
+    init_snapshot_db(db_path)
+    now_iso = datetime.now().isoformat()
+    payload: list[tuple] = []
+    for row in rows:
+        code = _norm_code(row.get("code"))
+        trade_date = _text(row.get("trade_date"))
+        if not code or not trade_date:
+            continue
+        payload.append(
+            (
+                trade_date,
+                code,
+                _num(row.get("float_cap")),
+                _num(row.get("total_cap")),
+                _num(row.get("turnover")),
+                _text(row.get("source")),
+                now_iso,
+            )
+        )
+    if not payload:
+        return 0
+    conn = _connect(db_path)
+    try:
+        conn.executemany(
+            "INSERT INTO market_ref_daily "
+            "(trade_date, code, float_cap, total_cap, turnover, source, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(trade_date, code) DO UPDATE SET "
+            "float_cap = COALESCE(excluded.float_cap, market_ref_daily.float_cap), "
+            "total_cap = COALESCE(excluded.total_cap, market_ref_daily.total_cap), "
+            "turnover = COALESCE(excluded.turnover, market_ref_daily.turnover), "
+            "source = COALESCE(excluded.source, market_ref_daily.source), "
             "updated_at = excluded.updated_at",
             payload,
         )
@@ -663,12 +832,12 @@ def upsert_delisted_masters(rows: list[dict], db_path: str | Path | None = None)
 
 
 def get_security_master(db_path: str | Path | None = None) -> dict[str, dict]:
-    """全量证券主表 ``{code: {"name","list_date","delist_date","delist_source"}}``。
+    """全量证券主表 ``{code: {"name","list_date","delist_date","delist_source","industry_l1"}}``。
 
     ``build_snapshot_rows`` 的 master 形状（新增键为增量，消费方按需取用）；
     ``delist_date`` 非空 = 已知退市日（语义来源见 ``delist_source``：``sh_suspend``
     = 沪「暂停上市日期」映射、``sz_delist`` = 深「终止上市日期」）；None = 未退市
-    或退市日未知。
+    或退市日未知。``industry_l1`` = 行业门类（巨潮回填/周一刷新写入；None = 未知）。
     """
     init_snapshot_db(db_path)
     conn = _connect(db_path)
@@ -679,9 +848,11 @@ def get_security_master(db_path: str | Path | None = None) -> dict[str, dict]:
                 "list_date": row["list_date"],
                 "delist_date": row["delist_date"],
                 "delist_source": row["delist_source"],
+                "industry_l1": row["industry_l1"],
             }
             for row in conn.execute(
-                "SELECT code, name, list_date, delist_date, delist_source FROM security_master"
+                "SELECT code, name, list_date, delist_date, delist_source, industry_l1 "
+                "FROM security_master"
             ).fetchall()
         }
     finally:

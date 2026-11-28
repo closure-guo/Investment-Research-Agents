@@ -51,6 +51,7 @@ from finance_agent.factors.library import (
     list_factors,
     list_ic_series,
     record_ic,
+    set_status,
 )
 from finance_agent.factors.validate import (
     AdmissionResult,
@@ -1690,3 +1691,107 @@ def test_admit_candidates_ledger_rejection_factor_id_stays_null(tmp_path):
     assert len(entries) == 1
     assert entries[0]["admitted"] == 0
     assert entries[0]["factor_id"] is None
+
+
+# ── 闸① 面板预检（extend-factor-library-coverage §10）─────────────────────
+
+
+def test_admit_candidates_rejects_missing_optional_field_at_gate1(tmp_path):
+    """引用面板未携带的可选字段 → 闸①拒收（LOW_COVERAGE + missing_fields），批不中断。
+
+    面板只有价量六字段时常量/可选字段不可求值——不得等 ``evaluate`` 抛裸 ValueError
+    拖垮整批，须在求值前按「可选数据字段的可计算性」拒收并落拒绝池（次日可重试）。
+    """
+    db = _empty_db(tmp_path)
+    results = admit_candidates(
+        [_candidate("log(float_cap)"), _candidate("volume")],
+        _signal_panel(),
+        seed=1,
+        db_path=db,
+    )
+    rejected, admitted = results
+    assert rejected.factor_id is None
+    assert rejected.rejected_gate == 1
+    precheck = rejected.gates[-1]
+    assert precheck.gate == 1
+    assert str(precheck.reason) == "LOW_COVERAGE"
+    assert precheck.detail["missing_fields"] == ["float_cap"]
+    # 整批不中断：同批强因子照常入库
+    assert admitted.status == "active"
+    # 拒收落拒绝池（gate=1 / LOW_COVERAGE / detail 可追溯）
+    rows = list_factors(status="rejected", db_path=db)
+    assert len(rows) == 1
+    assert rows[0]["expression"] == "log(float_cap)"
+    event = list_events(int(rows[0]["id"]), db_path=db)[0]
+    assert event["detail"]["gate"] == 1
+    assert event["detail"]["reason"] == "LOW_COVERAGE"
+    assert event["detail"]["missing_fields"] == ["float_cap"]
+
+
+def test_admit_candidates_rejects_missing_group_at_gate1(tmp_path):
+    """``ind_neutralize`` 但面板未携带 industry 分组 → 闸①拒收（missing_groups）。"""
+    db = _empty_db(tmp_path)
+    results = admit_candidates(
+        [_candidate("ind_neutralize(volume)"), _candidate("volume")],
+        _signal_panel(),  # groups=None
+        seed=1,
+        db_path=db,
+    )
+    rejected, admitted = results
+    assert rejected.rejected_gate == 1
+    precheck = rejected.gates[-1]
+    assert str(precheck.reason) == "LOW_COVERAGE"
+    assert precheck.detail["missing_groups"] == ["industry"]
+    assert admitted.status == "active"  # 批不中断
+
+
+# ── 同构重提桶归属（extend-factor-library-coverage §10）───────────────────
+
+
+def test_admit_candidates_inherits_category_from_quota_retired_row(tmp_path):
+    """同构 retired 行最近一次 active→retired 为 BUCKET_QUOTA → 沿用其 category。"""
+    db = _empty_db(tmp_path)
+    retired_id = add_factor(
+        expression="volume",
+        hypothesis="曾在外部桶内因配额退役的同构因子。",
+        category="外部",
+        status="active",
+        db_path=db,
+    )
+    set_status(retired_id, "retired", detail={"reason": "BUCKET_QUOTA"}, db_path=db)
+    result = admit_candidates(
+        [_candidate("volume", category="价量")], _signal_panel(), seed=1, db_path=db
+    )[0]
+    assert result.status == "active"
+    rows = {row["id"]: row for row in list_factors(db_path=db)}
+    assert rows[result.factor_id]["category"] == "外部"  # 桶随结构走，不随自报类别
+    admitted = next(
+        event
+        for event in list_events(int(result.factor_id), db_path=db)
+        if event["to_status"] == "active"
+    )
+    assert admitted["detail"]["inherited_category_from"] == retired_id
+
+
+def test_admit_candidates_keeps_self_reported_category_without_quota_retired(tmp_path):
+    """同构 retired 行退役原因非 BUCKET_QUOTA → 按自报 category、事件不带继承字段。"""
+    db = _empty_db(tmp_path)
+    retired_id = add_factor(
+        expression="volume",
+        hypothesis="非配额原因退役的同构因子。",
+        category="外部",
+        status="active",
+        db_path=db,
+    )
+    set_status(retired_id, "retired", detail={"reason": "DECAY"}, db_path=db)
+    result = admit_candidates(
+        [_candidate("volume", category="价量")], _signal_panel(), seed=1, db_path=db
+    )[0]
+    rows = {row["id"]: row for row in list_factors(db_path=db)}
+    assert rows[result.factor_id]["category"] == "价量"
+    admitted = next(
+        event
+        for event in list_events(int(result.factor_id), db_path=db)
+        if event["to_status"] == "active"
+    )
+    assert "inherited_category_from" not in admitted["detail"]
