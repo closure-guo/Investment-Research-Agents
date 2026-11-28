@@ -176,13 +176,17 @@ def test_failed_symbol_counted_no_half_rows(tmp_path):
     assert all(row[4] is not None for row in rows)  # 无 NULL turnover 行
 
 
-def test_backfill_idempotent(tmp_path):
+def test_backfill_resume_skips_fully_covered_symbols(tmp_path):
+    """断点续跑：已完整覆盖的票跳过（不再取数），行数不变（幂等）。"""
     db = _seed_db(tmp_path)
     client = FakeShareClient(data={"600519": _share_frame(_START, _END)})
     first = run_backfill(start=_START, end=_END, symbols=["600519"], db_path=db, client=client)
+    calls_after_first = len(client.calls)
     second = run_backfill(start=_START, end=_END, symbols=["600519"], db_path=db, client=client)
-    assert first["symbols_ok"] == second["symbols_ok"] == 1
-    assert first["rows_written"] == second["rows_written"] == 2
+    assert first["rows_written"] == 2
+    assert second["skipped_resumed"] == 1
+    assert second["rows_written"] == 0
+    assert len(client.calls) == calls_after_first  # 续跑不再请求源
     assert len(_ref_rows(db)) == 2  # 同键覆盖、行数不变
 
 

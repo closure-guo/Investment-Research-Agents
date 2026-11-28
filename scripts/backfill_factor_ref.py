@@ -96,6 +96,29 @@ def _snapshot_closes(
     return closes
 
 
+def _existing_ref_dates(code: str, start: str, end: str, db_path: str | Path | None) -> set[str]:
+    """该票在区间内已完整回填（``float_cap`` 与 ``turnover`` 均非空）的日期集合。
+
+    断点续跑判据：需覆盖快照区间内全部日期才跳过该票；侧表不存在 → 空集。
+    """
+    try:
+        conn = _connect(db_path or _default_db_path())
+    except sqlite3.Error:
+        return set()
+    try:
+        rows = conn.execute(
+            "SELECT trade_date FROM market_ref_daily "
+            "WHERE code = ? AND trade_date >= ? AND trade_date <= ? "
+            "AND float_cap IS NOT NULL AND turnover IS NOT NULL",
+            (code, start, end),
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+    finally:
+        conn.close()
+    return {str(row["trade_date"]) for row in rows}
+
+
 def run_backfill(
     *,
     start: str,
@@ -110,7 +133,8 @@ def run_backfill(
 
     摘要：``start``/``end``（请求区间）/ ``covered_start``/``covered_end``（实际
     写入区间，无行为 None）/ ``symbols_ok`` / ``symbols_failed``（源失败、缺列或
-    快照无覆盖）/ ``rows_written`` / ``skipped_rows``（无快照行或行内无效值跳过数）。
+    快照无覆盖）/ ``skipped_resumed``（断点续跑跳过票数）/ ``rows_written`` /
+    ``skipped_rows``（无快照行或行内无效值跳过数）。
     """
     client = client or AKShareClient()
     if symbols is None:
@@ -119,6 +143,7 @@ def run_backfill(
     rows_written = 0
     symbols_ok = 0
     symbols_failed = 0
+    skipped_resumed = 0
     skipped_rows = 0
     covered_start: str | None = None
     covered_end: str | None = None
@@ -134,6 +159,9 @@ def run_backfill(
             # 无当日不复权收盘价可乘（快照未覆盖该票）→ 不取数、不落任何行
             logger.warning("参考数据回填：快照无覆盖，跳过 %s", code)
             symbols_failed += 1
+            continue
+        if set(closes) <= _existing_ref_dates(code, start, end, db_path):
+            skipped_resumed += 1
             continue
         frame = client.fetch_symbol_share_history(code, start, end)
         if frame is None:
@@ -176,6 +204,7 @@ def run_backfill(
         "covered_end": covered_end,
         "symbols_ok": symbols_ok,
         "symbols_failed": symbols_failed,
+        "skipped_resumed": skipped_resumed,
         "rows_written": rows_written,
         "skipped_rows": skipped_rows,
     }
@@ -245,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "回填完成: "
         f"symbols_ok={summary['symbols_ok']} symbols_failed={summary['symbols_failed']} "
+        f"skipped_resumed={summary['skipped_resumed']} "
         f"rows_written={summary['rows_written']} skipped_rows={summary['skipped_rows']} "
         f"covered={summary['covered_start']}..{summary['covered_end']}"
         + (" [dry-run]" if args.dry_run else "")
