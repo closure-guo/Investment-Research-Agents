@@ -25,6 +25,11 @@ from typing import Any
 
 from finance_agent.outcome.track_record.judgment import derive_attribution_date
 
+# ``index_closes`` 表的主键是**不带后缀**的指数代码（index_compare.INDEX_COMPARE_UNIVERSE
+# 写入 "000300"；predictions.benchmark 才是 "000300.SH"）。2026-11-28 部署当晚实测：
+# 用带后缀代码查询恒空 → 基准被误报「不可用」（本模块上线首日缺陷，已修）。
+INDEX_CLOSES_CODE = "000300"
+# 展示口径用完整代码（与 §1.9① BENCHMARK_CODE 语义一致）
 BENCHMARK_CODE = "000300.SH"
 SETTLED_DIRECTIONAL_STATUSES = ("resolved_win", "resolved_loss", "resolved_neutral")
 
@@ -156,7 +161,7 @@ def same_window_baseline(
     try:
         if predictions is None:
             predictions = list_predictions(limit=100_000, db_path=db_path)
-        index_rows = list_index_closes(BENCHMARK_CODE, db_path=db_path)
+        index_rows = list_index_closes(INDEX_CLOSES_CODE, db_path=db_path)
         calendar = [str(r["trade_date"])[:10] for r in index_rows]
         index_close = {str(r["trade_date"])[:10]: float(r["close"]) for r in index_rows}
         if not calendar:
