@@ -45,7 +45,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from finance_agent.factors.dsl import parse
+from finance_agent.factors.dsl import collect_fields, parse
 from finance_agent.factors.eval_engine import MarketPanel, cross_section_zscore, evaluate
 from finance_agent.factors.library import list_ic_series
 
@@ -249,6 +249,7 @@ def rank_universe(
     ic_stats: dict[int, tuple[float, float]],
     top_n: int = 100,
     ic_counts: Mapping[int, int] | None = None,
+    stats_out: dict[int, dict] | None = None,
 ) -> list[Candidate]:
     """L2 打分入口：L1 通过标的 × 因子库因子 → Top-N ``Candidate``（R1–R3）。
 
@@ -256,6 +257,12 @@ def rank_universe(
     ``factor_weights`` 加权合成（R2；``ic_counts`` 透传控制幅度规则）→ composite
     降序、symbol 升序排序（确定性 tie-break）→ 截取 ``top_n``，rank 从 1 连续。
     ``Σ contribution == composite_score``（1e-9）在每条候选上成立（同一累加顺序）。
+
+    ``stats_out``（可选）：逐因子写 ``{"valid_n": int}``——as_of 截面在
+    ``passed_codes`` 上的非 NaN 值个数（extend-factor-library-coverage §11 缺口
+    披露；有效个数 < 30 的因子由调用方记入 ``factor_value_gaps``）。面板未携带的
+    可选参考字段（``float_cap`` 等）按全 NaN 处理：不抛错、该因子 zscore 全 0
+    （贡献 0），排序与「该因子不参与」逐项一致。
 
     fail loud：``top_n < 1`` / 面板缺 ``close`` / ``as_of`` 不在面板日期 /
     ``passed_codes`` 重复或不在面板列 / ``factors`` 为空 / ``Σ|ic_mean| < 1e-12``。
@@ -282,14 +289,26 @@ def rank_universe(
     zscore_maps: list[dict[str, float]] = []
     for row in factors:
         factor_id = int(row["id"])
-        frame = evaluate(parse(str(row["expression"])), panel)
-        cross_section = frame.loc[as_of]
-        if not isinstance(cross_section, pd.Series):  # 面板日期 index 重复 → fail loud
-            raise ValueError(
-                f"面板日期 {as_of!r} 非唯一行（因子 {factor_id} 的求值帧破坏面板不变量）"
-            )
+        node = parse(str(row["expression"]))
+        absent = [field for field in collect_fields(node) if field not in panel.fields]
+        if absent:
+            # 可选参考字段未携带 → 全 NaN 语义（贡献 0；valid_n=0 由调用方披露）
+            valid_n = 0
+            zscore_map = dict.fromkeys(symbols, 0.0)
+        else:
+            frame = evaluate(node, panel)
+            cross_section = frame.loc[as_of]
+            if not isinstance(cross_section, pd.Series):  # 面板日期 index 重复 → fail loud
+                raise ValueError(
+                    f"面板日期 {as_of!r} 非唯一行（因子 {factor_id} 的求值帧破坏面板不变量）"
+                )
+            window = cross_section.loc[symbols]
+            valid_n = int(window.notna().sum())
+            zscore_map = _cross_section_zscores(window)
+        if stats_out is not None:
+            stats_out[factor_id] = {"valid_n": valid_n}
         factor_ids.append(factor_id)
-        zscore_maps.append(_cross_section_zscores(cross_section.loc[symbols]))
+        zscore_maps.append(zscore_map)
 
     scored: list[Candidate] = []
     for symbol in symbols:
