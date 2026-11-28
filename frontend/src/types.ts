@@ -547,6 +547,42 @@ export interface TrackRecordPaper {
   note: string
 }
 
+// 连续超额读数族（update-outcome-band-volatility-scaled，2026-11-28 拍板）：
+// 主指标从「±2% 带的赢/输」改为「比指数多赚多少」；人口 = long/short 日主已判定。
+export interface TrackRecordContinuous {
+  n: number
+  mean_excess: number | null
+  median_excess: number | null
+  std: number | null
+  t_stat: number | null
+  excess_win_rate: number | null
+  distinct_symbols: number
+  population: string
+}
+
+// 同窗随机基准（同窗口、全市场等权的「随便一只股票」对照）：避免把下跌市里的
+// 「回避对了」读成选股能力。
+export interface TrackRecordBaseline {
+  available: boolean
+  reason?: string
+  windows: number
+  skipped_windows: number
+  stocks_per_window: number | null
+  mean_excess: number | null
+  median_excess: number | null
+  caliber: string
+}
+
+export interface TrackRecordBand {
+  mode: string
+  floor: number
+  vol_multiplier: number
+  vol_window_days: number
+  fallback_band: number
+  settled_with_band: number
+  cutover: string
+}
+
 export interface TrackRecordOverview {
   total: number
   open: number
@@ -572,6 +608,11 @@ export interface TrackRecordOverview {
   // add-paper-broker（B3）：虚拟 vs 仿真双曲线块；null = 无 paper 数据（隐藏系列）。
   // 可选以容忍旧后端（缺省视同 null，不伪造第二条曲线）
   paper?: TrackRecordPaper | null
+  // update-outcome-band-volatility-scaled：连续超额 / 同窗随机基准 / 带宽口径。
+  // 可选以容忍旧后端（缺省时整行不渲染，不伪造读数）
+  continuous?: TrackRecordContinuous
+  baseline?: TrackRecordBaseline
+  band?: TrackRecordBand
 }
 
 // 净值曲线点（add-track-record-stage-b）

@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import sqlite3
+import statistics
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +48,7 @@ CREATE TABLE IF NOT EXISTS predictions (
   resolution_rule   TEXT,
   avoidance_status  TEXT,
   settle_entry_price REAL,
+  neutral_band_used REAL,
   updated_at        TEXT NOT NULL,
   version_seq       INTEGER,
   snapshot_hash     TEXT,
@@ -92,6 +95,8 @@ _MUTABLE_FIELDS = (
     "updated_at",
     "avoidance_status",
     "settle_entry_price",
+    # update-outcome-band-volatility-scaled：判定所用中性带（切点起落库）
+    "neutral_band_used",
 )
 
 
@@ -212,6 +217,7 @@ def init_track_record_tables(db_path: str | Path | None = None) -> None:
         conn.executescript(TRACK_RECORD_EXTRA_DDL)
         _migrate_stage_c_columns(conn)
         _migrate_settlement_contract_columns(conn)
+        _migrate_band_caliber_columns(conn)
         _migrate_metrics_beta_alpha_columns(conn)
         _migrate_trigger_tracking_columns(conn)
         _migrate_lane_column(conn)
@@ -244,6 +250,20 @@ _SETTLEMENT_CONTRACT_COLUMNS = (
 def _migrate_settlement_contract_columns(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
     for col, ddl in _SETTLEMENT_CONTRACT_COLUMNS:
+        if col not in cols:
+            conn.execute(ddl)
+
+
+# ── update-outcome-band-volatility-scaled：判定所用中性带落库（幂等迁移）──
+# 切点前已结算行该列为 NULL（按产出时口径 = 固定 2% 解释），SHALL NOT 回填。
+_BAND_CALIBER_COLUMNS = (
+    ("neutral_band_used", "ALTER TABLE predictions ADD COLUMN neutral_band_used REAL"),
+)
+
+
+def _migrate_band_caliber_columns(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
+    for col, ddl in _BAND_CALIBER_COLUMNS:
         if col not in cols:
             conn.execute(ddl)
 
@@ -1330,6 +1350,13 @@ def prediction_stats(
     (resolved_win/loss/neutral,排除 unresolvable)——消除 ±2% 中性带截断偏差
     (口径 metrics.md §1.9①);neutral 方向观点不属于主指标人口,一律排除。
 
+    update-outcome-band-volatility-scaled（2026-11-28 拍板）：主指标改**连续超额**
+    ——同一人口（long/short 三态）的 `excess_n` / `excess_median` / `excess_std` /
+    `excess_t`（均值 t 统计量，非聚类折算，聚类 CI 由收口报告按标的簇 bootstrap 出）
+    / `excess_win_rate`（超额 > 0 的占比，不依赖中性带）；`distinct_symbols` 为去重
+    标的数（跨切点读数须与条数并读，防同一标的重复计数冒充样本量）；`band_settled`
+    为带波动率自适应带宽落库（切点后）的已结算条数，供「新口径分段」显示。
+
     horizon_days 缺省不过滤(全量存量);传值只统计该窗口(头条口径 DEFAULT_HORIZON_DAYS),
     切点前后已结算行不混入同一读数(口径切点分段)。
     stage-c：version_seq 过滤用于分段封存（P6），缺省统计全部版本。
@@ -1357,6 +1384,12 @@ def prediction_stats(
         q_loss = f"SELECT COUNT(*) FROM predictions WHERE status='resolved_loss'{ls}{src_cond}"  # noqa: S608
         q_avg = f"SELECT AVG(excess_return) FROM predictions WHERE status IN ('resolved_win','resolved_loss','resolved_neutral'){ls}{src_cond}"  # noqa: S608
         q_counts = f"SELECT status, COUNT(*) FROM predictions{where} GROUP BY status"  # noqa: S608
+        # where/src_cond 为固定字面量拼装 + 值参数化（同上方各查询）
+        q_cont = (
+            "SELECT symbol, excess_return, neutral_band_used FROM predictions"  # noqa: S608
+            " WHERE status IN ('resolved_win','resolved_loss','resolved_neutral')"
+            f"{ls}{src_cond}"
+        )
         total = int(conn.execute(q_total, params).fetchone()[0])
         open_count = int(conn.execute(q_open, params).fetchone()[0])
         wins = int(conn.execute(q_win, params).fetchone()[0])
@@ -1365,6 +1398,23 @@ def prediction_stats(
         win_rate = round(wins / settled, 4) if settled else None
         avg_exc = conn.execute(q_avg, params).fetchone()[0]
         avg_excess = round(float(avg_exc), 4) if avg_exc is not None else None
+        cont_rows = conn.execute(q_cont, params).fetchall()
+        excess_vals = [
+            float(r["excess_return"]) for r in cont_rows if r["excess_return"] is not None
+        ]
+        distinct_symbols = len({str(r["symbol"]) for r in cont_rows})
+        band_settled = sum(1 for r in cont_rows if r["neutral_band_used"] is not None)
+        excess_n = len(excess_vals)
+        excess_median = excess_std = excess_t = excess_win_rate = None
+        if excess_n:
+            excess_median = round(statistics.median(excess_vals), 4)
+            excess_win_rate = round(sum(1 for v in excess_vals if v > 0) / excess_n, 4)
+            if excess_n > 1:
+                sd = statistics.stdev(excess_vals)
+                excess_std = round(sd, 4)
+                if sd > 0 and math.isfinite(sd):
+                    mean = statistics.fmean(excess_vals)
+                    excess_t = round(mean / (sd / math.sqrt(excess_n)), 3)
         return {
             "total": total,
             "open": open_count,
@@ -1372,6 +1422,14 @@ def prediction_stats(
             "win_rate": win_rate,
             "avg_excess": avg_excess,
             "status_counts": dict(conn.execute(q_counts, params).fetchall()),
+            # update-outcome-band-volatility-scaled：连续超额读数族 + 去重与分段计数
+            "excess_n": excess_n,
+            "excess_median": excess_median,
+            "excess_std": excess_std,
+            "excess_t": excess_t,
+            "excess_win_rate": excess_win_rate,
+            "distinct_symbols": distinct_symbols,
+            "band_settled": band_settled,
         }
     finally:
         conn.close()

@@ -32,7 +32,9 @@ from finance_agent.outcome.track_record.judgment import (
     Resolution,
     day_master_ids,
     derive_entry,
+    realized_daily_vol,
     resolve_prediction,
+    scaled_neutral_band,
     settle_at_exit,
     should_supersede,
 )
@@ -179,6 +181,9 @@ def settle_open_predictions(
                             result["skipped"] += 1
                             continue
                         exit_date = str(kline.iloc[-1]["日期"])
+                        # update-outcome-band-volatility-scaled：superseded 与到期判定
+                        # 共用同一波动率自适应带宽（以入场日前的 20 日窗口为准）。
+                        band = scaled_neutral_band(realized_daily_vol(kline, entry_date))
                         # update-superseded-excess：与 horizon 到点共用同一套结算数学
                         # （收益/超额/±2% 中性带），基准腿用本批已取的 benchmark；
                         # 基准不可得时超额退化为 raw，不写 NULL。
@@ -191,6 +196,7 @@ def settle_open_predictions(
                             benchmark=benchmark,
                             resolution_rule="superseded",
                             hold_days=int((kline["日期"] > entry_date).sum()),
+                            neutral_band=band,
                         )
                         update_prediction_status(
                             old["prediction_id"],
@@ -202,6 +208,7 @@ def settle_open_predictions(
                                 "resolution_rule": sup_resolution.resolution_rule,
                                 "resolved_at": sup_resolution.exit_date,
                                 "settle_entry_price": sup_resolution.entry_price,
+                                "neutral_band_used": sup_resolution.neutral_band_used,
                             },
                             db_path,
                         )
@@ -296,6 +303,7 @@ def settle_open_predictions(
             "resolution_rule": resolution.resolution_rule,
             "resolved_at": resolution.exit_date,
             "settle_entry_price": resolution.entry_price,
+            "neutral_band_used": resolution.neutral_band_used,
         }
         if resolution.status in AVOIDANCE_STATUSES:
             # neutral 回避判定:结果只入 avoidance_status;status 落终态 avoidance 使其

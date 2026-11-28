@@ -851,3 +851,58 @@ def test_seed_track_record_reset_clears_state_tables(monkeypatch, tmp_path):
     finally:
         monkeypatch.delenv("TESTING", raising=False)
         importlib.reload(api_module)
+
+
+def test_overview_continuous_baseline_and_band(monkeypatch, tmp_path):
+    """update-outcome-band-volatility-scaled：连续超额 / 同窗随机基准 / 带宽字段。"""
+    import sqlite3
+
+    from finance_agent.data import snapshot as snapshot_mod
+
+    db = _use_db(monkeypatch, tmp_path)
+    excesses = [0.05, 0.04, 0.03, 0.02, 0.01, 0.06, 0.02, -0.02, -0.01, -0.03]
+    for i, excess in enumerate(excesses):
+        pid = _insert(db, symbol=f"6000{i:02d}.SH", created_at="2026-09-01T10:00:00")
+        update_prediction_status(
+            pid,
+            {
+                "status": "resolved_win" if excess > 0 else "resolved_loss",
+                "excess_return": excess,
+                "resolved_at": "2026-09-03",
+                "neutral_band_used": 0.03,
+            },
+            db_path=db,
+        )
+    upsert_index_closes(
+        [("000300.SH", "2026-09-01", 100.0), ("000300.SH", "2026-09-03", 100.0)],
+        db_path=db,
+    )
+    snapshot_db = tmp_path / "snap.db"
+    snapshot_mod.init_snapshot_db(snapshot_db)
+    conn = sqlite3.connect(snapshot_db)
+    try:
+        conn.executemany(
+            "INSERT OR REPLACE INTO market_snapshot (trade_date, code, close_raw) VALUES (?,?,?)",
+            [
+                ("2026-09-01", "600001", 10.0),
+                ("2026-09-03", "600001", 11.0),
+                ("2026-09-01", "600002", 20.0),
+                ("2026-09-03", "600002", 20.0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr("finance_agent.data.snapshot._default_db_path", lambda: snapshot_db)
+
+    data = TestClient(app).get("/api/v1/track-record/overview").json()
+    assert data["win_rate"] == 0.7
+    assert data["continuous"]["n"] == 10
+    assert data["continuous"]["distinct_symbols"] == 10
+    assert data["continuous"]["mean_excess"] == 0.017
+    assert data["continuous"]["excess_win_rate"] == 0.7
+    assert data["band"]["settled_with_band"] == 10
+    assert data["band"]["mode"] == "vol_scaled"
+    assert data["baseline"]["available"] is True
+    assert data["baseline"]["windows"] == 1
+    assert data["baseline"]["mean_excess"] == 0.05

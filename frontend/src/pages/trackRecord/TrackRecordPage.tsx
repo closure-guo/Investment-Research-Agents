@@ -456,6 +456,53 @@ export function TrackRecordPage({ onBack }: { onBack: () => void }) {
             </div>
           </div>
 
+          {/* 连续超额 + 同窗随机基准（update-outcome-band-volatility-scaled，2026-11-28 拍板）：
+              主指标从「±2% 带的赢/输」改为「比指数多赚多少」，并给出同窗口、全市场等权的
+              「随便一只股票」对照——下跌市里「回避对了」与市场本来就跌必须分得开。
+              只读展示：后端已按口径算好；旧后端缺省 → 整行不渲染，绝不伪造读数 */}
+          {overview.continuous && (
+            <div
+              data-testid="track-record-continuous"
+              className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-4 text-xs"
+              style={{ color: 'var(--text-secondary)' }}
+            >
+              <span data-testid="continuous-label">
+                连续超额（主指标 · n={overview.continuous.n}
+                {overview.continuous.distinct_symbols !== overview.continuous.n
+                  ? ` / 去重标的 ${overview.continuous.distinct_symbols} 只`
+                  : ''}
+                ）
+              </span>
+              <span>
+                均值 <Delta value={overview.continuous.mean_excess} />
+              </span>
+              <span>
+                中位 {overview.continuous.median_excess === null ? '—' : pct(overview.continuous.median_excess, 2)}
+              </span>
+              <span>超额胜率 {pct(overview.continuous.excess_win_rate, 1)}</span>
+              {overview.continuous.t_stat !== null && (
+                <span>t={overview.continuous.t_stat.toFixed(2)}</span>
+              )}
+              {overview.baseline &&
+                (overview.baseline.available ? (
+                  <span data-testid="track-record-baseline">
+                    同窗随机股票：均值 <Delta value={overview.baseline.mean_excess} />
+                    （{overview.baseline.windows} 个窗口 × 约 {overview.baseline.stocks_per_window} 只）
+                  </span>
+                ) : (
+                  <span data-testid="track-record-baseline-unavailable" style={{ color: 'var(--text-tertiary)' }}>
+                    同窗随机基准：{overview.baseline.reason ?? '不可用'}
+                  </span>
+                ))}
+              {overview.band && (
+                <span data-testid="track-record-band" style={{ color: 'var(--text-tertiary)' }}>
+                  中性带：波动率自适应（下限 1.5%，{overview.band.cutover} 切点起；新口径已结算{' '}
+                  {overview.band.settled_with_band} 条）
+                </span>
+              )}
+            </div>
+          )}
+
           {/* 口径披露（Δ2）：判定口径与存量旧口径计数常驻，不受样本门槛限制；存量 0 明示「无存量」。
               update-track-record-display-clarity：双计数——legacy_settled（已结算）与
               legacy_open（进行中，不计入头条口径）分列；legacy_open=0 或缺省不渲染该分句 */}
