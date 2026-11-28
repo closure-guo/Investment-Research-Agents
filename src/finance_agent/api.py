@@ -1250,6 +1250,14 @@ def _run_graph_streaming(
     if _handler is not None:
         _config["callbacks"] = [_handler]
 
+    # 会话用量记账（composer-stat-pills）：快路径/池分析在 PipelineRunner 线程执行，
+    # contextvar 不跨线程传播——收集器必须在本线程内激活。退出（含 GeneratorExit /
+    # 异常）时把 provider 真值累加落库；calls==0（stub/无调用）不写库，不造数。
+    from finance_agent.nodes._llm_utils import usage_collector
+    from finance_agent.usage_accounting import persist_session_usage
+
+    _usage_cm = usage_collector()
+    _usage_acc = _usage_cm.__enter__()
     try:
         for mode, chunk in graph.stream(
             initial_state,
@@ -1416,6 +1424,11 @@ def _run_graph_streaming(
             }
         )
     finally:
+        # 会话用量先收口（先退出收集器再落库：退出后事件不再累加，落的是本线程
+        # 真实跑过的调用；GeneratorExit 提前关闭时同样保留已发生部分）
+        with contextlib.suppress(BaseException):
+            _usage_cm.__exit__(None, None, None)
+        persist_session_usage(session_id, _usage_acc)
         # 根 span 退出前写入评估数据 metadata + 摘要 output（与 _stream_graph 对齐；
         # post-exit update 会被 Langfuse 丢弃，必须在 __exit__ 前写；
         # metadata/output 各自独立容错——任一段失败不连带另一段）
