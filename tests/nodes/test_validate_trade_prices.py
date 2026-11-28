@@ -636,3 +636,38 @@ class TestSellTypePriceExemption:
 
         d = TradeDecision.model_validate(self._decision())
         assert final_price_missing(d) == ["entry_price", "stop_loss", "target_price"]
+
+
+class TestDerivedMetricsPolarity:
+    """#606 残留（2026-11-28）：派生赔率按三价极性分派。
+
+    exit 惯例 stop<entry<target 与 long 同关系式；旧实现一律对 sell 用 short 公式，
+    在 exit 支把 risk 算成负 → 赔率 None + 误报「价位关系非法」，风控辩论拿不到
+    代码值（#606 11-25 评论实证）。
+    """
+
+    def test_exit_convention_uses_long_formula(self):
+        from finance_agent.nodes.validate import _compute_derived_metrics
+
+        dm = _compute_derived_metrics("sell", 21.58, 19.1314, 23.7186, polarity="exit")
+        assert dm["missing_reason"] is None
+        assert dm["risk_reward_ratio"] == pytest.approx((23.7186 - 21.58) / (21.58 - 19.1314))
+
+    def test_sell_without_sell_type_defaults_to_exit(self):
+        """极性缺省走 price_polarity(action, None)：sell 未申报 → exit（models 单一权威源）。"""
+        from finance_agent.nodes.validate import _compute_derived_metrics
+
+        dm = _compute_derived_metrics("sell", 21.58, 19.1314, 23.7186)
+        assert dm["risk_reward_ratio"] == pytest.approx((23.7186 - 21.58) / (21.58 - 19.1314))
+
+    def test_short_convention_unchanged(self):
+        from finance_agent.nodes.validate import _compute_derived_metrics
+
+        dm = _compute_derived_metrics("sell", 21.58, 23.7186, 19.1314, polarity="short")
+        assert dm["risk_reward_ratio"] == pytest.approx((21.58 - 19.1314) / (23.7186 - 21.58))
+
+    def test_buy_unchanged(self):
+        from finance_agent.nodes.validate import _compute_derived_metrics
+
+        dm = _compute_derived_metrics("buy", 100.0, 95.0, 108.0, polarity="long")
+        assert dm["risk_reward_ratio"] == pytest.approx(8.0 / 5.0)

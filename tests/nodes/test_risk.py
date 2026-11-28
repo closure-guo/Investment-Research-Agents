@@ -1087,3 +1087,127 @@ class TestDecisionHysteresis:
         assert mock_llm.call_count == 2
         assert result["final_trade_decision"].action == "buy"
         assert result["decision_hysteresis"]["applied"] == ""
+
+
+class TestExitPricePolarityNormalization:
+    """#606 终稿残留（2026-11-28）：sell_type=exit 三价极性归一。
+
+    风控席位可能把 exit 叙事写成 short 惯例（stop 在上、target 在下）；spec
+    「三价字段极性契约」要求 exit 为 stop<entry<target，错置须走修正回路。
+    打回预算已尽 → 确定性交换 + price_level_corrected 留痕。
+    """
+
+    @staticmethod
+    def _decision(**overrides):
+        from finance_agent.models import TradeDecision
+
+        base = {
+            "action": "sell",
+            "confidence": 0.6,
+            "reasoning": "维持看空，分批退出",
+            "sell_type": "exit",
+            "position_size": "light",
+            "entry_price": 21.58,
+            "stop_loss": 23.7186,
+            "target_price": 19.1314,
+            "exit_schedule": "分两批：现价减六成，上破失效位清余",
+            "reeval_triggers": ["收盘站上失效位则停止减仓"],
+        }
+        base.update(overrides)
+        return TradeDecision.model_validate(base)
+
+    def test_short_convention_is_swapped_and_marked(self):
+        from finance_agent.nodes.risk import _normalize_exit_price_polarity
+
+        decision, obs = _normalize_exit_price_polarity(self._decision())
+        # short 的失效位（上）→ exit 的反弹减仓带（target）；short 的兑现位（下）→ 清仓位（stop）
+        assert decision.stop_loss == 19.1314
+        assert decision.target_price == 23.7186
+        assert decision.price_level_corrected is True
+        assert "极性错置" in (decision.price_level_correction_reason or "")
+        assert obs["result"] == "corrected"
+        assert obs["before"] == {"stop_loss": 23.7186, "target_price": 19.1314}
+
+    def test_exit_convention_is_untouched(self):
+        from finance_agent.nodes.risk import _normalize_exit_price_polarity
+
+        d = self._decision(stop_loss=19.1314, target_price=23.7186)
+        out, obs = _normalize_exit_price_polarity(d)
+        assert out == d and obs["result"] == "pass"
+
+    def test_missing_price_is_untouched(self):
+        from finance_agent.nodes.risk import _normalize_exit_price_polarity
+
+        d = self._decision(stop_loss=None, target_price=None)
+        out, obs = _normalize_exit_price_polarity(d)
+        assert out == d and obs["result"] == "pass"
+
+    def test_non_exit_is_untouched(self):
+        from finance_agent.nodes.risk import _normalize_exit_price_polarity
+
+        short = self._decision(sell_type="short")
+        out, obs = _normalize_exit_price_polarity(short)
+        assert out == short and obs["result"] == "pass"
+        buy = self._decision(action="buy", sell_type=None, exit_schedule=None)
+        out2, obs2 = _normalize_exit_price_polarity(buy)
+        assert out2 is buy and obs2["result"] == "pass"
+
+    def test_reason_merged_when_already_corrected(self):
+        from finance_agent.nodes.risk import _normalize_exit_price_polarity
+
+        d = self._decision(
+            price_level_corrected=True, price_level_correction_reason="sanity 二次未通过"
+        )
+        out, _ = _normalize_exit_price_polarity(d)
+        reason = out.price_level_correction_reason or ""
+        assert reason.startswith("sanity 二次未通过")
+        assert "极性错置" in reason
+
+    @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
+    def test_risk_judge_final_decision_is_normalized(self, mock_llm):
+        """LLM 终稿写 short 惯例 → 终稿落库前交换，并写 state 观测键。"""
+        mock_llm.return_value = json.dumps(
+            {
+                "action": "sell",
+                "confidence": 0.6,
+                "reasoning": "维持看空方向，分批退出敞口",
+                "sell_type": "exit",
+                "position_size": "light",
+                "entry_price": 21.58,
+                "stop_loss": 23.7186,
+                "target_price": 19.1314,
+                "exit_schedule": "分两批：现价减六成，上破失效位清余",
+                "reeval_triggers": ["收盘站上失效位则停止减仓"],
+            },
+            ensure_ascii=False,
+        )
+        result = risk_judge({"trader_plan": {"action": "sell"}, "risk_debate_history": []})
+        decision = result["final_trade_decision"]
+        assert decision.stop_loss == 19.1314 and decision.target_price == 23.7186
+        assert decision.price_level_corrected is True
+        assert result["final_price_polarity_check"]["result"] == "corrected"
+
+    @patch("finance_agent.nodes._llm_utils.call_llm_streaming")
+    def test_reasoning_ratio_recomputed_after_swap(self, mock_llm):
+        """归一交换后按 exit 公式重算赔率：文本旧口径赔率（short 1.15:1）被原位替换。"""
+        mock_llm.return_value = json.dumps(
+            {
+                "action": "sell",
+                "confidence": 0.6,
+                "reasoning": "维持看空，赔率约 1.15:1 可接受",
+                "sell_type": "exit",
+                "position_size": "light",
+                "entry_price": 21.58,
+                "stop_loss": 23.7186,
+                "target_price": 19.1314,
+                "exit_schedule": "分两批：现价减六成，上破失效位清余",
+                "reeval_triggers": ["收盘站上失效位则停止减仓"],
+            },
+            ensure_ascii=False,
+        )
+        result = risk_judge({"trader_plan": {"action": "sell"}, "risk_debate_history": []})
+        decision = result["final_trade_decision"]
+        # exit 公式：(target−entry)/(entry−stop) = (23.7186−21.58)/(21.58−19.1314) ≈ 0.873
+        assert "0.87:1" in decision.reasoning
+        assert "1.15:1" not in decision.reasoning
+        assert result["payout_ratio_corrected"] is True

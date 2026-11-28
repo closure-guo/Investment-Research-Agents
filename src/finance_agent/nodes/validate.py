@@ -111,13 +111,29 @@ def check_and_fix_stated_ratio(
 
 
 def apply_payout_self_check(
-    reasoning: str, action: object, entry: object, stop: object, target: object
+    reasoning: str,
+    action: object,
+    entry: object,
+    stop: object,
+    target: object,
+    sell_type: object = None,
 ) -> tuple[str, bool, int]:
     """自算派生赔率并对 reasoning 做原位修正（trader / risk_judge 产出路径共用）。
 
+    ``sell_type`` 决定 sell 的极性（update-outcome-band-volatility-scaled 同源修正）：
+    exit 惯例 stop<entry<target 下赔率 = (t−e)/(e−s)，与 short 惯例相反；缺省按
+    ``price_polarity(action, None)``（sell 未申报 → exit，models 单一权威源）。
+
     返回 (修正后文本, 是否修正, 转述跳过计数)——跳过计数随节点 state 上报
     （`payout_ratio_conflict_skipped`），供批次归因消费。"""
-    derived = _compute_derived_metrics(str(action or ""), entry, stop, target)
+    normalized = str(action or "")
+    derived = _compute_derived_metrics(
+        normalized,
+        entry,
+        stop,
+        target,
+        polarity=price_polarity(normalized, sell_type if isinstance(sell_type, str) else None),
+    )
     return check_and_fix_stated_ratio(reasoning, derived.get("risk_reward_ratio"))
 
 
@@ -276,7 +292,7 @@ def _validate_price_levels(state: dict) -> dict:
     levels = state.get("price_levels") or {}
     # 派生指标只依赖申报价格，与参考带/行情无关——跳过 band 校验也 MUST 计算，
     # 否则风险辩论拿不到代码值、退回 LLM 心算（delta 核心承诺）
-    derived = _compute_derived_metrics(action, entry, stop, target)
+    derived = _compute_derived_metrics(action, entry, stop, target, polarity=polarity)
     if not levels.get("available"):
         return {
             "price_check": {
@@ -323,7 +339,9 @@ def _validate_price_levels(state: dict) -> dict:
     if not reasons:
         return {
             "price_check": {"result": "pass"},
-            "derived_metrics": _compute_derived_metrics(action, entry, stop, target),
+            "derived_metrics": _compute_derived_metrics(
+                action, entry, stop, target, polarity=polarity
+            ),
         }
 
     reason = "；".join(reasons)
@@ -354,16 +372,24 @@ def _validate_price_levels(state: dict) -> dict:
             corrected.get("entry_price"),
             corrected.get("stop_loss"),
             corrected.get("target_price"),
+            polarity=polarity,
         ),
     }
 
 
-def _compute_derived_metrics(action: str, entry: object, stop: object, target: object) -> dict:
+def _compute_derived_metrics(
+    action: str, entry: object, stop: object, target: object, polarity: str | None = None
+) -> dict:
     """派生风险指标确定性计算（deterministic-derived-metrics）。
 
-    止损距离 = |entry-stop|/entry；赔率 = |reward|/|risk|（buy：t-e / e-s；
-    sell：e-t / s-e）。参与数缺失/为 0 或除零 → 对应值 None 并注明原因，
-    MUST NOT 产出 0/无穷/NaN 占位。纯规则，无 LLM。
+    止损距离 = |entry-stop|/entry；赔率 = |reward|/|risk|，**按三价极性分派**
+    （add-price-polarity-contract 同源修正）：long/exit 惯例 stop<entry<target →
+    (t−e)/(e−s)；short 惯例 stop>entry>target → (e−t)/(s−e)。极性缺省按
+    ``price_polarity(action, None)``（sell 未申报 → exit；models 单一权威源）。
+    exit 惯例下旧实现（一律 sell 用 short 公式）会把 risk 算成负 → 赔率 None 并
+    误报「价位关系非法」，风控辩论拿不到代码值（#606 残留）。
+    参与数缺失/为 0 或除零 → 对应值 None 并注明原因，MUST NOT 产出 0/无穷/NaN
+    占位。纯规则，无 LLM。
     """
     missing: list[str] = []
     try:
@@ -392,9 +418,10 @@ def _compute_derived_metrics(action: str, entry: object, stop: object, target: o
         }
     e, s, t = cast(float, e), cast(float, s), cast(float, t)  # missing 守卫已排除 None
     stop_distance = abs(e - s) / e
-    if action == "sell":
+    effective = polarity if polarity is not None else price_polarity(action, None)
+    if effective == "short":
         reward, risk = e - t, s - e
-    else:
+    else:  # long / exit（exit 与 long 同关系式，语义不同）
         reward, risk = t - e, e - s
     ratio = abs(reward) / risk if risk > 0 else None
     if ratio is None:
