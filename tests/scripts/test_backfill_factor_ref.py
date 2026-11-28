@@ -39,20 +39,20 @@ def _share_frame(*days: str) -> pd.DataFrame:
     )
 
 
-def _snapshot_row(date: str, code: str) -> dict:
+def _snapshot_row(date: str, code: str, close: float = 10.0) -> dict:
     return {
         "trade_date": date,
         "code": code,
         "name": code,
-        "open": 10.0,
-        "high": 10.1,
-        "low": 9.9,
-        "close_raw": 10.0,
-        "close_qfq": 10.0,
+        "open": close,
+        "high": close + 0.1,
+        "low": close - 0.1,
+        "close_raw": close,
+        "close_qfq": close,
         "volume": 100.0,
         "amount": 1000.0,
         "pct_chg": 0.0,
-        "prev_close": 10.0,
+        "prev_close": close,
         "is_st": 0,
         "is_suspended": 0,
         "limit_up_sealed": 0,
@@ -87,7 +87,14 @@ def _seed_db(tmp_path):
         ],
         db_path=db,
     )
-    write_snapshot_rows(_START, [_snapshot_row(_START, "600519")], db_path=db)
+    # 快照收盘价刻意不同于新浪帧的 close（10/11），用于证明 float_cap 取快照口径
+    closes = {"600519": (12.0, 13.0), "000001": (20.0, 21.0)}
+    for index, day in enumerate((_START, _END)):
+        write_snapshot_rows(
+            day,
+            [_snapshot_row(day, code, closes[code][index]) for code in ("600519", "000001")],
+            db_path=db,
+        )
     return db
 
 
@@ -115,7 +122,8 @@ def test_backfill_rows_caliber_and_summary(tmp_path):
     before = _snapshot_rows(db)
     client = FakeShareClient(
         data={
-            "600519": _share_frame(_START, _END),
+            # 多一天无快照行（11-26）：该日必须跳过（不落半口径行）
+            "600519": _share_frame(_START, _END, "2026-11-26"),
             "000001": _share_frame(_START, _END),
         }
     )
@@ -129,13 +137,15 @@ def test_backfill_rows_caliber_and_summary(tmp_path):
     assert summary["symbols_ok"] == 2
     assert summary["symbols_failed"] == 0
     assert summary["rows_written"] == 4
+    assert summary["skipped_rows"] == 1  # 11-26 无快照行
     assert summary["start"] == _START
     assert summary["end"] == _END
     rows = _ref_rows(db)
     assert [row[0] for row in rows] == [_START, _END, _START, _END]
     assert [row[1] for row in rows] == ["000001", "000001", "600519", "600519"]
     first = rows[2]  # 600519 on _START
-    assert first[2] == pytest.approx(10.0 * 1.0e9)
+    # 快照 close_raw（12.0）而非新浪帧 close（10.0）
+    assert first[2] == pytest.approx(12.0 * 1.0e9)
     assert first[3] is None  # 历史源不提供总市值：不下推断值
     assert first[4] == pytest.approx(0.01)
     assert first[5] == "sina_history"
@@ -196,3 +206,13 @@ def test_empty_master_without_symbols_exits_2(tmp_path):
     db = tmp_path / "empty.db"
     init_snapshot_db(db)
     assert main(["--start", _START, "--end", _END, "--db", str(db)]) == 2
+
+
+def test_symbol_without_snapshot_rows_is_failed_and_not_fetched(tmp_path):
+    """快照无该票行 → 无当日不复权收盘价可乘，计 failed 且不发起取数。"""
+    db = _seed_db(tmp_path)
+    client = FakeShareClient(data={"300750": _share_frame(_START, _END)})
+    summary = run_backfill(start=_START, end=_END, symbols=["300750"], db_path=db, client=client)
+    assert summary["symbols_failed"] == 1
+    assert summary["rows_written"] == 0
+    assert client.calls == []  # 先查快照覆盖，无覆盖不发请求

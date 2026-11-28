@@ -7,8 +7,10 @@
         --start 2024-01-01 --end 2026-11-27
 
 - 源：新浪不复权日线（``stock_zh_a_daily``，``adjust=""``）的 ``outstanding_share``
-  与 ``turnover``；``float_cap = outstanding_share × close``（元），``turnover``
-  为源值小数口径；``source="sina_history"`` 留痕。
+  与 ``turnover``；``float_cap = outstanding_share × 当日 market_snapshot.close_raw``
+  （当日无快照行 → 跳过该日，不落半行），``turnover`` 为源值小数口径；
+  ``source="sina_history"`` 留痕。快照无该票任何行的标的计 ``symbols_failed``
+  且不发起取数。
 - 只写 ``market_ref_daily``（幂等 upsert），**MUST NOT 修改 market_snapshot 行**。
 - 源失败/空/缺 ``outstanding_share``/``turnover`` 列 → 该票计入 ``symbols_failed``，
   不落 NULL/0 值半口径行；逐行无效值跳过。
@@ -25,6 +27,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -33,6 +36,7 @@ from typing import Any
 from finance_agent.data import hotdb_guard
 from finance_agent.data.akshare_client import AKShareClient, _norm_date_iso
 from finance_agent.data.snapshot import (
+    _connect,
     _default_db_path,
     _norm_code,
     get_security_master,
@@ -60,6 +64,38 @@ def _split_csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def _snapshot_closes(
+    code: str, start: str, end: str, db_path: str | Path | None
+) -> dict[str, float]:
+    """该票在 ``[start, end]`` 的快照不复权收盘价 ``{trade_date: close_raw}``。
+
+    快照库无表（尚未初始化）→ 空 dict（调用方按无覆盖处置，不抛）。
+    """
+    try:
+        conn = _connect(db_path or _default_db_path())
+    except sqlite3.Error as e:
+        logger.warning("参考数据回填：快照库不可打开，跳过全场: %s", e)
+        return {}
+    try:
+        rows = conn.execute(
+            "SELECT trade_date, close_raw FROM market_snapshot "
+            "WHERE code = ? AND trade_date >= ? AND trade_date <= ?",
+            (code, start, end),
+        ).fetchall()
+    except sqlite3.Error as e:
+        logger.warning("参考数据回填：快照查询失败（可能未建表），跳过全场: %s", e)
+        return {}
+    finally:
+        conn.close()
+    closes: dict[str, float] = {}
+    for row in rows:
+        day = str(row["trade_date"])
+        close = _finite(row["close_raw"])
+        if close is not None and close > 0:
+            closes[day] = close
+    return closes
+
+
 def run_backfill(
     *,
     start: str,
@@ -73,8 +109,8 @@ def run_backfill(
     """逐票回填 ``market_ref_daily``，返回摘要（口径见模块 docstring）。
 
     摘要：``start``/``end``（请求区间）/ ``covered_start``/``covered_end``（实际
-    写入区间，无行为 None）/ ``symbols_ok`` / ``symbols_failed`` / ``rows_written``
-    / ``skipped_rows``（行内无效值跳过数）。
+    写入区间，无行为 None）/ ``symbols_ok`` / ``symbols_failed``（源失败、缺列或
+    快照无覆盖）/ ``rows_written`` / ``skipped_rows``（无快照行或行内无效值跳过数）。
     """
     client = client or AKShareClient()
     if symbols is None:
@@ -93,6 +129,12 @@ def run_backfill(
         if not code:
             symbols_failed += 1
             continue
+        closes = _snapshot_closes(code, start, end, db_path)
+        if not closes:
+            # 无当日不复权收盘价可乘（快照未覆盖该票）→ 不取数、不落任何行
+            logger.warning("参考数据回填：快照无覆盖，跳过 %s", code)
+            symbols_failed += 1
+            continue
         frame = client.fetch_symbol_share_history(code, start, end)
         if frame is None:
             symbols_failed += 1
@@ -100,13 +142,13 @@ def run_backfill(
         rows: list[dict[str, Any]] = []
         for _, row in frame.iterrows():
             day = _norm_date_iso(row.get("date"))
-            close = _finite(row.get("close"))
+            close = closes.get(day) if day else None
             shares = _finite(row.get("outstanding_share"))
             turnover = _finite(row.get("turnover"))
             if not day or close is None or shares is None or turnover is None:
                 skipped_rows += 1
                 continue
-            if close <= 0 or shares <= 0 or turnover < 0:
+            if shares <= 0 or turnover < 0:
                 skipped_rows += 1
                 continue
             rows.append(
