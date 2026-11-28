@@ -41,7 +41,7 @@ import json
 import math
 import os
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -682,6 +682,40 @@ def read_bars(
     for col in _NUMERIC_SNAPSHOT_COLUMNS:
         frame[col] = pd.to_numeric(frame[col], errors="coerce")
     return frame
+
+
+def read_close_map(
+    dates: Sequence[str], db_path: str | Path | None = None
+) -> dict[str, dict[str, float]]:
+    """批量读取若干交易日的全市场收盘价（``close_raw``）→ ``{date: {code: close}}``。
+
+    update-outcome-band-volatility-scaled 的同窗随机基准用：只需已完成历史窗口的两个
+    横截面，故不设 ``as_of`` 前视门（与 ``read_bars`` 的单标的取数语义不同）。日期须为
+    规范 ``YYYY-MM-DD``；空库 → 返回空 dict（调用方按「基准不可用」披露，不阻断页面）。
+    """
+    normalized: list[str] = []
+    for value in dates:
+        normalized.append(_parse_date_param(value, param="date").isoformat())
+    if not normalized:
+        return {}
+    placeholders = ", ".join("?" * len(normalized))
+    try:
+        conn = _connect_ro(db_path)
+    except sqlite3.OperationalError:
+        return {}
+    try:
+        rows = conn.execute(
+            # placeholders 仅为 "?" 序列；日期值全参数化
+            f"SELECT trade_date, code, close_raw FROM market_snapshot "  # noqa: S608
+            f"WHERE trade_date IN ({placeholders}) AND close_raw IS NOT NULL",
+            normalized,
+        ).fetchall()
+    finally:
+        conn.close()
+    out: dict[str, dict[str, float]] = {}
+    for trade_date, code, close in rows:
+        out.setdefault(str(trade_date), {})[str(code)] = float(close)
+    return out
 
 
 def upsert_security_master(rows: list[dict], db_path: str | Path | None = None) -> int:

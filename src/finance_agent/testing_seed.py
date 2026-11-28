@@ -212,6 +212,8 @@ async def run_test_seed(req: dict[str, Any]) -> dict[str, Any]:
                         "exit_price",
                         "raw_return",
                         "excess_return",
+                        # update-outcome-band-volatility-scaled：判定所用中性带
+                        "neutral_band_used",
                     ):
                         if row.get(_fld) is not None:
                             resolved[_fld] = row[_fld]

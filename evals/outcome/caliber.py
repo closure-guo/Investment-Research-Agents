@@ -7,7 +7,10 @@ from finance_agent.outcome.track_record.judgment import (  # noqa: F401  别名�
     DEFAULT_HORIZON_DAYS as PRIMARY_WINDOW_DAYS,
 )
 
-# ±2% 中性带：唯一实现源在 track-record 判定（§1.9①「不另造定义」）
+# 中性带常量：唯一实现源在 track-record 判定（§1.9①「不另造定义」）。
+# update-outcome-band-volatility-scaled（2026-11-28）：判定侧已改为逐行波动率自适应
+# （judgment.scaled_neutral_band），本常量现为「波动不可得时的回落带」；泄漏探针等
+# 诊断分桶仍消费它（诊断用途，不是结算判定）。
 from finance_agent.outcome.track_record.judgment import (  # noqa: F401  别名再导出
     DEFAULT_NEUTRAL_BAND as NEUTRAL_BAND,
 )

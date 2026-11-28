@@ -8,7 +8,9 @@ horizon 到点按区间超额收益判定:long/short → resolved_win/loss/neutr
 
 from __future__ import annotations
 
+import math
 import os
+import statistics
 from dataclasses import dataclass
 
 import pandas as pd
@@ -19,6 +21,13 @@ from finance_agent.data.market_caliber import (
 
 MAX_HORIZON_DAYS = 252
 DEFAULT_NEUTRAL_BAND = 0.02
+# 波动率自适应中性带（update-outcome-band-volatility-scaled，2026-11-28 拍板）：
+# 辅助分类带 = max(1.5%, 0.5 × 决策归属日起 20 个交易日窗口波动)。窗口波动 =
+# 归属日前 20 个交易日日收益标准差 × sqrt(20)（"年化波动率折算的窗口波动"）。
+# 波动不可得（K 线不足 21 点/数据异常）→ 回落既有全局 2%，行为与切点前一致。
+BAND_FLOOR = 0.015
+BAND_VOL_MULTIPLIER = 0.5
+BAND_VOL_WINDOW_DAYS = 20
 # outcome 评估默认判定窗口（delta update-decision-settlement-contract；口径 metrics.md §1.9）
 DEFAULT_HORIZON_DAYS = int(os.getenv("OUTCOME_DEFAULT_HORIZON_DAYS", "20"))
 CLOSE_TIME_CUTOFF = "15:00"  # 归属日收盘切分：created_at 时间部分 < 此值 → 归属日收盘入场
@@ -41,6 +50,44 @@ class Resolution:
     excess_return: float | None
     hold_days: int
     resolution_rule: str  # expiry / superseded
+    # update-outcome-band-volatility-scaled：本次判定实际使用的中性带（波动率自适应
+    # 或回落 2%）。落库列 neutral_band_used，供「新口径从切点起算」分段与审计。
+    neutral_band_used: float = DEFAULT_NEUTRAL_BAND
+
+
+def realized_daily_vol(
+    kline: pd.DataFrame, as_of: str, *, days: int = BAND_VOL_WINDOW_DAYS
+) -> float | None:
+    """``as_of``（含）之前 ``days`` 个交易日日收益的样本标准差（ddof=1）。
+
+    不足 ``days + 1`` 个收盘点 / 非正值 / 非有限 → ``None``（调用方回落固定带）。
+    """
+    df = _norm(kline)
+    rows = df[df["日期"] <= as_of].tail(days + 1)
+    if len(rows) < days + 1:
+        return None
+    closes = [float(v) for v in rows["收盘"].tolist()]
+    if any(v <= 0 for v in closes):
+        return None
+    rets = [closes[i] / closes[i - 1] - 1.0 for i in range(1, len(closes))]
+    if len(rets) < 2:
+        return None
+    sd = statistics.stdev(rets)
+    if not math.isfinite(sd) or sd <= 0:
+        return None
+    return sd
+
+
+def scaled_neutral_band(daily_vol: float | None) -> float:
+    """波动率自适应中性带：``max(1.5%, 0.5 × daily_vol × sqrt(20))``。
+
+    ``daily_vol`` 不可得（None/非正/非有限）→ 回落 ``DEFAULT_NEUTRAL_BAND``（2%），
+    与切点前行为一致；结果保留 6 位小数（与落库精度对齐）。
+    """
+    if daily_vol is None or not math.isfinite(daily_vol) or daily_vol <= 0:
+        return DEFAULT_NEUTRAL_BAND
+    window_vol = daily_vol * math.sqrt(BAND_VOL_WINDOW_DAYS)
+    return round(max(BAND_FLOOR, BAND_VOL_MULTIPLIER * window_vol), 6)
 
 
 def _effective_horizon(prediction: dict) -> int:
@@ -190,11 +237,12 @@ def settle_at_exit(
         entry_date=entry_date,
         entry_price=round(entry_price, 6),
         exit_date=exit_date,
-        exit_price=exit_price,
+        exit_price=round(exit_price, 6),
         raw_return=round(raw_return, 6),
         excess_return=excess,
         hold_days=hold_days,
         resolution_rule=resolution_rule,
+        neutral_band_used=round(float(band), 6),
     )
 
 
@@ -202,11 +250,15 @@ def resolve_prediction(
     prediction: dict,
     kline: pd.DataFrame,
     benchmark: pd.DataFrame | None = None,
-    neutral_band: float = DEFAULT_NEUTRAL_BAND,
+    neutral_band: float | None = None,
     *,
     entry_override: tuple[str, float] | None = None,
 ) -> Resolution | None:
     """horizon 到点判定。入场基准为派生 settle_entry_price（非参考价）。
+
+    ``neutral_band``（update-outcome-band-volatility-scaled）：缺省 ``None`` →
+    按入场日之前 20 个交易日波动率自适应计算（``scaled_neutral_band``）；显式传值
+    则用该值（回测/测试可复现固定带）。
 
     ``entry_override``（add-matching-engine T4）：回放侧经撮合引擎得到真实成交价时传
     ``(执行日, 成交价)`` 覆盖 derive_entry 的派生入场；给定时跳过派生，其余判定数学
@@ -225,6 +277,11 @@ def resolve_prediction(
     entry_date, entry_price = derived
     if entry_price <= 0:
         return None
+    band = (
+        float(neutral_band)
+        if neutral_band is not None
+        else scaled_neutral_band(realized_daily_vol(kline, entry_date))
+    )
     horizon = _effective_horizon(prediction)
     direction = prediction.get("direction", "long")
     df = _norm(kline)
@@ -243,5 +300,5 @@ def resolve_prediction(
         benchmark=benchmark,
         resolution_rule="expiry",
         hold_days=horizon,
-        neutral_band=neutral_band,
+        neutral_band=band,
     )

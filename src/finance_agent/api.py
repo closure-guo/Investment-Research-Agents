@@ -234,6 +234,7 @@ from finance_agent.outcome.store import (  # noqa: E402
 
 # predictions 战绩体系(add-track-record):全量观点记录取代 decision_log 写入
 from finance_agent.outcome.track_record import readout  # noqa: E402
+from finance_agent.outcome.track_record.baseline import same_window_baseline  # noqa: E402
 from finance_agent.outcome.track_record.calibration import calibration_table  # noqa: E402
 from finance_agent.outcome.track_record.ingest import (  # noqa: E402
     persist_prediction_from_accumulated,
@@ -2580,6 +2581,21 @@ async def track_record_overview(
         "jensen_alpha": metrics.get("jensen_alpha") if metrics else None,
         "as_of": latest_curve_date,
     }
+    # update-outcome-band-volatility-scaled（2026-11-28 拍板）：连续超额主读数 +
+    # 同窗随机基准对照 + 波动率自适应带宽披露。三者均为只读观测，不改变判定状态机；
+    # 存量 resolved 分类不回填（band_settled 只计切点后带带宽落库的行）。
+    baseline = await asyncio.to_thread(same_window_baseline)
+    # 显著性门槛同 §1.9④（settled<10 只披露样本与去重标的数，不报均值/胜率措辞）
+    continuous = {
+        "n": stats["excess_n"],
+        "mean_excess": None if insufficient else stats["avg_excess"],
+        "median_excess": None if insufficient else stats["excess_median"],
+        "std": None if insufficient else stats["excess_std"],
+        "t_stat": None if insufficient else stats["excess_t"],
+        "excess_win_rate": None if insufficient else stats["excess_win_rate"],
+        "distinct_symbols": stats["distinct_symbols"],
+        "population": "long/short 日主已判定（resolved_win/loss/neutral）",
+    }
     return {
         **stats,
         "source_type": source,
@@ -2590,6 +2606,18 @@ async def track_record_overview(
         "portfolio": portfolio,
         # add-paper-broker（B3）：虚拟 vs 仿真双曲线（共同日期对齐 + 执行损耗）
         "paper": await asyncio.to_thread(_paper_overview_block, as_of),
+        # update-outcome-band-volatility-scaled：连续超额 / 同窗随机基准 / 带宽口径
+        "continuous": continuous,
+        "baseline": baseline,
+        "band": {
+            "mode": "vol_scaled",
+            "floor": 0.015,
+            "vol_multiplier": 0.5,
+            "vol_window_days": 20,
+            "fallback_band": 0.02,
+            "settled_with_band": stats["band_settled"],
+            "cutover": "2026-11-28",
+        },
         "version_seq": version,
         "versions": await asyncio.to_thread(list_agents),
         # Δ2 口径字段：回避正确率独立（门控同胜率）+ 头条窗口 + 跨口径存量披露

@@ -160,6 +160,76 @@ describe('track-record 战绩页（add-track-record）', () => {
     await screen.findByText('贵州茅台')
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
   })
+
+  it('连续超额 + 同窗随机基准 + 带宽读数条（update-outcome-band-volatility-scaled）', async () => {
+    mockFetch({
+      overview: {
+        ...OVERVIEW,
+        continuous: {
+          n: 12,
+          mean_excess: 0.021,
+          median_excess: 0.008,
+          std: 0.062,
+          t_stat: 1.17,
+          excess_win_rate: 0.583,
+          distinct_symbols: 9,
+          population: 'long/short 日主已判定（resolved_win/loss/neutral）',
+        },
+        baseline: {
+          available: true,
+          windows: 5,
+          skipped_windows: 0,
+          stocks_per_window: 5480,
+          mean_excess: -0.035,
+          median_excess: -0.03,
+          caliber: '同窗全市场等权（close_raw，基准 000300.SH）',
+        },
+        band: {
+          mode: 'vol_scaled',
+          floor: 0.015,
+          vol_multiplier: 0.5,
+          vol_window_days: 20,
+          fallback_band: 0.02,
+          settled_with_band: 12,
+          cutover: '2026-11-28',
+        },
+      },
+      predictions: PREDICTIONS,
+    })
+    renderPage()
+    const strip = await screen.findByTestId('track-record-continuous')
+    expect(within(strip).getByTestId('continuous-label')).toHaveTextContent('n=12')
+    expect(within(strip).getByTestId('continuous-label')).toHaveTextContent('去重标的 9 只')
+    expect(within(strip).getByText('超额胜率 58.3%')).toBeInTheDocument()
+    expect(within(strip).getByText('t=1.17')).toBeInTheDocument()
+    const baseline = within(strip).getByTestId('track-record-baseline')
+    expect(baseline).toHaveTextContent('同窗随机股票')
+    expect(baseline).toHaveTextContent('5 个窗口 × 约 5480 只')
+    expect(within(strip).getByTestId('track-record-band')).toHaveTextContent('新口径已结算 12 条')
+  })
+
+  it('同窗随机基准不可用时如实披露原因，不折算 0', async () => {
+    mockFetch({
+      overview: {
+        ...OVERVIEW,
+        continuous: {
+          n: 12, mean_excess: 0.021, median_excess: 0.008, std: 0.062, t_stat: 1.17,
+          excess_win_rate: 0.583, distinct_symbols: 12, population: 'p',
+        },
+        baseline: {
+          available: false, reason: '快照库或指数收盘数据缺失', windows: 0,
+          skipped_windows: 3, stocks_per_window: null, mean_excess: null,
+          median_excess: null, caliber: 'c',
+        },
+      },
+      predictions: PREDICTIONS,
+    })
+    renderPage()
+    const strip = await screen.findByTestId('track-record-continuous')
+    expect(within(strip).getByTestId('track-record-baseline-unavailable')).toHaveTextContent(
+      '快照库或指数收盘数据缺失'
+    )
+  })
 })
 
 describe('结算价格同口径展示（update-track-record-settle-price-display）', () => {

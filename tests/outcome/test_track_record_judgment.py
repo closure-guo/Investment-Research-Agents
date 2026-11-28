@@ -9,6 +9,8 @@ import datetime
 import pandas as pd
 
 from finance_agent.outcome.track_record.judgment import (
+    BAND_FLOOR,
+    DEFAULT_NEUTRAL_BAND,
     Resolution,
     _bench_close_on_or_before,
     _effective_horizon,
@@ -16,7 +18,9 @@ from finance_agent.outcome.track_record.judgment import (
     derive_attribution_date,
     derive_entry,
     direction_for_action,
+    realized_daily_vol,
     resolve_prediction,
+    scaled_neutral_band,
     should_supersede,
 )
 
@@ -431,3 +435,69 @@ class TestEntryOverride:
         assert (
             resolve_prediction(_pred(horizon=2), kline, entry_override=("2026-09-03", -1.0)) is None
         )
+
+
+# ── update-outcome-band-volatility-scaled（2026-11-28 拍板）：波动率自适应中性带 ──
+
+
+def test_scaled_band_floor_and_formula():
+    """带宽 = max(1.5%, 0.5 × 日波动 × sqrt(20))；波动缺失回落 2%。"""
+    assert scaled_neutral_band(None) == DEFAULT_NEUTRAL_BAND
+    assert scaled_neutral_band(0.0) == DEFAULT_NEUTRAL_BAND
+    assert scaled_neutral_band(-0.01) == DEFAULT_NEUTRAL_BAND
+    # 极低波动 → 保底 1.5%
+    assert scaled_neutral_band(0.001) == BAND_FLOOR
+    # 日波动 2% → 窗口波动 2%×√20 ≈ 8.944% → 带宽 ≈ 4.472%
+    assert abs(scaled_neutral_band(0.02) - 0.5 * 0.02 * (20**0.5)) < 1e-6
+
+
+def test_realized_daily_vol_requires_21_points():
+    """不足 21 个收盘点（20 个日收益）→ None（调用方回落固定带）。"""
+    prices = [100.0 + i for i in range(21)]
+    assert realized_daily_vol(_kline_prices(prices), "2026-09-22") is not None
+    assert realized_daily_vol(_kline_prices(prices[:20]), "2026-09-21") is None
+
+
+def _kline_prev_vol(n_prev: int = 20, entry: float = 100.0, exit_price: float = 103.0):
+    """造 21 个入场前收盘点（日收益 ±2% 交替）+ 入场 + 两个后续点。
+
+    返回 (kline, created_at)：created_at 定在入场日前一天 10:00 → 派生入场 = 入场日收盘。
+    """
+    import datetime as dt
+
+    start = dt.date(2026, 8, 1)
+    dates = [str(start + dt.timedelta(days=i)) for i in range(n_prev + 3)]
+    prices = [100.0]
+    for i in range(1, n_prev):
+        prices.append(prices[-1] * (1.02 if i % 2 else 0.9803921568627451))
+    prices = prices[:n_prev] + [entry, (entry + exit_price) / 2, exit_price]
+    kline = pd.DataFrame({"日期": dates, "收盘": prices})
+    # 收盘后产出 → 派生入场 = 次一交易日（index n_prev）收盘；此前恰有 21 个收盘点
+    created = f"{dates[n_prev - 1]}T20:00:00"
+    return kline, created
+
+
+def test_resolve_prediction_uses_volatility_scaled_band():
+    """+3% 超额：固定 2% 带下判 win；高波动自适应带（≈4.5%）下判 neutral。"""
+    kline, created = _kline_prev_vol(entry=100.0, exit_price=103.0)
+    pred = {
+        "entry_price": 88.0,
+        "horizon_days": 2,
+        "direction": "long",
+        "created_at": created,
+    }
+    scaled = resolve_prediction(pred, kline)
+    assert scaled is not None
+    assert 0.04 < scaled.neutral_band_used < 0.05  # ±2% 交替日收益 → 带宽 ≈4.4%
+    assert scaled.status == "resolved_neutral"
+    assert abs(scaled.excess_return - 0.03) < 1e-9
+
+    fixed = resolve_prediction(pred, kline, neutral_band=DEFAULT_NEUTRAL_BAND)
+    assert fixed is not None and fixed.neutral_band_used == DEFAULT_NEUTRAL_BAND
+    assert fixed.status == "resolved_win"
+
+
+def test_resolve_prediction_falls_back_to_fixed_band_without_history():
+    """入场前历史不足 → 带宽回落 2%（行为与切点前一致，且带宽如实落库）。"""
+    r = resolve_prediction(_pred(horizon=2), _kline_prices([100, 101, 103]))
+    assert r is not None and r.neutral_band_used == DEFAULT_NEUTRAL_BAND
